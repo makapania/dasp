@@ -1,7 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(mkdir:*)",
+      "Bash(python3:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/bin/spectral-predict:*)",
+      "Bash(.venv/bin/pytest -v)",
+      "Bash(.venv/bin/pytest tests/test_asd_ascii.py -v)",
+      "Bash(.venv/bin/pytest -v --tb=short)",
+      "Bash(.venv/bin/black --check src/ tests/)",
+      "Bash(.venv/bin/black src/ tests/)",
+      "Bash(source:*)",
+      "Bash(spectral-predict:*)",
+      "Bash(pkill:*)"
     ],
     "deny": [],
     "ask": []
