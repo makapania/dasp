@@ -79,51 +79,6 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500):
                     )
         grids["MLP"] = mlp_configs
 
-    else:  # classification
-        # PLS-DA (PLS + LogisticRegression)
-        grids["PLS-DA"] = [
-            (PLSRegression(n_components=nc, scale=False), {"n_components": nc})
-            for nc in pls_components
-        ]
-
-        # Random Forest
-        rf_configs = []
-        for n_est in [200, 500]:
-            for max_d in [None, 15, 30]:
-                rf_configs.append(
-                    (
-                        RandomForestClassifier(
-                            n_estimators=n_est, max_depth=max_d, random_state=42, n_jobs=-1
-                        ),
-                        {"n_estimators": n_est, "max_depth": max_d},
-                    )
-                )
-        grids["RandomForest"] = rf_configs
-
-        # MLP
-        mlp_configs = []
-        for hidden in [(64,), (128, 64)]:
-            for alpha in [1e-4, 1e-3]:
-                for lr in [1e-3, 1e-2]:
-                    mlp_configs.append(
-                        (
-                            MLPClassifier(
-                                hidden_layer_sizes=hidden,
-                                alpha=alpha,
-                                learning_rate_init=lr,
-                                max_iter=max_iter,
-                                random_state=42,
-                                early_stopping=True,
-                            ),
-                            {
-                                "hidden_layer_sizes": hidden,
-                                "alpha": alpha,
-                                "learning_rate_init": lr,
-                            },
-                        )
-                    )
-        grids["MLP"] = mlp_configs
-
         # Neural Boosted Regression
         nbr_configs = []
 
@@ -168,6 +123,51 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500):
 
         grids["NeuralBoosted"] = nbr_configs
         # Total configurations: 2 * 3 * 2 * 2 = 24 per preprocessing method
+
+    else:  # classification
+        # PLS-DA (PLS + LogisticRegression)
+        grids["PLS-DA"] = [
+            (PLSRegression(n_components=nc, scale=False), {"n_components": nc})
+            for nc in pls_components
+        ]
+
+        # Random Forest
+        rf_configs = []
+        for n_est in [200, 500]:
+            for max_d in [None, 15, 30]:
+                rf_configs.append(
+                    (
+                        RandomForestClassifier(
+                            n_estimators=n_est, max_depth=max_d, random_state=42, n_jobs=-1
+                        ),
+                        {"n_estimators": n_est, "max_depth": max_d},
+                    )
+                )
+        grids["RandomForest"] = rf_configs
+
+        # MLP
+        mlp_configs = []
+        for hidden in [(64,), (128, 64)]:
+            for alpha in [1e-4, 1e-3]:
+                for lr in [1e-3, 1e-2]:
+                    mlp_configs.append(
+                        (
+                            MLPClassifier(
+                                hidden_layer_sizes=hidden,
+                                alpha=alpha,
+                                learning_rate_init=lr,
+                                max_iter=max_iter,
+                                random_state=42,
+                                early_stopping=True,
+                            ),
+                            {
+                                "hidden_layer_sizes": hidden,
+                                "alpha": alpha,
+                                "learning_rate_init": lr,
+                            },
+                        )
+                    )
+        grids["MLP"] = mlp_configs
 
     return grids
 

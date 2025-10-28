@@ -429,7 +429,7 @@ def _run_single_config(
 
     # Extract top important variables/wavelengths
     # Refit on full data to get feature importances
-    if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP"]:
+    if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP", "NeuralBoosted"]:
         try:
             # Refit the pipeline on full data
             pipe.fit(X, y)

@@ -35,7 +35,12 @@
       "Bash(.venvbinpytest tests/test_neural_boosted.py -v --tb=short)",
       "Bash(.venv/Scripts/pytest tests/test_neural_boosted.py -v --tb=short)",
       "Bash(python -m pytest:*)",
-      "Bash(python test_neural_boosted_simple.py:*)"
+      "Bash(python test_neural_boosted_simple.py:*)",
+      "Bash(git pull:*)",
+      "Bash(python test_neuralboosted_output.py:*)",
+      "Bash(python:*)",
+      "Bash(timeout 5 python:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []
