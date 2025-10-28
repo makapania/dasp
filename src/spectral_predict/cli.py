@@ -9,6 +9,8 @@ from . import __version__
 from .io import read_csv_spectra, read_reference_csv, align_xy
 from .search import run_search
 from .report import write_markdown_report
+from .interactive import run_interactive_loading
+from .interactive_gui import run_interactive_loading_gui
 
 
 def main():
@@ -65,6 +67,18 @@ Examples:
         choices=["auto", "python", "rs-prospectr", "rs-asdreader"],
         help="ASD reader method (default: auto)",
     )
+    parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        default=False,
+        help="Skip interactive loading phase",
+    )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        default=False,
+        help="Use text-based interactive mode instead of GUI",
+    )
 
     args = parser.parse_args()
 
@@ -97,6 +111,22 @@ Examples:
         X_aligned, y = align_xy(X, ref, args.id_column, args.target)
         print(f"  Aligned {len(y)} samples for target '{args.target}'")
         print()
+
+        # Run interactive loading phase
+        if not args.no_interactive:
+            if not args.no_gui:
+                # Use GUI version (default)
+                interactive_results = run_interactive_loading_gui(
+                    X_aligned, y, args.id_column, args.target
+                )
+            else:
+                # Use text-based version
+                interactive_results = run_interactive_loading(
+                    X_aligned, y, args.id_column, args.target
+                )
+            # Update X_aligned with potentially processed data (e.g., converted to absorbance)
+            X_aligned = interactive_results['X']
+            y = interactive_results['y']
 
         # Determine task type (regression or classification)
         # Check if target is numeric and has many decimal values (continuous)

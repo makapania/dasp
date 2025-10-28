@@ -15,7 +15,16 @@
       "Bash(.venv/bin/black src/ tests/)",
       "Bash(source:*)",
       "Bash(spectral-predict:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(.venvScriptspip install -e .)",
+      "Bash(python -m pip install:*)",
+      "Bash(python test_interactive.py:*)",
+      "Bash(python -m spectral_predict.cli:*)",
+      "Bash(python run_interactive_demo.py:*)",
+      "Bash(python test_gui.py:*)",
+      "Bash(python run_full_analysis.py:*)",
+      "Bash(python spectral_predict_gui.py:*)",
+      "Bash(git remote set-url:*)"
     ],
     "deny": [],
     "ask": []

@@ -59,6 +59,9 @@ Building baseline spectral models is tedious. You need to:
 
 **The Solution:**
 Spectral Predict does all of this automatically. You get:
+- ✅ **Interactive loading phase** with spectral plots and data preview
+- ✅ **Predictor screening** (JMP-style) to identify informative wavelengths
+- ✅ **Absorbance conversion** option (like Unscrambler)
 - ✅ **Automated grid search** over preprocessing × models × hyperparameters
 - ✅ **Smart ranking** that balances accuracy with simplicity
 - ✅ **Multiple input formats** (CSV wide/long, ASD ASCII/binary)
@@ -203,7 +206,9 @@ spectral-predict --spectra <CSV> | --asd-dir <DIR> \
                  [--folds 5] \
                  [--lambda-penalty 0.15] \
                  [--outdir outputs] \
-                 [--asd-reader auto]
+                 [--asd-reader auto] \
+                 [--interactive] \
+                 [--no-interactive]
 ```
 
 | Option | Default | Description |
@@ -212,6 +217,52 @@ spectral-predict --spectra <CSV> | --asd-dir <DIR> \
 | `--lambda-penalty` | 0.15 | Complexity penalty weight (higher = prefer simpler models) |
 | `--outdir` | outputs | Output directory |
 | `--asd-reader` | auto | ASD reader mode (auto tries SpecDAL if installed) |
+| `--interactive` | True | Enable interactive loading phase |
+| `--no-interactive` | - | Skip interactive loading phase |
+
+---
+
+## 🔍 Interactive Loading Phase
+
+By default, Spectral Predict includes an interactive loading phase that helps you verify your data before modeling:
+
+### 1. Spectral Plots
+Three plots are automatically generated:
+- **Raw spectra**: Verify reflectance values look correct
+- **1st derivative**: Check for spectral features
+- **2nd derivative**: Identify fine spectral details
+
+### 2. Data Preview
+A table showing:
+- Sample IDs
+- Target values (if available)
+- First few wavelengths
+- Quick verification that files loaded correctly
+
+### 3. Data Range Check
+Automatic detection of data format:
+- Reflectance (0-1)
+- Percent reflectance (0-100)
+- Other formats
+
+### 4. Absorbance Conversion
+Option to convert reflectance → absorbance using `log10(1/R)`:
+```
+Convert to absorbance? [y/N]:
+```
+
+### 5. Predictor Screening
+JMP-style variable screening showing:
+- Top 20 most correlated wavelengths with target
+- Correlation plot across all wavelengths
+- Immediate feedback on whether target is predictable
+
+**Skip Interactive Mode:**
+```bash
+spectral-predict --asd-dir data/ --reference ref.csv \
+                 --id-column sample --target nitrogen \
+                 --no-interactive
+```
 
 ---
 
