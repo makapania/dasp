@@ -36,11 +36,14 @@ If your data has wavelengths from 350-2500nm with 2151 channels, the full spectr
 ## 2. Feature Importance-Based Subsets
 
 ### Overview
-For models that can compute feature importances (PLS, PLS-DA, RandomForest, MLP), the system:
-1. Fits the model on the full spectrum
-2. Extracts feature importance scores
-3. Selects the top N most important wavelengths
-4. Re-tests the model using only those wavelengths
+For models that can compute feature importances (PLS, PLS-DA, RandomForest, MLP, NeuralBoosted), the system:
+1. Applies preprocessing to the data (if specified)
+2. Fits the model on the full preprocessed spectrum
+3. Extracts feature importance scores **from the preprocessed data**
+4. Selects the top N most important wavelengths based on those importances
+5. Re-tests the model using only those wavelengths (which are then preprocessed)
+
+**Important:** Feature importances are computed on **preprocessed data**, ensuring that wavelength selection reflects the actual transformed features the model sees. This means different preprocessing methods may identify different important wavelengths.
 
 ### Models Supporting Importance Extraction
 
@@ -252,7 +255,42 @@ The system creates **multiple subset configurations** from the top-ranked region
 - Derivative preprocessing (1st or 2nd derivative)
   - Reason: Derivatives already emphasize spectral features, making region analysis redundant
 
-**File Location:** `src/spectral_predict/search.py:250-268`
+**File Location:** `src/spectral_predict/search.py:124-157`
+
+---
+
+### IMPORTANT: Regions Computed Per Preprocessing Method
+
+**Key Change (v2.0):** Region-based subsets are now computed **separately for each preprocessing method** on the **preprocessed data**.
+
+**Why This Matters:**
+- Different preprocessing methods transform data differently
+- SNV normalization changes correlation patterns compared to raw data
+- Regions that are important in raw data may not be important after preprocessing
+- Each preprocessing method gets regions optimized for its transformed features
+
+**Example:**
+```
+Raw preprocessing:
+  Region analysis for raw: Identified 6 region-based subsets
+  - Region 1: 1450-1500nm (mean_corr = 0.82)  # O-H stretch region
+  - Region 2: 2200-2250nm (mean_corr = 0.78)  # C-H combination
+
+SNV preprocessing:
+  Region analysis for snv: Identified 6 region-based subsets
+  - Region 1: 2200-2250nm (mean_corr = 0.85)  # C-H now more important
+  - Region 2: 950-1000nm (mean_corr = 0.79)   # Different regions emerge
+```
+
+**Implementation:**
+The region computation happens inside the main preprocessing loop (line 124 in `search.py`):
+1. For each preprocessing method (raw, snv, etc.)
+2. Apply preprocessing to data
+3. Compute region correlations on preprocessed data
+4. Identify top regions based on preprocessed correlations
+5. Test models with those region-based subsets
+
+This ensures wavelength selection reflects the actual transformed features that models see.
 
 ---
 

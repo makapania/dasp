@@ -37,6 +37,21 @@
 | **Need maximum speed** | Random Forest (parallel processing) |
 | **Very large dataset (>5000 samples)** | Random Forest (scales better) |
 | **Very small dataset (<30 samples)** | PLS (less prone to overfitting) |
+| **Very high-dimensional with few samples** | Use wavelength subsets (top250, top500) first |
+
+### 💡 Handling High-Dimensional Data:
+
+If you have **very high-dimensional data** (1000+ wavelengths) with **few samples** (<100):
+
+1. **Use wavelength subset selection**: The system automatically tests `top250` and `top500` subsets
+2. **These often perform BETTER** than full spectrum due to reduced noise
+3. **Check results CSV**: Look for rows with `SubsetTag = "top250"` or `"top500"`
+4. **Neural Boosted works best** with subset models in high-dimensional settings
+
+**Example:**
+- Full spectrum (2000 vars, 50 samples): R² may be poor
+- Top 250 variables (250 vars, 50 samples): R² significantly better
+- The system handles this automatically!
 
 ---
 

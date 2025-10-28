@@ -13,6 +13,61 @@ import subprocess
 import threading
 from datetime import datetime
 
+# Check for required dependencies before proceeding
+def check_dependencies():
+    """Check if required packages are installed."""
+    missing = []
+
+    try:
+        import matplotlib
+    except ImportError:
+        missing.append("matplotlib")
+
+    try:
+        import numpy
+    except ImportError:
+        missing.append("numpy")
+
+    try:
+        import pandas
+    except ImportError:
+        missing.append("pandas")
+
+    try:
+        import sklearn
+    except ImportError:
+        missing.append("scikit-learn")
+
+    if missing:
+        error_msg = (
+            f"ERROR: Missing required packages: {', '.join(missing)}\n\n"
+            f"Please use the launcher script to run the GUI:\n\n"
+            f"  Unix/Mac/Linux:  ./run_gui.sh\n"
+            f"  Windows:         run_gui.bat\n\n"
+            f"Or install manually:\n"
+            f"  pip install {' '.join(missing)}\n\n"
+            f"Or install with virtual environment:\n"
+            f"  python3 -m venv .venv\n"
+            f"  source .venv/bin/activate  # or .venv\\Scripts\\activate on Windows\n"
+            f"  pip install -e ."
+        )
+        # Try to show GUI error if tkinter works
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Missing Dependencies", error_msg)
+            root.destroy()
+        except:
+            pass
+        # Always print to console
+        print("\n" + "="*70)
+        print(error_msg)
+        print("="*70 + "\n")
+        sys.exit(1)
+
+# Run dependency check
+check_dependencies()
+
 # Add src to path
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
@@ -24,7 +79,7 @@ class SpectralPredictApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Spectral Predict - Automated Spectral Analysis")
-        self.root.geometry("850x800")
+        self.root.geometry("850x1050")  # Increased height for model selection section
 
         # Variables
         self.input_type = tk.StringVar(value="asd")
@@ -43,6 +98,12 @@ class SpectralPredictApp:
         self.wavelength_max = tk.StringVar(value="")  # Max wavelength (auto-populate)
         self.use_gui = tk.BooleanVar(value=True)
         self.show_progress = tk.BooleanVar(value=True)  # NEW: Show progress monitor
+
+        # Model selection (all enabled by default)
+        self.use_pls = tk.BooleanVar(value=True)
+        self.use_randomforest = tk.BooleanVar(value=True)
+        self.use_mlp = tk.BooleanVar(value=True)
+        self.use_neuralboosted = tk.BooleanVar(value=True)
 
         # Progress monitor
         self.progress_monitor = None
@@ -240,6 +301,36 @@ class SpectralPredictApp:
         # Progress monitor option
         ttk.Checkbutton(options_frame, text="Show live progress monitor",
                        variable=self.show_progress).grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        # === MODEL SELECTION ===
+        section_label = ttk.Label(main_frame, text="4. Models to Test",
+                                 font=("Arial", 12, "bold"))
+        section_label.grid(row=current_row, column=0, columnspan=3, sticky=tk.W, pady=(15, 5))
+        current_row += 1
+
+        models_frame = ttk.LabelFrame(main_frame, text="Select Models (uncheck to skip)", padding="10")
+        models_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)",
+                       variable=self.use_pls).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Label(models_frame, text="Linear, fast, interpretable",
+                 font=("Arial", 8, "italic"), foreground="gray").grid(row=0, column=1, sticky=tk.W, padx=10)
+
+        ttk.Checkbutton(models_frame, text="✓ Random Forest",
+                       variable=self.use_randomforest).grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Label(models_frame, text="Nonlinear, robust, good for complex data",
+                 font=("Arial", 8, "italic"), foreground="gray").grid(row=1, column=1, sticky=tk.W, padx=10)
+
+        ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)",
+                       variable=self.use_mlp).grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Label(models_frame, text="Deep learning, captures nonlinearity",
+                 font=("Arial", 8, "italic"), foreground="gray").grid(row=2, column=1, sticky=tk.W, padx=10)
+
+        ttk.Checkbutton(models_frame, text="✓ Neural Boosted",
+                       variable=self.use_neuralboosted).grid(row=3, column=0, sticky=tk.W, pady=3)
+        ttk.Label(models_frame, text="Gradient boosting with neural networks, interpretable",
+                 font=("Arial", 8, "italic"), foreground="gray").grid(row=3, column=1, sticky=tk.W, padx=10)
 
         # === RUN BUTTON ===
         button_frame = ttk.Frame(main_frame)
@@ -610,6 +701,21 @@ class SpectralPredictApp:
             # Note: Wavelength filtering already applied before interactive GUI
             # X_aligned now contains the trimmed spectral range
 
+            # Build list of selected models
+            selected_models = []
+            if self.use_pls.get():
+                selected_models.append("PLS")
+            if self.use_randomforest.get():
+                selected_models.append("RandomForest")
+            if self.use_mlp.get():
+                selected_models.append("MLP")
+            if self.use_neuralboosted.get():
+                selected_models.append("NeuralBoosted")
+
+            # Validate at least one model is selected
+            if not selected_models:
+                raise ValueError("Please select at least one model to test")
+
             # Store data for thread to access
             self._analysis_data = {
                 'X_aligned': X_aligned,
@@ -620,7 +726,8 @@ class SpectralPredictApp:
                 'max_n_components': self.max_n_components.get(),
                 'max_iter': self.max_iter.get(),
                 'output_dir': self.output_dir.get(),
-                'target_name': self.target_column.get()
+                'target_name': self.target_column.get(),
+                'models_to_test': selected_models
             }
 
             # Define analysis function to run in thread
@@ -638,6 +745,7 @@ class SpectralPredictApp:
                         lambda_penalty=data['lambda_penalty'],
                         max_n_components=data['max_n_components'],
                         max_iter=data['max_iter'],
+                        models_to_test=data['models_to_test'],
                         progress_callback=self._update_progress_safe
                     )
 

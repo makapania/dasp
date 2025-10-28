@@ -15,7 +15,7 @@ from .regions import create_region_subsets, format_region_report
 
 
 def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
-               max_iter=500, progress_callback=None):
+               max_iter=500, models_to_test=None, progress_callback=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -35,6 +35,9 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for MLP
+    models_to_test : list of str, optional
+        List of model names to test (e.g., ['PLS', 'RandomForest', 'MLP', 'NeuralBoosted'])
+        If None, all models are tested
     progress_callback : callable, optional
         Function to call with progress updates. Should accept dict with keys:
         - 'stage': Current stage (e.g., 'preprocessing', 'model_testing')
@@ -77,6 +80,15 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     # Get model grids
     model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter)
 
+    # Filter models if models_to_test is specified
+    if models_to_test is not None:
+        # Filter to only requested models
+        model_grids = {name: configs for name, configs in model_grids.items()
+                      if name in models_to_test}
+
+        if not model_grids:
+            raise ValueError(f"No valid models found. Available: {list(get_model_grids(task_type, n_features, safe_max_components, max_iter).keys())}, Requested: {models_to_test}")
+
     # Define preprocessing configurations
     preprocess_configs = [
         {"name": "raw", "deriv": None, "window": None, "polyorder": None},
@@ -108,24 +120,8 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     print(f"Preprocessing configs: {len(preprocess_configs)}")
     print()
 
-    # Analyze spectral regions
-    print("Analyzing spectral regions...")
-    if progress_callback:
-        progress_callback({
-            'stage': 'region_analysis',
-            'message': 'Analyzing spectral regions...',
-            'current': 0,
-            'total': 1
-        })
-
-    region_subsets = create_region_subsets(X_np, y_np, wavelengths, n_top_regions=5)
-    if len(region_subsets) > 0:
-        print(f"  Identified {len(region_subsets)} region-based variable subsets")
-        for subset in region_subsets[:3]:  # Show top 3
-            print(f"  - {subset['description']}")
-    else:
-        print("  Warning: Could not identify spectral regions")
-    print()
+    # Note: Spectral region analysis is now done per preprocessing method
+    # (inside the main loop) to ensure regions are computed on preprocessed data
 
     # Calculate total number of configurations for progress tracking
     total_configs = 0
@@ -137,6 +133,41 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
 
     # Main search loop
     for preprocess_cfg in preprocess_configs:
+        # Compute region subsets on preprocessed data for this preprocessing method
+        # This ensures regions are based on the actual preprocessed features
+        region_subsets = []
+        if preprocess_cfg["deriv"] is None:  # Only for non-derivative preprocessing
+            try:
+                # Build preprocessing pipeline
+                prep_pipe_steps = build_preprocessing_pipeline(
+                    preprocess_cfg["name"],
+                    preprocess_cfg["deriv"],
+                    preprocess_cfg["window"],
+                    preprocess_cfg["polyorder"],
+                )
+
+                # Transform X through preprocessing
+                X_preprocessed = X_np.copy()
+                if prep_pipe_steps:
+                    prep_pipeline = Pipeline(prep_pipe_steps)
+                    X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
+
+                # Compute region subsets on preprocessed data
+                # Convert wavelengths to float (they come from DataFrame columns as strings)
+                wavelengths_float = np.array([float(w) for w in wavelengths])
+                region_subsets = create_region_subsets(X_preprocessed, y_np, wavelengths_float, n_top_regions=5)
+
+                if len(region_subsets) > 0:
+                    prep_name = str(preprocess_cfg.get("name", "unknown"))
+                    print(f"  Region analysis for {prep_name}: Identified {len(region_subsets)} region-based subsets")
+            except Exception as e:
+                prep_name = str(preprocess_cfg.get("name", "unknown"))
+                print(f"  Warning: Could not compute region subsets for {prep_name}: {e}")
+                # Uncomment for debugging:
+                # import traceback
+                # traceback.print_exc()
+                region_subsets = []
+
         for model_name, model_configs in model_grids.items():
             for model, params in model_configs:
                 current_config += 1
@@ -187,6 +218,8 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                             best_model_so_far = result
 
                 # For PLS, RF, MLP, and NeuralBoosted: compute feature importances and run subsets
+                # IMPORTANT: Importances are computed on PREPROCESSED data, ensuring that
+                # wavelength selection reflects the actual transformed features the model sees
                 if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP", "NeuralBoosted"]:
                     # Refit on full data to get importances
                     pipe_steps = build_preprocessing_pipeline(
@@ -206,6 +239,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                     )
 
                     # Get transformed X for importance calculation
+                    # This ensures importances are based on PREPROCESSED features
                     if hasattr(pipe, "named_steps") and len(pipe_steps) > 1:
                         # Transform through preprocessing
                         X_transformed = X_np
@@ -214,7 +248,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                     else:
                         X_transformed = X_np
 
-                    # Get importances
+                    # Get importances computed on preprocessed data
                     try:
                         importances = get_feature_importances(
                             fitted_model, model_name, X_transformed, y_np
@@ -229,8 +263,12 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
 
                         # Run subsets with expanded grid
                         for n_top in variable_counts:
+                            # Select top N most important wavelengths based on preprocessed importances
                             top_indices = np.argsort(importances)[-n_top:][::-1]
 
+                            # Note: We pass X_np (raw data) and subset_indices to _run_single_config
+                            # It will subset the wavelengths first, THEN apply preprocessing
+                            # This is correct because wavelength indices don't change with preprocessing
                             subset_result = _run_single_config(
                                 X_np,
                                 y_np,
