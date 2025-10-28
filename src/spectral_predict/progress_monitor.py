@@ -253,14 +253,14 @@ class ProgressMonitor:
             )
             return
 
-        # Extract model info
-        model_name = self.best_model.get('model', 'Unknown')
-        preprocessing = self.best_model.get('preprocessing', 'Unknown')
+        # Extract model info (keys are capitalized in result dict)
+        model_name = self.best_model.get('Model', self.best_model.get('model', 'Unknown'))
+        preprocessing = self.best_model.get('Preprocess', self.best_model.get('preprocessing', 'Unknown'))
         n_vars = self.best_model.get('n_vars', 0)
-        subset = self.best_model.get('subset', 'full')
+        subset = self.best_model.get('SubsetTag', self.best_model.get('subset', 'full'))
 
         # Format performance metrics
-        task_type = self.best_model.get('task_type', 'regression')
+        task_type = self.best_model.get('Task', self.best_model.get('task_type', 'regression'))
 
         if task_type == 'regression':
             rmse = self.best_model.get('RMSE', 0)

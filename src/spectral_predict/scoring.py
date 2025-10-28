@@ -69,10 +69,17 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
 
     # Compute complexity penalty
     # 1. LV penalty (for PLS models)
-    lvs_penalty = df["LVs"].fillna(0) / 25.0
+    lvs_penalty = df["LVs"].fillna(0).astype(np.float64) / 25.0
 
-    # 2. Variable fraction penalty
-    vars_penalty = df["n_vars"] / df["full_vars"]
+    # 2. Variable fraction penalty (logarithmic scale)
+    # Using log scale so difference between 20-30 is minimal, but 30-300 is significant
+    # log(30/n_features) vs log(20/n_features) has small difference
+    # log(300/n_features) vs log(30/n_features) has large difference
+    n_vars_array = np.asarray(df["n_vars"], dtype=np.float64)
+    full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
+    vars_ratio = n_vars_array / full_vars_array
+    # Add small epsilon to avoid log(0), normalize to [0, 1] range
+    vars_penalty = np.log1p(vars_ratio * 100.0) / np.log1p(100.0)  # log scale normalized
 
     # 3. Sparsity penalty (non-linear penalty for very sparse models)
     sparsity_penalty = np.zeros(len(df))
@@ -138,7 +145,7 @@ def create_results_dataframe(task_type):
     else:
         metric_cols = ["Accuracy", "ROC_AUC"]
 
-    all_cols = common_cols + metric_cols + ["CompositeScore", "Rank"]
+    all_cols = common_cols + metric_cols + ["top_vars", "CompositeScore", "Rank"]
 
     return pd.DataFrame(columns=all_cols)
 

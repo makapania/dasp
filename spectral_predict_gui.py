@@ -37,6 +37,10 @@ class SpectralPredictApp:
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
         self.lambda_penalty = tk.DoubleVar(value=0.15)
+        self.max_n_components = tk.IntVar(value=24)  # Maximum PLS components
+        self.max_iter = tk.IntVar(value=500)  # Maximum MLP iterations
+        self.wavelength_min = tk.StringVar(value="")  # Min wavelength (auto-populate)
+        self.wavelength_max = tk.StringVar(value="")  # Max wavelength (auto-populate)
         self.use_gui = tk.BooleanVar(value=True)
         self.show_progress = tk.BooleanVar(value=True)  # NEW: Show progress monitor
 
@@ -62,9 +66,15 @@ class SpectralPredictApp:
         subtitle = ttk.Label(main_frame,
                             text="Automated spectral analysis with preprocessing and model ranking",
                             font=("Arial", 10))
-        subtitle.grid(row=1, column=0, columnspan=3, pady=(0, 20))
+        subtitle.grid(row=1, column=0, columnspan=3, pady=(0, 5))
 
-        current_row = 2
+        models_info = ttk.Label(main_frame,
+                               text="Models tested: PLS, Random Forest, MLP, Neural Boosted",
+                               font=("Arial", 9, "italic"),
+                               foreground="darkblue")
+        models_info.grid(row=2, column=0, columnspan=3, pady=(0, 15))
+
+        current_row = 3
 
         # === INPUT DATA SECTION ===
         section_label = ttk.Label(main_frame, text="1. Input Data",
@@ -191,19 +201,45 @@ class SpectralPredictApp:
         ttk.Label(options_frame, text="Complexity Penalty:").grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Entry(options_frame, textvariable=self.lambda_penalty,
                  width=10).grid(row=1, column=1, sticky=tk.W, padx=5)
+        ttk.Label(options_frame, text="(higher = prefer simpler models)",
+                 font=("Arial", 8, "italic")).grid(row=1, column=2, sticky=tk.W)
+
+        # Max PLS components
+        ttk.Label(options_frame, text="Max Latent Variables:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Spinbox(options_frame, from_=2, to=100, textvariable=self.max_n_components,
+                   width=10).grid(row=2, column=1, sticky=tk.W, padx=5)
+        ttk.Label(options_frame, text="(PLS components to test)",
+                 font=("Arial", 8, "italic")).grid(row=2, column=2, sticky=tk.W)
+
+        # Max iterations
+        ttk.Label(options_frame, text="Max Iterations:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Spinbox(options_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter,
+                   width=10).grid(row=3, column=1, sticky=tk.W, padx=5)
+        ttk.Label(options_frame, text="(for MLP and Neural Boosted)",
+                 font=("Arial", 8, "italic")).grid(row=3, column=2, sticky=tk.W)
+
+        # Wavelength range
+        ttk.Label(options_frame, text="Wavelength Range (nm):").grid(row=4, column=0, sticky=tk.W, pady=5)
+        wavelength_frame = ttk.Frame(options_frame)
+        wavelength_frame.grid(row=4, column=1, columnspan=2, sticky=tk.W, padx=5)
+        ttk.Entry(wavelength_frame, textvariable=self.wavelength_min, width=8).grid(row=0, column=0, padx=2)
+        ttk.Label(wavelength_frame, text="to").grid(row=0, column=1, padx=2)
+        ttk.Entry(wavelength_frame, textvariable=self.wavelength_max, width=8).grid(row=0, column=2, padx=2)
+        ttk.Label(wavelength_frame, text="(auto-fills after data load)",
+                 font=("Arial", 8, "italic")).grid(row=0, column=3, padx=5)
 
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Entry(options_frame, textvariable=self.output_dir,
-                 width=20).grid(row=2, column=1, sticky=tk.W, padx=5)
+                 width=20).grid(row=5, column=1, sticky=tk.W, padx=5)
 
         # Interactive mode
         ttk.Checkbutton(options_frame, text="Show interactive data preview (GUI)",
-                       variable=self.use_gui).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
+                       variable=self.use_gui).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # Progress monitor option
         ttk.Checkbutton(options_frame, text="Show live progress monitor",
-                       variable=self.show_progress).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=5)
+                       variable=self.show_progress).grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # === RUN BUTTON ===
         button_frame = ttk.Frame(main_frame)
@@ -493,6 +529,41 @@ class SpectralPredictApp:
                 self.target_column.get()
             )
 
+            # Auto-populate wavelength range if not already set
+            if not self.wavelength_min.get() or not self.wavelength_max.get():
+                try:
+                    wavelengths = X_aligned.columns.astype(float)
+                    self.wavelength_min.set(str(int(wavelengths.min())))
+                    self.wavelength_max.set(str(int(wavelengths.max())))
+                except:
+                    pass  # If wavelengths aren't numeric, just skip
+
+            # Apply wavelength range filtering BEFORE interactive GUI (so plot shows trimmed range)
+            wavelength_min_str = self.wavelength_min.get().strip()
+            wavelength_max_str = self.wavelength_max.get().strip()
+
+            if wavelength_min_str or wavelength_max_str:
+                try:
+                    # Get wavelength column names (they should be numeric)
+                    wavelengths = X_aligned.columns.astype(float)
+
+                    # Apply min filter
+                    if wavelength_min_str:
+                        wl_min = float(wavelength_min_str)
+                        X_aligned = X_aligned.loc[:, wavelengths >= wl_min]
+                        wavelengths = X_aligned.columns.astype(float)
+
+                    # Apply max filter
+                    if wavelength_max_str:
+                        wl_max = float(wavelength_max_str)
+                        X_aligned = X_aligned.loc[:, wavelengths <= wl_max]
+
+                    print(f"Wavelength range filtered to {len(X_aligned.columns)} wavelengths " +
+                          f"({X_aligned.columns.astype(float).min():.1f} - {X_aligned.columns.astype(float).max():.1f} nm)")
+                except Exception as e:
+                    messagebox.showwarning("Wavelength Filter Warning",
+                        f"Could not apply wavelength filter: {e}\nProceeding with full spectrum.")
+
             # STEP 2: Show interactive GUI (if enabled)
             if self.use_gui.get():
                 self.status_label.config(text="Opening interactive preview...", foreground="blue")
@@ -536,6 +607,9 @@ class SpectralPredictApp:
             # Force the progress monitor to display
             self.root.update()
 
+            # Note: Wavelength filtering already applied before interactive GUI
+            # X_aligned now contains the trimmed spectral range
+
             # Store data for thread to access
             self._analysis_data = {
                 'X_aligned': X_aligned,
@@ -543,6 +617,8 @@ class SpectralPredictApp:
                 'task_type': task_type,
                 'folds': self.folds.get(),
                 'lambda_penalty': self.lambda_penalty.get(),
+                'max_n_components': self.max_n_components.get(),
+                'max_iter': self.max_iter.get(),
                 'output_dir': self.output_dir.get(),
                 'target_name': self.target_column.get()
             }
@@ -560,6 +636,8 @@ class SpectralPredictApp:
                         task_type=data['task_type'],
                         folds=data['folds'],
                         lambda_penalty=data['lambda_penalty'],
+                        max_n_components=data['max_n_components'],
+                        max_iter=data['max_iter'],
                         progress_callback=self._update_progress_safe
                     )
 
@@ -667,6 +745,8 @@ class SpectralPredictApp:
         cmd.extend([
             "--folds", str(self.folds.get()),
             "--lambda-penalty", str(self.lambda_penalty.get()),
+            "--max-n-components", str(self.max_n_components.get()),
+            "--max-iter", str(self.max_iter.get()),
             "--outdir", self.output_dir.get(),
         ])
 
@@ -730,7 +810,11 @@ Spectral Predict - Quick Start Guide
 
 3. OPTIONS
    • CV Folds: Number of cross-validation folds (default: 5)
-   • Complexity Penalty: Weight for model simplicity (default: 0.15)
+   • Complexity Penalty: Weight for model simplicity (default: 0.15, higher = prefer simpler)
+   • Max Latent Variables: Maximum PLS components to test (default: 24)
+   • Max Iterations: Maximum iterations for neural networks (default: 500)
+   • Wavelength Range: Trim spectrum to specific range (e.g., 780-2350 for NIR)
+     Auto-populated after data load, edit to restrict analysis range
    • Interactive Preview: Opens GUI to explore data before analysis
 
 4. RUN

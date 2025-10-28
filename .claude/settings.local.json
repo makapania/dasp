@@ -28,7 +28,14 @@
       "Bash(git config:*)",
       "Read(//c/**)",
       "Bash(python test_progress_monitor.py:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(python -m py_compile:*)",
+      "WebFetch(domain:docs.google.com)",
+      "WebFetch(domain:doc-08-98-docstext.googleusercontent.com)",
+      "Bash(.venvbinpytest tests/test_neural_boosted.py -v --tb=short)",
+      "Bash(.venv/Scripts/pytest tests/test_neural_boosted.py -v --tb=short)",
+      "Bash(python -m pytest:*)",
+      "Bash(python test_neural_boosted_simple.py:*)"
     ],
     "deny": [],
     "ask": []

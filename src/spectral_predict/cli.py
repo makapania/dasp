@@ -58,6 +58,18 @@ Examples:
         help="Complexity penalty weight (default: 0.15)",
     )
     parser.add_argument(
+        "--max-n-components",
+        type=int,
+        default=24,
+        help="Maximum number of PLS components to test (default: 24)",
+    )
+    parser.add_argument(
+        "--max-iter",
+        type=int,
+        default=500,
+        help="Maximum iterations for MLP models (default: 500)",
+    )
+    parser.add_argument(
         "--outdir", type=str, default="outputs", help="Output directory (default: outputs)"
     )
     parser.add_argument(
@@ -147,7 +159,8 @@ Examples:
         print()
 
         df_ranked = run_search(
-            X_aligned, y, task_type, folds=args.folds, lambda_penalty=args.lambda_penalty
+            X_aligned, y, task_type, folds=args.folds, lambda_penalty=args.lambda_penalty,
+            max_n_components=args.max_n_components, max_iter=args.max_iter
         )
 
         # Save results

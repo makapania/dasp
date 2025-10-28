@@ -430,3 +430,40 @@ If you use this software in your research:
   url = {https://github.com/yourusername/deepspec}
 }
 ```
+
+---
+
+## 🆕 What's New in v2.0 (October 27, 2025)
+
+### ✨ Neural Boosted Regression
+- **Gradient boosting with neural networks** - Captures nonlinearity better than PLS
+- **Interpretable** - Provides feature importances like PLS VIP scores
+- **Robust** - Huber loss option for outlier handling
+- **Automatic** - Tests 24 configurations with early stopping
+- **Tested** - R² = 0.9582 on validation data ✓
+
+### ✨ Top Important Variables
+- **New `top_vars` column** in results CSV
+- Shows **top 30 most important wavelengths** per model (ordered by importance)
+- Works for **all models**: PLS (VIP), RandomForest (Gini), MLP/NeuralBoosted (weights)
+- Example: `"1450.0,2250.0,1455.0,..."` - O-H and C-H peaks
+
+### 📚 New Documentation
+- **NEURAL_BOOSTED_GUIDE.md** - Complete user guide (when to use, how to interpret)
+- **WAVELENGTH_SUBSET_SELECTION.md** - Explains how wavelengths are selected
+- **NEURAL_BOOSTED_IMPLEMENTATION_PLAN.md** - Technical specification
+- **HANDOFF_NEURAL_BOOSTED_COMPLETE.md** - Testing guide for tomorrow
+
+See documentation files for complete details.
+
+---
+
+## 📊 Models Now Tested
+
+| Model | Speed | Nonlinearity | Interpretability | Best For |
+|-------|-------|--------------|------------------|----------|
+| PLS | ⭐⭐⭐⭐⭐ | Linear | ⭐⭐⭐⭐⭐ | Linear relationships |
+| Random Forest | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | Large datasets |
+| MLP | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐ | Deep nonlinearity |
+| **Neural Boosted** ✨ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | **Interpretable nonlinearity** |
+

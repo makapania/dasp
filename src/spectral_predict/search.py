@@ -14,7 +14,8 @@ from .scoring import create_results_dataframe, add_result
 from .regions import create_region_subsets, format_region_report
 
 
-def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, progress_callback=None):
+def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
+               max_iter=500, progress_callback=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -30,6 +31,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, progress_callback=
         Number of CV folds
     lambda_penalty : float
         Complexity penalty weight
+    max_n_components : int, default=24
+        Maximum number of PLS components to test
+    max_iter : int, default=500
+        Maximum iterations for MLP
     progress_callback : callable, optional
         Function to call with progress updates. Should accept dict with keys:
         - 'stage': Current stage (e.g., 'preprocessing', 'model_testing')
@@ -47,6 +52,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, progress_callback=
     y_np = y.values
     wavelengths = X.columns.values
     n_features = X_np.shape[1]
+    n_samples = X_np.shape[0]
 
     # Create results container
     df_results = create_results_dataframe(task_type)
@@ -57,8 +63,19 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, progress_callback=
         n_classes = len(np.unique(y_np))
         is_binary_classification = n_classes == 2
 
+    # Adjust max_n_components based on minimum CV fold size
+    # PLS requires n_components <= min(n_features, n_samples_in_fold)
+    # With k-fold CV, smallest fold has roughly n_samples / folds samples
+    min_fold_samples = n_samples // folds
+    # Use slightly lower bound to be safe (some folds might have fewer samples)
+    safe_max_components = min(max_n_components, min_fold_samples - 1, n_features)
+
+    if safe_max_components < max_n_components:
+        print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
+              f"due to dataset size (n_samples={n_samples}, min_fold_size~{min_fold_samples})")
+
     # Get model grids
-    model_grids = get_model_grids(task_type, n_features)
+    model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter)
 
     # Define preprocessing configurations
     preprocess_configs = [
@@ -169,8 +186,8 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, progress_callback=
                         if result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
                             best_model_so_far = result
 
-                # For PLS and RF, compute feature importances and run subsets
-                if model_name in ["PLS", "PLS-DA", "RandomForest"]:
+                # For PLS, RF, MLP, and NeuralBoosted: compute feature importances and run subsets
+                if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP", "NeuralBoosted"]:
                     # Refit on full data to get importances
                     pipe_steps = build_preprocessing_pipeline(
                         preprocess_cfg["name"],
@@ -274,11 +291,12 @@ def _run_single_config(
     is_binary_classification,
     subset_indices=None,
     subset_tag="full",
+    top_n_vars=30,
 ):
     """
     Run a single model configuration with CV.
 
-    Returns a dictionary with results.
+    Returns a dictionary with results, including top important variables.
     """
     # Apply subset if specified
     if subset_indices is not None:
@@ -370,5 +388,59 @@ def _run_single_config(
     else:
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc
+
+    # Extract top important variables/wavelengths
+    # Refit on full data to get feature importances
+    if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP"]:
+        try:
+            # Refit the pipeline on full data
+            pipe.fit(X, y)
+
+            # Get the fitted model from pipeline
+            fitted_model = (
+                pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
+            )
+
+            # For PLS-DA, get the PLS component
+            if model_name == "PLS-DA" and hasattr(pipe, "named_steps"):
+                fitted_model = pipe.named_steps["pls"]
+
+            # Get transformed X for importance calculation
+            if hasattr(pipe, "named_steps") and len(pipe.steps) > 1:
+                X_transformed = X
+                for step_name, transformer in pipe.steps[:-1]:
+                    if step_name != "lr":  # Skip logistic regression for PLS-DA
+                        X_transformed = transformer.transform(X_transformed)
+            else:
+                X_transformed = X
+
+            # Compute importances
+            importances = get_feature_importances(
+                fitted_model, model_name, X_transformed, y
+            )
+
+            # Get top N features
+            n_to_select = min(top_n_vars, len(importances))
+            top_indices = np.argsort(importances)[-n_to_select:][::-1]
+
+            # Map back to original wavelengths
+            if subset_indices is not None:
+                # We're working with a subset, map indices back to original wavelengths
+                original_wavelengths = wavelengths[subset_indices]
+                top_wavelengths = original_wavelengths[top_indices]
+            else:
+                # Full spectrum
+                top_wavelengths = wavelengths[top_indices]
+
+            # Format as comma-separated string
+            top_vars_str = ','.join([f"{w:.1f}" for w in top_wavelengths])
+            result['top_vars'] = top_vars_str
+
+        except Exception as e:
+            # If anything fails, just mark as N/A
+            result['top_vars'] = 'N/A'
+    else:
+        # For models that don't support importance extraction
+        result['top_vars'] = 'N/A'
 
     return result
