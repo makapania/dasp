@@ -11,9 +11,10 @@ from sklearn.preprocessing import label_binarize
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result
+from .regions import create_region_subsets, format_region_report
 
 
-def run_search(X, y, task_type, folds=5, lambda_penalty=0.15):
+def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, progress_callback=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -29,6 +30,13 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15):
         Number of CV folds
     lambda_penalty : float
         Complexity penalty weight
+    progress_callback : callable, optional
+        Function to call with progress updates. Should accept dict with keys:
+        - 'stage': Current stage (e.g., 'preprocessing', 'model_testing')
+        - 'message': Status message
+        - 'current': Current item number
+        - 'total': Total items
+        - 'best_model': Best model found so far (dict with RMSE/R2 or Acc/AUC)
 
     Returns
     -------
@@ -81,11 +89,58 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15):
     print(f"Running {task_type} search with {folds}-fold CV...")
     print(f"Models: {list(model_grids.keys())}")
     print(f"Preprocessing configs: {len(preprocess_configs)}")
+    print()
+
+    # Analyze spectral regions
+    print("Analyzing spectral regions...")
+    if progress_callback:
+        progress_callback({
+            'stage': 'region_analysis',
+            'message': 'Analyzing spectral regions...',
+            'current': 0,
+            'total': 1
+        })
+
+    region_subsets = create_region_subsets(X_np, y_np, wavelengths, n_top_regions=5)
+    if len(region_subsets) > 0:
+        print(f"  Identified {len(region_subsets)} region-based variable subsets")
+        for subset in region_subsets[:3]:  # Show top 3
+            print(f"  - {subset['description']}")
+    else:
+        print("  Warning: Could not identify spectral regions")
+    print()
+
+    # Calculate total number of configurations for progress tracking
+    total_configs = 0
+    for model_name, model_configs in model_grids.items():
+        total_configs += len(model_configs) * len(preprocess_configs)
+
+    current_config = 0
+    best_model_so_far = None
 
     # Main search loop
     for preprocess_cfg in preprocess_configs:
         for model_name, model_configs in model_grids.items():
             for model, params in model_configs:
+                current_config += 1
+
+                # Progress update
+                prep_name = preprocess_cfg["name"]
+                if preprocess_cfg["deriv"]:
+                    prep_name += f"_d{preprocess_cfg['deriv']}"
+
+                progress_msg = f"Testing {model_name} with {prep_name} preprocessing"
+                print(f"[{current_config}/{total_configs}] {progress_msg}")
+
+                if progress_callback:
+                    progress_callback({
+                        'stage': 'model_testing',
+                        'message': progress_msg,
+                        'current': current_config,
+                        'total': total_configs,
+                        'best_model': best_model_so_far
+                    })
+
                 # Run full model first
                 result = _run_single_config(
                     X_np,
@@ -102,6 +157,17 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15):
                     subset_tag="full",
                 )
                 df_results = add_result(df_results, result)
+
+                # Update best model tracker
+                if best_model_so_far is None:
+                    best_model_so_far = result
+                else:
+                    if task_type == "regression":
+                        if result["RMSE"] < best_model_so_far["RMSE"]:
+                            best_model_so_far = result
+                    else:  # classification
+                        if result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                            best_model_so_far = result
 
                 # For PLS and RF, compute feature importances and run subsets
                 if model_name in ["PLS", "PLS-DA", "RandomForest"]:
@@ -137,11 +203,15 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15):
                             fitted_model, model_name, X_transformed, y_np
                         )
 
-                        # Run subsets: top-20, top-5, top-3
-                        for n_top in [20, 5, 3]:
-                            if n_top >= n_features:
-                                continue
+                        # Expanded variable selection grid
+                        # Logarithmic spacing: 10, 20, 50, 100, 250, 500, 1000, etc.
+                        variable_counts = [10, 20, 50, 100, 250, 500, 1000]
 
+                        # Only test counts that are less than total features
+                        variable_counts = [n for n in variable_counts if n < n_features]
+
+                        # Run subsets with expanded grid
+                        for n_top in variable_counts:
                             top_indices = np.argsort(importances)[-n_top:][::-1]
 
                             subset_result = _run_single_config(
@@ -159,6 +229,27 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15):
                                 subset_tag=f"top{n_top}",
                             )
                             df_results = add_result(df_results, subset_result)
+
+                        # Run region-based subsets (only for raw and snv preprocessing)
+                        # Skip for derivative preprocessing to avoid redundancy
+                        if preprocess_cfg["deriv"] is None and len(region_subsets) > 0:
+                            for region_subset in region_subsets:
+                                region_result = _run_single_config(
+                                    X_np,
+                                    y_np,
+                                    wavelengths,
+                                    model,
+                                    model_name,
+                                    params,
+                                    preprocess_cfg,
+                                    cv_splitter,
+                                    task_type,
+                                    is_binary_classification,
+                                    subset_indices=region_subset['indices'],
+                                    subset_tag=region_subset['tag'],
+                                )
+                                df_results = add_result(df_results, region_result)
+
                     except Exception as e:
                         print(f"Warning: Could not compute importances for {model_name}: {e}")
 

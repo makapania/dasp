@@ -24,7 +24,11 @@
       "Bash(python test_gui.py:*)",
       "Bash(python run_full_analysis.py:*)",
       "Bash(python spectral_predict_gui.py:*)",
-      "Bash(git remote set-url:*)"
+      "Bash(git remote set-url:*)",
+      "Bash(git config:*)",
+      "Read(//c/**)",
+      "Bash(python test_progress_monitor.py:*)",
+      "Bash(python -c:*)"
     ],
     "deny": [],
     "ask": []

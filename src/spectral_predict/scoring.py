@@ -6,12 +6,22 @@ import pandas as pd
 
 def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
     """
-    Compute composite score with simplicity penalty.
+    Compute composite score with improved simplicity penalty.
 
-    Score = z(primary_metric) + λ × (LVs/25 + n_vars/full_vars)
+    New formula balances performance and parsimony:
+    Score = performance_score + complexity_penalty
 
-    For regression: primary_metric = RMSE (lower is better, so use +z)
-    For classification: primary_metric = ROC_AUC (higher is better, so use -z)
+    Performance score (lower is better):
+    - Regression: 0.5*z(RMSE) - 0.5*z(R2)  [combine both metrics]
+    - Classification: -z(ROC_AUC) - 0.3*z(Accuracy)
+
+    Complexity penalty (non-linear for sparse models):
+    - LV penalty: λ × (LVs/25)
+    - Variable penalty: λ × (n_vars/full_vars)
+    - Sparsity penalty: Additional penalty when using very few variables
+      * If n_vars < 10: add λ × 2.0 (heavy penalty)
+      * If n_vars < 25: add λ × 1.0 (moderate penalty)
+      * If n_vars < 1% of full_vars: add λ × 1.5
 
     Lower composite score is better.
 
@@ -31,27 +41,60 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
     """
     df = df_results.copy()
 
-    # Determine primary metric
+    # Compute performance score (combining multiple metrics)
     if task_type == "regression":
-        metric_col = "RMSE"
-        # For RMSE, lower is better, so we want positive z-scores for bad models
-        z_metric = (df[metric_col] - df[metric_col].mean()) / df[metric_col].std()
-    else:  # classification
-        metric_col = "ROC_AUC"
-        # For ROC_AUC, higher is better, so we negate to make lower scores better
-        z_metric = -(df[metric_col] - df[metric_col].mean()) / df[metric_col].std()
+        # Z-score for RMSE (lower is better, positive z = bad)
+        z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
+        z_rmse = z_rmse.fillna(0)
 
-    # Handle case where std = 0 (all same)
-    if np.isnan(z_metric).any():
-        z_metric = z_metric.fillna(0)
+        # Z-score for R2 (higher is better, negative z = bad)
+        z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
+        z_r2 = z_r2.fillna(0)
+
+        # Combined performance score (lower is better)
+        # Weight RMSE and R2 equally, but negate R2 since higher is better
+        performance_score = 0.5 * z_rmse - 0.5 * z_r2
+
+    else:  # classification
+        # Z-score for ROC_AUC (higher is better)
+        z_auc = (df["ROC_AUC"] - df["ROC_AUC"].mean()) / df["ROC_AUC"].std()
+        z_auc = z_auc.fillna(0)
+
+        # Z-score for Accuracy (higher is better)
+        z_acc = (df["Accuracy"] - df["Accuracy"].mean()) / df["Accuracy"].std()
+        z_acc = z_acc.fillna(0)
+
+        # Combined performance score (lower is better, so negate)
+        performance_score = -z_auc - 0.3 * z_acc
 
     # Compute complexity penalty
-    # LVs: for non-PLS models, we'll use 0 or handle separately
+    # 1. LV penalty (for PLS models)
     lvs_penalty = df["LVs"].fillna(0) / 25.0
+
+    # 2. Variable fraction penalty
     vars_penalty = df["n_vars"] / df["full_vars"]
 
-    # Composite score
-    df["CompositeScore"] = z_metric + lambda_penalty * (lvs_penalty + vars_penalty)
+    # 3. Sparsity penalty (non-linear penalty for very sparse models)
+    sparsity_penalty = np.zeros(len(df))
+
+    # Heavy penalty for extremely sparse models
+    very_sparse_mask = df["n_vars"] < 10
+    sparsity_penalty[very_sparse_mask] += 2.0
+
+    # Moderate penalty for sparse models
+    sparse_mask = (df["n_vars"] >= 10) & (df["n_vars"] < 25)
+    sparsity_penalty[sparse_mask] += 1.0
+
+    # Additional penalty if using less than 1% of available variables
+    percent_vars = (df["n_vars"] / df["full_vars"]) * 100
+    ultra_sparse_mask = (percent_vars < 1.0) & (df["n_vars"] >= 10)
+    sparsity_penalty[ultra_sparse_mask] += 1.5
+
+    # Total complexity penalty
+    complexity_penalty = lambda_penalty * (lvs_penalty + vars_penalty + sparsity_penalty)
+
+    # Composite score (lower is better)
+    df["CompositeScore"] = performance_score + complexity_penalty
 
     # Rank (1 = best)
     df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)

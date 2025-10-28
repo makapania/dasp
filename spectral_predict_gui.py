@@ -10,6 +10,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import subprocess
+import threading
+from datetime import datetime
 
 # Add src to path
 src_path = Path(__file__).parent / "src"
@@ -36,6 +38,11 @@ class SpectralPredictApp:
         self.folds = tk.IntVar(value=5)
         self.lambda_penalty = tk.DoubleVar(value=0.15)
         self.use_gui = tk.BooleanVar(value=True)
+        self.show_progress = tk.BooleanVar(value=True)  # NEW: Show progress monitor
+
+        # Progress monitor
+        self.progress_monitor = None
+        self.analysis_thread = None
 
         self._create_ui()
 
@@ -193,6 +200,10 @@ class SpectralPredictApp:
         # Interactive mode
         ttk.Checkbutton(options_frame, text="Show interactive data preview (GUI)",
                        variable=self.use_gui).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        # Progress monitor option
+        ttk.Checkbutton(options_frame, text="Show live progress monitor",
+                       variable=self.show_progress).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # === RUN BUTTON ===
         button_frame = ttk.Frame(main_frame)
@@ -438,6 +449,204 @@ class SpectralPredictApp:
             messagebox.showerror("Validation Error", "\n".join(errors))
             return
 
+        # Check if we should show progress monitor
+        if self.show_progress.get():
+            # Run with progress monitor (in-process with threading)
+            self._run_analysis_with_progress()
+        else:
+            # Run in subprocess (old method, no progress)
+            self._run_analysis_subprocess()
+
+    def _run_analysis_with_progress(self):
+        """Run analysis with live progress monitor."""
+        try:
+            # Import required modules
+            from spectral_predict.progress_monitor import ProgressMonitor
+            from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy, read_asd_dir
+            from spectral_predict.interactive_gui import run_interactive_loading_gui
+            from spectral_predict.search import run_search
+            from spectral_predict.report import write_markdown_report
+
+            # Update status
+            self.status_label.config(text="Loading data...", foreground="blue")
+            self.run_button.config(state="disabled")
+            self.root.update()
+
+            # STEP 1: Load data
+            # Read spectral data
+            if self.input_type.get() == "asd":
+                X = read_asd_dir(self.asd_dir.get())
+            else:
+                X = read_csv_spectra(self.spectra_file.get())
+
+            # Read reference data
+            ref = read_reference_csv(
+                self.reference_file.get(),
+                self.spectral_file_column.get()
+            )
+
+            # Align X and y (extract target column)
+            X_aligned, y_aligned = align_xy(
+                X,
+                ref,
+                self.spectral_file_column.get(),
+                self.target_column.get()
+            )
+
+            # STEP 2: Show interactive GUI (if enabled)
+            if self.use_gui.get():
+                self.status_label.config(text="Opening interactive preview...", foreground="blue")
+                self.root.update()
+
+                # Run interactive GUI and get results
+                interactive_result = run_interactive_loading_gui(
+                    X_aligned,
+                    y_aligned,
+                    id_column=self.id_column.get(),
+                    target=self.target_column.get()
+                )
+
+                # Check if user clicked continue
+                if not interactive_result.get('user_continue', False):
+                    self.status_label.config(text="Analysis cancelled by user", foreground="orange")
+                    self.run_button.config(state="normal")
+                    return
+
+                # Use the potentially modified data from interactive GUI
+                X_aligned = interactive_result['X']
+                y_aligned = interactive_result['y']
+
+            # STEP 3: Show progress monitor and run analysis
+            self.status_label.config(text="Starting model search...", foreground="blue")
+            self.root.update()
+
+            # Determine task type
+            if y_aligned.nunique() == 2:
+                task_type = "binary_classification"
+            elif y_aligned.dtype == 'object' or y_aligned.nunique() < 10:
+                task_type = "multiclass_classification"
+            else:
+                task_type = "regression"
+
+            # Create progress monitor (estimate total models)
+            estimated_total = 350
+            self.progress_monitor = ProgressMonitor(parent=self.root, total_models=estimated_total)
+            self.progress_monitor.show()
+
+            # Force the progress monitor to display
+            self.root.update()
+
+            # Store data for thread to access
+            self._analysis_data = {
+                'X_aligned': X_aligned,
+                'y_aligned': y_aligned,
+                'task_type': task_type,
+                'folds': self.folds.get(),
+                'lambda_penalty': self.lambda_penalty.get(),
+                'output_dir': self.output_dir.get(),
+                'target_name': self.target_column.get()
+            }
+
+            # Define analysis function to run in thread
+            def run_analysis_thread():
+                try:
+                    # Get data from stored dictionary
+                    data = self._analysis_data
+
+                    # Run search with progress callback
+                    results_df = run_search(
+                        data['X_aligned'],
+                        data['y_aligned'],
+                        task_type=data['task_type'],
+                        folds=data['folds'],
+                        lambda_penalty=data['lambda_penalty'],
+                        progress_callback=self._update_progress_safe
+                    )
+
+                    # Create timestamp for unique filenames
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                    # Save results with timestamp
+                    output_dir = Path(data['output_dir'])
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    results_filename = f"results_{data['target_name']}_{timestamp}.csv"
+                    results_path = output_dir / results_filename
+                    results_df.to_csv(results_path, index=False)
+
+                    # Generate report with timestamp
+                    report_dir = Path("reports")
+                    report_dir.mkdir(parents=True, exist_ok=True)
+                    report_filename = f"{data['target_name']}_{timestamp}.md"
+                    report_path = report_dir / report_filename
+                    write_markdown_report(
+                        data['target_name'],  # target (correct parameter name)
+                        results_df,           # df_ranked
+                        str(report_dir)       # out_dir
+                    )
+
+                    # Complete progress monitor (schedule on main thread)
+                    def on_complete():
+                        if self.progress_monitor:
+                            self.progress_monitor.complete(
+                                success=True,
+                                message=f"Analysis complete! Results saved to {results_path}"
+                            )
+                        self.status_label.config(
+                            text="✓ Analysis complete! Check outputs/ directory",
+                            foreground="green"
+                        )
+                        messagebox.showinfo(
+                            "Success",
+                            f"Analysis completed successfully!\n\n"
+                            f"Results saved to:\n"
+                            f"  - {results_path}\n"
+                            f"  - {report_path}"
+                        )
+                        self.run_button.config(state="normal")
+
+                    self.root.after(0, on_complete)
+
+                except Exception as e:
+                    # Handle errors (schedule on main thread)
+                    error_msg = str(e)
+                    import traceback
+                    traceback.print_exc()  # Print to console for debugging
+
+                    def on_error():
+                        if self.progress_monitor:
+                            self.progress_monitor.complete(
+                                success=False,
+                                message=f"Error: {error_msg}"
+                            )
+                        self.status_label.config(
+                            text="✗ Analysis failed",
+                            foreground="red"
+                        )
+                        messagebox.showerror(
+                            "Error",
+                            f"Analysis failed:\n\n{error_msg}"
+                        )
+                        self.run_button.config(state="normal")
+
+                    self.root.after(0, on_error)
+
+            # Start analysis in background thread
+            self.analysis_thread = threading.Thread(target=run_analysis_thread, daemon=True)
+            self.analysis_thread.start()
+
+        except Exception as e:
+            self.status_label.config(text="✗ Error starting analysis", foreground="red")
+            messagebox.showerror("Error", f"Failed to start analysis:\n\n{str(e)}")
+            self.run_button.config(state="normal")
+
+    def _update_progress_safe(self, progress_data):
+        """Thread-safe progress update."""
+        if self.progress_monitor is not None:
+            # Schedule update on main thread
+            self.root.after(0, lambda: self.progress_monitor.update(progress_data))
+
+    def _run_analysis_subprocess(self):
+        """Run analysis in subprocess (old method without progress)."""
         # Build command
         cmd = [sys.executable, "-m", "spectral_predict.cli"]
 
@@ -446,16 +655,13 @@ class SpectralPredictApp:
             cmd.extend(["--asd-dir", self.asd_dir.get()])
         else:
             cmd.extend(["--spectra", self.spectra_file.get()])
-            # For CSV spectra, we might need to specify which column has IDs
-            # But this is automatically handled by the CLI (first column)
 
         # Add required arguments
         cmd.extend([
             "--reference", self.reference_file.get(),
-            "--id-column", self.spectral_file_column.get(),  # Spectral file column links to data
+            "--id-column", self.spectral_file_column.get(),
             "--target", self.target_column.get(),
         ])
-        # Note: specimen ID column is not passed to CLI (it's for tracking only in GUI)
 
         # Add optional arguments
         cmd.extend([
@@ -475,7 +681,6 @@ class SpectralPredictApp:
 
         # Run in subprocess
         try:
-            # Change to the script directory
             script_dir = Path(__file__).parent
 
             result = subprocess.run(
