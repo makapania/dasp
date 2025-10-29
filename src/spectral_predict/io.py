@@ -130,7 +130,7 @@ def _normalize_filename_for_matching(filename):
     filename = str(filename)
 
     # Remove common extensions
-    for ext in [".asd", ".sig", ".csv", ".txt"]:
+    for ext in [".asd", ".sig", ".csv", ".txt", ".spc"]:
         if filename.lower().endswith(ext):
             filename = filename[: -len(ext)]
             break
@@ -452,3 +452,82 @@ def _handle_binary_asd(asd_file, reader_mode):
             f"Binary ASD file detected: {asd_file.name}. "
             f"Reader mode '{reader_mode}' not yet implemented for binary files."
         )
+
+
+def read_spc_dir(spc_dir):
+    """
+    Read SPC (GRAMS/Thermo Galactic) files from a directory.
+
+    Uses the pyspectra library to read binary .spc files.
+
+    Parameters
+    ----------
+    spc_dir : str or Path
+        Directory containing SPC files
+
+    Returns
+    -------
+    pd.DataFrame
+        Wide matrix with rows = filename, columns = wavelengths (nm)
+
+    Raises
+    ------
+    ValueError
+        If directory doesn't exist, no SPC files found, or pyspectra not installed
+    """
+    spc_dir = Path(spc_dir)
+
+    if not spc_dir.exists():
+        raise ValueError(f"Directory not found: {spc_dir}")
+
+    if not spc_dir.is_dir():
+        raise ValueError(f"Not a directory: {spc_dir}")
+
+    # Find SPC files
+    spc_files = list(spc_dir.glob("*.spc"))
+
+    if len(spc_files) == 0:
+        raise ValueError(f"No .spc files found in {spc_dir}")
+
+    print(f"Found {len(spc_files)} SPC files")
+
+    # Try to import pyspectra
+    try:
+        from pyspectra.readers.read_spc import read_spc_dir as pyspectra_read_spc_dir
+    except ImportError:
+        raise ValueError(
+            "SPC file support requires the pyspectra library.\n"
+            "Install it with: pip install pyspectra"
+        )
+
+    # Read all SPC files
+    try:
+        df_spc, dict_spc = pyspectra_read_spc_dir(str(spc_dir))
+
+        # pyspectra returns DataFrame with columns=files, rows=wavelengths
+        # We need to transpose: rows=samples, columns=wavelengths
+        df = df_spc.T
+
+        # Ensure column names are floats (wavelengths)
+        df.columns = df.columns.astype(float)
+
+        # Sort columns by wavelength
+        df = df[sorted(df.columns)]
+
+        # Use stem (filename without extension) as index
+        df.index = [Path(idx).stem if isinstance(idx, str) else idx for idx in df.index]
+
+        # Validate
+        if df.shape[1] < 100:
+            raise ValueError(f"Expected at least 100 wavelengths, got {df.shape[1]}")
+
+        # Check wavelengths are increasing
+        wls = np.array(df.columns)
+        if not np.all(wls[1:] > wls[:-1]):
+            raise ValueError("Wavelengths must be strictly increasing")
+
+        print(f"Successfully read {len(df)} SPC spectra with {df.shape[1]} wavelengths")
+        return df
+
+    except Exception as e:
+        raise ValueError(f"Failed to read SPC files: {e}")

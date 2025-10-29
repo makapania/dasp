@@ -31,6 +31,14 @@ except ImportError:
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
+# Import spectral_predict modules
+try:
+    from spectral_predict.preprocess import SavgolDerivative
+    HAS_DERIVATIVES = True
+except ImportError:
+    HAS_DERIVATIVES = False
+    SavgolDerivative = None
+
 
 class SpectralPredictApp:
     """Main application window with 3-tab design."""
@@ -38,20 +46,30 @@ class SpectralPredictApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Spectral Predict - Automated Spectral Analysis")
-        self.root.geometry("1400x950")
+
+        # Set window size - use zoomed/maximized for better visibility
+        try:
+            self.root.state('zoomed')  # Windows/Linux
+        except:
+            # Fallback for systems that don't support 'zoomed'
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            window_width = int(screen_width * 0.85)
+            window_height = int(screen_height * 0.85)
+            self.root.geometry(f"{window_width}x{window_height}")
 
         # Configure modern theme
         self._configure_style()
 
         # Data variables
-        self.X = None  # Spectral data
+        self.X = None  # Spectral data (filtered by wavelength)
+        self.X_original = None  # Original unfiltered spectral data
         self.y = None  # Target data
         self.ref = None  # Reference dataframe
 
         # GUI variables
-        self.input_type = tk.StringVar(value="asd")
-        self.asd_dir = tk.StringVar()
-        self.spectra_file = tk.StringVar()
+        self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
+        self.detected_type = None  # Auto-detected type: "asd", "csv", or "spc"
         self.reference_file = tk.StringVar()
         self.spectral_file_column = tk.StringVar()
         self.id_column = tk.StringVar()
@@ -76,6 +94,7 @@ class SpectralPredictApp:
         # Progress tracking
         self.progress_monitor = None
         self.analysis_thread = None
+        self.analysis_start_time = None
 
         # Plotting
         self.plot_frames = {}
@@ -155,31 +174,16 @@ class SpectralPredictApp:
         ttk.Label(content_frame, text="1. Input Data", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
         row += 1
 
-        # Input type selection
-        input_frame = ttk.LabelFrame(content_frame, text="Spectral Data Type", padding="15")
-        input_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        # Spectral data directory (unified input with auto-detection)
+        ttk.Label(content_frame, text="Spectral File Directory:").grid(row=row, column=0, sticky=tk.W, pady=10)
+        ttk.Entry(content_frame, textvariable=self.spectral_data_path, width=60).grid(row=row, column=1, padx=10)
+        ttk.Button(content_frame, text="Browse...", command=self._browse_spectral_data, style='Modern.TButton').grid(row=row, column=2)
         row += 1
 
-        ttk.Radiobutton(input_frame, text="ASD files (directory)", variable=self.input_type, value="asd",
-                       command=self._update_input_fields).grid(row=0, column=0, sticky=tk.W, padx=10)
-        ttk.Radiobutton(input_frame, text="CSV file (wide format)", variable=self.input_type, value="csv",
-                       command=self._update_input_fields).grid(row=0, column=1, sticky=tk.W, padx=10)
-
-        # ASD directory
-        self.asd_frame = ttk.Frame(content_frame)
-        self.asd_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        # Detection status label
+        self.detection_status = ttk.Label(content_frame, text="", style='Caption.TLabel')
+        self.detection_status.grid(row=row, column=1, sticky=tk.W, padx=10, pady=(0, 10))
         row += 1
-        ttk.Label(self.asd_frame, text="ASD Directory:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(self.asd_frame, textvariable=self.asd_dir, width=60).grid(row=0, column=1, padx=10)
-        ttk.Button(self.asd_frame, text="Browse...", command=self._browse_asd_dir, style='Modern.TButton').grid(row=0, column=2)
-
-        # CSV file
-        self.csv_frame = ttk.Frame(content_frame)
-        self.csv_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
-        row += 1
-        ttk.Label(self.csv_frame, text="Spectra CSV:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(self.csv_frame, textvariable=self.spectra_file, width=60).grid(row=0, column=1, padx=10)
-        ttk.Button(self.csv_frame, text="Browse...", command=self._browse_spectra_file, style='Modern.TButton').grid(row=0, column=2)
 
         # Reference file
         ttk.Label(content_frame, text="Reference CSV:").grid(row=row, column=0, sticky=tk.W, pady=10)
@@ -222,6 +226,8 @@ class SpectralPredictApp:
         ttk.Label(wl_frame, text="to").grid(row=0, column=1, padx=5)
         ttk.Entry(wl_frame, textvariable=self.wavelength_max, width=12).grid(row=0, column=2, padx=5)
         ttk.Label(wl_frame, text="(auto-fills after load)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        self.update_wl_button = ttk.Button(wl_frame, text="Update Plots", command=self._update_wavelengths, style='Modern.TButton', state='disabled')
+        self.update_wl_button.grid(row=0, column=4, padx=15)
 
         # Load Data Button
         self.load_button = ttk.Button(content_frame, text="📊 Load Data & Generate Plots",
@@ -341,12 +347,30 @@ class SpectralPredictApp:
         content_frame = ttk.Frame(self.tab3, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
-        # Title
-        ttk.Label(content_frame, text="Analysis Progress", style='Title.TLabel').pack(anchor=tk.W, pady=(0, 20))
+        # Header with title and best model info side-by-side
+        header_frame = ttk.Frame(content_frame)
+        header_frame.pack(fill='x', pady=(0, 20))
 
-        # Progress info
-        self.progress_info = ttk.Label(content_frame, text="No analysis running", style='Heading.TLabel')
-        self.progress_info.pack(anchor=tk.W, pady=10)
+        # Left side: Title
+        ttk.Label(header_frame, text="Analysis Progress", style='Title.TLabel').pack(side='left', anchor=tk.W)
+
+        # Right side: Best model info
+        best_model_frame = ttk.Frame(header_frame)
+        best_model_frame.pack(side='right', anchor=tk.E)
+
+        ttk.Label(best_model_frame, text="Best Model So Far:", style='Heading.TLabel').pack(anchor=tk.E)
+        self.best_model_info = ttk.Label(best_model_frame, text="(none yet)", style='Caption.TLabel', foreground=self.colors['success'])
+        self.best_model_info.pack(anchor=tk.E)
+
+        # Progress info with time estimate
+        progress_info_frame = ttk.Frame(content_frame)
+        progress_info_frame.pack(fill='x', pady=10)
+
+        self.progress_info = ttk.Label(progress_info_frame, text="No analysis running", style='Heading.TLabel')
+        self.progress_info.pack(side='left', anchor=tk.W)
+
+        self.time_estimate_label = ttk.Label(progress_info_frame, text="", style='Caption.TLabel')
+        self.time_estimate_label.pack(side='right', anchor=tk.E)
 
         # Progress text area
         self.progress_text = tk.Text(content_frame, height=30, width=120, font=('Consolas', 10), bg='#FAFAFA', fg=self.colors['text'])
@@ -362,36 +386,96 @@ class SpectralPredictApp:
 
     # === Helper Methods ===
 
-    def _update_input_fields(self):
-        """Show/hide input fields based on selection."""
-        if self.input_type.get() == "asd":
-            self.asd_frame.grid()
-            self.csv_frame.grid_remove()
-        else:
-            self.asd_frame.grid_remove()
-            self.csv_frame.grid()
+    def _browse_spectral_data(self):
+        """Browse for spectral data and auto-detect type."""
+        directory = filedialog.askdirectory(title="Select Spectral Data Directory")
 
-    def _browse_asd_dir(self):
-        """Browse for ASD directory and auto-import CSV if found."""
-        directory = filedialog.askdirectory(title="Select ASD Directory")
-        if directory:
-            self.asd_dir.set(directory)
+        if not directory:
+            return
 
-            # Look for CSV files
-            csv_files = list(Path(directory).glob("*.csv"))
+        # Store path
+        self.spectral_data_path.set(directory)
+        path = Path(directory)
 
+        # Auto-detect file type
+        # Priority: ASD > CSV > SPC
+
+        # Check for ASD files
+        asd_files = list(path.glob("*.asd"))
+        if asd_files:
+            self.detected_type = "asd"
+            self.detection_status.config(
+                text=f"✓ Detected {len(asd_files)} ASD files",
+                foreground=self.colors['success']
+            )
+
+            # Auto-detect reference CSV
+            csv_files = list(path.glob("*.csv"))
             if len(csv_files) == 1:
                 self.reference_file.set(str(csv_files[0]))
                 self._auto_detect_columns()
-                messagebox.showinfo("CSV Found", f"Automatically imported:\n{csv_files[0].name}")
+                # No popup needed - status label shows detection
             elif len(csv_files) > 1:
-                messagebox.showinfo("Multiple CSVs", f"Found {len(csv_files)} CSV files. Please select manually.")
+                # Update status to guide user - no popup needed
+                self.detection_status.config(
+                    text=f"✓ Detected {len(asd_files)} ASD files - {len(csv_files)} CSVs found, select reference manually",
+                    foreground=self.colors['accent']
+                )
+            return
 
-    def _browse_spectra_file(self):
-        """Browse for spectra CSV file."""
-        filename = filedialog.askopenfilename(title="Select Spectra CSV", filetypes=[("CSV files", "*.csv")])
-        if filename:
-            self.spectra_file.set(filename)
+        # Check for CSV files
+        csv_files = list(path.glob("*.csv"))
+        if csv_files:
+            if len(csv_files) == 1:
+                # Single CSV - use as spectral data
+                self.spectral_data_path.set(str(csv_files[0]))
+                self.detected_type = "csv"
+                self.detection_status.config(
+                    text="✓ Detected CSV spectra file - select reference CSV below",
+                    foreground=self.colors['success']
+                )
+                # No popup needed - status label guides user
+            else:
+                # Multiple CSVs - need user to clarify
+                self.detected_type = "csv"
+                self.detection_status.config(
+                    text=f"⚠ Found {len(csv_files)} CSV files - select files manually",
+                    foreground=self.colors['accent']
+                )
+                # No popup needed - status label guides user
+            return
+
+        # Check for SPC files (GRAMS/Thermo Galactic)
+        spc_files = list(path.glob("*.spc"))
+        if spc_files:
+            self.detected_type = "spc"
+            self.detection_status.config(
+                text=f"✓ Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+
+            # Auto-detect reference CSV
+            csv_files = list(path.glob("*.csv"))
+            if len(csv_files) == 1:
+                self.reference_file.set(str(csv_files[0]))
+                self._auto_detect_columns()
+                # No popup needed - status label shows detection
+            elif len(csv_files) > 1:
+                # Update status to guide user - no popup needed
+                self.detection_status.config(
+                    text=f"✓ Detected {len(spc_files)} SPC files - {len(csv_files)} CSVs found, select reference manually",
+                    foreground=self.colors['accent']
+                )
+            return
+
+        # No supported files found
+        self.detected_type = None
+        self.detection_status.config(
+            text="✗ No supported spectral files found",
+            foreground='red'
+        )
+        messagebox.showwarning("No Spectral Data",
+            "No supported spectral files found in this directory.\n\nSupported formats:\n• .asd (ASD files)\n• .csv (CSV spectral data)\n• .spc (GRAMS/Thermo Galactic)")
 
     def _browse_reference_file(self):
         """Browse for reference CSV file."""
@@ -427,23 +511,31 @@ class SpectralPredictApp:
     def _load_and_plot_data(self):
         """Load data and generate spectral plots."""
         try:
-            from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy, read_asd_dir
-            from spectral_predict.preprocess import SavgolDerivative
+            from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy, read_asd_dir, read_spc_dir
 
             self.tab1_status.config(text="Loading data...")
             self.root.update()
 
-            # Load spectral data
-            if self.input_type.get() == "asd":
-                if not self.asd_dir.get():
-                    messagebox.showwarning("Missing Input", "Please select ASD directory")
-                    return
-                X = read_asd_dir(self.asd_dir.get())
+            # Check if spectral data has been selected and detected
+            if not self.spectral_data_path.get():
+                messagebox.showwarning("Missing Input", "Please select spectral data directory")
+                return
+
+            if not self.detected_type:
+                messagebox.showwarning("No Data Detected",
+                    "Could not detect spectral data type.\n\nPlease ensure the directory contains:\n• .asd files\n• .csv files\n• .spc files (GRAMS)")
+                return
+
+            # Load spectral data based on detected type
+            if self.detected_type == "asd":
+                X = read_asd_dir(self.spectral_data_path.get())
+            elif self.detected_type == "csv":
+                X = read_csv_spectra(self.spectral_data_path.get())
+            elif self.detected_type == "spc":
+                X = read_spc_dir(self.spectral_data_path.get())
             else:
-                if not self.spectra_file.get():
-                    messagebox.showwarning("Missing Input", "Please select spectra CSV file")
-                    return
-                X = read_csv_spectra(self.spectra_file.get())
+                messagebox.showerror("Error", f"Unknown data type: {self.detected_type}")
+                return
 
             # Load reference data
             if not self.reference_file.get():
@@ -455,39 +547,84 @@ class SpectralPredictApp:
             # Align data
             X_aligned, y_aligned = align_xy(X, ref, self.spectral_file_column.get(), self.target_column.get())
 
-            # Store data
-            self.X = X_aligned
+            # Store original unfiltered data
+            self.X_original = X_aligned
             self.y = y_aligned
             self.ref = ref
 
-            # Auto-populate wavelength range
-            wavelengths = self.X.columns.astype(float)
-            self.wavelength_min.set(str(int(wavelengths.min())))
-            self.wavelength_max.set(str(int(wavelengths.max())))
+            # Auto-populate wavelength range ONLY if empty
+            if not self.wavelength_min.get().strip() and not self.wavelength_max.get().strip():
+                wavelengths = self.X_original.columns.astype(float)
+                self.wavelength_min.set(str(int(wavelengths.min())))
+                self.wavelength_max.set(str(int(wavelengths.max())))
 
-            # Apply wavelength filtering if specified
-            wl_min = self.wavelength_min.get().strip()
-            wl_max = self.wavelength_max.get().strip()
-
-            if wl_min or wl_max:
-                wavelengths = self.X.columns.astype(float)
-                if wl_min:
-                    self.X = self.X.loc[:, wavelengths >= float(wl_min)]
-                if wl_max:
-                    wavelengths = self.X.columns.astype(float)
-                    self.X = self.X.loc[:, wavelengths <= float(wl_max)]
+            # Apply wavelength filtering
+            self._apply_wavelength_filter()
 
             # Generate plots
             self._generate_plots()
 
             self.tab1_status.config(text=f"✓ Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
-            messagebox.showinfo("Success", "Data loaded successfully!\n\nProceed to 'Analysis Configuration' tab.")
+            # Enable the wavelength update button
+            self.update_wl_button.config(state='normal')
+            # No popup needed - status label shows success and plots are visible
 
         except Exception as e:
             import traceback
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to load data:\n{e}")
             self.tab1_status.config(text="✗ Error loading data")
+
+    def _apply_wavelength_filter(self):
+        """Apply wavelength filtering to X_original and store in self.X."""
+        if self.X_original is None:
+            return
+
+        # Get wavelength range
+        wl_min = self.wavelength_min.get().strip()
+        wl_max = self.wavelength_max.get().strip()
+
+        # Start with full data
+        self.X = self.X_original.copy()
+
+        # Apply filtering
+        if wl_min or wl_max:
+            wavelengths = self.X.columns.astype(float)
+            if wl_min:
+                self.X = self.X.loc[:, wavelengths >= float(wl_min)]
+            if wl_max:
+                wavelengths = self.X.columns.astype(float)
+                self.X = self.X.loc[:, wavelengths <= float(wl_max)]
+
+    def _update_wavelengths(self):
+        """Update wavelength filter and regenerate plots."""
+        if self.X_original is None:
+            messagebox.showwarning("No Data", "Please load data first")
+            return
+
+        try:
+            # Validate wavelength inputs
+            wl_min = self.wavelength_min.get().strip()
+            wl_max = self.wavelength_max.get().strip()
+
+            if wl_min:
+                float(wl_min)  # Validate it's a number
+            if wl_max:
+                float(wl_max)  # Validate it's a number
+
+            # Apply new filter
+            self._apply_wavelength_filter()
+
+            # Regenerate plots
+            self._generate_plots()
+
+            # Update status
+            self.tab1_status.config(text=f"✓ Updated to {len(self.X)} samples × {self.X.shape[1]} wavelengths")
+
+        except ValueError as e:
+            messagebox.showerror("Invalid Input", "Wavelength values must be numbers")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update wavelengths:\n{e}")
 
     def _generate_plots(self):
         """Generate spectral plots in the plot notebook."""
@@ -502,15 +639,20 @@ class SpectralPredictApp:
         # Create plot tabs
         self._create_plot_tab("Raw Spectra", self.X.values, "Reflectance", "blue")
 
-        # 1st derivative
-        deriv1 = SavgolDerivative(deriv=1, window=7)
-        X_deriv1 = deriv1.transform(self.X.values)
-        self._create_plot_tab("1st Derivative", X_deriv1, "First Derivative", "green")
+        # Generate derivative plots if available
+        if HAS_DERIVATIVES:
+            # 1st derivative
+            deriv1 = SavgolDerivative(deriv=1, window=7)
+            X_deriv1 = deriv1.transform(self.X.values)
+            self._create_plot_tab("1st Derivative", X_deriv1, "First Derivative", "green")
 
-        # 2nd derivative
-        deriv2 = SavgolDerivative(deriv=2, window=7)
-        X_deriv2 = deriv2.transform(self.X.values)
-        self._create_plot_tab("2nd Derivative", X_deriv2, "Second Derivative", "red")
+            # 2nd derivative
+            deriv2 = SavgolDerivative(deriv=2, window=7)
+            X_deriv2 = deriv2.transform(self.X.values)
+            self._create_plot_tab("2nd Derivative", X_deriv2, "Second Derivative", "red")
+        else:
+            messagebox.showwarning("Derivatives Unavailable",
+                "Could not import SavgolDerivative. Only raw spectra will be plotted.")
 
     def _create_plot_tab(self, title, data, ylabel, color):
         """Create a plot tab."""
@@ -576,6 +718,11 @@ class SpectralPredictApp:
         self.progress_text.delete('1.0', tk.END)
         self.progress_info.config(text="Starting analysis...")
         self.progress_status.config(text="Analysis in progress...")
+        self.best_model_info.config(text="(none yet)")
+        self.time_estimate_label.config(text="")
+
+        # Reset start time
+        self.analysis_start_time = datetime.now()
 
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models,))
@@ -646,7 +793,60 @@ class SpectralPredictApp:
 
         current = info.get('current', 0)
         total = info.get('total', 1)
+        best_model = info.get('best_model', None)
+
+        # Calculate time estimate
+        if self.analysis_start_time and current > 0:
+            elapsed = (datetime.now() - self.analysis_start_time).total_seconds()
+            time_per_config = elapsed / current
+            remaining_configs = total - current
+            estimated_remaining = time_per_config * remaining_configs
+
+            # Format time remaining
+            if estimated_remaining < 60:
+                time_str = f"~{int(estimated_remaining)}s remaining"
+            elif estimated_remaining < 3600:
+                time_str = f"~{int(estimated_remaining / 60)}m {int(estimated_remaining % 60)}s remaining"
+            else:
+                hours = int(estimated_remaining / 3600)
+                minutes = int((estimated_remaining % 3600) / 60)
+                time_str = f"~{hours}h {minutes}m remaining"
+        else:
+            time_str = "Calculating..."
+
+        # Update progress info
         self.root.after(0, lambda: self.progress_info.config(text=f"Progress: {current}/{total} configurations"))
+        self.root.after(0, lambda: self.time_estimate_label.config(text=time_str))
+
+        # Update best model display
+        if best_model:
+            # Determine task type from best_model dict
+            if 'RMSE' in best_model:
+                # Regression
+                model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
+                if best_model.get('Deriv'):
+                    model_text += f" (d{best_model['Deriv']})"
+                model_text += f"\nRMSE: {best_model['RMSE']:.4f} | R²: {best_model['R2']:.4f}"
+
+                # Add top wavelengths if available
+                if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
+                    top_vars = best_model['top_vars'].split(',')[:5]  # First 5
+                    model_text += f"\nTop λ: {', '.join(top_vars)} nm"
+            else:
+                # Classification
+                model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
+                if best_model.get('Deriv'):
+                    model_text += f" (d{best_model['Deriv']})"
+                model_text += f"\nAcc: {best_model['Accuracy']:.4f}"
+                if 'ROC_AUC' in best_model and not np.isnan(best_model['ROC_AUC']):
+                    model_text += f" | AUC: {best_model['ROC_AUC']:.4f}"
+
+                # Add top wavelengths if available
+                if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
+                    top_vars = best_model['top_vars'].split(',')[:5]  # First 5
+                    model_text += f"\nTop λ: {', '.join(top_vars)} nm"
+
+            self.root.after(0, lambda text=model_text: self.best_model_info.config(text=text))
 
     def _log_progress(self, message):
         """Log message to progress text area."""
