@@ -24,10 +24,7 @@ using Random
 using LinearAlgebra
 
 # Import required functions from other modules
-include("models.jl")
-include("preprocessing.jl")
-
-using .Scoring: safe_zscore
+# Note: These are included in the main module file, not here
 
 
 # ============================================================================
