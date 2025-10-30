@@ -1,0 +1,427 @@
+================================================================================
+CROSS-VALIDATION WORKFLOW DIAGRAM
+================================================================================
+
+1. BASIC CV WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ INPUT DATA                                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ X: n_samples × n_features matrix                                       │
+│ y: n_samples vector                                                     │
+│ model: PLSModel, RidgeModel, etc.                                      │
+│ preprocess_config: Dict("name" => "snv")                               │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: CREATE FOLDS                                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│ create_cv_folds(n_samples, n_folds=5)                                  │
+│                                                                          │
+│ Returns: [(train_idx₁, test_idx₁),                                     │
+│           (train_idx₂, test_idx₂),                                     │
+│           (train_idx₃, test_idx₃),                                     │
+│           (train_idx₄, test_idx₄),                                     │
+│           (train_idx₅, test_idx₅)]                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: RUN EACH FOLD (Sequential or Parallel)                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ FOR each (train_idx, test_idx) in folds:                               │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │ FOLD EXECUTION                                                   │  │
+│   ├─────────────────────────────────────────────────────────────────┤  │
+│   │ 1. Split data: X_train = X[train_idx, :]                       │  │
+│   │                X_test = X[test_idx, :]                          │  │
+│   │                y_train = y[train_idx]                           │  │
+│   │                y_test = y[test_idx]                             │  │
+│   │                                                                  │  │
+│   │ 2. Preprocess:                                                  │  │
+│   │    if skip_preprocessing:                                       │  │
+│   │        X_train_proc = X_train  # Use as-is                      │  │
+│   │        X_test_proc = X_test                                     │  │
+│   │    else:                                                        │  │
+│   │        X_train_proc = apply_preprocessing(X_train, config)     │  │
+│   │        X_test_proc = apply_preprocessing(X_test, config)       │  │
+│   │                                                                  │  │
+│   │ 3. Train: fit_model!(model, X_train_proc, y_train)            │  │
+│   │                                                                  │  │
+│   │ 4. Predict: y_pred = predict_model(model, X_test_proc)        │  │
+│   │                                                                  │  │
+│   │ 5. Compute metrics:                                            │  │
+│   │    if task_type == "regression":                               │  │
+│   │        metrics = compute_regression_metrics(y_test, y_pred)   │  │
+│   │        # Returns: {"RMSE": ..., "R2": ..., "MAE": ...}        │  │
+│   │    else:  # classification                                     │  │
+│   │        metrics = compute_classification_metrics(y_test, y_pred)│  │
+│   │        # Returns: {"Accuracy": ..., "ROC_AUC": ..., ...}      │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│ Collect all fold_metrics                                               │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: AGGREGATE RESULTS                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│ aggregate_cv_results(fold_metrics, task_type, n_folds)                 │
+│                                                                          │
+│ For each metric (e.g., RMSE):                                          │
+│   - Compute mean across folds                                          │
+│   - Compute std across folds                                           │
+│                                                                          │
+│ Returns: Dict(                                                          │
+│     "RMSE_mean" => mean([fold₁.RMSE, fold₂.RMSE, ...]),              │
+│     "RMSE_std" => std([fold₁.RMSE, fold₂.RMSE, ...]),                │
+│     "R2_mean" => ...,                                                  │
+│     "R2_std" => ...,                                                   │
+│     "cv_scores" => [fold₁_metrics, fold₂_metrics, ...],              │
+│     "n_folds" => 5,                                                    │
+│     "task_type" => "regression"                                        │
+│ )                                                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ OUTPUT                                                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│ results = Dict with:                                                    │
+│   - Mean metrics: RMSE_mean, R2_mean, MAE_mean                         │
+│   - Std metrics: RMSE_std, R2_std, MAE_std                             │
+│   - Individual fold results                                            │
+│   - Metadata                                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+2. SKIP PREPROCESSING WORKFLOW (DERIVATIVE SUBSETS)
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ PARENT PREPROCESSING (Done Once)                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│ X_full = [100 samples × 200 wavelengths]                               │
+│ preprocess_config = Dict("name" => "snv_deriv", "deriv" => 1, ...)     │
+│                                                                          │
+│ X_preprocessed = apply_preprocessing(X_full, preprocess_config)        │
+│ # X_preprocessed is now SNV + 1st derivative transformed                │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ DERIVATIVE SUBSET CREATION                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ selected_wavelengths = [10, 20, 30, 40, 50]  # From feature selection  │
+│ X_subset = X_preprocessed[:, selected_wavelengths]                      │
+│ # X_subset is [100 samples × 5 wavelengths]                            │
+│ # ALREADY PREPROCESSED!                                                │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ CROSS-VALIDATION ON SUBSET                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ model = PLSModel(5)                                                     │
+│                                                                          │
+│ results = run_cross_validation(                                        │
+│     X_subset,  # <-- Already preprocessed data                         │
+│     y,                                                                  │
+│     model,                                                              │
+│     "PLS",                                                              │
+│     preprocess_config,  # <-- Still pass this (for metadata)           │
+│     "regression",                                                       │
+│     skip_preprocessing=true  # ⚠️ CRITICAL!                            │
+│ )                                                                       │
+│                                                                          │
+│ Inside run_single_fold:                                                │
+│   if skip_preprocessing:  # TRUE                                       │
+│       X_train_proc = X_train  # Use as-is (no preprocessing)           │
+│       X_test_proc = X_test                                             │
+│   # Model trains on already-preprocessed subset                        │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+3. PARALLEL CV WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ JULIA STARTUP                                                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│ $ julia -t 4  # Start with 4 threads                                   │
+│                                                                          │
+│ Threads.nthreads() = 4                                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ FOLD EXECUTION (Parallel)                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ Threads.@threads for i in 1:n_folds                                    │
+│                                                                          │
+│   Thread 1: ┌─────────────────┐                                        │
+│   Fold 1    │ Split → Preproc │                                        │
+│   running   │ Train → Predict │  ←── Independent                       │
+│             │ Compute Metrics │                                        │
+│             └─────────────────┘                                        │
+│                                                                          │
+│   Thread 2: ┌─────────────────┐                                        │
+│   Fold 2    │ Split → Preproc │                                        │
+│   running   │ Train → Predict │  ←── Runs in parallel                 │
+│             │ Compute Metrics │                                        │
+│             └─────────────────┘                                        │
+│                                                                          │
+│   Thread 3: ┌─────────────────┐                                        │
+│   Fold 3    │ Split → Preproc │                                        │
+│   running   │ Train → Predict │  ←── Runs in parallel                 │
+│             │ Compute Metrics │                                        │
+│             └─────────────────┘                                        │
+│                                                                          │
+│   Thread 4: ┌─────────────────┐                                        │
+│   Fold 4    │ Split → Preproc │                                        │
+│   running   │ Train → Predict │  ←── Runs in parallel                 │
+│             │ Compute Metrics │                                        │
+│             └─────────────────┘                                        │
+│                                                                          │
+│   Thread 1: ┌─────────────────┐  (reused after Fold 1 completes)      │
+│   Fold 5    │ Split → Preproc │                                        │
+│   running   │ Train → Predict │                                        │
+│             │ Compute Metrics │                                        │
+│             └─────────────────┘                                        │
+│                                                                          │
+│ end                                                                     │
+│                                                                          │
+│ Speedup: ~3-4x with 4 threads                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+4. HYPERPARAMETER TUNING WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ GRID SEARCH WITH CV                                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ FOR each n_components in [1, 3, 5, 10, 15, 20]:                       │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │ model = PLSModel(n_components)                                  │  │
+│   │                                                                  │  │
+│   │ results = run_cross_validation(                                │  │
+│   │     X, y, model, "PLS",                                        │  │
+│   │     Dict("name" => "snv"), "regression"                        │  │
+│   │ )                                                               │  │
+│   │                                                                  │  │
+│   │ Store: (n_components, results["RMSE_mean"])                    │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│ ENDFOR                                                                  │
+│                                                                          │
+│ Find configuration with minimum RMSE_mean                              │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Results:
+┌────────────────┬──────────┬──────────┐
+│ n_components   │ RMSE     │ R²       │
+├────────────────┼──────────┼──────────┤
+│ 1              │ 0.650    │ 0.75     │
+│ 3              │ 0.580    │ 0.82     │
+│ 5              │ 0.520    │ 0.87     │ ← Best
+│ 10             │ 0.530    │ 0.86     │
+│ 15             │ 0.540    │ 0.85     │
+│ 20             │ 0.550    │ 0.84     │
+└────────────────┴──────────┴──────────┘
+
+
+5. FOLD STRUCTURE EXAMPLE (5-Fold)
+================================================================================
+
+Dataset: 100 samples (indices 1-100)
+5 folds created with create_cv_folds(100, 5)
+
+Fold 1:
+┌────────────────────────────────────────────────────┐
+│ Train: [21, 22, 23, ..., 100] (80 samples)        │
+│ Test:  [1, 2, 3, ..., 20]     (20 samples)        │
+└────────────────────────────────────────────────────┘
+
+Fold 2:
+┌────────────────────────────────────────────────────┐
+│ Train: [1-20, 41-100]         (80 samples)        │
+│ Test:  [21, 22, 23, ..., 40]  (20 samples)        │
+└────────────────────────────────────────────────────┘
+
+Fold 3:
+┌────────────────────────────────────────────────────┐
+│ Train: [1-40, 61-100]         (80 samples)        │
+│ Test:  [41, 42, 43, ..., 60]  (20 samples)        │
+└────────────────────────────────────────────────────┘
+
+Fold 4:
+┌────────────────────────────────────────────────────┐
+│ Train: [1-60, 81-100]         (80 samples)        │
+│ Test:  [61, 62, 63, ..., 80]  (20 samples)        │
+└────────────────────────────────────────────────────┘
+
+Fold 5:
+┌────────────────────────────────────────────────────┐
+│ Train: [1-80]                 (80 samples)        │
+│ Test:  [81, 82, 83, ..., 100] (20 samples)        │
+└────────────────────────────────────────────────────┘
+
+Properties:
+✓ Each sample appears in exactly one test set
+✓ Each sample appears in exactly 4 training sets
+✓ Train and test sets are disjoint
+✓ All folds have equal test set size (±1 for uneven divisions)
+
+
+6. METRICS COMPUTATION FLOW
+================================================================================
+
+REGRESSION METRICS:
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Input: y_true = [1.0, 2.0, 3.0, 4.0, 5.0]                              │
+│        y_pred = [1.1, 2.2, 2.9, 4.1, 4.8]                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Compute residuals:                                                      │
+│   residuals = y_true - y_pred                                          │
+│   = [−0.1, −0.2, 0.1, −0.1, 0.2]                                       │
+│                                                                          │
+│ RMSE = √(mean(residuals²))                                             │
+│      = √(mean([0.01, 0.04, 0.01, 0.01, 0.04]))                        │
+│      = √(0.022) = 0.148                                                │
+│                                                                          │
+│ MAE = mean(|residuals|)                                                │
+│     = mean([0.1, 0.2, 0.1, 0.1, 0.2])                                 │
+│     = 0.14                                                              │
+│                                                                          │
+│ R² = 1 - (SS_res / SS_tot)                                             │
+│   SS_res = sum(residuals²) = 0.11                                     │
+│   SS_tot = sum((y_true - mean(y_true))²) = 10.0                       │
+│   R² = 1 - (0.11 / 10.0) = 0.989                                      │
+│                                                                          │
+│ Return: Dict("RMSE" => 0.148, "R2" => 0.989, "MAE" => 0.14)           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+CLASSIFICATION METRICS:
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Input: y_true = [0.0, 0.0, 1.0, 1.0, 1.0]                              │
+│        y_pred = [0.1, 0.3, 0.7, 0.9, 0.8] (probabilities)              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Threshold at 0.5:                                                       │
+│   y_pred_binary = [0, 0, 1, 1, 1]                                      │
+│                                                                          │
+│ Confusion Matrix:                                                       │
+│   TP = 3 (predicted 1, actually 1)                                     │
+│   TN = 2 (predicted 0, actually 0)                                     │
+│   FP = 0 (predicted 1, actually 0)                                     │
+│   FN = 0 (predicted 0, actually 1)                                     │
+│                                                                          │
+│ Accuracy = (TP + TN) / (TP + TN + FP + FN)                             │
+│          = (3 + 2) / 5 = 1.0                                           │
+│                                                                          │
+│ Precision = TP / (TP + FP) = 3 / 3 = 1.0                               │
+│                                                                          │
+│ Recall = TP / (TP + FN) = 3 / 3 = 1.0                                  │
+│                                                                          │
+│ ROC AUC = (computed via trapezoidal rule) ≈ 1.0                        │
+│                                                                          │
+│ Return: Dict("Accuracy" => 1.0, "ROC_AUC" => 1.0,                      │
+│              "Precision" => 1.0, "Recall" => 1.0)                      │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+7. FUNCTION CALL HIERARCHY
+================================================================================
+
+run_cross_validation()
+├── create_cv_folds()
+│   └── randperm()  # Shuffle indices
+│
+├── For each fold:
+│   └── run_single_fold()
+│       ├── Split data (X[train_idx, :], y[train_idx])
+│       ├── apply_preprocessing() [if not skip_preprocessing]
+│       ├── build_model()  # Fresh model instance
+│       ├── fit_model!()
+│       ├── predict_model()
+│       └── compute_regression_metrics() or compute_classification_metrics()
+│           ├── For regression:
+│           │   ├── mean(), std()
+│           │   ├── sqrt(), sum()
+│           │   └── Return RMSE, R², MAE
+│           └── For classification:
+│               ├── Confusion matrix
+│               ├── compute_roc_auc()
+│               └── Return Accuracy, ROC AUC, Precision, Recall
+│
+└── aggregate_cv_results()
+    ├── mean() over folds
+    ├── std() over folds
+    └── Package into result Dict
+
+
+8. DATA FLOW DIAGRAM
+================================================================================
+
+                    Input Data
+                    ┌─────┐
+                    │ X,y │
+                    └──┬──┘
+                       │
+                       ↓
+            ┌──────────────────────┐
+            │  create_cv_folds     │
+            │  Returns: folds      │
+            └──────────┬───────────┘
+                       │
+         ┌─────────────┴─────────────┐
+         │                           │
+         ↓                           ↓
+    ┌─────────┐               ┌─────────┐
+    │ Fold 1  │  ...  ...    │ Fold 5  │
+    └────┬────┘               └────┬────┘
+         │                         │
+         └────────────┬────────────┘
+                      │
+                      ↓
+         ┌────────────────────────┐
+         │  run_single_fold       │
+         │  (for each fold)       │
+         └────────────┬───────────┘
+                      │
+         ┌────────────┴───────────┐
+         │                        │
+         ↓                        ↓
+    ┌──────────┐          ┌──────────┐
+    │Preprocess│          │  Train   │
+    │  Data    │ ────────→│  Model   │
+    └──────────┘          └─────┬────┘
+                                │
+                                ↓
+                          ┌──────────┐
+                          │ Predict  │
+                          │  y_pred  │
+                          └─────┬────┘
+                                │
+                                ↓
+                        ┌───────────────┐
+                        │Compute Metrics│
+                        └───────┬───────┘
+                                │
+                                ↓
+                    ┌────────────────────────┐
+                    │  aggregate_cv_results  │
+                    │  Mean ± Std            │
+                    └───────────┬────────────┘
+                                │
+                                ↓
+                        ┌───────────────┐
+                        │ Final Results │
+                        │ Dict with     │
+                        │ Mean, Std, etc│
+                        └───────────────┘
+
+
+================================================================================
+END OF WORKFLOW DIAGRAMS
+================================================================================
