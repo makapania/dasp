@@ -7,6 +7,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import label_binarize
+from sklearn.base import clone
+from joblib import Parallel, delayed
 
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
@@ -15,7 +17,10 @@ from .regions import create_region_subsets, format_region_report
 
 
 def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
-               max_iter=500, models_to_test=None, progress_callback=None):
+               max_iter=500, models_to_test=None, preprocessing_methods=None,
+               window_sizes=None, n_estimators_list=None, learning_rates=None,
+               enable_variable_subsets=True, variable_counts=None,
+               enable_region_subsets=True, n_top_regions=5, progress_callback=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -38,6 +43,14 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     models_to_test : list of str, optional
         List of model names to test (e.g., ['PLS', 'RandomForest', 'MLP', 'NeuralBoosted'])
         If None, all models are tested
+    enable_variable_subsets : bool, default=True
+        Enable top-N variable subset analysis
+    variable_counts : list of int, optional
+        Variable counts to test (e.g., [10, 20, 50])
+    enable_region_subsets : bool, default=True
+        Enable spectral region subset analysis
+    n_top_regions : int, default=5
+        Number of top regions to analyze (5, 10, 15, or 20)
     progress_callback : callable, optional
         Function to call with progress updates. Should accept dict with keys:
         - 'stage': Current stage (e.g., 'preprocessing', 'model_testing')
@@ -77,8 +90,9 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
               f"due to dataset size (n_samples={n_samples}, min_fold_size~{min_fold_samples})")
 
-    # Get model grids
-    model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter)
+    # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted)
+    model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
+                                   n_estimators_list=n_estimators_list, learning_rates=learning_rates)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
@@ -89,25 +103,83 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         if not model_grids:
             raise ValueError(f"No valid models found. Available: {list(get_model_grids(task_type, n_features, safe_max_components, max_iter).keys())}, Requested: {models_to_test}")
 
-    # Define preprocessing configurations
-    preprocess_configs = [
-        {"name": "raw", "deriv": None, "window": None, "polyorder": None},
-        {"name": "snv", "deriv": None, "window": None, "polyorder": None},
-    ]
+    # Define preprocessing configurations based on user selections
+    # Use preprocessing_methods dict if provided, otherwise default to all
+    if preprocessing_methods is None:
+        preprocessing_methods = {
+            'raw': True,
+            'snv': True,
+            'sg1': True,
+            'sg2': True,
+            'deriv_snv': True
+        }
 
-    # Add derivative configs
-    for deriv in [1, 2]:
-        for window in [7, 19]:
-            polyorder = 2 if deriv == 1 else 3
+    # Use window_sizes list if provided, otherwise default to [7, 19]
+    if window_sizes is None:
+        window_sizes = [7, 19]
+
+    preprocess_configs = []
+
+    # Add raw if selected
+    if preprocessing_methods.get('raw', False):
+        preprocess_configs.append({"name": "raw", "deriv": None, "window": None, "polyorder": None})
+
+    # Add SNV if selected
+    if preprocessing_methods.get('snv', False):
+        preprocess_configs.append({"name": "snv", "deriv": None, "window": None, "polyorder": None})
+
+    # Add derivative configs based on user selections
+    # For each derivative type, we create:
+    # 1. Pure derivative (deriv)
+    # 2. SNV then derivative (snv_deriv) - if SNV is also selected
+    # 3. Derivative then SNV (deriv_snv) - if deriv_snv checkbox is selected
+
+    if preprocessing_methods.get('sg1', False):
+        # 1st derivative only
+        for window in window_sizes:
             preprocess_configs.append(
-                {"name": "deriv", "deriv": deriv, "window": window, "polyorder": polyorder}
+                {"name": "deriv", "deriv": 1, "window": window, "polyorder": 2}
             )
+
+        # If SNV is also selected, add SNV → derivative combination
+        if preprocessing_methods.get('snv', False):
+            for window in window_sizes:
+                preprocess_configs.append(
+                    {"name": "snv_deriv", "deriv": 1, "window": window, "polyorder": 2}
+                )
+
+        # If deriv_snv is selected, add derivative → SNV combination for 1st deriv
+        if preprocessing_methods.get('deriv_snv', False):
+            for window in window_sizes:
+                preprocess_configs.append(
+                    {"name": "deriv_snv", "deriv": 1, "window": window, "polyorder": 2}
+                )
+
+    if preprocessing_methods.get('sg2', False):
+        # 2nd derivative only
+        for window in window_sizes:
             preprocess_configs.append(
-                {"name": "snv_deriv", "deriv": deriv, "window": window, "polyorder": polyorder}
+                {"name": "deriv", "deriv": 2, "window": window, "polyorder": 3}
             )
-            preprocess_configs.append(
-                {"name": "deriv_snv", "deriv": deriv, "window": window, "polyorder": polyorder}
-            )
+
+        # If SNV is also selected, add SNV → derivative combination
+        if preprocessing_methods.get('snv', False):
+            for window in window_sizes:
+                preprocess_configs.append(
+                    {"name": "snv_deriv", "deriv": 2, "window": window, "polyorder": 3}
+                )
+
+        # If deriv_snv is selected, add derivative → SNV combination for 2nd deriv
+        if preprocessing_methods.get('deriv_snv', False):
+            for window in window_sizes:
+                preprocess_configs.append(
+                    {"name": "deriv_snv", "deriv": 2, "window": window, "polyorder": 3}
+                )
+
+    # If no preprocessing methods selected, default to raw
+    if not preprocess_configs:
+        print("Warning: No preprocessing methods selected. Defaulting to raw.")
+        preprocess_configs.append({"name": "raw", "deriv": None, "window": None, "polyorder": None})
 
     # Create CV splitter
     if task_type == "regression":
@@ -118,6 +190,16 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     print(f"Running {task_type} search with {folds}-fold CV...")
     print(f"Models: {list(model_grids.keys())}")
     print(f"Preprocessing configs: {len(preprocess_configs)}")
+    print(f"\nPreprocessing breakdown:")
+    for cfg in preprocess_configs:
+        cfg_name = cfg['name']
+        if cfg['deriv'] is not None:
+            print(f"  - {cfg_name} (deriv={cfg['deriv']}, window={cfg['window']})")
+        else:
+            print(f"  - {cfg_name}")
+    print(f"\nEnable variable subsets: {enable_variable_subsets}")
+    print(f"Variable counts: {variable_counts}")
+    print(f"Enable region subsets: {enable_region_subsets}")
     print()
 
     # Note: Spectral region analysis is now done per preprocessing method
@@ -135,8 +217,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     for preprocess_cfg in preprocess_configs:
         # Compute region subsets on preprocessed data for this preprocessing method
         # This ensures regions are based on the actual preprocessed features
+        # Region subsets now work for ALL preprocessing types including derivatives
         region_subsets = []
-        if preprocess_cfg["deriv"] is None:  # Only for non-derivative preprocessing
+        X_preprocessed_for_regions = None
+        if enable_region_subsets:
             try:
                 # Build preprocessing pipeline
                 prep_pipe_steps = build_preprocessing_pipeline(
@@ -147,19 +231,21 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                 )
 
                 # Transform X through preprocessing
-                X_preprocessed = X_np.copy()
+                X_preprocessed_for_regions = X_np.copy()
                 if prep_pipe_steps:
                     prep_pipeline = Pipeline(prep_pipe_steps)
-                    X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
+                    X_preprocessed_for_regions = prep_pipeline.fit_transform(X_preprocessed_for_regions, y_np)
 
                 # Compute region subsets on preprocessed data
+                # For derivatives: regions will be in derivative feature space
                 # Convert wavelengths to float (they come from DataFrame columns as strings)
                 wavelengths_float = np.array([float(w) for w in wavelengths])
-                region_subsets = create_region_subsets(X_preprocessed, y_np, wavelengths_float, n_top_regions=5)
+                region_subsets = create_region_subsets(X_preprocessed_for_regions, y_np, wavelengths_float, n_top_regions=n_top_regions)
 
                 if len(region_subsets) > 0:
                     prep_name = str(preprocess_cfg.get("name", "unknown"))
-                    print(f"  Region analysis for {prep_name}: Identified {len(region_subsets)} region-based subsets")
+                    deriv_info = f"_d{preprocess_cfg['deriv']}" if preprocess_cfg["deriv"] else ""
+                    print(f"  Region analysis for {prep_name}{deriv_info}: Identified {len(region_subsets)} region-based subsets")
             except Exception as e:
                 prep_name = str(preprocess_cfg.get("name", "unknown"))
                 print(f"  Warning: Could not compute region subsets for {prep_name}: {e}")
@@ -221,55 +307,138 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                 # IMPORTANT: Importances are computed on PREPROCESSED data, ensuring that
                 # wavelength selection reflects the actual transformed features the model sees
                 if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP", "NeuralBoosted"]:
-                    # Refit on full data to get importances
-                    pipe_steps = build_preprocessing_pipeline(
-                        preprocess_cfg["name"],
-                        preprocess_cfg["deriv"],
-                        preprocess_cfg["window"],
-                        preprocess_cfg["polyorder"],
-                    )
-                    pipe_steps.append(("model", model))
-                    pipe = Pipeline(pipe_steps) if pipe_steps else model
-
-                    pipe.fit(X_np, y_np)
-
-                    # Get model from pipeline
-                    fitted_model = (
-                        pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
-                    )
-
-                    # Get transformed X for importance calculation
-                    # This ensures importances are based on PREPROCESSED features
-                    if hasattr(pipe, "named_steps") and len(pipe_steps) > 1:
-                        # Transform through preprocessing
-                        X_transformed = X_np
-                        for step_name, transformer in pipe.steps[:-1]:
-                            X_transformed = transformer.transform(X_transformed)
+                    if not enable_variable_subsets:
+                        print(f"  ⊗ Skipping subset analysis for {model_name} (variable subsets disabled)")
                     else:
-                        X_transformed = X_np
+                        print(f"  → Computing feature importances for {model_name} subset analysis...")
 
-                    # Get importances computed on preprocessed data
-                    try:
-                        importances = get_feature_importances(
-                            fitted_model, model_name, X_transformed, y_np
+                        # Refit on full data to get importances
+                        pipe_steps = build_preprocessing_pipeline(
+                            preprocess_cfg["name"],
+                            preprocess_cfg["deriv"],
+                            preprocess_cfg["window"],
+                            preprocess_cfg["polyorder"],
+                        )
+                        pipe_steps.append(("model", model))
+                        pipe = Pipeline(pipe_steps) if pipe_steps else model
+
+                        pipe.fit(X_np, y_np)
+
+                        # Get model from pipeline
+                        fitted_model = (
+                            pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
                         )
 
-                        # Expanded variable selection grid
-                        # Logarithmic spacing: 10, 20, 50, 100, 250, 500, 1000, etc.
-                        variable_counts = [10, 20, 50, 100, 250, 500, 1000]
+                        # Get transformed X for importance calculation
+                        # This ensures importances are based on PREPROCESSED features
+                        if hasattr(pipe, "named_steps") and len(pipe_steps) > 1:
+                            # Transform through preprocessing
+                            X_transformed = X_np
+                            for step_name, transformer in pipe.steps[:-1]:
+                                X_transformed = transformer.transform(X_transformed)
+                        else:
+                            X_transformed = X_np
 
-                        # Only test counts that are less than total features
-                        variable_counts = [n for n in variable_counts if n < n_features]
+                        # Get importances computed on preprocessed data
+                        try:
+                            importances = get_feature_importances(
+                                fitted_model, model_name, X_transformed, y_np
+                            )
 
-                        # Run subsets with expanded grid
-                        for n_top in variable_counts:
-                            # Select top N most important wavelengths based on preprocessed importances
-                            top_indices = np.argsort(importances)[-n_top:][::-1]
+                            # Use user-specified variable counts, or default if not provided
+                            if variable_counts is None:
+                                user_variable_counts = [10, 20, 50, 100, 250, 500, 1000]
+                            else:
+                                user_variable_counts = variable_counts
 
-                            # Note: We pass X_np (raw data) and subset_indices to _run_single_config
-                            # It will subset the wavelengths first, THEN apply preprocessing
-                            # This is correct because wavelength indices don't change with preprocessing
-                            subset_result = _run_single_config(
+                            # For validation, use the feature count from the PREPROCESSED data
+                            # (derivatives reduce feature count, so use transformed shape)
+                            n_features_for_validation = X_transformed.shape[1]
+
+                            # Only test counts that are less than total features
+                            valid_variable_counts = [n for n in user_variable_counts if n < n_features_for_validation]
+
+                            print(f"  → User variable counts: {user_variable_counts}")
+                            print(f"  → Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}")
+
+                            if not valid_variable_counts:
+                                print(f"  ⚠ Warning: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
+
+                            # Run subsets with user-selected counts
+                            for n_top in valid_variable_counts:
+                                print(f"  → Testing top-{n_top} variable subset...")
+                                # Select top N most important features based on preprocessed importances
+                                top_indices = np.argsort(importances)[-n_top:][::-1]
+
+                                # For derivative preprocessing: importances are computed on transformed features
+                                # We must use the TRANSFORMED data and skip reapplying preprocessing
+                                # Otherwise window size (e.g., 17) > n_features (e.g., 10) causes errors
+                                if preprocess_cfg["deriv"] is not None:
+                                    # Use preprocessed data, skip reprocessing
+                                    # Keep original preprocess_cfg for correct labeling in results
+                                    subset_result = _run_single_config(
+                                        X_transformed,
+                                        y_np,
+                                        wavelengths,
+                                        model,
+                                        model_name,
+                                        params,
+                                        preprocess_cfg,  # Keep original config for labeling
+                                        cv_splitter,
+                                        task_type,
+                                        is_binary_classification,
+                                        subset_indices=top_indices,
+                                        subset_tag=f"top{n_top}",
+                                        skip_preprocessing=True,  # Flag to skip reapplying
+                                    )
+                                else:
+                                    # For raw/SNV: indices map to original wavelengths, can reapply preprocessing
+                                    subset_result = _run_single_config(
+                                        X_np,
+                                        y_np,
+                                        wavelengths,
+                                        model,
+                                        model_name,
+                                        params,
+                                        preprocess_cfg,
+                                        cv_splitter,
+                                        task_type,
+                                        is_binary_classification,
+                                        subset_indices=top_indices,
+                                        subset_tag=f"top{n_top}",
+                                    )
+                                df_results = add_result(df_results, subset_result)
+
+                        except Exception as e:
+                            print(f"Warning: Could not compute importances for {model_name}: {e}")
+
+                # Run region-based subsets for ALL models (not just PLS/RF/MLP/NeuralBoosted)
+                # For derivatives: use preprocessed data to avoid reapplying preprocessing
+                # For raw/SNV: use raw data and reapply preprocessing
+                if enable_region_subsets and len(region_subsets) > 0:
+                    print(f"  → Testing {len(region_subsets)} region-based subsets...")
+                    for region_subset in region_subsets:
+                        if preprocess_cfg["deriv"] is not None:
+                            # For derivatives: use preprocessed data, skip reprocessing
+                            # Keep original preprocess_cfg for correct labeling
+                            region_result = _run_single_config(
+                                X_preprocessed_for_regions,
+                                y_np,
+                                wavelengths,
+                                model,
+                                model_name,
+                                params,
+                                preprocess_cfg,  # Keep original config for labeling
+                                cv_splitter,
+                                task_type,
+                                is_binary_classification,
+                                subset_indices=region_subset['indices'],
+                                subset_tag=region_subset['tag'],
+                                skip_preprocessing=True,  # Flag to skip reapplying
+                            )
+                        else:
+                            # For raw/SNV: use raw data, reapply preprocessing
+                            region_result = _run_single_config(
                                 X_np,
                                 y_np,
                                 wavelengths,
@@ -280,33 +449,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                                 cv_splitter,
                                 task_type,
                                 is_binary_classification,
-                                subset_indices=top_indices,
-                                subset_tag=f"top{n_top}",
+                                subset_indices=region_subset['indices'],
+                                subset_tag=region_subset['tag'],
                             )
-                            df_results = add_result(df_results, subset_result)
-
-                        # Run region-based subsets (only for raw and snv preprocessing)
-                        # Skip for derivative preprocessing to avoid redundancy
-                        if preprocess_cfg["deriv"] is None and len(region_subsets) > 0:
-                            for region_subset in region_subsets:
-                                region_result = _run_single_config(
-                                    X_np,
-                                    y_np,
-                                    wavelengths,
-                                    model,
-                                    model_name,
-                                    params,
-                                    preprocess_cfg,
-                                    cv_splitter,
-                                    task_type,
-                                    is_binary_classification,
-                                    subset_indices=region_subset['indices'],
-                                    subset_tag=region_subset['tag'],
-                                )
-                                df_results = add_result(df_results, region_result)
-
-                    except Exception as e:
-                        print(f"Warning: Could not compute importances for {model_name}: {e}")
+                        df_results = add_result(df_results, region_result)
 
     # Compute composite scores and rank
     from .scoring import compute_composite_score
@@ -314,6 +460,66 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     df_ranked = compute_composite_score(df_results, task_type, lambda_penalty)
 
     return df_ranked
+
+
+def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification):
+    """
+    Run a single CV fold in parallel.
+
+    Parameters
+    ----------
+    pipe : sklearn.pipeline.Pipeline
+        Pipeline to fit (will be cloned)
+    X : ndarray
+        Feature matrix
+    y : ndarray
+        Target vector
+    train_idx : ndarray
+        Training indices
+    test_idx : ndarray
+        Test indices
+    task_type : str
+        'regression' or 'classification'
+    is_binary_classification : bool
+        Whether this is binary classification
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with fold metrics
+    """
+    # Clone pipeline to avoid thread-safety issues
+    pipe_clone = clone(pipe)
+
+    # Split data
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Fit and predict
+    pipe_clone.fit(X_train, y_train)
+
+    if task_type == "regression":
+        y_pred = pipe_clone.predict(X_test)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        r2 = r2_score(y_test, y_pred)
+        return {"RMSE": rmse, "R2": r2}
+    else:  # classification
+        y_pred = pipe_clone.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+
+        # ROC AUC
+        try:
+            if is_binary_classification:
+                y_proba = pipe_clone.predict_proba(X_test)[:, 1]
+                auc = roc_auc_score(y_test, y_proba)
+            else:
+                y_proba = pipe_clone.predict_proba(X_test)
+                y_test_bin = label_binarize(y_test, classes=np.unique(y))
+                auc = roc_auc_score(y_test_bin, y_proba, average="macro", multi_class="ovr")
+        except Exception:
+            auc = np.nan
+
+        return {"Accuracy": acc, "ROC_AUC": auc}
 
 
 def _run_single_config(
@@ -330,11 +536,21 @@ def _run_single_config(
     subset_indices=None,
     subset_tag="full",
     top_n_vars=30,
+    skip_preprocessing=False,
 ):
     """
     Run a single model configuration with CV.
 
-    Returns a dictionary with results, including top important variables.
+    Parameters
+    ----------
+    skip_preprocessing : bool, default=False
+        If True, skip building preprocessing pipeline (data is already preprocessed).
+        Used for derivative subsets where preprocessing was already applied.
+
+    Returns
+    -------
+    dict
+        Dictionary with results, including top important variables.
     """
     # Apply subset if specified
     if subset_indices is not None:
@@ -345,13 +561,16 @@ def _run_single_config(
 
     full_vars = len(wavelengths)
 
-    # Build preprocessing pipeline
-    pipe_steps = build_preprocessing_pipeline(
-        preprocess_cfg["name"],
-        preprocess_cfg["deriv"],
-        preprocess_cfg["window"],
-        preprocess_cfg["polyorder"],
-    )
+    # Build preprocessing pipeline (skip if data is already preprocessed)
+    if skip_preprocessing:
+        pipe_steps = []
+    else:
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["name"],
+            preprocess_cfg["deriv"],
+            preprocess_cfg["window"],
+            preprocess_cfg["polyorder"],
+        )
 
     # For PLS-DA, we need PLS + LogisticRegression
     if model_name == "PLS-DA":
@@ -362,37 +581,13 @@ def _run_single_config(
 
     pipe = Pipeline(pipe_steps) if pipe_steps else model
 
-    # Run CV
-    cv_metrics = []
-    for train_idx, test_idx in cv_splitter.split(X, y):
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-
-        # Fit and predict
-        pipe.fit(X_train, y_train)
-
-        if task_type == "regression":
-            y_pred = pipe.predict(X_test)
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-            r2 = r2_score(y_test, y_pred)
-            cv_metrics.append({"RMSE": rmse, "R2": r2})
-        else:  # classification
-            y_pred = pipe.predict(X_test)
-            acc = accuracy_score(y_test, y_pred)
-
-            # ROC AUC
-            try:
-                if is_binary_classification:
-                    y_proba = pipe.predict_proba(X_test)[:, 1]
-                    auc = roc_auc_score(y_test, y_proba)
-                else:
-                    y_proba = pipe.predict_proba(X_test)
-                    y_test_bin = label_binarize(y_test, classes=np.unique(y))
-                    auc = roc_auc_score(y_test_bin, y_proba, average="macro", multi_class="ovr")
-            except Exception:
-                auc = np.nan
-
-            cv_metrics.append({"Accuracy": acc, "ROC_AUC": auc})
+    # Run CV in parallel (use n_jobs=-1 to use all available cores)
+    cv_metrics = Parallel(n_jobs=-1, backend='loky')(
+        delayed(_run_single_fold)(
+            pipe, X, y, train_idx, test_idx, task_type, is_binary_classification
+        )
+        for train_idx, test_idx in cv_splitter.split(X, y)
+    )
 
     # Average metrics
     if task_type == "regression":

@@ -6,22 +6,22 @@ import pandas as pd
 
 def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
     """
-    Compute composite score with improved simplicity penalty.
+    Compute composite score with performance-dominant ranking.
 
-    New formula balances performance and parsimony:
+    Formula: ~90% performance, ~10% complexity
     Score = performance_score + complexity_penalty
 
     Performance score (lower is better):
     - Regression: 0.5*z(RMSE) - 0.5*z(R2)  [combine both metrics]
     - Classification: -z(ROC_AUC) - 0.3*z(Accuracy)
 
-    Complexity penalty (non-linear for sparse models):
-    - LV penalty: λ × (LVs/25)
-    - Variable penalty: λ × (n_vars/full_vars)
-    - Sparsity penalty: Additional penalty when using very few variables
-      * If n_vars < 10: add λ × 2.0 (heavy penalty)
-      * If n_vars < 25: add λ × 1.0 (moderate penalty)
-      * If n_vars < 1% of full_vars: add λ × 1.5
+    Complexity penalty (linear, no harsh sparsity penalties):
+    - LV penalty: Small penalty for more latent variables
+    - Variable penalty: Small penalty for more variables
+    - Both weighted equally, scaled to ~10% of total score
+
+    This ensures models with similar R² stay close in ranking,
+    with complexity only as a tiebreaker.
 
     Lower composite score is better.
 
@@ -32,7 +32,8 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
     task_type : str
         'regression' or 'classification'
     lambda_penalty : float
-        Penalty weight for model complexity
+        Penalty weight for model complexity (default: 0.15)
+        This is scaled down internally to keep complexity at ~10% influence.
 
     Returns
     -------
@@ -67,38 +68,29 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
         # Combined performance score (lower is better, so negate)
         performance_score = -z_auc - 0.3 * z_acc
 
-    # Compute complexity penalty
-    # 1. LV penalty (for PLS models)
+    # Compute complexity penalty (simple linear penalties, no harsh sparsity penalties)
+    # Scale complexity to be ~10% of performance (performance z-scores typically range ±3)
+    # To make complexity ~10% of total: use small penalty weight
+
+    # 1. LV penalty (for PLS models) - normalized to [0, 1]
+    # Fewer LVs is better, so higher LVs = higher penalty
     lvs_penalty = df["LVs"].fillna(0).astype(np.float64) / 25.0
 
-    # 2. Variable fraction penalty (logarithmic scale)
-    # Using log scale so difference between 20-30 is minimal, but 30-300 is significant
-    # log(30/n_features) vs log(20/n_features) has small difference
-    # log(300/n_features) vs log(30/n_features) has large difference
+    # 2. Variable fraction penalty - normalized to [0, 1]
+    # Fewer variables is better, so more variables = higher penalty
     n_vars_array = np.asarray(df["n_vars"], dtype=np.float64)
     full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
-    vars_ratio = n_vars_array / full_vars_array
-    # Add small epsilon to avoid log(0), normalize to [0, 1] range
-    vars_penalty = np.log1p(vars_ratio * 100.0) / np.log1p(100.0)  # log scale normalized
+    vars_penalty = n_vars_array / full_vars_array
 
-    # 3. Sparsity penalty (non-linear penalty for very sparse models)
-    sparsity_penalty = np.zeros(len(df))
-
-    # Heavy penalty for extremely sparse models
-    very_sparse_mask = df["n_vars"] < 10
-    sparsity_penalty[very_sparse_mask] += 2.0
-
-    # Moderate penalty for sparse models
-    sparse_mask = (df["n_vars"] >= 10) & (df["n_vars"] < 25)
-    sparsity_penalty[sparse_mask] += 1.0
-
-    # Additional penalty if using less than 1% of available variables
-    percent_vars = (df["n_vars"] / df["full_vars"]) * 100
-    ultra_sparse_mask = (percent_vars < 1.0) & (df["n_vars"] >= 10)
-    sparsity_penalty[ultra_sparse_mask] += 1.5
+    # Scale complexity to ~10% of performance contribution
+    # Performance z-scores range ~[-3, +3], so range is ~6
+    # We want complexity to contribute ~0.6 units (10% of 6)
+    # lvs_penalty + vars_penalty ranges [0, 2], so multiply by 0.3 to get ~0.6
+    # Additionally, use user's lambda_penalty as a tuning factor
+    complexity_scale = 0.3 * lambda_penalty / 0.15  # Normalize around default 0.15
 
     # Total complexity penalty
-    complexity_penalty = lambda_penalty * (lvs_penalty + vars_penalty + sparsity_penalty)
+    complexity_penalty = complexity_scale * (lvs_penalty + vars_penalty)
 
     # Composite score (lower is better)
     df["CompositeScore"] = performance_score + complexity_penalty
@@ -108,6 +100,13 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
 
     # Sort by rank
     df = df.sort_values("Rank")
+
+    # Reorder columns: Rank first, top_vars last
+    # Get all columns except Rank and top_vars
+    cols = [c for c in df.columns if c not in ['Rank', 'top_vars']]
+    # Construct new column order: Rank first, then everything else, then top_vars
+    new_col_order = ['Rank'] + cols + ['top_vars']
+    df = df[new_col_order]
 
     return df
 

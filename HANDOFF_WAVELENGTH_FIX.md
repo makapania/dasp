@@ -123,12 +123,71 @@ for preprocess_cfg in preprocess_configs:
 
 ### 3. GUI Improvements
 
-#### spectral_predict_gui.py
-**Changed:** Window size from 850x800 to **850x950** (line 27)
+#### A. Window Size Fix
+**Initial Change:** Window size from 850x800 to **850x950**
+**Final Change:** Window size increased to **900x1150** (line 82)
 
-**Why:** Bottom buttons (Run Analysis, Help, Exit) were not visible without manual window resizing
+**Why:**
+- Bottom buttons were not visible without manual resizing
+- Model selection section added more height
+- Further increased to ensure all buttons are fully visible, not partially obscured
 
-#### Launcher Scripts Created
+#### B. Model Selection Checkboxes (NEW!)
+**Feature:** Users can now choose which models to test
+
+**Implementation:**
+- Added 4 checkboxes in new "4. Models to Test" section:
+  - ✓ PLS (Partial Least Squares) - checked by default
+  - ✓ Random Forest - checked by default
+  - ✓ MLP (Multi-Layer Perceptron) - checked by default
+  - ✓ Neural Boosted - checked by default
+- Validation ensures at least one model is selected
+- Passes `models_to_test` parameter to `run_search()`
+- Benefits: Faster analysis when skipping slow models like Neural Boosted
+
+**Files Modified:**
+- `spectral_predict_gui.py` - Added checkboxes and validation
+- `src/spectral_predict/search.py` - Added `models_to_test` parameter and filtering
+
+#### C. Auto-Populate Reference CSV (NEW!)
+**Feature:** When selecting ASD directory, automatically finds and loads reference CSV
+
+**How it works:**
+- After selecting ASD directory, scans for CSV files
+- If exactly **1 CSV** found → auto-populates reference CSV field
+- If **multiple CSVs** found → shows message to select manually
+- Automatically triggers column detection for convenience
+- Shows status message in green (auto-detected) or orange (multiple found)
+
+**User Experience:**
+```
+User selects ASD directory containing:
+  - Spectrum00001.asd
+  - Spectrum00002.asd
+  - ...
+  - BoneCollagen.csv  ← Only CSV file
+
+→ GUI automatically fills in "BoneCollagen.csv" as reference
+→ Shows: "Auto-detected reference CSV: BoneCollagen.csv" in green
+→ Auto-runs column detection
+```
+
+**File Modified:** `spectral_predict_gui.py` - Updated `_browse_asd_dir()` function
+
+#### D. Dependency Checking on Startup (NEW!)
+**Feature:** GUI validates required packages before launching
+
+**Checks for:**
+- matplotlib
+- numpy
+- pandas
+- scikit-learn
+
+**If missing:** Shows error dialog and console message with installation instructions
+
+**File Modified:** `spectral_predict_gui.py` - Added `check_dependencies()` function
+
+#### E. Launcher Scripts Created
 
 **run_gui.sh** (Unix/Mac/Linux):
 - Checks for virtual environment
@@ -408,16 +467,28 @@ The fix uses a **per-preprocessing computation strategy**:
 
 ## 🎉 Summary
 
+### Core Bug Fix:
 **What was broken:**
 - Wavelength regions computed on raw data, applied to all preprocessing methods
 
 **What was fixed:**
 - Wavelength regions now computed per preprocessing method on preprocessed data
 
+### GUI Enhancements:
+**What was added:**
+- Model selection checkboxes (choose which models to test)
+- Auto-populate reference CSV from ASD directory
+- Dependency checking on startup
+- Window size increased to 900x1150 for full button visibility
+- Launcher scripts with auto-dependency installation
+
 **Impact:**
 - More accurate wavelength selection
 - Better model performance with region-based subsets
-- Correct behavior matching user expectations
+- Faster, more user-friendly GUI workflow
+- Automatic reference CSV detection saves time
+- Clear error messages for missing dependencies
+- All buttons fully visible without manual resizing
 
 **Confidence:** High
 - Tested with synthetic data (✓)

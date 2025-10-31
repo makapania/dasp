@@ -142,7 +142,7 @@ def create_region_subsets(X, y, wavelengths, n_top_regions=5):
     wavelengths : np.ndarray
         Wavelength values
     n_top_regions : int
-        Number of top regions to use (default: 5)
+        Number of top regions to use (default: 5, can be up to 20)
 
     Returns
     -------
@@ -158,51 +158,61 @@ def create_region_subsets(X, y, wavelengths, n_top_regions=5):
     if len(regions) == 0:
         return []
 
+    # Cap n_top_regions to available regions
+    n_top_regions = min(n_top_regions, len(regions))
+
     # Get top regions
     top_regions = get_top_regions(regions, n_top=n_top_regions)
 
     subsets = []
 
+    # Strategy: Test individual regions and strategic combinations
+    # For n_top_regions=5: test top 3 individual + combinations (5-6 subsets)
+    # For n_top_regions=10: test top 5 individual + combinations (8-10 subsets)
+    # For n_top_regions=15: test top 7 individual + combinations (10-12 subsets)
+    # For n_top_regions=20: test top 10 individual + combinations (13-15 subsets)
+
+    # Determine how many individual regions to test
+    if n_top_regions <= 5:
+        n_individual = 3
+    elif n_top_regions <= 10:
+        n_individual = 5
+    elif n_top_regions <= 15:
+        n_individual = 7
+    else:  # n_top_regions > 15
+        n_individual = 10
+
     # Individual top regions (test each separately)
-    for i, region in enumerate(top_regions[:3], 1):  # Top 3 individual regions
+    for i, region in enumerate(top_regions[:n_individual], 1):
         if len(region['indices']) > 0:
+            # Include actual wavelength range in tag for immediate interpretability
+            wl_tag = f"{region['start']:.0f}-{region['end']:.0f}nm"
             subsets.append({
                 'indices': region['indices'],
-                'tag': f'region{i}',
+                'tag': f'region_{wl_tag}',
                 'description': f"Region {i}: {region['start']:.0f}-{region['end']:.0f}nm "
                              f"(r={region['mean_corr']:.3f}, n={len(region['indices'])})"
             })
 
-    # Combined top regions
-    if n_top_regions >= 2:
-        # Top 2 regions combined
-        indices_top2 = get_region_variable_indices(top_regions[:2])
-        if len(indices_top2) > 0:
-            subsets.append({
-                'indices': indices_top2,
-                'tag': 'top2regions',
-                'description': f"Top 2 regions combined (n={len(indices_top2)})"
-            })
+    # Combined top regions at strategic intervals
+    # Test combinations: top-2, top-5, top-10, top-15, top-20 (as available)
+    combination_sizes = [2, 5, 10, 15, 20]
+    for combo_size in combination_sizes:
+        if combo_size <= n_top_regions and combo_size > 1:
+            indices_combo = get_region_variable_indices(top_regions[:combo_size])
+            if len(indices_combo) > 0:
+                # For readability, only show wavelength ranges for small combinations
+                if combo_size <= 5:
+                    wl_ranges = ','.join([f"{r['start']:.0f}-{r['end']:.0f}" for r in top_regions[:combo_size]])
+                    tag_suffix = f"_{wl_ranges}nm"
+                else:
+                    tag_suffix = ""
 
-    if n_top_regions >= 3:
-        # Top 3 regions combined
-        indices_top3 = get_region_variable_indices(top_regions[:3])
-        if len(indices_top3) > 0:
-            subsets.append({
-                'indices': indices_top3,
-                'tag': 'top3regions',
-                'description': f"Top 3 regions combined (n={len(indices_top3)})"
-            })
-
-    if n_top_regions >= 5:
-        # Top 5 regions combined
-        indices_top5 = get_region_variable_indices(top_regions[:5])
-        if len(indices_top5) > 0:
-            subsets.append({
-                'indices': indices_top5,
-                'tag': 'top5regions',
-                'description': f"Top 5 regions combined (n={len(indices_top5)})"
-            })
+                subsets.append({
+                    'indices': indices_combo,
+                    'tag': f'top{combo_size}regions{tag_suffix}',
+                    'description': f"Top {combo_size} regions combined (n={len(indices_combo)})"
+                })
 
     return subsets
 

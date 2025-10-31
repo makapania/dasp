@@ -132,12 +132,12 @@ class ProgressMonitor:
         self.current_label.grid(row=1, column=0, sticky=tk.W)
 
         # === BEST MODEL SECTION ===
-        best_frame = ttk.LabelFrame(main_frame, text="Best Model So Far", padding="15")
-        best_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        self.best_frame = ttk.LabelFrame(main_frame, text="Best Model So Far", padding="15")
+        self.best_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
 
         # Best model display
         self.best_label = ttk.Label(
-            best_frame,
+            self.best_frame,
             text="No models tested yet",
             font=("Arial", 10),
             foreground="gray",
@@ -251,6 +251,9 @@ class ProgressMonitor:
                 text="No models tested yet",
                 foreground="gray"
             )
+            # Reset header text when nothing has been tested yet
+            if hasattr(self, 'best_frame') and self.best_frame.winfo_exists():
+                self.best_frame.config(text="Best Model So Far")
             return
 
         # Extract model info (keys are capitalized in result dict)
@@ -270,6 +273,14 @@ class ProgressMonitor:
             roc_auc = self.best_model.get('ROC_AUC', 0)
             accuracy = self.best_model.get('Accuracy', 0)
             metrics_text = f"ROC AUC: {roc_auc:.4f} | Accuracy: {accuracy:.4f}"
+
+        # Update header to include variable count for quick glance
+        if hasattr(self, 'best_frame') and self.best_frame.winfo_exists():
+            try:
+                self.best_frame.config(text=f"Best Model So Far — {n_vars} variables")
+            except Exception:
+                # Fallback in case of any UI issues
+                self.best_frame.config(text="Best Model So Far")
 
         # Build display text
         display_text = (

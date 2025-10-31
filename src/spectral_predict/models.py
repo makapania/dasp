@@ -8,7 +8,8 @@ from sklearn.linear_model import LogisticRegression
 from .neural_boosted import NeuralBoostedRegressor
 
 
-def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500):
+def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
+                    n_estimators_list=None, learning_rates=None):
     """
     Get model grids for hyperparameter search.
 
@@ -22,12 +23,21 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500):
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for MLP
+    n_estimators_list : list of int, optional
+        List of n_estimators values for NeuralBoosted. If None, uses [100]
+    learning_rates : list of float, optional
+        List of learning rates for NeuralBoosted. If None, uses [0.1, 0.2]
 
     Returns
     -------
     grids : dict
         Dictionary mapping model names to lists of (model, param_dict) tuples
     """
+    # Set defaults for NeuralBoosted hyperparameters
+    if n_estimators_list is None:
+        n_estimators_list = [100]
+    if learning_rates is None:
+        learning_rates = [0.1, 0.2]
     grids = {}
 
     # PLS components grid (clip to n_features and max_n_components)
@@ -82,17 +92,19 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500):
         # Neural Boosted Regression
         nbr_configs = []
 
-        # Grid: conservative to moderate learning rates
-        learning_rates = [0.05, 0.1, 0.2]
-
-        # Number of estimators: early stopping will find optimal
-        n_estimators_list = [50, 100]
+        # Use user-specified hyperparameters (or defaults from function parameters)
+        # Default: [100] for n_estimators, [0.1, 0.2] for learning_rates
+        # User can enable more via GUI for comprehensive search
 
         # Hidden layer sizes: keep small (weak learner property)
         hidden_sizes = [3, 5]
 
         # Activations: tanh (JMP default) and identity (linear)
         activations = ['tanh', 'identity']
+
+        # Grid size: len(n_estimators_list) × len(learning_rates) × 2 × 2
+        # Default: 1 × 2 × 2 × 2 = 8 configs
+        # Full: 2 × 3 × 2 × 2 = 24 configs (if user enables all)
 
         for n_est in n_estimators_list:
             for lr in learning_rates:

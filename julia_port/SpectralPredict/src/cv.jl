@@ -591,53 +591,22 @@ This is the main entry point for cross-validation. It:
   - Metadata: "n_folds", "task_type"
 
 # Parallelization
-The function can use multi-threading for parallel fold execution:
-```julia
-# Set number of threads before starting Julia
-# julia -t 4  # Use 4 threads
-
-# CV will automatically use available threads
-results = run_cross_validation(X, y, model, "PLS", config, "regression")
-```
+The function can use multi-threading for parallel fold execution.
+Set number of threads before starting Julia: `julia -t 4`
+CV will automatically use available threads.
 
 # Examples
-```julia
-# Basic 5-fold CV
-X = rand(100, 50)
-y = rand(100)
-model = build_model("PLS", Dict("n_components" => 5), "regression")
-preprocess_config = Dict("name" => "snv")
+Basic usage:
+    X = rand(100, 50)
+    y = rand(100)
+    model = build_model("PLS", Dict("n_components" => 5), "regression")
+    preprocess_config = Dict("name" => "snv")
+    results = run_cross_validation(X, y, model, "PLS", preprocess_config, "regression")
 
-results = run_cross_validation(
-    X, y, model, "PLS", preprocess_config, "regression"
-)
-
-# Access results
-println("RMSE: ", results["RMSE_mean"], " ± ", results["RMSE_std"])
-println("R²: ", results["R2_mean"], " ± ", results["R2_std"])
-
-# View individual fold scores
-for (i, fold_metrics) in enumerate(results["cv_scores"])
-    println("Fold $i: RMSE = ", fold_metrics["RMSE"])
-end
-
-# 10-fold CV with skip preprocessing
-results = run_cross_validation(
-    X, y, model, "PLS", preprocess_config, "regression",
-    n_folds=10,
-    skip_preprocessing=true
-)
-
-# Classification example
-y_class = rand([0.0, 1.0], 100)
-model_class = build_model("Ridge", Dict("alpha" => 1.0), "regression")
-results = run_cross_validation(
-    X, y_class, model_class, "Ridge",
-    Dict("name" => "raw"), "classification"
-)
-println("Accuracy: ", results["Accuracy_mean"], " ± ", results["Accuracy_std"])
-println("ROC AUC: ", results["ROC_AUC_mean"], " ± ", results["ROC_AUC_std"])
-```
+Access results:
+    results["RMSE_mean"], results["RMSE_std"]
+    results["R2_mean"], results["R2_std"]
+    results["cv_scores"]  # Individual fold results
 
 # Notes
 - Each fold gets a fresh model instance (via build_model)

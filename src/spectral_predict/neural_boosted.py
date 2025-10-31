@@ -124,7 +124,7 @@ class NeuralBoostedRegressor(BaseEstimator, RegressorMixin):
         hidden_layer_size=3,
         activation='tanh',
         alpha=0.0001,
-        max_iter=500,
+        max_iter=100,  # OPTIMIZED: Reduced from 500 (Phase A - evidence shows 15-30 needed)
         early_stopping=True,
         validation_fraction=0.15,
         n_iter_no_change=10,
@@ -234,7 +234,7 @@ class NeuralBoostedRegressor(BaseEstimator, RegressorMixin):
                 random_state=self.random_state + i if self.random_state is not None else None,
                 warm_start=False,
                 solver='lbfgs',  # Better for small networks
-                tol=1e-4,  # Tolerance for optimization
+                tol=5e-4,  # OPTIMIZED: Relaxed from 1e-4 (Phase A - faster convergence)
                 verbose=False
             )
 

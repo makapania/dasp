@@ -1,0 +1,153 @@
+Traceback (most recent call last):
+  File "C:\Users\sponheim\git\dasp\spectral_predict_julia_bridge.py", line 251, in run_search_julia
+    result = _run_julia_process(
+        julia_exe,
+    ...<3 lines>...
+        progress_callback
+    )
+  File "C:\Users\sponheim\git\dasp\spectral_predict_julia_bridge.py", line 664, in _run_julia_process
+    raise e
+  File "C:\Users\sponheim\git\dasp\spectral_predict_julia_bridge.py", line 648, in _run_julia_process
+    raise RuntimeError(f"Julia process exited with code {return_code}")
+RuntimeError: Julia process exited with code 1
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\sponheim\git\dasp\spectral_predict_julia_bridge.py", line 834, in main
+    results = run_search_julia(
+        X, y,
+    ...<7 lines>...
+        progress_callback=lambda info: print(f"  Progress: {info.get('message', '')}")
+    )
+  File "C:\Users\sponheim\git\dasp\spectral_predict_julia_bridge.py", line 260, in run_search_julia
+    raise RuntimeError(f"Julia execution failed: {e}")
+RuntimeError: Julia execution failed: Julia process exited with code 1
+
+======================================================================
+SpectralPredict Julia Bridge - Test
+======================================================================
+
+
+======================================================================
+Julia Backend Status Check
+======================================================================
+[OK] Julia executable found: C:\Users\sponheim\AppData\Local\Programs\Julia-1.12.1\bin\julia.exe
+[OK] julia version 1.12.1
+[OK] Julia project found: C:\Users\sponheim\git\dasp\julia_port\SpectralPredict
+[OK] Project.toml found
+[OK] Julia backend ready!
+
+[SUCCESS] Julia backend is ready to use!
+======================================================================
+
+Creating sample data...
+  Samples: 50
+  Features: 100
+
+Running test analysis...
+
+  Progress: Preparing data for Julia...
+  Progress: Starting Julia analysis...
+┌ Warning: Replacing docs for `Main.SpectralPredict.apply_snv :: Tuple{Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.apply_derivative :: Tuple{Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.build_preprocessing_pipeline :: Tuple{Dict{String, Any}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.apply_preprocessing :: Tuple{Matrix{Float64}, Dict{String, Any}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.get_model_configs :: Tuple{String}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.PLSModel :: Union{}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.RidgeModel :: Union{}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.LassoModel :: Union{}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.ElasticNetModel :: Union{}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.RandomForestModel :: Union{}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.MLPModel :: Union{}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.build_model :: Tuple{String, Dict{String, Any}, String}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Main.SpectralPredict.PLSModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Main.SpectralPredict.RidgeModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Main.SpectralPredict.LassoModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Main.SpectralPredict.ElasticNetModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Main.SpectralPredict.RandomForestModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Main.SpectralPredict.MLPModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.fit_model! :: Tuple{Any, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Main.SpectralPredict.PLSModel, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Main.SpectralPredict.RidgeModel, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Main.SpectralPredict.LassoModel, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Main.SpectralPredict.ElasticNetModel, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Main.SpectralPredict.RandomForestModel, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Main.SpectralPredict.MLPModel, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.predict_model :: Tuple{Any, Matrix{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.compute_vip_scores :: Tuple{Main.SpectralPredict.PLSModel, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.get_feature_importances :: Tuple{Any, String, Matrix{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.compute_tree_importances :: Tuple{Any, Int64}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.create_cv_folds :: Union{Tuple{Int64}, Tuple{Int64, Int64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.compute_regression_metrics :: Tuple{Vector{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.compute_classification_metrics :: Tuple{Vector{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.compute_roc_auc :: Tuple{Vector{Float64}, Vector{Float64}}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.run_single_fold :: Tuple{Matrix{Float64}, Vector{Float64}, Vector{Int64}, Vector{Int64}, Any, String, Dict{String, Any}, String}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.run_cross_validation :: Tuple{Matrix{Float64}, Vector{Float64}, Any, String, Dict{String, Any}, String}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.extract_model_config :: Tuple{Any, String}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.aggregate_cv_results :: Tuple{Vector{Dict{String, Float64}}, String, Int64}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+┌ Warning: Replacing docs for `Main.SpectralPredict.run_cross_validation_parallel :: Tuple{Matrix{Float64}, Vector{Float64}, Any, String, Dict{String, Any}, String}` in module `Main.SpectralPredict`
+└ @ Base.Docs docs\Docs.jl:249
+======================================================================
+SpectralPredict Julia Bridge - Analysis Starting
+======================================================================
+
+ERROR: LoadError: ParseError:
+# Error @ C:\Users\sponheim\AppData\Local\Temp\tmpuxluyc75\run_analysis.jl:21:19
+    "task_type" => "regression",
+    "models" => ['PLS', 'Ridge'],
+#                 └─┘ ── character literal contains multiple characters
+Stacktrace:
+ [1] top-level scope
+   @ C:\Users\sponheim\AppData\Local\Temp\tmpuxluyc75\run_analysis.jl:21
+ [2] include(mod::Module, _path::String)
+   @ Base .\Base.jl:306
+ [3] exec_options(opts::Base.JLOptions)
+   @ Base .\client.jl:317
+ [4] _start()
+   @ Base .\client.jl:550
+in expression starting at C:\Users\sponheim\AppData\Local\Temp\tmpuxluyc75\run_analysis.jl:21
+
+======================================================================
+Test Failed
+======================================================================
+
+Error: Julia execution failed: Julia process exited with code 1
+

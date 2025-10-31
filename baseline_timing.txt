@@ -1,0 +1,5 @@
+Baseline Timing
+===============
+Total time: 397.81 seconds
+Configurations: 204
+Time per config: 1.950 seconds

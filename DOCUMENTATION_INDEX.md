@@ -1,7 +1,36 @@
 # Documentation Index
 
-**Last Updated:** October 27, 2025
+**Last Updated:** October 29, 2025 (Bug Fix Session)
 **Status:** Current and organized
+
+---
+
+## 🚨 **NEW: October 29, 2025 - Bug Fix & Julia Port Documentation**
+
+**Critical bugs were fixed and system is ready for Julia port.** Start here:
+
+| File | Purpose | Length | Priority |
+|------|---------|--------|----------|
+| **JULIA_PORT_HANDOFF.md** ⭐⭐⭐ | Complete Julia port guide with all fixes | 45 min read | **JULIA PORT** |
+| **RESTART_README.md** | Quick start after bug fixes | 5 min read | Python users |
+| **CURRENT_STATE_AND_FIXES.md** | Complete state documentation | 20 min read | Reference |
+| **PREPROCESSING_COMBINATIONS_FIX.md** | Preprocessing bug details | 10 min read | Reference |
+| **SUBSET_DEBUG_GUIDE.md** | Subset analysis troubleshooting | 15 min read | If needed |
+| **DEBUG_SUBSET_NOW.md** | Immediate debug steps | 8 min read | If subsets broken |
+
+### Bugs Fixed Today (All verified working):
+1. ✅ Variable subsets with derivatives (double-preprocessing bug)
+2. ✅ Region subsets enabled for derivatives
+3. ✅ Region subsets run for ALL models (not just PLS/RF/MLP)
+4. ✅ Ranking fixed (90% performance, 10% complexity)
+5. ✅ Preprocessing labels corrected for subsets
+6. ✅ Region analysis expanded (5/10/15/20 regions configurable)
+
+### New Features:
+- Tab 4: Results table
+- Tab 5: Refine Model
+
+**Quick Start:** Read `RESTART_README.md` then restart the GUI
 
 ---
 
