@@ -1,12 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python spectral_predict_julia_bridge.py:*)",
-      "Bash(timeout 180 python:*)",
-      "Bash(tee:*)",
-      "Bash(timeout 300 python:*)",
-      "Bash(python:*)",
-      "Bash(git add:*)"
+      "Bash(git push:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
