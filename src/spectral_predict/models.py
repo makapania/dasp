@@ -4,8 +4,107 @@ import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.neural_network import MLPRegressor, MLPClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge, Lasso
 from .neural_boosted import NeuralBoostedRegressor
+
+
+def get_model(model_name, task_type='regression', n_components=10, max_n_components=24, max_iter=500):
+    """
+    Get a single model instance with default hyperparameters.
+
+    Parameters
+    ----------
+    model_name : str
+        Model type name ('PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted', 'PLS-DA')
+    task_type : str, default='regression'
+        'regression' or 'classification'
+    n_components : int, default=10
+        Number of components for PLS models
+    max_n_components : int, default=24
+        Maximum number of PLS components to test
+    max_iter : int, default=500
+        Maximum iterations for neural network models
+
+    Returns
+    -------
+    model : estimator
+        Configured model instance ready for fitting
+    """
+    # Clip n_components to max_n_components
+    n_components = min(n_components, max_n_components)
+
+    if task_type == "regression":
+        if model_name == "PLS":
+            return PLSRegression(n_components=n_components, scale=False)
+
+        elif model_name == "Ridge":
+            return Ridge(alpha=1.0, random_state=42)
+
+        elif model_name == "Lasso":
+            return Lasso(alpha=1.0, random_state=42, max_iter=max_iter)
+
+        elif model_name == "RandomForest":
+            return RandomForestRegressor(
+                n_estimators=200,
+                max_depth=None,
+                random_state=42,
+                n_jobs=-1
+            )
+
+        elif model_name == "MLP":
+            return MLPRegressor(
+                hidden_layer_sizes=(64,),
+                alpha=1e-3,
+                learning_rate_init=1e-3,
+                max_iter=max_iter,
+                random_state=42,
+                early_stopping=True
+            )
+
+        elif model_name == "NeuralBoosted":
+            return NeuralBoostedRegressor(
+                n_estimators=100,
+                learning_rate=0.1,
+                hidden_layer_size=3,
+                activation='tanh',
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=10,
+                alpha=1e-4,
+                random_state=42,
+                verbose=0
+            )
+
+        else:
+            raise ValueError(f"Unknown regression model: {model_name}")
+
+    else:  # classification
+        if model_name in ["PLS-DA", "PLS"]:
+            # For classification, PLS is used as a transformer
+            return PLSRegression(n_components=n_components, scale=False)
+
+        elif model_name == "RandomForest":
+            return RandomForestClassifier(
+                n_estimators=200,
+                max_depth=None,
+                random_state=42,
+                n_jobs=-1
+            )
+
+        elif model_name == "MLP":
+            return MLPClassifier(
+                hidden_layer_sizes=(64,),
+                alpha=1e-3,
+                learning_rate_init=1e-3,
+                max_iter=max_iter,
+                random_state=42,
+                early_stopping=True
+            )
+
+        else:
+            raise ValueError(f"Unknown classification model: {model_name}")
+
+    return model
 
 
 def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
@@ -50,6 +149,28 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
             (PLSRegression(n_components=nc, scale=False), {"n_components": nc})
             for nc in pls_components
         ]
+
+        # Ridge Regression
+        ridge_configs = []
+        for alpha in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]:
+            ridge_configs.append(
+                (
+                    Ridge(alpha=alpha, random_state=42),
+                    {"alpha": alpha}
+                )
+            )
+        grids["Ridge"] = ridge_configs
+
+        # Lasso Regression
+        lasso_configs = []
+        for alpha in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]:
+            lasso_configs.append(
+                (
+                    Lasso(alpha=alpha, random_state=42, max_iter=max_iter),
+                    {"alpha": alpha}
+                )
+            )
+        grids["Lasso"] = lasso_configs
 
         # Random Forest
         rf_configs = []
@@ -249,6 +370,15 @@ def get_feature_importances(model, model_name, X, y):
     if model_name in ["PLS", "PLS-DA"]:
         # Use VIP scores
         return compute_vip(model, X, y)
+
+    elif model_name in ["Ridge", "Lasso"]:
+        # Get coefficients (linear models)
+        coefs = np.abs(model.coef_)
+        if len(coefs.shape) > 1:
+            coefs = coefs[0]  # Handle multi-output case
+
+        # Return absolute coefficient values as importance
+        return coefs
 
     elif model_name == "RandomForest":
         # Use built-in feature importances

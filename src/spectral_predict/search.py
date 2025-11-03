@@ -303,10 +303,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                         if result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
                             best_model_so_far = result
 
-                # For PLS, RF, MLP, and NeuralBoosted: compute feature importances and run subsets
+                # For PLS, Ridge, Lasso, RF, MLP, and NeuralBoosted: compute feature importances and run subsets
                 # IMPORTANT: Importances are computed on PREPROCESSED data, ensuring that
                 # wavelength selection reflects the actual transformed features the model sees
-                if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP", "NeuralBoosted"]:
+                if model_name in ["PLS", "PLS-DA", "Ridge", "Lasso", "RandomForest", "MLP", "NeuralBoosted"]:
                     if not enable_variable_subsets:
                         print(f"  ⊗ Skipping subset analysis for {model_name} (variable subsets disabled)")
                     else:
@@ -624,7 +624,7 @@ def _run_single_config(
 
     # Extract top important variables/wavelengths
     # Refit on full data to get feature importances
-    if model_name in ["PLS", "PLS-DA", "RandomForest", "MLP", "NeuralBoosted"]:
+    if model_name in ["PLS", "PLS-DA", "Ridge", "Lasso", "RandomForest", "MLP", "NeuralBoosted"]:
         try:
             # Refit the pipeline on full data
             pipe.fit(X, y)

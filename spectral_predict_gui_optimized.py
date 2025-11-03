@@ -1,15 +1,17 @@
 """
-Spectral Predict - Redesigned 5-Tab GUI Application (OPTIMIZED)
+Spectral Predict - Redesigned 6-Tab GUI Application (OPTIMIZED)
 
 Tab 1: Import & Preview - Data loading + spectral plots
-Tab 2: Analysis Configuration - All analysis settings
-Tab 3: Analysis Progress - Live progress monitor
-Tab 4: Results - Analysis results table (clickable to refine)
-Tab 5: Refine Model - Interactive model refinement
+Tab 2: Data Quality Check - Outlier detection and exclusion
+Tab 3: Analysis Configuration - All analysis settings
+Tab 4: Analysis Progress - Live progress monitor
+Tab 5: Results - Analysis results table (clickable to refine)
+Tab 6: Custom Model Development - Interactive model refinement
 
 OPTIMIZED VERSION:
 - Neural Boosted max_iter reduced from 500 to 100 (Phase A optimization)
 - Implements evidence-based optimizations for 2-3x speedup
+- Phase 3: Integrated outlier detection system with unified exclusion
 """
 
 import sys
@@ -27,7 +29,7 @@ try:
     import matplotlib
     matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
     from matplotlib.figure import Figure
     HAS_MATPLOTLIB = True
 except ImportError:
@@ -45,9 +47,16 @@ except ImportError:
     HAS_DERIVATIVES = False
     SavgolDerivative = None
 
+try:
+    from spectral_predict.outlier_detection import generate_outlier_report
+    HAS_OUTLIER_DETECTION = True
+except ImportError:
+    HAS_OUTLIER_DETECTION = False
+    generate_outlier_report = None
+
 
 class SpectralPredictApp:
-    """Main application window with 5-tab design."""
+    """Main application window with 6-tab design."""
 
     def __init__(self, root):
         self.root = root
@@ -95,8 +104,16 @@ class SpectralPredictApp:
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
         self.show_progress = tk.BooleanVar(value=True)
 
+        # Reflectance/Absorbance toggle
+        self.use_absorbance = tk.BooleanVar(value=False)
+
+        # Spectrum exclusion tracking
+        self.excluded_spectra = set()  # Set of indices of excluded spectra
+
         # Model selection
         self.use_pls = tk.BooleanVar(value=True)
+        self.use_ridge = tk.BooleanVar(value=False)  # Default off (baseline model)
+        self.use_lasso = tk.BooleanVar(value=False)  # Default off (baseline model)
         self.use_randomforest = tk.BooleanVar(value=True)
         self.use_mlp = tk.BooleanVar(value=True)
         self.use_neuralboosted = tk.BooleanVar(value=True)
@@ -134,6 +151,12 @@ class SpectralPredictApp:
         self.lr_005 = tk.BooleanVar(value=False)
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
+
+        # Outlier detection variables (Phase 3)
+        self.n_pca_components = tk.IntVar(value=5)
+        self.y_min_bound = tk.StringVar(value="")
+        self.y_max_bound = tk.StringVar(value="")
+        self.outlier_report = None  # Store most recent outlier detection report
 
         # Progress tracking
         self.progress_monitor = None
@@ -177,17 +200,18 @@ class SpectralPredictApp:
         style.configure('TNotebook.Tab', font=('Segoe UI', 11), padding=(20, 10))
 
     def _create_ui(self):
-        """Create 5-tab user interface."""
+        """Create 6-tab user interface."""
         # Create notebook
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
 
         # Create tabs
         self._create_tab1_import_preview()
-        self._create_tab2_analysis_config()
-        self._create_tab3_progress()
-        self._create_tab4_results()
-        self._create_tab5_refine_model()
+        self._create_tab2_data_quality_check()
+        self._create_tab3_analysis_config()
+        self._create_tab4_progress()
+        self._create_tab5_results()
+        self._create_tab6_refine_model()
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -275,6 +299,42 @@ class SpectralPredictApp:
         self.update_wl_button = ttk.Button(wl_frame, text="Update Plots", command=self._update_wavelengths, style='Modern.TButton', state='disabled')
         self.update_wl_button.grid(row=0, column=4, padx=15)
 
+        # === Reflectance/Absorbance Toggle ===
+        ttk.Label(content_frame, text="Data Transformation:", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
+        row += 1
+
+        transform_frame = ttk.Frame(content_frame)
+        transform_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+        row += 1
+
+        self.absorbance_checkbox = ttk.Checkbutton(transform_frame, text="Convert to Absorbance (log10(1/R))",
+                                                    variable=self.use_absorbance,
+                                                    command=self._toggle_absorbance,
+                                                    state='disabled')
+        self.absorbance_checkbox.grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Label(transform_frame, text="(Toggle to view data as absorbance instead of reflectance)",
+                 style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=10)
+
+        # === Spectrum Exclusion Controls ===
+        ttk.Label(content_frame, text="Spectrum Selection:", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
+        row += 1
+
+        exclusion_frame = ttk.Frame(content_frame)
+        exclusion_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+        row += 1
+
+        self.reset_exclusions_button = ttk.Button(exclusion_frame, text="Reset Exclusions",
+                                                  command=self._reset_exclusions,
+                                                  style='Modern.TButton',
+                                                  state='disabled')
+        self.reset_exclusions_button.grid(row=0, column=0, padx=5)
+
+        self.exclusion_status = ttk.Label(exclusion_frame, text="No spectra excluded", style='Caption.TLabel')
+        self.exclusion_status.grid(row=0, column=1, sticky=tk.W, padx=10)
+
+        ttk.Label(exclusion_frame, text="(Click individual spectra in plots to toggle visibility)",
+                 style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
+
         # Load Data Button
         self.load_button = ttk.Button(content_frame, text="📊 Load Data & Generate Plots",
                                      command=self._load_and_plot_data, style='Accent.TButton')
@@ -300,14 +360,174 @@ class SpectralPredictApp:
         self.plot_notebook.add(placeholder, text="Load data to see plots")
         ttk.Label(placeholder, text="Load data to generate spectral plots", style='Caption.TLabel').pack(expand=True)
 
-    def _create_tab2_analysis_config(self):
-        """Tab 2: Analysis Configuration - All analysis settings."""
+    def _create_tab2_data_quality_check(self):
+        """Tab 2: Data Quality Check - Outlier detection and exclusion."""
         self.tab2 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab2, text='  ⚙️ Analysis Configuration  ')
+        self.notebook.add(self.tab2, text='  🔍 Data Quality Check  ')
 
         # Create scrollable content
         canvas = tk.Canvas(self.tab2, bg=self.colors['bg'], highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.tab2, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Title
+        ttk.Label(content_frame, text="Data Quality Check", style='Title.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 20))
+        row += 1
+
+        # === SECTION 1: Controls ===
+        ttk.Label(content_frame, text="1. Outlier Detection Parameters", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        controls_frame = ttk.LabelFrame(content_frame, text="Detection Settings", padding="20")
+        controls_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # PCA Components
+        ttk.Label(controls_frame, text="PCA Components:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        ttk.Spinbox(controls_frame, from_=2, to=20, textvariable=self.n_pca_components, width=12).grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(controls_frame, text="Number of PCs for outlier detection", style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
+
+        # Y Range (optional)
+        ttk.Label(controls_frame, text="Y Range (optional):").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        y_range_frame = ttk.Frame(controls_frame)
+        y_range_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W)
+        ttk.Label(y_range_frame, text="Min:").pack(side='left', padx=(0, 5))
+        ttk.Entry(y_range_frame, textvariable=self.y_min_bound, width=10).pack(side='left', padx=(0, 10))
+        ttk.Label(y_range_frame, text="Max:").pack(side='left', padx=(0, 5))
+        ttk.Entry(y_range_frame, textvariable=self.y_max_bound, width=10).pack(side='left')
+
+        # Buttons
+        button_frame = ttk.Frame(controls_frame)
+        button_frame.grid(row=2, column=0, columnspan=3, pady=20)
+        self.run_outlier_btn = ttk.Button(button_frame, text="Run Outlier Detection",
+                                          command=self._run_outlier_detection, style='Accent.TButton')
+        self.run_outlier_btn.pack(side='left', padx=5)
+        self.export_report_btn = ttk.Button(button_frame, text="Export Report",
+                                           command=self._export_outlier_report, style='Modern.TButton')
+        self.export_report_btn.pack(side='left', padx=5)
+
+        # === SECTION 2: Visualizations ===
+        ttk.Label(content_frame, text="2. Outlier Detection Plots", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        # Create notebook for visualization tabs
+        self.outlier_plot_notebook = ttk.Notebook(content_frame)
+        self.outlier_plot_notebook.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
+        content_frame.grid_rowconfigure(row, weight=1)
+        row += 1
+
+        # Create placeholder frames for each plot type
+        self.pca_plot_frame = ttk.Frame(self.outlier_plot_notebook)
+        self.outlier_plot_notebook.add(self.pca_plot_frame, text="PCA Scores")
+
+        self.t2_plot_frame = ttk.Frame(self.outlier_plot_notebook)
+        self.outlier_plot_notebook.add(self.t2_plot_frame, text="Hotelling T²")
+
+        self.q_plot_frame = ttk.Frame(self.outlier_plot_notebook)
+        self.outlier_plot_notebook.add(self.q_plot_frame, text="Q-Residuals")
+
+        self.maha_plot_frame = ttk.Frame(self.outlier_plot_notebook)
+        self.outlier_plot_notebook.add(self.maha_plot_frame, text="Mahalanobis")
+
+        self.y_dist_plot_frame = ttk.Frame(self.outlier_plot_notebook)
+        self.outlier_plot_notebook.add(self.y_dist_plot_frame, text="Y Distribution")
+
+        # === SECTION 3: Summary Table ===
+        ttk.Label(content_frame, text="3. Outlier Summary", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        # Create frame for treeview
+        tree_frame = ttk.Frame(content_frame)
+        tree_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
+        content_frame.grid_rowconfigure(row, weight=1)
+        row += 1
+
+        # Create Treeview with scrollbars
+        columns = ('Sample', 'Y_Value', 'T2', 'Q', 'Maha', 'Y', 'Flags')
+        self.outlier_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', selectmode='extended', height=10)
+
+        # Define column headings
+        self.outlier_tree.heading('Sample', text='Sample')
+        self.outlier_tree.heading('Y_Value', text='Y Value')
+        self.outlier_tree.heading('T2', text='T² Outlier')
+        self.outlier_tree.heading('Q', text='Q Outlier')
+        self.outlier_tree.heading('Maha', text='Maha Outlier')
+        self.outlier_tree.heading('Y', text='Y Outlier')
+        self.outlier_tree.heading('Flags', text='Total Flags')
+
+        # Configure column widths
+        self.outlier_tree.column('Sample', width=80, anchor='center')
+        self.outlier_tree.column('Y_Value', width=100, anchor='center')
+        self.outlier_tree.column('T2', width=80, anchor='center')
+        self.outlier_tree.column('Q', width=80, anchor='center')
+        self.outlier_tree.column('Maha', width=80, anchor='center')
+        self.outlier_tree.column('Y', width=80, anchor='center')
+        self.outlier_tree.column('Flags', width=100, anchor='center')
+
+        # Add scrollbars
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.outlier_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.outlier_tree.xview)
+        self.outlier_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.outlier_tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        # === SECTION 4: Selection Controls ===
+        ttk.Label(content_frame, text="4. Sample Selection & Exclusion", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        selection_frame = ttk.LabelFrame(content_frame, text="Auto-Select Outliers", padding="20")
+        selection_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Selection checkboxes
+        self.select_all_flagged = tk.BooleanVar(value=False)
+        self.select_high_conf = tk.BooleanVar(value=True)
+        self.select_moderate_conf = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(selection_frame, text="Select all flagged samples",
+                       variable=self.select_all_flagged,
+                       command=self._auto_select_flagged).grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Checkbutton(selection_frame, text="High confidence (3+ flags)",
+                       variable=self.select_high_conf,
+                       command=self._auto_select_high_confidence).grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Checkbutton(selection_frame, text="Moderate confidence (2 flags)",
+                       variable=self.select_moderate_conf,
+                       command=self._auto_select_moderate_confidence).grid(row=2, column=0, sticky=tk.W, pady=5)
+
+        # Status and action buttons
+        self.outlier_selection_status = ttk.Label(selection_frame, text="No samples selected", style='Caption.TLabel')
+        self.outlier_selection_status.grid(row=3, column=0, pady=10)
+
+        ttk.Button(selection_frame, text="Mark Selected for Exclusion",
+                  command=self._mark_selected_for_exclusion,
+                  style='Accent.TButton').grid(row=4, column=0, pady=10)
+
+        # Overall status
+        self.tab2_status = ttk.Label(content_frame, text="Load data and run outlier detection to begin", style='Caption.TLabel')
+        self.tab2_status.grid(row=row, column=0, columnspan=3)
+
+    def _create_tab3_analysis_config(self):
+        """Tab 3: Analysis Configuration - All analysis settings."""
+        self.tab3 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab3, text='  ⚙️ Analysis Configuration  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(self.tab3, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab3, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -446,14 +666,20 @@ class SpectralPredictApp:
         ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)", variable=self.use_pls).grid(row=0, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Linear, fast, interpretable", style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest).grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge).grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L2 regularized linear, fast baseline", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp).grid(row=2, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso).grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L1 regularized linear, sparse solutions", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=3, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Gradient boosting with NNs", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest).grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp).grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Gradient boosting with NNs", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
         # === Advanced Model Options ===
         ttk.Label(content_frame, text="Advanced Model Options", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -489,15 +715,15 @@ class SpectralPredictApp:
                   style='Accent.TButton').grid(row=row, column=0, columnspan=2, pady=40, ipadx=30, ipady=10)
         row += 1
 
-        self.tab2_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')
-        self.tab2_status.grid(row=row, column=0, columnspan=2)
+        self.tab3_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')
+        self.tab3_status.grid(row=row, column=0, columnspan=2)
 
-    def _create_tab3_progress(self):
-        """Tab 3: Analysis Progress - Live progress monitor."""
-        self.tab3 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab3, text='  📊 Analysis Progress  ')
+    def _create_tab4_progress(self):
+        """Tab 4: Analysis Progress - Live progress monitor."""
+        self.tab4 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab4, text='  📊 Analysis Progress  ')
 
-        content_frame = ttk.Frame(self.tab3, style='TFrame', padding="30")
+        content_frame = ttk.Frame(self.tab4, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
         # Header with title and best model info side-by-side
@@ -537,12 +763,12 @@ class SpectralPredictApp:
         self.progress_status = ttk.Label(content_frame, text="Waiting for analysis to start...", style='Caption.TLabel')
         self.progress_status.pack(pady=10)
 
-    def _create_tab4_results(self):
-        """Tab 4: Results - Display analysis results in a table."""
-        self.tab4 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab4, text='  📊 Results  ')
+    def _create_tab5_results(self):
+        """Tab 5: Results - Display analysis results in a table."""
+        self.tab5 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab5, text='  📊 Results  ')
 
-        content_frame = ttk.Frame(self.tab4, style='TFrame', padding="30")
+        content_frame = ttk.Frame(self.tab5, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
         # Title
@@ -550,7 +776,7 @@ class SpectralPredictApp:
 
         # Instructions
         instructions = ttk.Label(content_frame,
-            text="Click on any result row to load it into the 'Refine Model' tab for further tuning.",
+            text="Click on any result row to load it into the 'Custom Model Development' tab for further tuning.",
             style='Caption.TLabel')
         instructions.pack(anchor=tk.W, pady=(0, 10))
 
@@ -580,14 +806,14 @@ class SpectralPredictApp:
                                        style='Caption.TLabel')
         self.results_status.pack(pady=10)
 
-    def _create_tab5_refine_model(self):
-        """Tab 5: Refine Model - Interactive model parameter refinement."""
-        self.tab5 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab5, text='  🔧 Refine Model  ')
+    def _create_tab6_refine_model(self):
+        """Tab 6: Custom Model Development - Interactive model parameter refinement."""
+        self.tab6 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab6, text='  🔧 Custom Model Development  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab5, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab5, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab6, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab6, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -600,14 +826,27 @@ class SpectralPredictApp:
         row = 0
 
         # Title
-        ttk.Label(content_frame, text="Refine Model", style='Title.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
+        ttk.Label(content_frame, text="Custom Model Development", style='Title.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
         row += 1
 
         # Instructions
         ttk.Label(content_frame,
-            text="Double-click a result from the Results tab to load it here for refinement.",
+            text="Double-click a result from the Results tab to load it here for refinement, or click 'Reset to Defaults' for fresh development.",
             style='Caption.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
         row += 1
+
+        # === Mode Control Frame ===
+        mode_frame = ttk.LabelFrame(content_frame, text="Development Mode", padding=10)
+        mode_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+
+        # Mode status label
+        self.refine_mode_label = ttk.Label(mode_frame, text="Mode: Fresh Development", style='Caption.TLabel')
+        self.refine_mode_label.pack(side='left', padx=5)
+
+        # Reset button
+        ttk.Button(mode_frame, text="Reset to Defaults",
+                   command=self._load_default_parameters).pack(side='right', padx=5)
 
         # === Selected Model Info ===
         ttk.Label(content_frame, text="Selected Model Configuration", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
@@ -631,34 +870,89 @@ class SpectralPredictApp:
         params_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        # Wavelength range
-        ttk.Label(params_frame, text="Wavelength Range (nm):", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
-        wl_frame = ttk.Frame(params_frame)
-        wl_frame.grid(row=1, column=0, sticky=tk.W, pady=5)
+        # Wavelength specification header
+        ttk.Label(params_frame, text="Wavelength Specification:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
 
-        self.refine_wl_min = tk.StringVar()
-        self.refine_wl_max = tk.StringVar()
-        ttk.Entry(wl_frame, textvariable=self.refine_wl_min, width=12).grid(row=0, column=0, padx=5)
-        ttk.Label(wl_frame, text="to").grid(row=0, column=1, padx=5)
-        ttk.Entry(wl_frame, textvariable=self.refine_wl_max, width=12).grid(row=0, column=2, padx=5)
+        # Wavelength presets
+        preset_frame = ttk.Frame(params_frame)
+        preset_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        ttk.Label(preset_frame, text="Quick presets:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
+        ttk.Button(preset_frame, text="All", command=lambda: self._apply_wl_preset('all'),
+                   width=8).pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="NIR Only", command=lambda: self._apply_wl_preset('nir'),
+                   width=8).pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="Visible", command=lambda: self._apply_wl_preset('visible'),
+                   width=8).pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="Custom Range...", command=self._custom_range_dialog,
+                   width=12).pack(side='left', padx=2)
+
+        # Instructions
+        ttk.Label(params_frame, text="Enter wavelengths as individual values or ranges (e.g., 1920, 1930-1940, 1950)",
+                  style='Caption.TLabel').grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        # Text box for wavelength specification
+        wl_spec_frame = ttk.Frame(params_frame)
+        wl_spec_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=5)
+
+        self.refine_wl_spec = tk.Text(wl_spec_frame, height=6, width=60, font=('Consolas', 9), wrap=tk.WORD)
+        self.refine_wl_spec.pack(side='left', fill='both', expand=True)
+
+        wl_spec_scrollbar = ttk.Scrollbar(wl_spec_frame, orient='vertical', command=self.refine_wl_spec.yview)
+        wl_spec_scrollbar.pack(side='right', fill='y')
+        self.refine_wl_spec.config(yscrollcommand=wl_spec_scrollbar.set)
+
+        # Button to preview wavelength selection
+        ttk.Button(params_frame, text="Preview Selected Wavelengths",
+                   command=self._preview_wavelength_selection).grid(row=4, column=0, sticky=tk.W, pady=5)
+
+        # Wavelength count display (real-time)
+        self.refine_wl_count_label = ttk.Label(params_frame, text="Wavelengths: 0 selected",
+                                                style='Caption.TLabel')
+        self.refine_wl_count_label.grid(row=4, column=1, sticky=tk.W, padx=(10, 0))
+
+        # Bind update to text widget for real-time feedback
+        self.refine_wl_spec.bind('<KeyRelease>', self._update_wavelength_count)
 
         # Window size (for derivatives)
-        ttk.Label(params_frame, text="Window Size:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Label(params_frame, text="Window Size:", style='Subheading.TLabel').grid(row=5, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_window = tk.IntVar(value=17)
         window_frame = ttk.Frame(params_frame)
-        window_frame.grid(row=3, column=0, sticky=tk.W, pady=5)
+        window_frame.grid(row=6, column=0, sticky=tk.W, pady=5)
         for w in [7, 11, 17, 19]:
             ttk.Radiobutton(window_frame, text=f"{w}", variable=self.refine_window, value=w).pack(side='left', padx=5)
 
+        # Model Type
+        ttk.Label(params_frame, text="Model Type:", style='Subheading.TLabel').grid(row=7, column=0, sticky=tk.W, pady=(15, 5))
+        self.refine_model_type = tk.StringVar(value='PLS')
+        model_combo = ttk.Combobox(params_frame, textvariable=self.refine_model_type, width=20, state='readonly')
+        model_combo['values'] = ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']
+        model_combo.grid(row=8, column=0, sticky=tk.W, pady=5)
+
+        # Task Type
+        ttk.Label(params_frame, text="Task Type:", style='Subheading.TLabel').grid(row=9, column=0, sticky=tk.W, pady=(15, 5))
+        self.refine_task_type = tk.StringVar(value='regression')
+        task_frame = ttk.Frame(params_frame)
+        task_frame.grid(row=10, column=0, sticky=tk.W, pady=5)
+        ttk.Radiobutton(task_frame, text="Regression", variable=self.refine_task_type, value='regression').pack(side='left', padx=5)
+        ttk.Radiobutton(task_frame, text="Classification", variable=self.refine_task_type, value='classification').pack(side='left', padx=5)
+
+        # Preprocessing Method
+        ttk.Label(params_frame, text="Preprocessing:", style='Subheading.TLabel').grid(row=11, column=0, sticky=tk.W, pady=(15, 5))
+        self.refine_preprocess = tk.StringVar(value='raw')
+        preprocess_combo = ttk.Combobox(params_frame, textvariable=self.refine_preprocess, width=20, state='readonly')
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'deriv_snv']
+        preprocess_combo.grid(row=12, column=0, sticky=tk.W, pady=5)
+
         # CV Folds
-        ttk.Label(params_frame, text="CV Folds:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Label(params_frame, text="CV Folds:", style='Subheading.TLabel').grid(row=13, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_folds = tk.IntVar(value=5)
-        ttk.Spinbox(params_frame, from_=3, to=10, textvariable=self.refine_folds, width=12).grid(row=5, column=0, sticky=tk.W)
+        ttk.Spinbox(params_frame, from_=3, to=10, textvariable=self.refine_folds, width=12).grid(row=14, column=0, sticky=tk.W)
 
         # Max iterations (for neural models)
-        ttk.Label(params_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Label(params_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=15, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_max_iter = tk.IntVar(value=100)
-        ttk.Spinbox(params_frame, from_=100, to=5000, increment=100, textvariable=self.refine_max_iter, width=12).grid(row=7, column=0, sticky=tk.W)
+        ttk.Spinbox(params_frame, from_=100, to=5000, increment=100, textvariable=self.refine_max_iter, width=12).grid(row=16, column=0, sticky=tk.W)
 
         # Run refined model button
         self.refine_run_button = ttk.Button(content_frame, text="▶ Run Refined Model", command=self._run_refined_model,
@@ -865,8 +1159,10 @@ class SpectralPredictApp:
             self._generate_plots()
 
             self.tab1_status.config(text=f"✓ Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
-            # Enable the wavelength update button
+            # Enable interactive controls
             self.update_wl_button.config(state='normal')
+            self.absorbance_checkbox.config(state='normal')
+            self.reset_exclusions_button.config(state='normal')
             # No popup needed - status label shows success and plots are visible
 
         except Exception as e:
@@ -926,6 +1222,61 @@ class SpectralPredictApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to update wavelengths:\n{e}")
 
+    def _toggle_absorbance(self):
+        """Toggle between reflectance and absorbance display."""
+        if self.X is None:
+            return
+
+        # Regenerate plots with current transformation state
+        self._generate_plots()
+
+    def _reset_exclusions(self):
+        """Reset all spectrum exclusions."""
+        self.excluded_spectra.clear()
+        self._update_exclusion_status()
+        # Regenerate plots to restore all spectra
+        self._generate_plots()
+
+    def _update_exclusion_status(self):
+        """Update the exclusion status label."""
+        n_excluded = len(self.excluded_spectra)
+        if n_excluded == 0:
+            self.exclusion_status.config(text="No spectra excluded")
+        elif n_excluded == 1:
+            self.exclusion_status.config(text="1 spectrum excluded")
+        else:
+            self.exclusion_status.config(text=f"{n_excluded} spectra excluded")
+
+    def _on_spectrum_click(self, event):
+        """Handle clicking on a spectrum line to toggle its visibility."""
+        line = event.artist
+        sample_idx = int(line.get_gid())  # Get stored sample index
+
+        if sample_idx in self.excluded_spectra:
+            # Re-include the spectrum
+            self.excluded_spectra.remove(sample_idx)
+            line.set_alpha(0.3)  # Restore normal alpha
+            line.set_linewidth(1.0)  # Restore normal linewidth
+        else:
+            # Exclude the spectrum
+            self.excluded_spectra.add(sample_idx)
+            line.set_alpha(0.05)  # Make nearly transparent
+            line.set_linewidth(0.5)  # Make thinner
+
+        event.canvas.draw()
+        self._update_exclusion_status()
+
+    def _apply_transformation(self, data):
+        """Apply absorbance transformation if enabled."""
+        if self.use_absorbance.get():
+            # Convert reflectance to absorbance: A = log10(1/R)
+            # Add small epsilon to avoid log(0)
+            epsilon = 1e-10
+            data_safe = np.maximum(data, epsilon)
+            return np.log10(1.0 / data_safe)
+        else:
+            return data
+
     def _generate_plots(self):
         """Generate spectral plots in the plot notebook."""
         if not HAS_MATPLOTLIB:
@@ -936,26 +1287,40 @@ class SpectralPredictApp:
         for widget in self.plot_notebook.winfo_children():
             widget.destroy()
 
+        # Determine y-axis label based on transformation state
+        ylabel = "Absorbance" if self.use_absorbance.get() else "Reflectance"
+
+        # Apply transformation to raw data
+        data_transformed = self._apply_transformation(self.X.values)
+
         # Create plot tabs
-        self._create_plot_tab("Raw Spectra", self.X.values, "Reflectance", "blue")
+        self._create_plot_tab("Raw Spectra", data_transformed, ylabel, "blue", is_raw=True)
 
         # Generate derivative plots if available
         if HAS_DERIVATIVES:
             # 1st derivative
             deriv1 = SavgolDerivative(deriv=1, window=7)
             X_deriv1 = deriv1.transform(self.X.values)
-            self._create_plot_tab("1st Derivative", X_deriv1, "First Derivative", "green")
+            self._create_plot_tab("1st Derivative", X_deriv1, "First Derivative", "green", is_raw=False)
 
             # 2nd derivative
             deriv2 = SavgolDerivative(deriv=2, window=7)
             X_deriv2 = deriv2.transform(self.X.values)
-            self._create_plot_tab("2nd Derivative", X_deriv2, "Second Derivative", "red")
+            self._create_plot_tab("2nd Derivative", X_deriv2, "Second Derivative", "red", is_raw=False)
         else:
             messagebox.showwarning("Derivatives Unavailable",
                 "Could not import SavgolDerivative. Only raw spectra will be plotted.")
 
-    def _create_plot_tab(self, title, data, ylabel, color):
-        """Create a plot tab."""
+    def _create_plot_tab(self, title, data, ylabel, color, is_raw=False):
+        """Create an interactive plot tab with click-to-toggle and zoom/pan.
+
+        Args:
+            title: Title for the plot tab
+            data: Spectral data to plot (samples x wavelengths)
+            ylabel: Y-axis label
+            color: Line color
+            is_raw: Whether this is raw data (enables click interaction only for raw)
+        """
         frame = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(frame, text=title)
 
@@ -973,9 +1338,23 @@ class SpectralPredictApp:
             alpha = 0.5
             indices = np.random.choice(n_samples, size=50, replace=False)
 
-        # Plot
+        # Plot with interactive features (only for raw spectra to keep it simple)
         for i in indices:
-            ax.plot(wavelengths, data[i, :], alpha=alpha, color=color, linewidth=1)
+            # Determine if this spectrum is currently excluded
+            if i in self.excluded_spectra:
+                current_alpha = 0.05
+                current_linewidth = 0.5
+            else:
+                current_alpha = alpha
+                current_linewidth = 1.0
+
+            line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
+                          color=color, linewidth=current_linewidth)
+
+            # Make clickable only for raw spectra
+            if is_raw:
+                line.set_gid(str(i))  # Store sample index as gid
+                line.set_picker(5)  # Enable picking with 5-point tolerance
 
         ax.set_xlabel('Wavelength (nm)', fontsize=12)
         ax.set_ylabel(ylabel, fontsize=12)
@@ -985,9 +1364,425 @@ class SpectralPredictApp:
         if "Derivative" in title:
             ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
 
+        # Add click handler only for raw spectra
+        if is_raw:
+            fig.canvas.mpl_connect('pick_event', self._on_spectrum_click)
+
         canvas = FigureCanvasTkAgg(fig, master=frame)
         canvas.draw()
+
+        # Add navigation toolbar for zoom/pan
+        toolbar_frame = ttk.Frame(frame)
+        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+        # Pack canvas below toolbar
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    # ========== OUTLIER DETECTION METHODS (Phase 3) ==========
+
+    def _run_outlier_detection(self):
+        """Run outlier detection analysis."""
+        if not HAS_OUTLIER_DETECTION:
+            messagebox.showerror("Module Missing",
+                "Outlier detection module not found. Please check installation.")
+            return
+
+        if self.X is None or self.y is None:
+            messagebox.showerror("Error", "Please load data first in the 'Import & Preview' tab")
+            return
+
+        try:
+            # Get parameters
+            n_components = self.n_pca_components.get()
+            y_min = float(self.y_min_bound.get()) if self.y_min_bound.get().strip() else None
+            y_max = float(self.y_max_bound.get()) if self.y_max_bound.get().strip() else None
+
+            # Apply absorbance transformation if enabled
+            X_data = self._apply_transformation(self.X.values)
+
+            # Run detection
+            self.tab2_status.config(text="Running outlier detection...")
+            self.root.update()
+
+            self.outlier_report = generate_outlier_report(
+                X_data, self.y.values, n_components, y_min, y_max
+            )
+
+            # Update visualizations
+            self._plot_pca_scores()
+            self._plot_hotelling_t2()
+            self._plot_q_residuals()
+            self._plot_mahalanobis()
+            self._plot_y_distribution()
+
+            # Populate table
+            self._populate_outlier_table()
+
+            # Update status
+            n_high = len(self.outlier_report['high_confidence_outliers'])
+            n_moderate = len(self.outlier_report['moderate_confidence_outliers'])
+            n_low = len(self.outlier_report['low_confidence_outliers'])
+
+            self.tab2_status.config(
+                text=f"Detection complete: {n_high} high confidence, {n_moderate} moderate, {n_low} low confidence outliers"
+            )
+
+            messagebox.showinfo("Success",
+                f"Outlier detection complete!\n\n"
+                f"High confidence (3+ flags): {n_high}\n"
+                f"Moderate confidence (2 flags): {n_moderate}\n"
+                f"Low confidence (1 flag): {n_low}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Outlier detection failed:\n{str(e)}")
+            self.tab2_status.config(text="Error during outlier detection")
+
+    def _plot_pca_scores(self):
+        """Plot PCA scores (PC1 vs PC2) colored by Y value."""
+        if not HAS_MATPLOTLIB or self.outlier_report is None:
+            return
+
+        # Clear existing plot
+        for widget in self.pca_plot_frame.winfo_children():
+            widget.destroy()
+
+        fig = Figure(figsize=(8, 6))
+        ax = fig.add_subplot(111)
+
+        scores = self.outlier_report['pca']['scores']
+        y_values = self.y.values
+        outliers = self.outlier_report['pca']['outlier_flags']
+
+        # Scatter plot
+        scatter = ax.scatter(scores[:, 0], scores[:, 1], c=y_values,
+                           cmap='viridis', alpha=0.6, edgecolors='black', linewidths=0.5)
+
+        # Highlight outliers
+        if np.any(outliers):
+            ax.scatter(scores[outliers, 0], scores[outliers, 1],
+                      facecolors='none', edgecolors='red', linewidths=2, s=100,
+                      label='T² Outliers')
+
+        ax.set_xlabel(f'PC1 ({self.outlier_report["pca"]["variance_explained"][0]*100:.1f}%)')
+        ax.set_ylabel(f'PC2 ({self.outlier_report["pca"]["variance_explained"][1]*100:.1f}%)')
+        ax.set_title('PCA Score Plot (PC1 vs PC2)')
+        ax.grid(True, alpha=0.3)
+        if np.any(outliers):
+            ax.legend()
+
+        fig.colorbar(scatter, ax=ax, label='Y Value')
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.pca_plot_frame)
+        canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _plot_hotelling_t2(self):
+        """Plot Hotelling T² statistics with threshold."""
+        if not HAS_MATPLOTLIB or self.outlier_report is None:
+            return
+
+        # Clear existing plot
+        for widget in self.t2_plot_frame.winfo_children():
+            widget.destroy()
+
+        fig = Figure(figsize=(8, 6))
+        ax = fig.add_subplot(111)
+
+        t2_values = self.outlier_report['pca']['hotelling_t2']
+        threshold = self.outlier_report['pca']['t2_threshold']
+        outliers = self.outlier_report['pca']['outlier_flags']
+
+        # Bar chart
+        colors = ['red' if o else 'steelblue' for o in outliers]
+        ax.bar(range(len(t2_values)), t2_values, color=colors, alpha=0.7)
+        ax.axhline(threshold, color='red', linestyle='--', linewidth=2, label=f'95% Threshold ({threshold:.2f})')
+
+        ax.set_xlabel('Sample Index')
+        ax.set_ylabel('Hotelling T²')
+        ax.set_title('Hotelling T² Statistic')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.t2_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _plot_q_residuals(self):
+        """Plot Q-residuals with threshold."""
+        if not HAS_MATPLOTLIB or self.outlier_report is None:
+            return
+
+        # Clear existing plot
+        for widget in self.q_plot_frame.winfo_children():
+            widget.destroy()
+
+        fig = Figure(figsize=(8, 6))
+        ax = fig.add_subplot(111)
+
+        q_values = self.outlier_report['q_residuals']['q_residuals']
+        threshold = self.outlier_report['q_residuals']['q_threshold']
+        outliers = self.outlier_report['q_residuals']['outlier_flags']
+
+        # Bar chart
+        colors = ['red' if o else 'steelblue' for o in outliers]
+        ax.bar(range(len(q_values)), q_values, color=colors, alpha=0.7)
+        ax.axhline(threshold, color='red', linestyle='--', linewidth=2, label=f'95% Threshold ({threshold:.2f})')
+
+        ax.set_xlabel('Sample Index')
+        ax.set_ylabel('Q-Residual (SPE)')
+        ax.set_title('Q-Residuals (Squared Prediction Error)')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.q_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _plot_mahalanobis(self):
+        """Plot Mahalanobis distances with threshold."""
+        if not HAS_MATPLOTLIB or self.outlier_report is None:
+            return
+
+        # Clear existing plot
+        for widget in self.maha_plot_frame.winfo_children():
+            widget.destroy()
+
+        fig = Figure(figsize=(8, 6))
+        ax = fig.add_subplot(111)
+
+        distances = self.outlier_report['mahalanobis']['distances']
+        threshold = self.outlier_report['mahalanobis']['threshold']
+        outliers = self.outlier_report['mahalanobis']['outlier_flags']
+
+        # Bar chart
+        colors = ['red' if o else 'steelblue' for o in outliers]
+        ax.bar(range(len(distances)), distances, color=colors, alpha=0.7)
+        ax.axhline(threshold, color='red', linestyle='--', linewidth=2,
+                  label=f'Threshold ({threshold:.2f})')
+
+        ax.set_xlabel('Sample Index')
+        ax.set_ylabel('Mahalanobis Distance')
+        ax.set_title('Mahalanobis Distance in PCA Space')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.maha_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _plot_y_distribution(self):
+        """Plot Y value distribution with outliers highlighted."""
+        if not HAS_MATPLOTLIB or self.outlier_report is None:
+            return
+
+        # Clear existing plot
+        for widget in self.y_dist_plot_frame.winfo_children():
+            widget.destroy()
+
+        fig = Figure(figsize=(8, 6))
+        ax1 = fig.add_subplot(211)
+        ax2 = fig.add_subplot(212)
+
+        y_values = self.y.values
+        outliers = self.outlier_report['y_consistency']['all_outliers']
+
+        # Histogram
+        ax1.hist(y_values, bins=30, color='steelblue', alpha=0.7, edgecolor='black')
+        if np.any(outliers):
+            ax1.hist(y_values[outliers], bins=30, color='red', alpha=0.7,
+                    edgecolor='black', label='Y Outliers')
+            ax1.legend()
+        ax1.set_xlabel('Y Value')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Y Value Distribution')
+        ax1.grid(True, alpha=0.3, axis='y')
+
+        # Box plot
+        bp = ax2.boxplot([y_values], vert=False, patch_artist=True, widths=0.5)
+        bp['boxes'][0].set_facecolor('steelblue')
+        bp['boxes'][0].set_alpha(0.7)
+
+        if np.any(outliers):
+            ax2.scatter(y_values[outliers], np.ones(np.sum(outliers)),
+                       color='red', s=100, zorder=3, label='Y Outliers')
+            ax2.legend()
+
+        ax2.set_xlabel('Y Value')
+        ax2.set_title('Y Value Box Plot')
+        ax2.set_yticks([])
+        ax2.grid(True, alpha=0.3, axis='x')
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.y_dist_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _populate_outlier_table(self):
+        """Populate the outlier summary table."""
+        if self.outlier_report is None:
+            return
+
+        # Clear existing
+        for item in self.outlier_tree.get_children():
+            self.outlier_tree.delete(item)
+
+        # Get summary
+        summary = self.outlier_report['outlier_summary']
+
+        # Add rows
+        for idx, row in summary.iterrows():
+            values = (
+                row['Sample_Index'],
+                f"{row['Y_Value']:.2f}",
+                "✓" if row['T2_Outlier'] else "",
+                "✓" if row['Q_Outlier'] else "",
+                "✓" if row['Maha_Outlier'] else "",
+                "✓" if row['Y_Outlier'] else "",
+                row['Total_Flags']
+            )
+
+            # Color code by flags
+            if row['Total_Flags'] >= 3:
+                tag = 'high'
+            elif row['Total_Flags'] == 2:
+                tag = 'moderate'
+            else:
+                tag = 'normal'
+
+            self.outlier_tree.insert('', 'end', values=values, tags=(tag,))
+
+        # Configure tags
+        self.outlier_tree.tag_configure('high', background='#ffcccc')
+        self.outlier_tree.tag_configure('moderate', background='#ffffcc')
+        self.outlier_tree.tag_configure('normal', background='white')
+
+    def _auto_select_flagged(self):
+        """Auto-select all flagged samples."""
+        if self.outlier_report is None:
+            return
+
+        # Clear selection
+        for item in self.outlier_tree.selection():
+            self.outlier_tree.selection_remove(item)
+
+        if self.select_all_flagged.get():
+            # Select all with at least 1 flag
+            summary = self.outlier_report['outlier_summary']
+            flagged = summary[summary['Total_Flags'] > 0]
+
+            for idx, row in flagged.iterrows():
+                # Find the tree item corresponding to this row
+                for item in self.outlier_tree.get_children():
+                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index']:
+                        self.outlier_tree.selection_add(item)
+                        break
+
+        self._update_outlier_selection_status()
+
+    def _auto_select_high_confidence(self):
+        """Auto-select high confidence outliers (3+ flags)."""
+        if self.outlier_report is None:
+            return
+
+        # Clear selection
+        for item in self.outlier_tree.selection():
+            self.outlier_tree.selection_remove(item)
+
+        if self.select_high_conf.get():
+            # Select samples with 3+ flags
+            summary = self.outlier_report['outlier_summary']
+            high_conf = summary[summary['Total_Flags'] >= 3]
+
+            for idx, row in high_conf.iterrows():
+                for item in self.outlier_tree.get_children():
+                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index']:
+                        self.outlier_tree.selection_add(item)
+                        break
+
+        self._update_outlier_selection_status()
+
+    def _auto_select_moderate_confidence(self):
+        """Auto-select moderate confidence outliers (2 flags)."""
+        if self.outlier_report is None:
+            return
+
+        # Clear selection
+        for item in self.outlier_tree.selection():
+            self.outlier_tree.selection_remove(item)
+
+        if self.select_moderate_conf.get():
+            # Select samples with 2 flags
+            summary = self.outlier_report['outlier_summary']
+            moderate_conf = summary[summary['Total_Flags'] == 2]
+
+            for idx, row in moderate_conf.iterrows():
+                for item in self.outlier_tree.get_children():
+                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index']:
+                        self.outlier_tree.selection_add(item)
+                        break
+
+        self._update_outlier_selection_status()
+
+    def _update_outlier_selection_status(self):
+        """Update the selection status label."""
+        n_selected = len(self.outlier_tree.selection())
+        self.outlier_selection_status.config(text=f"{n_selected} samples selected")
+
+    def _mark_selected_for_exclusion(self):
+        """Add selected samples to unified exclusion set."""
+        selected = self.outlier_tree.selection()
+
+        if not selected:
+            messagebox.showwarning("No Selection", "Please select samples to exclude")
+            return
+
+        # Get selected indices
+        added_count = 0
+        for item in selected:
+            values = self.outlier_tree.item(item, 'values')
+            sample_idx = int(values[0])
+            if sample_idx not in self.excluded_spectra:
+                self.excluded_spectra.add(sample_idx)
+                added_count += 1
+
+        # Update plots in Tab 1 if data is loaded
+        if self.X is not None:
+            self._generate_plots()
+
+        messagebox.showinfo("Success",
+            f"Added {added_count} new samples to exclusion list.\n"
+            f"Total excluded: {len(self.excluded_spectra)}\n\n"
+            f"These samples will be excluded from analysis.")
+
+    def _export_outlier_report(self):
+        """Export outlier detection report to CSV."""
+        if self.outlier_report is None:
+            messagebox.showerror("Error", "Run outlier detection first")
+            return
+
+        try:
+            # Ask for file location
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                title="Save Outlier Report"
+            )
+
+            if filepath:
+                summary = self.outlier_report['outlier_summary']
+                summary.to_csv(filepath, index=False)
+                messagebox.showinfo("Success", f"Report exported to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
+
+    # ========== END OUTLIER DETECTION METHODS ==========
 
     def _run_analysis(self):
         """Run analysis in background thread."""
@@ -1000,6 +1795,10 @@ class SpectralPredictApp:
         selected_models = []
         if self.use_pls.get():
             selected_models.append("PLS")
+        if self.use_ridge.get():
+            selected_models.append("Ridge")
+        if self.use_lasso.get():
+            selected_models.append("Lasso")
         if self.use_randomforest.get():
             selected_models.append("RandomForest")
         if self.use_mlp.get():
@@ -1156,9 +1955,23 @@ class SpectralPredictApp:
             self._log_progress(f"{'='*70}\n")
 
             # Run search
+            # Filter out excluded spectra
+            if self.excluded_spectra:
+                mask = ~np.isin(np.arange(len(self.X)), list(self.excluded_spectra))
+                X_filtered = self.X[mask]
+                y_filtered = self.y[mask]
+
+                # Update progress with exclusion info
+                self.root.after(0, lambda: self.progress_text.insert(tk.END,
+                    f"\nℹ️ Excluding {len(self.excluded_spectra)} user-selected spectra from analysis...\n"))
+                self.root.after(0, lambda: self.progress_text.see(tk.END))
+            else:
+                X_filtered = self.X
+                y_filtered = self.y
+
             results_df = run_search(
-                self.X,
-                self.y,
+                X_filtered,
+                y_filtered,
                 task_type=task_type,
                 folds=self.folds.get(),
                 lambda_penalty=self.lambda_penalty.get(),
@@ -1362,48 +2175,149 @@ class SpectralPredictApp:
             return
 
         # Get the selected model configuration
-        model_config = self.results_df.iloc[row_idx].to_dict()
+        # CRITICAL: Use .loc (label-based) not .iloc (position-based)
+        # because treeview IID uses the dataframe's original index labels
+        model_config = self.results_df.loc[row_idx].to_dict()
         self.selected_model_config = model_config
 
-        # Populate the Refine Model tab
+        # Validation logging
+        rank = model_config.get('Rank', 'N/A')
+        r2_or_acc = model_config.get('R2', model_config.get('Accuracy', 'N/A'))
+        model_name = model_config.get('Model', 'N/A')
+        print(f"✓ Loading Rank {rank}: {model_name} (R²/Acc={r2_or_acc}, n_vars={model_config.get('n_vars', 'N/A')})")
+
+        # Populate the Custom Model Development tab
         self._load_model_for_refinement(model_config)
 
-        # Switch to the Refine Model tab
-        self.notebook.select(4)  # Tab 5 (index 4)
+        # Switch to the Custom Model Development tab
+        self.notebook.select(5)  # Tab 6 (index 5)
+
+    def _validate_data_for_refinement(self):
+        """Validate that required data is available for refinement."""
+        if self.X_original is None:
+            messagebox.showwarning(
+                "Data Not Loaded",
+                "Please load data in the Data Upload tab before using Custom Model Development."
+            )
+            return False
+
+        if self.y is None:
+            messagebox.showwarning(
+                "Target Variable Missing",
+                "Please ensure target variable (y) is loaded in the Data Upload tab."
+            )
+            return False
+
+        return True
+
+    def _load_default_parameters(self):
+        """Load default parameters for fresh model development."""
+        if not self._validate_data_for_refinement():
+            return
+
+        # Set all wavelengths
+        wavelengths = list(self.X_original.columns.astype(float).values)
+        wl_spec = self._format_wavelengths_as_spec(wavelengths)
+
+        self.refine_wl_spec.config(state='normal')
+        self.refine_wl_spec.delete('1.0', 'end')
+        self.refine_wl_spec.insert('1.0', wl_spec)
+
+        # Default parameters
+        self.refine_model_type.set('PLS')
+        self.refine_task_type.set('regression')
+        self.refine_preprocess.set('raw')
+        self.refine_window.set(17)
+        self.refine_folds.set(5)
+        self.refine_max_iter.set(100)
+
+        # Update model info display
+        self.refine_model_info.config(state='normal')
+        self.refine_model_info.delete('1.0', 'end')
+        self.refine_model_info.insert('1.0', "Default parameters loaded. Ready for fresh model development.")
+        self.refine_model_info.config(state='disabled')
+
+        # Update mode label and status
+        self.refine_mode_label.config(text="Mode: Fresh Development (Defaults Loaded)")
+        self.refine_status.config(text="Ready to develop custom model")
+
+        # Enable the run button
+        self.refine_run_button.config(state='normal')
+
+        # Update the wavelength count display
+        self._update_wavelength_count()
+
+    def _validate_refinement_parameters(self):
+        """Validate all refinement parameters before execution."""
+        errors = []
+
+        # Validate wavelength specification
+        wl_spec_text = self.refine_wl_spec.get('1.0', 'end')
+        if not wl_spec_text or wl_spec_text.strip() == '':
+            errors.append("Wavelength specification is empty")
+
+        # Validate model type
+        if self.refine_model_type.get() not in ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']:
+            errors.append("Invalid model type selected")
+
+        # Validate CV folds
+        if self.refine_folds.get() < 3:
+            errors.append("CV folds must be at least 3")
+
+        if errors:
+            messagebox.showerror("Validation Error", "\n".join(errors))
+            return False
+
+        return True
 
     def _load_model_for_refinement(self, config):
-        """Load a model configuration into the Refine Model tab."""
+        """Load a model configuration into the Custom Model Development tab."""
+        # Validate data availability
+        if not self._validate_data_for_refinement():
+            return
+
         # Build configuration text
         info_text = f"""Model: {config.get('Model', 'N/A')}
 Preprocessing: {config.get('Preprocess', 'N/A')}
-Subset: {config.get('Subset', 'N/A')}
+Subset: {config.get('SubsetTag', config.get('Subset', 'N/A'))}
 Window Size: {config.get('Window', 'N/A')}
 """
 
         # Add performance metrics
-        if 'RMSE' in config:
+        if 'RMSE' in config and not pd.isna(config.get('RMSE')):
             # Regression
             info_text += f"""
 Performance (Regression):
   RMSE: {config.get('RMSE', 'N/A')}
   R²: {config.get('R2', 'N/A')}
-  MAE: {config.get('MAE', 'N/A')}
 """
-        else:
+        elif 'Accuracy' in config and not pd.isna(config.get('Accuracy')):
             # Classification
             info_text += f"""
 Performance (Classification):
   Accuracy: {config.get('Accuracy', 'N/A')}
-  Precision: {config.get('Precision', 'N/A')}
-  Recall: {config.get('Recall', 'N/A')}
-  F1 Score: {config.get('F1', 'N/A')}
 """
             if 'ROC_AUC' in config and not pd.isna(config['ROC_AUC']):
                 info_text += f"  ROC AUC: {config.get('ROC_AUC', 'N/A')}\n"
 
-        # Add top wavelengths if available
+        # Add wavelength information
+        n_vars = config.get('n_vars', 'N/A')
+        full_vars = config.get('full_vars', 'N/A')
+        subset_tag = config.get('SubsetTag', config.get('Subset', 'full'))
+
+        info_text += f"\nWavelengths: {n_vars} of {full_vars} used"
+        if subset_tag != 'full' and subset_tag != 'N/A':
+            info_text += f" ({subset_tag})"
+        info_text += "\n"
+
         if 'top_vars' in config and config['top_vars'] != 'N/A':
-            info_text += f"\nTop Wavelengths: {config['top_vars']}\n"
+            top_vars_list = config['top_vars'].split(',')
+            n_shown = len(top_vars_list)
+            if n_shown < n_vars and n_vars != 'N/A':
+                info_text += f"Most important {n_shown} wavelengths shown below (model used {n_vars} total):\n"
+            else:
+                info_text += f"Wavelengths used:\n"
+            info_text += f"  {config['top_vars']}\n"
 
         # Add hyperparameters if available
         if 'n_estimators' in config and not pd.isna(config['n_estimators']):
@@ -1419,29 +2333,146 @@ Performance (Classification):
         self.refine_model_info.config(state='disabled')
 
         # Populate refinement parameters with current values
-        # Get wavelength range from current data
-        if self.X is not None:
-            wavelengths = self.X.columns.astype(float)
-            self.refine_wl_min.set(str(int(wavelengths.min())))
-            self.refine_wl_max.set(str(int(wavelengths.max())))
+        # Populate wavelength specification - Show ONLY wavelengths used in the selected model
+        print(f"DEBUG: X_original is None? {self.X_original is None}")
+
+        if self.X_original is not None:
+            try:
+                print(f"DEBUG: X_original shape: {self.X_original.shape}")
+
+                # Extract all available wavelengths
+                all_wavelengths = self.X_original.columns.astype(float).values
+                print(f"DEBUG: Total available wavelengths: {len(all_wavelengths)}")
+
+                subset_tag = config.get('SubsetTag', config.get('Subset', 'full'))
+                n_vars = config.get('n_vars', len(all_wavelengths))
+
+                # Determine which wavelengths to show
+                model_wavelengths = None
+
+                # For subset models: Parse the actual wavelengths used from top_vars
+                if 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
+                    print(f"DEBUG: Model has top_vars, parsing specific wavelengths")
+                    try:
+                        # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
+                        top_vars_str = str(config['top_vars']).strip()
+                        # Remove any .0 artifacts and split
+                        wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
+                        model_wavelengths = [float(w) for w in wavelength_strings if w]
+                        model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
+                        print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
+                    except Exception as e:
+                        print(f"WARNING: Could not parse top_vars: {e}")
+                        model_wavelengths = None
+
+                # For full models or if parsing failed: Use all wavelengths
+                if model_wavelengths is None:
+                    if subset_tag == 'full' or subset_tag == 'N/A':
+                        print(f"DEBUG: Full model - using all {len(all_wavelengths)} wavelengths")
+                        model_wavelengths = list(all_wavelengths)
+                    else:
+                        # Fallback: use all wavelengths
+                        print(f"WARNING: Subset model but no top_vars, using all wavelengths")
+                        model_wavelengths = list(all_wavelengths)
+
+                # Format the wavelengths (ranges for consecutive, individual otherwise)
+                wl_spec = self._format_wavelengths_as_spec(model_wavelengths)
+                print(f"DEBUG: Formatted {len(model_wavelengths)} wavelengths into {len(wl_spec)} character spec")
+
+                # FALLBACK: If formatter returns empty, use simple range
+                if not wl_spec or len(wl_spec) == 0:
+                    print("WARNING: Formatter returned empty, using fallback")
+                    if len(model_wavelengths) > 0:
+                        wl_spec = f"{model_wavelengths[0]:.1f}-{model_wavelengths[-1]:.1f}"
+                    else:
+                        wl_spec = "# ERROR: No wavelengths available"
+
+                # Ensure widget is in normal state before editing
+                self.refine_wl_spec.config(state='normal')
+                self.refine_wl_spec.delete('1.0', 'end')
+                self.refine_wl_spec.insert('1.0', wl_spec)
+
+                # Verify insertion
+                content = self.refine_wl_spec.get('1.0', 'end-1c')
+                print(f"DEBUG: Text widget content length: {len(content)} characters")
+
+                if len(content) == 0:
+                    print("ERROR: Text widget is empty after insertion!")
+
+            except Exception as e:
+                print(f"ERROR loading wavelengths: {e}")
+                import traceback
+                traceback.print_exc()
+
+                # Show error to user in the text widget
+                self.refine_wl_spec.config(state='normal')
+                self.refine_wl_spec.delete('1.0', 'end')
+                self.refine_wl_spec.insert('1.0', f"# ERROR: Could not load wavelengths\n# {str(e)}\n# Please check console for details")
+
+        else:
+            print("WARNING: X_original is None - data not loaded")
+            self.refine_wl_spec.config(state='normal')
+            self.refine_wl_spec.delete('1.0', 'end')
+            self.refine_wl_spec.insert('1.0', "# ERROR: Data not loaded\n# Please load data in Data Upload tab first")
 
         # Set window size
         window = config.get('Window', 17)
         if not pd.isna(window) and window in [7, 11, 17, 19]:
             self.refine_window.set(int(window))
 
+        # Set model type
+        model_name = config.get('Model', 'PLS')
+        if model_name in ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']:
+            self.refine_model_type.set(model_name)
+
+        # Set task type (auto-detect from data)
+        if self.y is not None:
+            if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+                self.refine_task_type.set('classification')
+            else:
+                self.refine_task_type.set('regression')
+
+        # Set preprocessing method
+        preprocess = config.get('Preprocess', 'raw')
+        deriv = config.get('Deriv', None)
+
+        # Convert from search.py naming to GUI naming
+        if preprocess == 'deriv' and deriv == 1:
+            gui_preprocess = 'sg1'
+        elif preprocess == 'deriv' and deriv == 2:
+            gui_preprocess = 'sg2'
+        elif preprocess == 'snv_deriv':
+            # SNV then derivative - not directly supported in refinement, use closest match
+            gui_preprocess = 'sg1' if deriv == 1 else 'sg2'
+        elif preprocess == 'deriv_snv':
+            gui_preprocess = 'deriv_snv'
+        elif preprocess in ['raw', 'snv']:
+            gui_preprocess = preprocess
+        else:
+            gui_preprocess = 'raw'  # Fallback
+
+        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'deriv_snv']:
+            self.refine_preprocess.set(gui_preprocess)
+
         # Enable the run button
         self.refine_run_button.config(state='normal')
         self.refine_status.config(text=f"Loaded: {config.get('Model', 'N/A')} | {config.get('Preprocess', 'N/A')}")
 
+        # Update mode label to indicate loaded from results
+        rank = config.get('Rank', 'N/A')
+        self.refine_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})")
+
+        # Update the wavelength count display
+        self._update_wavelength_count()
+
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
-        if self.selected_model_config is None:
-            messagebox.showwarning("No Model", "Please select a model from the Results tab first")
-            return
-
         if self.X is None or self.y is None:
             messagebox.showwarning("No Data", "Please load data first")
+            return
+
+        # Validate refinement parameters
+        if not self._validate_refinement_parameters():
             return
 
         # Disable button during execution
@@ -1457,26 +2488,38 @@ Performance (Classification):
         try:
             from spectral_predict.models import get_model
             from spectral_predict.preprocess import SavgolDerivative, SNV
-            from spectral_predict.scoring import cross_validate_model
-            from sklearn.model_selection import KFold
+            from sklearn.model_selection import KFold, StratifiedKFold
+            from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+            from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
+            from sklearn.base import clone
 
-            config = self.selected_model_config
+            # Parse wavelength specification
+            available_wl = self.X_original.columns.astype(float).values
+            wl_spec_text = self.refine_wl_spec.get('1.0', 'end')
+            selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
 
-            # Apply wavelength filtering to get X_subset
-            X_work = self.X_original.copy()
-            wl_min = self.refine_wl_min.get().strip()
-            wl_max = self.refine_wl_max.get().strip()
+            if not selected_wl:
+                raise ValueError("No valid wavelengths selected. Please check your wavelength specification.")
 
-            if wl_min or wl_max:
-                wavelengths = X_work.columns.astype(float)
-                if wl_min:
-                    X_work = X_work.loc[:, wavelengths >= float(wl_min)]
-                if wl_max:
-                    wavelengths = X_work.columns.astype(float)
-                    X_work = X_work.loc[:, wavelengths <= float(wl_max)]
+            # Filter X_original to selected wavelengths
+            # Create mapping from float wavelengths to actual column names
+            wl_to_col = {float(col): col for col in self.X_original.columns}
 
-            # Apply preprocessing
-            preprocess = config.get('Preprocess', 'raw')
+            # Get the actual column names for selected wavelengths
+            selected_cols = [wl_to_col[wl] for wl in selected_wl if wl in wl_to_col]
+
+            if not selected_cols:
+                raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
+
+            X_work = self.X_original[selected_cols]
+
+            if X_work.empty or X_work.shape[1] == 0:
+                raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: {X_work.shape[1]}")
+
+            wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
+
+            # Get user-selected preprocessing method
+            preprocess = self.refine_preprocess.get()
             window = self.refine_window.get()
 
             if preprocess == 'snv':
@@ -1491,14 +2534,11 @@ Performance (Classification):
             else:  # raw
                 X_processed = X_work.values
 
-            # Determine task type
-            if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
-                task_type = "classification"
-            else:
-                task_type = "regression"
+            # Get user-selected task type
+            task_type = self.refine_task_type.get()
 
-            # Get model
-            model_name = config.get('Model', 'PLS')
+            # Get user-selected model
+            model_name = self.refine_model_type.get()
             model = get_model(
                 model_name,
                 task_type=task_type,
@@ -1506,9 +2546,59 @@ Performance (Classification):
                 max_iter=self.refine_max_iter.get()
             )
 
-            # Run cross-validation
-            cv = KFold(n_splits=self.refine_folds.get(), shuffle=True, random_state=42)
-            results = cross_validate_model(model, X_processed, self.y.values, cv, task_type)
+            # Run cross-validation manually
+            n_folds = self.refine_folds.get()
+            if task_type == "regression":
+                cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+            else:
+                cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+            # Collect metrics for each fold
+            fold_metrics = []
+            y_array = self.y.values
+
+            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_processed, y_array)):
+                # Clone model for this fold
+                model_fold = clone(model)
+
+                # Split data
+                X_train, X_test = X_processed[train_idx], X_processed[test_idx]
+                y_train, y_test = y_array[train_idx], y_array[test_idx]
+
+                # Fit and predict
+                model_fold.fit(X_train, y_train)
+                y_pred = model_fold.predict(X_test)
+
+                if task_type == "regression":
+                    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                    r2 = r2_score(y_test, y_pred)
+                    mae = mean_absolute_error(y_test, y_pred)
+                    fold_metrics.append({"rmse": rmse, "r2": r2, "mae": mae})
+                else:
+                    acc = accuracy_score(y_test, y_pred)
+                    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+                    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+                    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+                    fold_metrics.append({"accuracy": acc, "precision": prec, "recall": rec, "f1": f1})
+
+            # Compute mean and std across folds
+            results = {}
+            if task_type == "regression":
+                results['rmse_mean'] = np.mean([m['rmse'] for m in fold_metrics])
+                results['rmse_std'] = np.std([m['rmse'] for m in fold_metrics])
+                results['r2_mean'] = np.mean([m['r2'] for m in fold_metrics])
+                results['r2_std'] = np.std([m['r2'] for m in fold_metrics])
+                results['mae_mean'] = np.mean([m['mae'] for m in fold_metrics])
+                results['mae_std'] = np.std([m['mae'] for m in fold_metrics])
+            else:
+                results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
+                results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
+                results['precision_mean'] = np.mean([m['precision'] for m in fold_metrics])
+                results['precision_std'] = np.std([m['precision'] for m in fold_metrics])
+                results['recall_mean'] = np.mean([m['recall'] for m in fold_metrics])
+                results['recall_std'] = np.std([m['recall'] for m in fold_metrics])
+                results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
+                results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
 
             # Format results
             if task_type == "regression":
@@ -1521,9 +2611,10 @@ Cross-Validation Performance ({self.refine_folds.get()} folds):
 
 Configuration:
   Model: {model_name}
+  Task Type: {task_type}
   Preprocessing: {preprocess}
   Window Size: {window}
-  Wavelength Range: {wl_min or 'full'} - {wl_max or 'full'} nm
+  Wavelengths: {wl_summary}
   Features: {X_processed.shape[1]}
   Samples: {X_processed.shape[0]}
   CV Folds: {self.refine_folds.get()}
@@ -1539,9 +2630,10 @@ Cross-Validation Performance ({self.refine_folds.get()} folds):
 
 Configuration:
   Model: {model_name}
+  Task Type: {task_type}
   Preprocessing: {preprocess}
   Window Size: {window}
-  Wavelength Range: {wl_min or 'full'} - {wl_max or 'full'} nm
+  Wavelengths: {wl_summary}
   Features: {X_processed.shape[1]}
   Samples: {X_processed.shape[0]}
   CV Folds: {self.refine_folds.get()}
@@ -1572,6 +2664,289 @@ Configuration:
         else:
             self.refine_status.config(text="✓ Refined model complete")
             messagebox.showinfo("Success", "Refined model analysis complete!")
+
+    def _format_wavelengths_as_spec(self, wavelengths):
+        """
+        Format a list of wavelengths into a compact specification string.
+        Groups consecutive wavelengths into ranges.
+
+        Example: [1500, 1501, 1502, 1505, 1506, 1510]
+                 -> "1500.0-1502.0, 1505.0-1506.0, 1510.0"
+        """
+        # Enhanced validation
+        if wavelengths is None:
+            print("WARNING: _format_wavelengths_as_spec received None")
+            return ""
+
+        # Convert numpy array to list if needed
+        if hasattr(wavelengths, 'tolist'):
+            wavelengths = wavelengths.tolist()
+
+        # Ensure it's a list
+        if not isinstance(wavelengths, list):
+            try:
+                wavelengths = list(wavelengths)
+            except Exception as e:
+                print(f"ERROR: Cannot convert wavelengths to list: {e}")
+                return ""
+
+        if len(wavelengths) == 0:
+            print("WARNING: _format_wavelengths_as_spec received empty list")
+            return ""
+
+        wavelengths = sorted(list(set(wavelengths)))  # Remove duplicates and sort
+
+        # Group consecutive wavelengths (within 1.5 nm)
+        ranges = []
+        start = wavelengths[0]
+        end = wavelengths[0]
+
+        for i in range(1, len(wavelengths)):
+            if wavelengths[i] - end <= 1.5:  # Consecutive
+                end = wavelengths[i]
+            else:
+                # Save the range
+                if abs(end - start) < 0.1:  # Single wavelength
+                    ranges.append(f"{start:.1f}")
+                else:  # Range
+                    ranges.append(f"{start:.1f}-{end:.1f}")
+                start = wavelengths[i]
+                end = wavelengths[i]
+
+        # Don't forget the last range
+        if abs(end - start) < 0.1:
+            ranges.append(f"{start:.1f}")
+        else:
+            ranges.append(f"{start:.1f}-{end:.1f}")
+
+        return ", ".join(ranges)
+
+    def _parse_wavelength_spec(self, spec_text, available_wavelengths):
+        """
+        Parse wavelength specification string into list of wavelengths.
+
+        Format: "1920, 1930-1940, 1950, 1960-2000"
+        - Individual wavelengths: 1920, 1950
+        - Ranges: 1930-1940, 1960-2000
+        - Comments: Lines starting with # are ignored
+
+        Returns list of wavelengths that exist in available_wavelengths.
+        """
+        selected = []
+        spec_text = spec_text.strip()
+
+        if not spec_text:
+            return list(available_wavelengths)  # Return all if empty
+
+        # Remove comment lines (lines starting with #)
+        lines = spec_text.split('\n')
+        clean_lines = [line for line in lines if not line.strip().startswith('#')]
+        spec_text = ' '.join(clean_lines)
+
+        # Split by commas
+        parts = [p.strip() for p in spec_text.split(',')]
+
+        for part in parts:
+            if '-' in part and not part.startswith('-'):
+                # Range specification
+                try:
+                    start, end = part.split('-')
+                    start_wl = float(start.strip())
+                    end_wl = float(end.strip())
+
+                    # Find wavelengths in this range
+                    for wl in available_wavelengths:
+                        if start_wl <= wl <= end_wl:
+                            selected.append(wl)
+                except ValueError:
+                    # Invalid range, skip
+                    continue
+            else:
+                # Individual wavelength
+                try:
+                    wl = float(part.strip())
+                    # Find closest wavelength in available
+                    if wl in available_wavelengths:
+                        selected.append(wl)
+                    else:
+                        # Find closest match
+                        closest = min(available_wavelengths, key=lambda x: abs(x - wl))
+                        if abs(closest - wl) < 5:  # Within 5 nm tolerance
+                            selected.append(closest)
+                except ValueError:
+                    # Invalid wavelength, skip
+                    continue
+
+        # Remove duplicates and sort
+        selected = sorted(list(set(selected)))
+        return selected
+
+    def _preview_wavelength_selection(self):
+        """Preview the wavelength selection with a plot."""
+        if self.X_original is None:
+            messagebox.showwarning("No Data", "Please load data first to preview wavelength selection.")
+            return
+
+        # Get available wavelengths
+        available_wl = self.X_original.columns.astype(float).values
+
+        # Parse wavelength specification
+        spec_text = self.refine_wl_spec.get('1.0', 'end')
+        try:
+            selected_wl = self._parse_wavelength_spec(spec_text, available_wl)
+        except Exception as e:
+            messagebox.showerror("Parse Error", f"Error parsing wavelength specification:\n{e}")
+            return
+
+        if not selected_wl:
+            messagebox.showwarning("No Wavelengths", "No valid wavelengths found in specification.")
+            return
+
+        # Create preview window
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title("Wavelength Selection Preview")
+        preview_window.geometry("800x500")
+
+        # Info text
+        info_text = f"Selected {len(selected_wl)} wavelengths out of {len(available_wl)} available"
+        ttk.Label(preview_window, text=info_text, font=('Arial', 12, 'bold')).pack(pady=10)
+
+        # Create plot
+        if HAS_MATPLOTLIB:
+            fig = Figure(figsize=(10, 4))
+            ax = fig.add_subplot(111)
+
+            # Create binary indicator (1 = selected, 0 = not selected)
+            selected_set = set(selected_wl)
+            indicators = [1 if wl in selected_set else 0 for wl in available_wl]
+
+            # Plot
+            ax.fill_between(available_wl, 0, indicators, alpha=0.3, color='blue', label='Selected')
+            ax.plot(available_wl, indicators, 'b-', linewidth=0.5)
+            ax.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax.set_ylabel('Selected', fontsize=10)
+            ax.set_title(f'Wavelength Selection: {len(selected_wl)}/{len(available_wl)} wavelengths', fontsize=12)
+            ax.set_ylim(-0.1, 1.1)
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+
+            # Embed plot
+            canvas = FigureCanvasTkAgg(fig, master=preview_window)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Show wavelength list in text box
+        list_frame = ttk.LabelFrame(preview_window, text="Selected Wavelengths", padding="10")
+        list_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        wl_text = tk.Text(list_frame, height=5, font=('Consolas', 9), wrap=tk.WORD)
+        wl_text.pack(fill='both', expand=True)
+
+        # Format wavelengths nicely
+        wl_str = ', '.join([f"{wl:.1f}" for wl in selected_wl[:50]])  # Show first 50
+        if len(selected_wl) > 50:
+            wl_str += f", ... ({len(selected_wl) - 50} more)"
+        wl_text.insert('1.0', wl_str)
+        wl_text.config(state='disabled')
+
+        # Close button
+        ttk.Button(preview_window, text="Close", command=preview_window.destroy).pack(pady=10)
+
+
+    def _update_wavelength_count(self, event=None):
+        """Update wavelength count display in real-time."""
+        try:
+            if self.X_original is None:
+                self.refine_wl_count_label.config(text="Wavelengths: Data not loaded")
+                return
+
+            wl_spec_text = self.refine_wl_spec.get('1.0', 'end')
+            available_wl = self.X_original.columns.astype(float).values
+            selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+
+            count = len(selected_wl)
+            if count > 0:
+                range_text = f"({selected_wl[0]:.1f} - {selected_wl[-1]:.1f} nm)"
+                self.refine_wl_count_label.config(text=f"Wavelengths: {count} selected {range_text}")
+            else:
+                self.refine_wl_count_label.config(text="Wavelengths: 0 selected (check specification)")
+        except Exception as e:
+            self.refine_wl_count_label.config(text="Wavelengths: Invalid specification")
+            print(f"DEBUG: Error updating wavelength count: {e}")
+
+    def _apply_wl_preset(self, preset_type):
+        """Apply wavelength preset."""
+        if self.X_original is None:
+            messagebox.showinfo("No Data", "Please load data first")
+            return
+
+        wavelengths = self.X_original.columns.astype(float).values
+
+        if preset_type == 'all':
+            selected = wavelengths
+        elif preset_type == 'nir':
+            selected = [wl for wl in wavelengths if wl >= 780]
+        elif preset_type == 'visible':
+            selected = [wl for wl in wavelengths if 400 <= wl <= 780]
+        else:
+            return
+
+        if len(selected) == 0:
+            messagebox.showinfo("No Wavelengths", f"No wavelengths found for {preset_type} preset in your data")
+            return
+
+        wl_spec = self._format_wavelengths_as_spec(list(selected))
+        self.refine_wl_spec.delete('1.0', 'end')
+        self.refine_wl_spec.insert('1.0', wl_spec)
+        self._update_wavelength_count()
+
+    def _custom_range_dialog(self):
+        """Show dialog for custom wavelength range."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Custom Wavelength Range")
+        dialog.geometry("350x180")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Start wavelength (nm):", padding=5).pack(pady=5)
+        start_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=start_var, width=20).pack()
+
+        ttk.Label(dialog, text="End wavelength (nm):", padding=5).pack(pady=5)
+        end_var = tk.StringVar()
+        ttk.Entry(dialog, textvariable=end_var, width=20).pack()
+
+        def apply_range():
+            try:
+                start = float(start_var.get())
+                end = float(end_var.get())
+
+                if self.X_original is None:
+                    messagebox.showwarning("No Data", "Please load data first")
+                    dialog.destroy()
+                    return
+
+                wavelengths = self.X_original.columns.astype(float).values
+                selected = [wl for wl in wavelengths if start <= wl <= end]
+
+                if len(selected) == 0:
+                    messagebox.showwarning("No Wavelengths",
+                                          f"No wavelengths found in range {start}-{end} nm")
+                    return
+
+                wl_spec = self._format_wavelengths_as_spec(selected)
+                self.refine_wl_spec.delete('1.0', 'end')
+                self.refine_wl_spec.insert('1.0', wl_spec)
+                self._update_wavelength_count()
+                dialog.destroy()
+
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter valid numbers")
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        ttk.Button(button_frame, text="Apply", command=apply_range).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side='left', padx=5)
 
 
 def main():
