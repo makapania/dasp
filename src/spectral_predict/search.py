@@ -20,7 +20,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                enable_variable_subsets=True, variable_counts=None,
-               enable_region_subsets=True, n_top_regions=5, progress_callback=None):
+               enable_region_subsets=True, n_top_regions=5, progress_callback=None,
+               variable_selection_method='importance', apply_uve_prefilter=False,
+               uve_cutoff_multiplier=1.0, uve_n_components=None,
+               spa_n_random_starts=10, ipls_n_intervals=20):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -58,6 +61,19 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         - 'current': Current item number
         - 'total': Total items
         - 'best_model': Best model found so far (dict with RMSE/R2 or Acc/AUC)
+    variable_selection_method : str, default='importance'
+        Placeholder for future feature-selection strategy integration
+        ('importance', 'spa', 'uve', 'uve_spa', 'ipls'). Currently informational.
+    apply_uve_prefilter : bool, default=False
+        Placeholder flag indicating whether to run a UVE prefilter step.
+    uve_cutoff_multiplier : float, default=1.0
+        Placeholder parameter for UVE cutoff scaling.
+    uve_n_components : int or None, default=None
+        Placeholder for specifying component count for UVE.
+    spa_n_random_starts : int, default=10
+        Placeholder for SPA random restarts.
+    ipls_n_intervals : int, default=20
+        Placeholder for interval count in iPLS selection.
 
     Returns
     -------
@@ -72,6 +88,20 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
 
     # Create results container
     df_results = create_results_dataframe(task_type)
+
+    # NOTE: Advanced variable selection hooks are not yet implemented in this core search.
+    # When the GUI requests alternative strategies, provide a gentle notice so users know
+    # the request is being acknowledged even though the default importance-based workflow
+    # is still applied.
+    if variable_selection_method not in (None, '', 'importance'):
+        print(f"Info: variable_selection_method='{variable_selection_method}' is not yet "
+              "implemented in the Python backend. Continuing with importance-based subsets.")
+    if apply_uve_prefilter or uve_n_components or uve_cutoff_multiplier != 1.0:
+        print("Info: UVE prefilter parameters are currently placeholders in the Python backend.")
+    if spa_n_random_starts != 10:
+        print("Info: SPA random starts parameter is noted but not yet applied in the Python backend.")
+    if ipls_n_intervals != 20:
+        print("Info: iPLS interval parameter is noted but not yet applied in the Python backend.")
 
     # Determine if classification is binary or multiclass
     is_binary_classification = False

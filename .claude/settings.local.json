@@ -19,7 +19,9 @@
       "Bash(if [ -f \".venv/Scripts/activate\" ])",
       "Bash(then echo \"venv found\")",
       "Bash(else echo \"venv not found\")",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(julia --version:*)",
+      "Bash(julia --project=. -e:*)"
     ],
     "deny": [],
     "ask": []

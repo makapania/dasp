@@ -44,8 +44,8 @@ import pandas as pd
 # ============================================================================
 
 # Julia paths (user can override these)
-JULIA_EXE = r"C:\Users\sponheim\AppData\Local\Programs\Julia-1.12.1\bin\julia.exe"
-JULIA_PROJECT = r"C:\Users\sponheim\git\dasp\julia_port\SpectralPredict"
+JULIA_EXE = "/opt/homebrew/bin/julia"
+JULIA_PROJECT = "/Users/mattsponheimer/git/dasp/julia_port/SpectralPredict"
 
 
 # ============================================================================

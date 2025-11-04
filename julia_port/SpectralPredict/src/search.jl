@@ -395,7 +395,7 @@ function run_search(
     results_df = DataFrame(results)
 
     # 5. Compute composite scores and ranks
-    Scoring.rank_results!(results_df, task_type, lambda_penalty)
+    rank_results!(results_df)
 
     # 6. Sort by rank
     sort!(results_df, :Rank)

@@ -341,7 +341,7 @@ function fit_model!(model::PLSModel, X::Matrix{Float64}, y::Vector{Float64})
     Y_mat = reshape(y_centered, :, 1)
 
     # Fit using the simpls algorithm equivalent
-    model.model = fit(CCA, X_centered', Y_mat', n_components)
+    model.model = fit(CCA, X_centered', Y_mat'; outdim=n_components)
 
     return model
 end
@@ -600,13 +600,12 @@ function predict_model(model::PLSModel, X::Matrix{Float64})::Vector{Float64}
     # Center using training means
     X_centered = X .- model.mean_X'
 
-    # Project and predict
-    # For CCA-based PLS: transform X to latent space, then back to y-space
-    T = MultivariateStats.transform(model.model, X_centered')  # Get scores
+    # Project X into latent space using xproj
+    T = X_centered * model.model.xproj  # Get scores (n_samples × n_components)
 
-    # For regression: y_pred = T * q' where q is y-loadings
-    # Approximate using the canonical correlations
-    y_pred = vec(sum(T, dims=1))  # Simplified prediction
+    # Project from latent space to y using yproj
+    # For PLS regression: y_pred = T * yproj'
+    y_pred = vec(T * model.model.yproj')
 
     # Add back mean
     return y_pred .+ model.mean_y

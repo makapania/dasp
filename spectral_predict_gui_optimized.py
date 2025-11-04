@@ -18,6 +18,7 @@ OPTIMIZED VERSION:
 
 import sys
 import os
+import ast
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -2627,15 +2628,47 @@ Performance (Classification):
             if not selected_wl:
                 raise ValueError("No valid wavelengths selected. Please check your wavelength specification.")
 
-            # Filter X_original to selected wavelengths
+            # Filter data source to selected wavelengths
             # Create mapping from float wavelengths to actual column names
-            wl_to_col = {float(col): col for col in self.X_original.columns}
+            if self.X is not None:
+                wavelength_columns = self.X.columns
+            else:
+                wavelength_columns = self.X_original.columns
+            wl_to_col = {float(col): col for col in wavelength_columns}
 
             # Get the actual column names for selected wavelengths
             selected_cols = [wl_to_col[wl] for wl in selected_wl if wl in wl_to_col]
 
             if not selected_cols:
                 raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
+
+            # Determine how many folds we'll run so we can validate sample counts
+            n_folds = self.refine_folds.get()
+
+            # Determine data source (respect current wavelength filter)
+            if self.X is not None:
+                X_source = self.X
+            else:
+                X_source = self.X_original
+
+            # Align sample selection with the main analysis (respect excluded spectra)
+            total_samples = len(X_source)
+            excluded_indices = sorted(idx for idx in self.excluded_spectra if 0 <= idx < total_samples)
+            if excluded_indices:
+                excluded_set = set(excluded_indices)
+                include_indices = [i for i in range(total_samples) if i not in excluded_set]
+                if len(include_indices) < n_folds:
+                    raise ValueError(
+                        f"Only {len(include_indices)} samples remain after exclusions; "
+                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                    )
+                print(f"DEBUG: Applying {len(excluded_indices)} excluded spectra for refinement "
+                      f"({len(include_indices)} samples remain).")
+                X_base_df = X_source.iloc[include_indices]
+                y_series = self.y.iloc[include_indices]
+            else:
+                X_base_df = X_source
+                y_series = self.y
 
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
@@ -2681,7 +2714,15 @@ Performance (Classification):
             # CRITICAL FIX: Detect if we have derivative preprocessing + variable subset
             # This matches the behavior in search.py (lines 434-449)
             is_derivative = preprocess in ['sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
-            is_subset = len(selected_wl) < len(self.X_original.columns)
+            base_full_vars = len(X_base_df.columns)
+            if self.selected_model_config is not None:
+                cfg_full_vars = self.selected_model_config.get('full_vars')
+                if cfg_full_vars is not None and not pd.isna(cfg_full_vars):
+                    try:
+                        base_full_vars = int(cfg_full_vars)
+                    except (TypeError, ValueError):
+                        pass
+            is_subset = len(selected_wl) < base_full_vars
             use_full_spectrum_preprocessing = is_derivative and is_subset
 
             if use_full_spectrum_preprocessing:
@@ -2711,13 +2752,31 @@ Performance (Classification):
                 max_iter=self.refine_max_iter.get()
             )
 
+            # Reapply tuned hyperparameters from the search results when available
+            params_from_search = {}
+            if self.selected_model_config is not None:
+                raw_params = self.selected_model_config.get('Params')
+                if isinstance(raw_params, str) and raw_params.strip():
+                    try:
+                        parsed = ast.literal_eval(raw_params)
+                        if isinstance(parsed, dict):
+                            params_from_search = parsed
+                    except (ValueError, SyntaxError) as parse_err:
+                        print(f"WARNING: Could not parse saved Params '{raw_params}': {parse_err}")
+
+            if params_from_search:
+                try:
+                    model.set_params(**params_from_search)
+                    print(f"DEBUG: Applied saved search parameters: {params_from_search}")
+                except Exception as e:
+                    print(f"WARNING: Failed to apply saved parameters {params_from_search}: {e}")
+
             # Build preprocessing pipeline and prepare data
             from spectral_predict.preprocess import build_preprocessing_pipeline
             from sklearn.pipeline import Pipeline
 
             # Prepare cross-validation
-            n_folds = self.refine_folds.get()
-            y_array = self.y.values
+            y_array = y_series.values
             if task_type == "regression":
                 cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
             else:
@@ -2735,12 +2794,12 @@ Performance (Classification):
                 prep_pipeline = Pipeline(prep_steps)
 
                 # 2. Preprocess FULL spectrum (all wavelengths)
-                X_full = self.X_original.values
+                X_full = X_base_df.values
                 print(f"DEBUG: Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
                 X_full_preprocessed = prep_pipeline.fit_transform(X_full)
 
                 # 3. Find indices of selected wavelengths in original data
-                all_wavelengths = self.X_original.columns.astype(float).values
+                all_wavelengths = X_base_df.columns.astype(float).values
                 wavelength_indices = []
                 for wl in selected_wl:
                     idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
@@ -2761,7 +2820,7 @@ Performance (Classification):
             else:
                 # === PATH B: Raw/SNV or Full-Spectrum (existing behavior) ===
                 # Subset raw data first, then preprocess inside CV
-                X_work = self.X_original[selected_cols].values
+                X_work = X_base_df[selected_cols].values
 
                 # Build full pipeline with preprocessing + model
                 pipe_steps = build_preprocessing_pipeline(
