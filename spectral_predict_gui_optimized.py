@@ -166,6 +166,14 @@ class SpectralPredictApp:
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
 
+        # Variable selection method (NEW - for advanced methods)
+        self.variable_selection_method = tk.StringVar(value='importance')  # 'importance', 'spa', 'uve', 'uve_spa', 'ipls'
+        self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
+        self.uve_cutoff_multiplier = tk.DoubleVar(value=1.0)  # UVE threshold (0.7-1.5)
+        self.uve_n_components = tk.StringVar(value="")  # PLS components for UVE (empty = auto)
+        self.spa_n_random_starts = tk.IntVar(value=10)  # Random starts for SPA
+        self.ipls_n_intervals = tk.IntVar(value=20)  # Number of intervals for iPLS
+
         # Outlier detection variables (Phase 3)
         self.n_pca_components = tk.IntVar(value=5)
         self.y_min_bound = tk.StringVar(value="")
@@ -669,6 +677,72 @@ class SpectralPredictApp:
 
         ttk.Label(subset_frame, text="💡 More subsets = more comprehensive results but longer runtime",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # === Variable Selection Methods ===
+        ttk.Label(content_frame, text="Variable Selection Methods 🆕", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        varsel_frame = ttk.LabelFrame(content_frame, text="Advanced Variable Selection", padding="20")
+        varsel_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Method selection (radio buttons)
+        ttk.Label(varsel_frame, text="Selection Method:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+
+        ttk.Radiobutton(varsel_frame, text="Feature Importance (default)",
+                       variable=self.variable_selection_method, value='importance').grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Uses model-specific importance scores",
+                 style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+
+        ttk.Radiobutton(varsel_frame, text="SPA (Successive Projections)",
+                       variable=self.variable_selection_method, value='spa').grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Collinearity-aware selection",
+                 style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+
+        ttk.Radiobutton(varsel_frame, text="UVE (Uninformative Variable Elimination)",
+                       variable=self.variable_selection_method, value='uve').grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Filters noisy variables",
+                 style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+
+        ttk.Radiobutton(varsel_frame, text="UVE-SPA Hybrid",
+                       variable=self.variable_selection_method, value='uve_spa').grid(row=4, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Combines noise filtering + collinearity reduction",
+                 style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+
+        ttk.Radiobutton(varsel_frame, text="iPLS (Interval PLS)",
+                       variable=self.variable_selection_method, value='ipls').grid(row=5, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Region-based analysis",
+                 style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+
+        # UVE Prefilter option
+        ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
+                       variable=self.apply_uve_prefilter).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+
+        # Method parameters
+        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
+
+        params_frame = ttk.Frame(varsel_frame)
+        params_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        # UVE parameters
+        ttk.Label(params_frame, text="UVE Cutoff:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        ttk.Entry(params_frame, textvariable=self.uve_cutoff_multiplier, width=8).grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(params_frame, text="(0.7-1.5, default: 1.0)", style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="UVE Components:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Entry(params_frame, textvariable=self.uve_n_components, width=8).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(leave empty for auto)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="SPA Random Starts:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=50, textvariable=self.spa_n_random_starts, width=8).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 10)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="iPLS Intervals:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=5, to=50, textvariable=self.ipls_n_intervals, width=8).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 20)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(varsel_frame, text="📚 See VARIABLE_SELECTION_IMPLEMENTATION.md for method details",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
 
         # === Model Selection ===
         ttk.Label(content_frame, text="Models to Test", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -1992,6 +2066,14 @@ class SpectralPredictApp:
                 X_filtered = self.X
                 y_filtered = self.y
 
+            # Parse UVE n_components (empty string = None)
+            uve_n_comp = None
+            if self.uve_n_components.get().strip():
+                try:
+                    uve_n_comp = int(self.uve_n_components.get())
+                except ValueError:
+                    self._log_progress("⚠️ Warning: Invalid UVE n_components, using auto-determination")
+
             results_df = run_search(
                 X_filtered,
                 y_filtered,
@@ -2009,7 +2091,14 @@ class SpectralPredictApp:
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
                 n_top_regions=self.n_top_regions.get(),
-                progress_callback=self._progress_callback
+                progress_callback=self._progress_callback,
+                # Variable selection parameters (NEW)
+                variable_selection_method=self.variable_selection_method.get(),
+                apply_uve_prefilter=self.apply_uve_prefilter.get(),
+                uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
+                uve_n_components=uve_n_comp,
+                spa_n_random_starts=self.spa_n_random_starts.get(),
+                ipls_n_intervals=self.ipls_n_intervals.get()
             )
 
             # Save results
@@ -2548,11 +2637,6 @@ Performance (Classification):
             if not selected_cols:
                 raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
 
-            X_work = self.X_original[selected_cols]
-
-            if X_work.empty or X_work.shape[1] == 0:
-                raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: {X_work.shape[1]}")
-
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
             # Get user-selected preprocessing method and map to build_preprocessing_pipeline format
@@ -2594,6 +2678,16 @@ Performance (Classification):
             deriv = deriv_map.get(preprocess, 0)
             polyorder = polyorder_map.get(preprocess, 2)
 
+            # CRITICAL FIX: Detect if we have derivative preprocessing + variable subset
+            # This matches the behavior in search.py (lines 434-449)
+            is_derivative = preprocess in ['sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+            is_subset = len(selected_wl) < len(self.X_original.columns)
+            use_full_spectrum_preprocessing = is_derivative and is_subset
+
+            if use_full_spectrum_preprocessing:
+                print("DEBUG: Derivative + subset detected. Using full-spectrum preprocessing (matching search.py).")
+                print(f"DEBUG: This fixes the R² discrepancy for non-contiguous wavelength selections.")
+
             # Get user-selected task type
             task_type = self.refine_task_type.get()
 
@@ -2617,33 +2711,73 @@ Performance (Classification):
                 max_iter=self.refine_max_iter.get()
             )
 
-            # CRITICAL FIX: Build preprocessing pipeline (same as search.py)
-            # This ensures preprocessing happens INSIDE each CV fold, not before
+            # Build preprocessing pipeline and prepare data
             from spectral_predict.preprocess import build_preprocessing_pipeline
             from sklearn.pipeline import Pipeline
 
-            pipe_steps = build_preprocessing_pipeline(
-                preprocess_name,
-                deriv,
-                window,
-                polyorder
-            )
-            pipe_steps.append(('model', model))
-            pipe = Pipeline(pipe_steps)
-
-            print(f"DEBUG: Built pipeline with steps: {[name for name, _ in pipe_steps]}")
-
-            # Run cross-validation with RAW data (not preprocessed!)
+            # Prepare cross-validation
             n_folds = self.refine_folds.get()
+            y_array = self.y.values
             if task_type == "regression":
                 cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
             else:
                 cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
+            if use_full_spectrum_preprocessing:
+                # === PATH A: Derivative + Subset (matches search.py lines 434-449) ===
+                # 1. Build preprocessing pipeline WITHOUT model
+                prep_steps = build_preprocessing_pipeline(
+                    preprocess_name,
+                    deriv,
+                    window,
+                    polyorder
+                )
+                prep_pipeline = Pipeline(prep_steps)
+
+                # 2. Preprocess FULL spectrum (all wavelengths)
+                X_full = self.X_original.values
+                print(f"DEBUG: Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
+                X_full_preprocessed = prep_pipeline.fit_transform(X_full)
+
+                # 3. Find indices of selected wavelengths in original data
+                all_wavelengths = self.X_original.columns.astype(float).values
+                wavelength_indices = []
+                for wl in selected_wl:
+                    idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+
+                # 4. Subset the PREPROCESSED data (not raw!)
+                X_work = X_full_preprocessed[:, wavelength_indices]
+                print(f"DEBUG: Subsetted to {X_work.shape[1]} wavelengths after preprocessing.")
+                print(f"DEBUG: This preserves derivative context from full spectrum.")
+
+                # 5. Build pipeline with ONLY the model (skip preprocessing - already done!)
+                pipe_steps = [('model', model)]
+                pipe = Pipeline(pipe_steps)
+
+                print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing already applied)")
+
+            else:
+                # === PATH B: Raw/SNV or Full-Spectrum (existing behavior) ===
+                # Subset raw data first, then preprocess inside CV
+                X_work = self.X_original[selected_cols].values
+
+                # Build full pipeline with preprocessing + model
+                pipe_steps = build_preprocessing_pipeline(
+                    preprocess_name,
+                    deriv,
+                    window,
+                    polyorder
+                )
+                pipe_steps.append(('model', model))
+                pipe = Pipeline(pipe_steps)
+
+                print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
+
             # Collect metrics for each fold
             fold_metrics = []
-            y_array = self.y.values
-            X_raw = X_work.values  # Raw data (not preprocessed!)
+            X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
                 # Clone ENTIRE PIPELINE for this fold (not just model)
@@ -2688,14 +2822,29 @@ Performance (Classification):
                 results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
                 results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
 
-            # Format results
+            # Format results with detailed diagnostics
             if task_type == "regression":
+                # Add comparison to loaded model if available
+                loaded_r2 = "N/A"
+                r2_diff = "N/A"
+                if self.selected_model_config is not None and 'R2' in self.selected_model_config:
+                    loaded_r2_value = self.selected_model_config.get('R2')
+                    if not pd.isna(loaded_r2_value):
+                        loaded_r2 = f"{loaded_r2_value:.4f}"
+                        r2_diff_value = results['r2_mean'] - loaded_r2_value
+                        r2_diff = f"{r2_diff_value:+.4f}"
+
                 results_text = f"""Refined Model Results:
 
 Cross-Validation Performance ({self.refine_folds.get()} folds):
   RMSE: {results['rmse_mean']:.4f} ± {results['rmse_std']:.4f}
   R²: {results['r2_mean']:.4f} ± {results['r2_std']:.4f}
   MAE: {results['mae_mean']:.4f} ± {results['mae_std']:.4f}
+
+COMPARISON TO LOADED MODEL:
+  Original R² (from Results tab): {loaded_r2}
+  Refined R² (just computed):     {results['r2_mean']:.4f}
+  Difference:                     {r2_diff}
 
 Configuration:
   Model: {model_name}
@@ -2706,6 +2855,17 @@ Configuration:
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
   CV Folds: {self.refine_folds.get()}
+  n_components: {n_components}
+
+DEBUG INFO:
+  Loaded LVs from config: {self.selected_model_config.get('LVs', 'N/A') if self.selected_model_config else 'N/A'}
+  Loaded n_vars from config: {self.selected_model_config.get('n_vars', 'N/A') if self.selected_model_config else 'N/A'}
+  Loaded Preprocessing: {self.selected_model_config.get('Preprocess', 'N/A') if self.selected_model_config else 'N/A'}
+  Loaded Deriv: {self.selected_model_config.get('Deriv', 'N/A') if self.selected_model_config else 'N/A'}
+  Loaded Window: {self.selected_model_config.get('Window', 'N/A') if self.selected_model_config else 'N/A'}
+  Processing Path: {'Full-spectrum preprocessing (derivative+subset fix)' if use_full_spectrum_preprocessing else 'Standard (subset then preprocess)'}
+
+NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match search.py behavior and preserve derivative context.' if use_full_spectrum_preprocessing else ''}
 """
             else:
                 results_text = f"""Refined Model Results:
@@ -2736,11 +2896,18 @@ Configuration:
             final_model = final_pipe.named_steps['model']
 
             # Build preprocessor from pipeline steps (excluding the model)
-            if len(pipe_steps) > 1:  # Has preprocessing steps
+            if use_full_spectrum_preprocessing:
+                # For derivative + subset: preprocessor was already fitted on full spectrum
+                # We need to save that preprocessor, not create a new one
+                final_preprocessor = prep_pipeline  # Already fitted
+                print("DEBUG: Using full-spectrum preprocessor (already fitted)")
+            elif len(pipe_steps) > 1:  # Has preprocessing steps
                 final_preprocessor = Pipeline(pipe_steps[:-1])  # All steps except model
                 final_preprocessor.fit(X_raw)  # Fit on raw data
+                print("DEBUG: Fitting preprocessor on subset data")
             else:
                 final_preprocessor = None
+                print("DEBUG: No preprocessor (raw data)")
 
             # Store the fitted model and metadata for later saving
             self.refined_model = final_model
@@ -2753,7 +2920,7 @@ Configuration:
                 'preprocessing': preprocess,
                 'window': window,
                 'n_vars': len(selected_wl),
-                'n_samples': X_processed.shape[0],
+                'n_samples': X_raw.shape[0],
                 'cv_folds': n_folds
             }
 

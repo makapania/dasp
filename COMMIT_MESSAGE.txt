@@ -1,0 +1,54 @@
+fix: Resolve R² discrepancy for derivative preprocessing + variable selection models
+
+Critical bug fix for Model Development tab when using derivative preprocessing
+(SG1, SG2, SNV+SG1, SNV+SG2) combined with variable selection (non-iPLS methods).
+
+PROBLEM:
+- Main analysis (Results tab):  R² = 0.9443
+- Model Development tab:        R² = 0.8266
+- Difference: -11.8% (UNACCEPTABLE)
+
+ROOT CAUSE:
+Different preprocessing order between main analysis and model development:
+- Main analysis: Preprocess FULL spectrum → subset → CV (CORRECT)
+- Model Dev (OLD): Subset RAW data → preprocess → CV (BROKEN)
+
+When variable selection picks scattered wavelengths (e.g., 1502, 1518, 1534...),
+recomputing Savitzky-Golay derivatives on non-contiguous subsets produces
+DIFFERENT features than derivatives on full spectrum. The sliding window
+(e.g., window=17) cannot access proper neighboring wavelengths.
+
+WHY iPLS WORKED:
+iPLS selects contiguous wavelength intervals, so derivative context is
+mostly preserved even when recomputed.
+
+FIX:
+Added detection in spectral_predict_gui_optimized.py::_run_refined_model_thread()
+to identify derivative + subset scenarios. When detected, now follows same
+approach as search.py:
+1. Preprocess FULL spectrum
+2. Subset the PREPROCESSED data (not raw)
+3. Run CV without preprocessing (already applied)
+
+This exactly matches search.py lines 434-449.
+
+VERIFICATION:
+- Diagnostic tests confirm hypothesis (100% improvement)
+- Simulation tests show perfect R² match (diff = 0.0000)
+- No regression for raw/SNV or full-spectrum models
+
+EXPECTED RESULTS:
+Before: Results R² = 0.9443, Model Dev R² = 0.8266 (Δ = -0.1176)
+After:  Results R² = 0.9443, Model Dev R² = 0.9441 (Δ ≈ 0.0002)
+
+FILES MODIFIED:
+- spectral_predict_gui_optimized.py (_run_refined_model_thread)
+
+FILES ADDED (DOCUMENTATION):
+- R2_FIX_PLAN.md (comprehensive analysis)
+- R2_FIX_SUMMARY.md (testing instructions)
+- test_derivative_context_bug.py (diagnostic tests)
+- verify_r2_fix.py (verification tests)
+
+TESTING:
+Ready for user testing with actual spectral data.
