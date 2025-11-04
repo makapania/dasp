@@ -2708,8 +2708,31 @@ Performance (Classification):
             }
 
             preprocess_name = preprocess_name_map.get(preprocess, 'raw')
-            deriv = deriv_map.get(preprocess, 0)
-            polyorder = polyorder_map.get(preprocess, 2)
+
+            # Use actual derivative order from loaded config if available (fixes deriv_snv mismatch)
+            # Otherwise fall back to hardcoded map for custom models
+            if self.selected_model_config is not None:
+                config_deriv = self.selected_model_config.get('Deriv', None)
+                if config_deriv is not None and not pd.isna(config_deriv):
+                    deriv = int(config_deriv)
+                    # Determine polyorder based on actual derivative order
+                    if deriv == 0:
+                        polyorder = 2
+                    elif deriv == 1:
+                        polyorder = 2
+                    elif deriv == 2:
+                        polyorder = 3
+                    else:
+                        polyorder = 2  # Fallback
+                    print(f"DEBUG: Using deriv={deriv}, polyorder={polyorder} from loaded config")
+                else:
+                    # No valid deriv in config, use map
+                    deriv = deriv_map.get(preprocess, 0)
+                    polyorder = polyorder_map.get(preprocess, 2)
+            else:
+                # No config loaded, use map (custom model creation)
+                deriv = deriv_map.get(preprocess, 0)
+                polyorder = polyorder_map.get(preprocess, 2)
 
             # CRITICAL FIX: Detect if we have derivative preprocessing + variable subset
             # This matches the behavior in search.py (lines 434-449)
