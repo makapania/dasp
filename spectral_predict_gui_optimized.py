@@ -1,5 +1,5 @@
 """
-Spectral Predict - Redesigned 6-Tab GUI Application (OPTIMIZED)
+Spectral Predict - Redesigned 7-Tab GUI Application (OPTIMIZED)
 
 Tab 1: Import & Preview - Data loading + spectral plots
 Tab 2: Data Quality Check - Outlier detection and exclusion
@@ -7,11 +7,13 @@ Tab 3: Analysis Configuration - All analysis settings
 Tab 4: Analysis Progress - Live progress monitor
 Tab 5: Results - Analysis results table (clickable to refine)
 Tab 6: Custom Model Development - Interactive model refinement
+Tab 7: Model Prediction - Load saved models and predict on new data
 
 OPTIMIZED VERSION:
 - Neural Boosted max_iter reduced from 500 to 100 (Phase A optimization)
 - Implements evidence-based optimizations for 2-3x speedup
 - Phase 3: Integrated outlier detection system with unified exclusion
+- Phase 3+: Model prediction tab for applying saved .dasp models
 """
 
 import sys
@@ -85,6 +87,18 @@ class SpectralPredictApp:
         # Results storage
         self.results_df = None  # Analysis results dataframe
         self.selected_model_config = None  # Selected model configuration for refinement
+
+        # Refined/saved model storage (for model persistence)
+        self.refined_model = None  # Fitted model from Custom Model Development tab
+        self.refined_preprocessor = None  # Fitted preprocessing pipeline
+        self.refined_performance = None  # Performance metrics dict (R2, RMSE, etc.)
+        self.refined_wavelengths = None  # List of wavelengths used in refined model
+        self.refined_config = None  # Configuration dict for refined model
+
+        # Model Prediction Tab (Tab 7) variables
+        self.loaded_models = []  # List of model dicts from load_model()
+        self.prediction_data = None  # DataFrame with new spectral data
+        self.predictions_df = None  # Results dataframe
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -200,7 +214,7 @@ class SpectralPredictApp:
         style.configure('TNotebook.Tab', font=('Segoe UI', 11), padding=(20, 10))
 
     def _create_ui(self):
-        """Create 6-tab user interface."""
+        """Create 7-tab user interface."""
         # Create notebook
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
@@ -212,6 +226,7 @@ class SpectralPredictApp:
         self._create_tab4_progress()
         self._create_tab5_results()
         self._create_tab6_refine_model()
+        self._create_tab7_model_prediction()
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -940,8 +955,8 @@ class SpectralPredictApp:
         # Preprocessing Method
         ttk.Label(params_frame, text="Preprocessing:", style='Subheading.TLabel').grid(row=11, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_preprocess = tk.StringVar(value='raw')
-        preprocess_combo = ttk.Combobox(params_frame, textvariable=self.refine_preprocess, width=20, state='readonly')
-        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'deriv_snv']
+        preprocess_combo = ttk.Combobox(params_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
         preprocess_combo.grid(row=12, column=0, sticky=tk.W, pady=5)
 
         # CV Folds
@@ -954,11 +969,18 @@ class SpectralPredictApp:
         self.refine_max_iter = tk.IntVar(value=100)
         ttk.Spinbox(params_frame, from_=100, to=5000, increment=100, textvariable=self.refine_max_iter, width=12).grid(row=16, column=0, sticky=tk.W)
 
-        # Run refined model button
-        self.refine_run_button = ttk.Button(content_frame, text="▶ Run Refined Model", command=self._run_refined_model,
-                  style='Accent.TButton', state='disabled')
-        self.refine_run_button.grid(row=row, column=0, columnspan=2, pady=30, ipadx=30, ipady=10)
+        # Button frame for Run and Save buttons
+        button_frame = ttk.Frame(content_frame)
+        button_frame.grid(row=row, column=0, columnspan=2, pady=30)
         row += 1
+
+        self.refine_run_button = ttk.Button(button_frame, text="▶ Run Refined Model", command=self._run_refined_model,
+                  style='Accent.TButton', state='disabled')
+        self.refine_run_button.grid(row=0, column=0, padx=10, ipadx=30, ipady=10)
+
+        self.refine_save_button = ttk.Button(button_frame, text="💾 Save Model", command=self._save_refined_model,
+                  style='Secondary.TButton', state='disabled')
+        self.refine_save_button.grid(row=0, column=1, padx=10, ipadx=30, ipady=10)
 
         # Results display
         ttk.Label(content_frame, text="Refined Model Results", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -1810,8 +1832,9 @@ class SpectralPredictApp:
             messagebox.showwarning("No Models", "Please select at least one model to test")
             return
 
-        # Switch to progress tab
-        self.notebook.select(2)
+        # Switch to Analysis Progress tab (index 3)
+        # Tab indices: 0=Import, 1=Quality Check, 2=Analysis Config, 3=Analysis Progress, 4=Results, 5=Custom Model Dev
+        self.notebook.select(3)
 
         # Clear progress text
         self.progress_text.delete('1.0', tk.END)
@@ -2350,13 +2373,27 @@ Performance (Classification):
                 # Determine which wavelengths to show
                 model_wavelengths = None
 
-                # For subset models: Parse the actual wavelengths used from top_vars
-                if 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
-                    print(f"DEBUG: Model has top_vars, parsing specific wavelengths")
+                # For subset models: Prefer all_vars (complete list) over top_vars (top 30)
+                # This fixes the variable count mismatch for models with >30 variables
+                if 'all_vars' in config and config['all_vars'] != 'N/A' and config['all_vars']:
+                    print(f"DEBUG: Model has all_vars, parsing complete wavelength list")
+                    try:
+                        # Parse wavelengths from all_vars string (e.g., "1520.0, 1540.0, 1560.0, ...")
+                        all_vars_str = str(config['all_vars']).strip()
+                        wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
+                        model_wavelengths = [float(w) for w in wavelength_strings if w]
+                        model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
+                        print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
+                    except Exception as e:
+                        print(f"WARNING: Could not parse all_vars: {e}")
+                        model_wavelengths = None
+
+                # Fallback to top_vars for backward compatibility with old results
+                if model_wavelengths is None and 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
+                    print(f"DEBUG: Falling back to top_vars (may be incomplete for large subsets)")
                     try:
                         # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
                         top_vars_str = str(config['top_vars']).strip()
-                        # Remove any .0 artifacts and split
                         wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
                         model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
@@ -2442,8 +2479,8 @@ Performance (Classification):
         elif preprocess == 'deriv' and deriv == 2:
             gui_preprocess = 'sg2'
         elif preprocess == 'snv_deriv':
-            # SNV then derivative - not directly supported in refinement, use closest match
-            gui_preprocess = 'sg1' if deriv == 1 else 'sg2'
+            # SNV then derivative - NOW PROPERLY SUPPORTED!
+            gui_preprocess = 'snv_sg1' if deriv == 1 else 'snv_sg2'
         elif preprocess == 'deriv_snv':
             gui_preprocess = 'deriv_snv'
         elif preprocess in ['raw', 'snv']:
@@ -2451,7 +2488,7 @@ Performance (Classification):
         else:
             gui_preprocess = 'raw'  # Fallback
 
-        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'deriv_snv']:
+        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']:
             self.refine_preprocess.set(gui_preprocess)
 
         # Enable the run button
@@ -2518,35 +2555,85 @@ Performance (Classification):
 
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
-            # Get user-selected preprocessing method
+            # Get user-selected preprocessing method and map to build_preprocessing_pipeline format
             preprocess = self.refine_preprocess.get()
             window = self.refine_window.get()
 
-            if preprocess == 'snv':
-                X_processed = SNV().transform(X_work.values)
-            elif preprocess == 'sg1':
-                X_processed = SavgolDerivative(deriv=1, window=window).transform(X_work.values)
-            elif preprocess == 'sg2':
-                X_processed = SavgolDerivative(deriv=2, window=window).transform(X_work.values)
-            elif preprocess == 'deriv_snv':
-                X_temp = SavgolDerivative(deriv=1, window=window).transform(X_work.values)
-                X_processed = SNV().transform(X_temp)
-            else:  # raw
-                X_processed = X_work.values
+            # Map GUI preprocessing names to search.py format
+            preprocess_name_map = {
+                'raw': 'raw',
+                'snv': 'snv',
+                'sg1': 'deriv',
+                'sg2': 'deriv',
+                'snv_sg1': 'snv_deriv',
+                'snv_sg2': 'snv_deriv',
+                'deriv_snv': 'deriv_snv'
+            }
+
+            deriv_map = {
+                'raw': 0,
+                'snv': 0,
+                'sg1': 1,
+                'sg2': 2,
+                'snv_sg1': 1,
+                'snv_sg2': 2,
+                'deriv_snv': 1
+            }
+
+            polyorder_map = {
+                'raw': 2,
+                'snv': 2,
+                'sg1': 2,
+                'sg2': 3,
+                'snv_sg1': 2,
+                'snv_sg2': 3,
+                'deriv_snv': 2
+            }
+
+            preprocess_name = preprocess_name_map.get(preprocess, 'raw')
+            deriv = deriv_map.get(preprocess, 0)
+            polyorder = polyorder_map.get(preprocess, 2)
 
             # Get user-selected task type
             task_type = self.refine_task_type.get()
 
             # Get user-selected model
             model_name = self.refine_model_type.get()
+
+            # Extract hyperparameters from loaded model config (if available)
+            # This ensures we reproduce the exact same model that was selected from results
+            n_components = 10  # Default fallback
+            if self.selected_model_config is not None and 'LVs' in self.selected_model_config:
+                lvs_value = self.selected_model_config.get('LVs')
+                if not pd.isna(lvs_value):
+                    n_components = int(lvs_value)
+                    print(f"DEBUG: Using n_components={n_components} from loaded model config")
+
             model = get_model(
                 model_name,
                 task_type=task_type,
+                n_components=n_components,  # Use exact n_components from original model
                 max_n_components=self.max_n_components.get(),
                 max_iter=self.refine_max_iter.get()
             )
 
-            # Run cross-validation manually
+            # CRITICAL FIX: Build preprocessing pipeline (same as search.py)
+            # This ensures preprocessing happens INSIDE each CV fold, not before
+            from spectral_predict.preprocess import build_preprocessing_pipeline
+            from sklearn.pipeline import Pipeline
+
+            pipe_steps = build_preprocessing_pipeline(
+                preprocess_name,
+                deriv,
+                window,
+                polyorder
+            )
+            pipe_steps.append(('model', model))
+            pipe = Pipeline(pipe_steps)
+
+            print(f"DEBUG: Built pipeline with steps: {[name for name, _ in pipe_steps]}")
+
+            # Run cross-validation with RAW data (not preprocessed!)
             n_folds = self.refine_folds.get()
             if task_type == "regression":
                 cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
@@ -2556,18 +2643,19 @@ Performance (Classification):
             # Collect metrics for each fold
             fold_metrics = []
             y_array = self.y.values
+            X_raw = X_work.values  # Raw data (not preprocessed!)
 
-            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_processed, y_array)):
-                # Clone model for this fold
-                model_fold = clone(model)
+            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
+                # Clone ENTIRE PIPELINE for this fold (not just model)
+                pipe_fold = clone(pipe)
 
                 # Split data
-                X_train, X_test = X_processed[train_idx], X_processed[test_idx]
+                X_train, X_test = X_raw[train_idx], X_raw[test_idx]
                 y_train, y_test = y_array[train_idx], y_array[test_idx]
 
-                # Fit and predict
-                model_fold.fit(X_train, y_train)
-                y_pred = model_fold.predict(X_test)
+                # Fit pipeline (preprocessing + model) and predict
+                pipe_fold.fit(X_train, y_train)
+                y_pred = pipe_fold.predict(X_test)
 
                 if task_type == "regression":
                     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -2615,8 +2703,8 @@ Configuration:
   Preprocessing: {preprocess}
   Window Size: {window}
   Wavelengths: {wl_summary}
-  Features: {X_processed.shape[1]}
-  Samples: {X_processed.shape[0]}
+  Features: {len(selected_wl)}
+  Samples: {X_raw.shape[0]}
   CV Folds: {self.refine_folds.get()}
 """
             else:
@@ -2634,10 +2722,40 @@ Configuration:
   Preprocessing: {preprocess}
   Window Size: {window}
   Wavelengths: {wl_summary}
-  Features: {X_processed.shape[1]}
-  Samples: {X_processed.shape[0]}
+  Features: {len(selected_wl)}
+  Samples: {X_raw.shape[0]}
   CV Folds: {self.refine_folds.get()}
 """
+
+            # Fit final pipeline on full dataset for model persistence
+            # Clone the pipeline and fit on all data
+            final_pipe = clone(pipe)
+            final_pipe.fit(X_raw, y_array)
+
+            # Extract model and preprocessor from pipeline for saving
+            final_model = final_pipe.named_steps['model']
+
+            # Build preprocessor from pipeline steps (excluding the model)
+            if len(pipe_steps) > 1:  # Has preprocessing steps
+                final_preprocessor = Pipeline(pipe_steps[:-1])  # All steps except model
+                final_preprocessor.fit(X_raw)  # Fit on raw data
+            else:
+                final_preprocessor = None
+
+            # Store the fitted model and metadata for later saving
+            self.refined_model = final_model
+            self.refined_preprocessor = final_preprocessor
+            self.refined_wavelengths = list(selected_wl)
+            self.refined_performance = results
+            self.refined_config = {
+                'model_name': model_name,
+                'task_type': task_type,
+                'preprocessing': preprocess,
+                'window': window,
+                'n_vars': len(selected_wl),
+                'n_samples': X_processed.shape[0],
+                'cv_folds': n_folds
+            }
 
             # Update UI
             self.root.after(0, lambda: self._update_refined_results(results_text))
@@ -2655,15 +2773,109 @@ Configuration:
         self.refine_results_text.insert('1.0', results_text)
         self.refine_results_text.config(state='disabled')
 
-        # Re-enable button
+        # Re-enable buttons
         self.refine_run_button.config(state='normal')
 
         if is_error:
             self.refine_status.config(text="✗ Error running refined model")
+            self.refine_save_button.config(state='disabled')
             messagebox.showerror("Error", "Failed to run refined model. See results area for details.")
         else:
             self.refine_status.config(text="✓ Refined model complete")
+            # Enable Save Model button after successful run
+            self.refine_save_button.config(state='normal')
             messagebox.showinfo("Success", "Refined model analysis complete!")
+
+    def _save_refined_model(self):
+        """Save the current refined model to a .dasp file."""
+        # Check if model has been trained
+        if self.refined_model is None:
+            messagebox.showerror(
+                "No Model Trained",
+                "Please run a refined model first before saving.\n\n"
+                "Click 'Run Refined Model' to train a model, then you can save it."
+            )
+            return
+
+        try:
+            from spectral_predict.model_io import save_model
+            from datetime import datetime
+
+            # Ask for save location
+            default_name = f"model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dasp"
+
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".dasp",
+                filetypes=[("DASP Model", "*.dasp"), ("All files", "*.*")],
+                initialfile=default_name,
+                title="Save Trained Model"
+            )
+
+            if not filepath:
+                return  # User cancelled
+
+            # Build comprehensive metadata
+            metadata = {
+                'model_name': self.refined_config['model_name'],
+                'task_type': self.refined_config['task_type'],
+                'preprocessing': self.refined_config['preprocessing'],
+                'window': self.refined_config['window'],
+                'wavelengths': self.refined_wavelengths,
+                'n_vars': self.refined_config['n_vars'],
+                'n_samples': self.refined_config['n_samples'],
+                'cv_folds': self.refined_config['cv_folds'],
+                'performance': {}
+            }
+
+            # Add performance metrics based on task type
+            if self.refined_config['task_type'] == 'regression':
+                metadata['performance'] = {
+                    'RMSE': self.refined_performance.get('rmse_mean'),
+                    'RMSE_std': self.refined_performance.get('rmse_std'),
+                    'R2': self.refined_performance.get('r2_mean'),
+                    'R2_std': self.refined_performance.get('r2_std'),
+                    'MAE': self.refined_performance.get('mae_mean'),
+                    'MAE_std': self.refined_performance.get('mae_std')
+                }
+            else:  # classification
+                metadata['performance'] = {
+                    'Accuracy': self.refined_performance.get('accuracy_mean'),
+                    'Accuracy_std': self.refined_performance.get('accuracy_std'),
+                    'Precision': self.refined_performance.get('precision_mean'),
+                    'Precision_std': self.refined_performance.get('precision_std'),
+                    'Recall': self.refined_performance.get('recall_mean'),
+                    'Recall_std': self.refined_performance.get('recall_std'),
+                    'F1': self.refined_performance.get('f1_mean'),
+                    'F1_std': self.refined_performance.get('f1_std')
+                }
+
+            # Save the model
+            save_model(
+                model=self.refined_model,
+                preprocessor=self.refined_preprocessor,
+                metadata=metadata,
+                filepath=filepath
+            )
+
+            # Show success message
+            messagebox.showinfo(
+                "Model Saved",
+                f"Model successfully saved to:\n\n{filepath}\n\n"
+                f"You can now load this model in the Model Prediction tab "
+                f"to make predictions on new data."
+            )
+
+            # Update status
+            self.refine_status.config(text=f"✓ Model saved to {Path(filepath).name}")
+
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            messagebox.showerror(
+                "Save Error",
+                f"Failed to save model:\n\n{str(e)}\n\nSee console for details."
+            )
+            print(f"Error saving model:\n{error_msg}")
 
     def _format_wavelengths_as_spec(self, wavelengths):
         """
@@ -2947,6 +3159,535 @@ Configuration:
         button_frame.pack(pady=10)
         ttk.Button(button_frame, text="Apply", command=apply_range).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side='left', padx=5)
+
+    # === Tab 7: Model Prediction Methods ===
+
+    def _create_tab7_model_prediction(self):
+        """Create Tab 7: Model Prediction - Load models and make predictions on new data."""
+        self.tab7 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab7, text='  🔮 Model Prediction  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(self.tab7, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab7, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Title
+        ttk.Label(content_frame, text="Model Prediction", style='Title.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
+        row += 1
+
+        # Instructions
+        ttk.Label(content_frame,
+            text="Load saved .dasp model files and apply them to new spectral data for predictions.",
+            style='Caption.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
+        row += 1
+
+        # === Step 1: Load Models ===
+        step1_frame = ttk.LabelFrame(content_frame, text="Step 1: Load Saved Models", padding="20")
+        step1_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=20, pady=10)
+        row += 1
+
+        # Button frame for load and clear
+        button_frame1 = ttk.Frame(step1_frame)
+        button_frame1.grid(row=0, column=0, columnspan=2, pady=5)
+
+        ttk.Button(button_frame1, text="📂 Load Model File",
+                   command=self._load_model_for_prediction).pack(side='left', padx=5)
+        ttk.Button(button_frame1, text="🗑️ Clear All Models",
+                   command=self._clear_loaded_models).pack(side='left', padx=5)
+
+        # Loaded models display
+        ttk.Label(step1_frame, text="Loaded Models:", style='Subheading.TLabel').grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(10, 5))
+
+        models_text_frame = ttk.Frame(step1_frame)
+        models_text_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        self.loaded_models_text = tk.Text(models_text_frame, height=8, width=90,
+                                          font=('Consolas', 9),
+                                          bg='#FAFAFA', fg=self.colors['text'],
+                                          wrap=tk.WORD, state='disabled')
+        self.loaded_models_text.pack(side='left', fill='both', expand=True)
+
+        models_scrollbar = ttk.Scrollbar(models_text_frame, orient='vertical',
+                                        command=self.loaded_models_text.yview)
+        models_scrollbar.pack(side='right', fill='y')
+        self.loaded_models_text.config(yscrollcommand=models_scrollbar.set)
+
+        # === Step 2: Load Data ===
+        step2_frame = ttk.LabelFrame(content_frame, text="Step 2: Load Data for Prediction", padding="20")
+        step2_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=20, pady=10)
+        row += 1
+
+        # Data source selection
+        ttk.Label(step2_frame, text="Data Source:", style='Subheading.TLabel').grid(
+            row=0, column=0, sticky=tk.W, pady=5)
+
+        self.pred_data_source = tk.StringVar(value='directory')
+        source_frame = ttk.Frame(step2_frame)
+        source_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        ttk.Radiobutton(source_frame, text="Directory (ASD/SPC)",
+                       variable=self.pred_data_source, value='directory').pack(side='left', padx=5)
+        ttk.Radiobutton(source_frame, text="CSV File",
+                       variable=self.pred_data_source, value='csv').pack(side='left', padx=5)
+
+        # File path entry
+        ttk.Label(step2_frame, text="Path:", style='Caption.TLabel').grid(
+            row=2, column=0, sticky=tk.W, pady=(10, 5))
+
+        path_frame = ttk.Frame(step2_frame)
+        path_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        self.pred_data_path = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.pred_data_path, width=60).pack(side='left', fill='x', expand=True)
+        ttk.Button(path_frame, text="Browse...",
+                   command=self._browse_prediction_data).pack(side='left', padx=5)
+
+        # Load button and status
+        button_frame2 = ttk.Frame(step2_frame)
+        button_frame2.grid(row=4, column=0, columnspan=2, pady=10)
+
+        ttk.Button(button_frame2, text="📊 Load Data",
+                   command=self._load_prediction_data).pack(side='left', padx=5)
+
+        self.pred_data_status = ttk.Label(step2_frame, text="No data loaded", style='Caption.TLabel')
+        self.pred_data_status.grid(row=5, column=0, columnspan=2, pady=5)
+
+        # === Step 3: Run Predictions ===
+        step3_frame = ttk.LabelFrame(content_frame, text="Step 3: Make Predictions", padding="20")
+        step3_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=20, pady=10)
+        row += 1
+
+        button_frame3 = ttk.Frame(step3_frame)
+        button_frame3.grid(row=0, column=0, columnspan=2, pady=5)
+
+        ttk.Button(button_frame3, text="🚀 Run All Models",
+                   command=self._run_predictions, style='Accent.TButton').pack(side='left', padx=5)
+        ttk.Button(button_frame3, text="📥 Export to CSV",
+                   command=self._export_predictions).pack(side='left', padx=5)
+
+        # Progress bar
+        self.pred_progress = ttk.Progressbar(step3_frame, mode='determinate', length=400)
+        self.pred_progress.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+
+        # Status label
+        self.pred_status = ttk.Label(step3_frame, text="Ready", style='Caption.TLabel')
+        self.pred_status.grid(row=2, column=0, columnspan=2)
+
+        # === Step 4: View Results ===
+        step4_frame = ttk.LabelFrame(content_frame, text="Step 4: View Predictions", padding="20")
+        step4_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=20, pady=10)
+        content_frame.grid_rowconfigure(row, weight=1)
+        row += 1
+
+        # Predictions table
+        ttk.Label(step4_frame, text="Prediction Results:", style='Subheading.TLabel').grid(
+            row=0, column=0, sticky=tk.W, pady=(0, 5))
+
+        tree_frame = ttk.Frame(step4_frame)
+        tree_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        step4_frame.grid_rowconfigure(1, weight=1)
+        step4_frame.grid_columnconfigure(0, weight=1)
+
+        self.predictions_tree = ttk.Treeview(tree_frame, height=12, show='headings')
+        self.predictions_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Scrollbars for treeview
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.predictions_tree.yview)
+        vsb.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.predictions_tree.configure(yscrollcommand=vsb.set)
+
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.predictions_tree.xview)
+        hsb.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        self.predictions_tree.configure(xscrollcommand=hsb.set)
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        # Statistics display
+        ttk.Label(step4_frame, text="Statistics:", style='Subheading.TLabel').grid(
+            row=2, column=0, sticky=tk.W, pady=(15, 5))
+
+        stats_text_frame = ttk.Frame(step4_frame)
+        stats_text_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=5)
+
+        self.pred_stats_text = tk.Text(stats_text_frame, height=10, width=90,
+                                       font=('Consolas', 9),
+                                       bg='#FAFAFA', fg=self.colors['text'],
+                                       wrap=tk.WORD, state='disabled')
+        self.pred_stats_text.pack(side='left', fill='both', expand=True)
+
+        stats_scrollbar = ttk.Scrollbar(stats_text_frame, orient='vertical',
+                                       command=self.pred_stats_text.yview)
+        stats_scrollbar.pack(side='right', fill='y')
+        self.pred_stats_text.config(yscrollcommand=stats_scrollbar.set)
+
+    def _load_model_for_prediction(self):
+        """Browse and load a .dasp model file."""
+        filepath = filedialog.askopenfilename(
+            title="Select DASP Model File",
+            filetypes=[("DASP Model", "*.dasp"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            from spectral_predict.model_io import load_model
+
+            # Load the model
+            model_dict = load_model(filepath)
+
+            # Add file information
+            model_dict['filepath'] = filepath
+            model_dict['filename'] = Path(filepath).name
+
+            # Add to loaded models list
+            self.loaded_models.append(model_dict)
+
+            # Update display
+            self._update_loaded_models_display()
+
+            messagebox.showinfo("Success",
+                f"Model loaded successfully:\n{Path(filepath).name}")
+
+        except Exception as e:
+            messagebox.showerror("Load Error",
+                f"Failed to load model:\n{str(e)}")
+
+    def _update_loaded_models_display(self):
+        """Update the list of loaded models display."""
+        self.loaded_models_text.config(state='normal')
+        self.loaded_models_text.delete('1.0', 'end')
+
+        if not self.loaded_models:
+            self.loaded_models_text.insert('1.0', "No models loaded. Click 'Load Model File' to add models.")
+        else:
+            for i, model_dict in enumerate(self.loaded_models, 1):
+                metadata = model_dict['metadata']
+
+                # Extract key information
+                model_name = metadata.get('model_name', 'Unknown')
+                preprocessing = metadata.get('preprocessing', 'Unknown')
+                n_vars = metadata.get('n_vars', 'Unknown')
+
+                # Performance metrics
+                perf = metadata.get('performance', {})
+                r2 = perf.get('R2', perf.get('R2_cv', 'N/A'))
+                rmse = perf.get('RMSE', perf.get('RMSE_cv', 'N/A'))
+
+                # Format R2 and RMSE
+                if isinstance(r2, (int, float)):
+                    r2_str = f"{r2:.4f}"
+                else:
+                    r2_str = str(r2)
+
+                if isinstance(rmse, (int, float)):
+                    rmse_str = f"{rmse:.4f}"
+                else:
+                    rmse_str = str(rmse)
+
+                filename = model_dict.get('filename', 'Unknown')
+
+                # Build display text
+                text = f"[{i}] {filename}\n"
+                text += f"    Model: {model_name}  |  Preprocessing: {preprocessing}\n"
+                text += f"    R²: {r2_str}  |  RMSE: {rmse_str}  |  Variables: {n_vars}\n"
+                text += f"    Path: {model_dict.get('filepath', 'Unknown')}\n"
+                text += "\n"
+
+                self.loaded_models_text.insert('end', text)
+
+        self.loaded_models_text.config(state='disabled')
+
+    def _clear_loaded_models(self):
+        """Clear all loaded models."""
+        if self.loaded_models:
+            response = messagebox.askyesno("Confirm Clear",
+                f"Clear all {len(self.loaded_models)} loaded model(s)?")
+            if response:
+                self.loaded_models = []
+                self._update_loaded_models_display()
+                messagebox.showinfo("Cleared", "All models have been cleared.")
+        else:
+            messagebox.showinfo("No Models", "No models are currently loaded.")
+
+    def _browse_prediction_data(self):
+        """Browse for spectral data directory or CSV file."""
+        source = self.pred_data_source.get()
+
+        if source == 'directory':
+            path = filedialog.askdirectory(title="Select Spectral Data Directory")
+        else:  # csv
+            path = filedialog.askopenfilename(
+                title="Select CSV File",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+
+        if path:
+            self.pred_data_path.set(path)
+
+    def _load_prediction_data(self):
+        """Load spectral data for predictions."""
+        path_str = self.pred_data_path.get()
+
+        if not path_str:
+            messagebox.showerror("No Path", "Please select a data source first.")
+            return
+
+        path = Path(path_str)
+
+        if not path.exists():
+            messagebox.showerror("Path Error", f"Path does not exist:\n{path_str}")
+            return
+
+        source = self.pred_data_source.get()
+
+        try:
+            from spectral_predict.io import read_asd_dir, read_spc_dir, read_csv_spectra
+
+            if source == 'directory':
+                # Try to detect file type
+                asd_files = list(path.glob("*.asd"))
+                spc_files = list(path.glob("*.spc"))
+
+                if asd_files:
+                    self.pred_status.config(text="Loading ASD files...")
+                    self.root.update()
+                    self.prediction_data = read_asd_dir(str(path))
+                elif spc_files:
+                    self.pred_status.config(text="Loading SPC files...")
+                    self.root.update()
+                    self.prediction_data = read_spc_dir(str(path))
+                else:
+                    messagebox.showerror("No Files",
+                        "No ASD or SPC files found in the selected directory.")
+                    return
+            else:  # csv
+                self.pred_status.config(text="Loading CSV file...")
+                self.root.update()
+                self.prediction_data = read_csv_spectra(str(path))
+
+            # Update status
+            n_samples = len(self.prediction_data)
+            n_wavelengths = len(self.prediction_data.columns)
+
+            self.pred_data_status.config(
+                text=f"✓ Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
+            )
+
+            messagebox.showinfo("Success",
+                f"Data loaded successfully:\n{n_samples} spectra\n{n_wavelengths} wavelengths")
+
+        except Exception as e:
+            messagebox.showerror("Load Error",
+                f"Failed to load data:\n{str(e)}")
+            self.pred_data_status.config(text="Load failed")
+
+    def _run_predictions(self):
+        """Apply all loaded models to prediction data."""
+        # Validate inputs
+        if not self.loaded_models:
+            messagebox.showerror("No Models",
+                "Please load at least one model first.")
+            return
+
+        if self.prediction_data is None:
+            messagebox.showerror("No Data",
+                "Please load prediction data first.")
+            return
+
+        try:
+            from spectral_predict.model_io import predict_with_model
+
+            # Initialize results dataframe
+            results = pd.DataFrame()
+            results['Sample'] = self.prediction_data.index
+
+            # Setup progress bar
+            self.pred_progress['maximum'] = len(self.loaded_models)
+            self.pred_progress['value'] = 0
+
+            # Apply each model
+            successful_models = 0
+            for i, model_dict in enumerate(self.loaded_models):
+                metadata = model_dict['metadata']
+                model_name = metadata.get('model_name', 'Unknown')
+                preprocessing = metadata.get('preprocessing', 'raw')
+                filename = model_dict.get('filename', f'Model_{i+1}')
+
+                # Update status
+                self.pred_status.config(text=f"Running {filename}...")
+                self.root.update()
+
+                try:
+                    # Make predictions
+                    predictions = predict_with_model(
+                        model_dict,
+                        self.prediction_data,
+                        validate_wavelengths=True
+                    )
+
+                    # Store predictions with descriptive column name
+                    col_name = f"{model_name}_{preprocessing}"
+
+                    # Handle duplicate column names
+                    counter = 1
+                    original_col_name = col_name
+                    while col_name in results.columns:
+                        col_name = f"{original_col_name}_{counter}"
+                        counter += 1
+
+                    results[col_name] = predictions
+                    successful_models += 1
+
+                except Exception as e:
+                    error_msg = f"Model '{filename}' failed:\n{str(e)}"
+                    print(error_msg)  # Log to console
+                    # Continue with other models
+
+                # Update progress
+                self.pred_progress['value'] = i + 1
+                self.root.update()
+
+            # Store results
+            self.predictions_df = results
+
+            # Display results
+            self._display_predictions()
+
+            # Update status
+            if successful_models == len(self.loaded_models):
+                self.pred_status.config(text=f"✓ Complete! {successful_models} models applied successfully.")
+            else:
+                failed = len(self.loaded_models) - successful_models
+                self.pred_status.config(
+                    text=f"⚠ Complete with warnings: {successful_models} succeeded, {failed} failed."
+                )
+
+            messagebox.showinfo("Predictions Complete",
+                f"Successfully applied {successful_models} of {len(self.loaded_models)} models.\n"
+                f"Results are displayed below.")
+
+        except Exception as e:
+            messagebox.showerror("Prediction Error",
+                f"An error occurred during predictions:\n{str(e)}")
+            self.pred_status.config(text="Error occurred")
+
+    def _display_predictions(self):
+        """Display predictions in treeview table."""
+        # Clear existing items
+        for item in self.predictions_tree.get_children():
+            self.predictions_tree.delete(item)
+
+        if self.predictions_df is None or self.predictions_df.empty:
+            return
+
+        # Set columns
+        columns = list(self.predictions_df.columns)
+        self.predictions_tree['columns'] = columns
+
+        # Configure column headings and widths
+        for col in columns:
+            self.predictions_tree.heading(col, text=col)
+            if col == 'Sample':
+                self.predictions_tree.column(col, width=150, anchor='w')
+            else:
+                self.predictions_tree.column(col, width=120, anchor='e')
+
+        # Populate rows
+        for idx, row in self.predictions_df.iterrows():
+            values = []
+            for col in columns:
+                val = row[col]
+                # Format numeric values
+                if isinstance(val, (int, float)) and col != 'Sample':
+                    values.append(f"{val:.4f}")
+                else:
+                    values.append(str(val))
+
+            self.predictions_tree.insert('', 'end', values=values)
+
+        # Calculate and display statistics
+        self._update_prediction_statistics()
+
+    def _update_prediction_statistics(self):
+        """Calculate and display prediction statistics."""
+        if self.predictions_df is None or self.predictions_df.empty:
+            return
+
+        self.pred_stats_text.config(state='normal')
+        self.pred_stats_text.delete('1.0', 'end')
+
+        stats_text = "Prediction Statistics:\n"
+        stats_text += "=" * 60 + "\n\n"
+
+        # Calculate stats for each prediction column (skip 'Sample' column)
+        prediction_cols = [col for col in self.predictions_df.columns if col != 'Sample']
+
+        if not prediction_cols:
+            stats_text += "No prediction columns found.\n"
+        else:
+            for col in prediction_cols:
+                values = self.predictions_df[col].dropna()
+
+                if len(values) > 0:
+                    stats_text += f"{col}:\n"
+                    stats_text += f"  Count: {len(values)}\n"
+                    stats_text += f"  Mean:  {values.mean():.4f}\n"
+                    stats_text += f"  Std:   {values.std():.4f}\n"
+                    stats_text += f"  Min:   {values.min():.4f}\n"
+                    stats_text += f"  Max:   {values.max():.4f}\n"
+                    stats_text += f"  Median:{values.median():.4f}\n"
+                    stats_text += "\n"
+
+        self.pred_stats_text.insert('1.0', stats_text)
+        self.pred_stats_text.config(state='disabled')
+
+    def _export_predictions(self):
+        """Export predictions to CSV file."""
+        if self.predictions_df is None or self.predictions_df.empty:
+            messagebox.showerror("No Predictions",
+                "No predictions to export. Run predictions first.")
+            return
+
+        # Generate default filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        default_filename = f"predictions_{timestamp}.csv"
+
+        # Ask user for save location
+        filepath = filedialog.asksaveasfilename(
+            title="Export Predictions",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=default_filename
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Export to CSV
+            self.predictions_df.to_csv(filepath, index=False)
+
+            messagebox.showinfo("Export Successful",
+                f"Predictions exported to:\n{filepath}\n\n"
+                f"{len(self.predictions_df)} samples exported.")
+
+        except Exception as e:
+            messagebox.showerror("Export Error",
+                f"Failed to export predictions:\n{str(e)}")
 
 
 def main():

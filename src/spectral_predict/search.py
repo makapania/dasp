@@ -310,7 +310,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                     if not enable_variable_subsets:
                         print(f"  ⊗ Skipping subset analysis for {model_name} (variable subsets disabled)")
                     else:
-                        print(f"  → Computing feature importances for {model_name} subset analysis...")
+                        print(f"  -> Computing feature importances for {model_name} subset analysis...")
 
                         # Refit on full data to get importances
                         pipe_steps = build_preprocessing_pipeline(
@@ -358,15 +358,15 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                             # Only test counts that are less than total features
                             valid_variable_counts = [n for n in user_variable_counts if n < n_features_for_validation]
 
-                            print(f"  → User variable counts: {user_variable_counts}")
-                            print(f"  → Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}")
+                            print(f"  -> User variable counts: {user_variable_counts}")
+                            print(f"  -> Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}")
 
                             if not valid_variable_counts:
                                 print(f"  ⚠ Warning: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
 
                             # Run subsets with user-selected counts
                             for n_top in valid_variable_counts:
-                                print(f"  → Testing top-{n_top} variable subset...")
+                                print(f"  -> Testing top-{n_top} variable subset...")
                                 # Select top N most important features based on preprocessed importances
                                 top_indices = np.argsort(importances)[-n_top:][::-1]
 
@@ -416,7 +416,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                 # For derivatives: use preprocessed data to avoid reapplying preprocessing
                 # For raw/SNV: use raw data and reapply preprocessing
                 if enable_region_subsets and len(region_subsets) > 0:
-                    print(f"  → Testing {len(region_subsets)} region-based subsets...")
+                    print(f"  -> Testing {len(region_subsets)} region-based subsets...")
                     for region_subset in region_subsets:
                         if preprocess_cfg["deriv"] is not None:
                             # For derivatives: use preprocessed data, skip reprocessing
@@ -652,7 +652,23 @@ def _run_single_config(
                 fitted_model, model_name, X_transformed, y
             )
 
-            # Get top N features
+            # For subset models: save ALL wavelengths used (not just top 30)
+            # This fixes the variable count mismatch when loading models for refinement
+            if subset_tag != "full" and subset_indices is not None:
+                # Save ALL wavelengths used in the subset model
+                all_indices = np.arange(len(importances))
+                if subset_indices is not None:
+                    original_wavelengths_all = wavelengths[subset_indices]
+                    all_wavelengths = original_wavelengths_all[all_indices]
+                else:
+                    all_wavelengths = wavelengths[all_indices]
+
+                all_vars_str = ','.join([f"{w:.1f}" for w in all_wavelengths])
+                result['all_vars'] = all_vars_str
+            else:
+                result['all_vars'] = 'N/A'
+
+            # Get top N features for display purposes (always top 30)
             n_to_select = min(top_n_vars, len(importances))
             top_indices = np.argsort(importances)[-n_to_select:][::-1]
 
@@ -672,8 +688,10 @@ def _run_single_config(
         except Exception as e:
             # If anything fails, just mark as N/A
             result['top_vars'] = 'N/A'
+            result['all_vars'] = 'N/A'
     else:
         # For models that don't support importance extraction
         result['top_vars'] = 'N/A'
+        result['all_vars'] = 'N/A'
 
     return result

@@ -6,7 +6,20 @@
       "Bash(python:*)",
       "Bash(dir:*)",
       "Bash(findstr:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(.venvScriptspython.exe -m pytest tests/test_variable_count_fix.py -v)",
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_variable_count_fix.py -v)",
+      "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(pip install:*)",
+      "Bash(cat:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_model_io.py -v)",
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_end_to_end_workflow.py -v)",
+      "Bash(where:*)",
+      "Bash(if [ -f \".venv/Scripts/activate\" ])",
+      "Bash(then echo \"venv found\")",
+      "Bash(else echo \"venv not found\")",
+      "Bash(fi)"
     ],
     "deny": [],
     "ask": []

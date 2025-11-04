@@ -144,7 +144,7 @@ def create_results_dataframe(task_type):
     else:
         metric_cols = ["Accuracy", "ROC_AUC"]
 
-    all_cols = common_cols + metric_cols + ["top_vars", "CompositeScore", "Rank"]
+    all_cols = common_cols + metric_cols + ["top_vars", "all_vars", "CompositeScore", "Rank"]
 
     return pd.DataFrame(columns=all_cols)
 
