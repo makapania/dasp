@@ -14,6 +14,7 @@ from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result
 from .regions import create_region_subsets, format_region_report
+from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection
 
 
 def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
@@ -21,7 +22,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                enable_variable_subsets=True, variable_counts=None,
                enable_region_subsets=True, n_top_regions=5, progress_callback=None,
-               variable_selection_method='importance', apply_uve_prefilter=False,
+               variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20):
     """
@@ -61,9 +62,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         - 'current': Current item number
         - 'total': Total items
         - 'best_model': Best model found so far (dict with RMSE/R2 or Acc/AUC)
-    variable_selection_method : str, default='importance'
-        Placeholder for future feature-selection strategy integration
-        ('importance', 'spa', 'uve', 'uve_spa', 'ipls'). Currently informational.
+    variable_selection_methods : list of str or None, default=None
+        List of variable selection methods to use. Can include multiple methods:
+        'importance', 'spa', 'uve', 'uve_spa', 'ipls'. If None, defaults to ['importance'].
+        Note: Currently only 'importance' is implemented; others are placeholders.
     apply_uve_prefilter : bool, default=False
         Placeholder flag indicating whether to run a UVE prefilter step.
     uve_cutoff_multiplier : float, default=1.0
@@ -89,13 +91,24 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     # Create results container
     df_results = create_results_dataframe(task_type)
 
-    # NOTE: Advanced variable selection hooks are not yet implemented in this core search.
-    # When the GUI requests alternative strategies, provide a gentle notice so users know
-    # the request is being acknowledged even though the default importance-based workflow
-    # is still applied.
-    if variable_selection_method not in (None, '', 'importance'):
-        print(f"Info: variable_selection_method='{variable_selection_method}' is not yet "
-              "implemented in the Python backend. Continuing with importance-based subsets.")
+    # Handle variable selection methods (support multiple methods)
+    if variable_selection_methods is None or not variable_selection_methods:
+        variable_selection_methods = ['importance']
+
+    # Filter to only implemented methods
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls']  # All methods now functional
+    selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
+
+    # Warn about unimplemented methods
+    unimplemented = [m for m in variable_selection_methods if m not in implemented_methods]
+    if unimplemented:
+        print(f"Info: Variable selection methods {unimplemented} are not yet implemented.")
+        print(f"      Continuing with implemented methods: {selected_methods}")
+
+    # Ensure at least one method is selected
+    if not selected_methods:
+        selected_methods = ['importance']
+        print("Info: No implemented methods selected. Defaulting to 'importance'.")
     if apply_uve_prefilter or uve_n_components or uve_cutoff_multiplier != 1.0:
         print("Info: UVE prefilter parameters are currently placeholders in the Python backend.")
     if spa_n_random_starts != 10:
@@ -369,78 +382,129 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                         else:
                             X_transformed = X_np
 
-                        # Get importances computed on preprocessed data
-                        try:
-                            importances = get_feature_importances(
-                                fitted_model, model_name, X_transformed, y_np
-                            )
-
-                            # Use user-specified variable counts, or default if not provided
-                            if variable_counts is None:
-                                user_variable_counts = [10, 20, 50, 100, 250, 500, 1000]
-                            else:
-                                user_variable_counts = variable_counts
-
-                            # For validation, use the feature count from the PREPROCESSED data
-                            # (derivatives reduce feature count, so use transformed shape)
-                            n_features_for_validation = X_transformed.shape[1]
-
-                            # Only test counts that are less than total features
-                            valid_variable_counts = [n for n in user_variable_counts if n < n_features_for_validation]
-
-                            print(f"  -> User variable counts: {user_variable_counts}")
-                            print(f"  -> Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}")
-
-                            if not valid_variable_counts:
-                                print(f"  ⚠ Warning: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
-
-                            # Run subsets with user-selected counts
-                            for n_top in valid_variable_counts:
-                                print(f"  -> Testing top-{n_top} variable subset...")
-                                # Select top N most important features based on preprocessed importances
-                                top_indices = np.argsort(importances)[-n_top:][::-1]
-
-                                # For derivative preprocessing: importances are computed on transformed features
-                                # We must use the TRANSFORMED data and skip reapplying preprocessing
-                                # Otherwise window size (e.g., 17) > n_features (e.g., 10) causes errors
-                                if preprocess_cfg["deriv"] is not None:
-                                    # Use preprocessed data, skip reprocessing
-                                    # Keep original preprocess_cfg for correct labeling in results
-                                    subset_result = _run_single_config(
-                                        X_transformed,
-                                        y_np,
-                                        wavelengths,
-                                        model,
-                                        model_name,
-                                        params,
-                                        preprocess_cfg,  # Keep original config for labeling
-                                        cv_splitter,
-                                        task_type,
-                                        is_binary_classification,
-                                        subset_indices=top_indices,
-                                        subset_tag=f"top{n_top}",
-                                        skip_preprocessing=True,  # Flag to skip reapplying
+                        # Loop over each selected variable selection method
+                        for varsel_method in selected_methods:
+                            # Get importances computed on preprocessed data
+                            try:
+                                if varsel_method == 'importance':
+                                    importances = get_feature_importances(
+                                        fitted_model, model_name, X_transformed, y_np
                                     )
+
+                                elif varsel_method == 'spa':
+                                    # SPA: Successive Projections Algorithm - reduces collinearity
+                                    # Select minimally correlated variables
+                                    n_to_select = min(n_top, n_features_for_validation)
+                                    importances = spa_selection(
+                                        X_transformed, y_np,
+                                        n_features=n_to_select,
+                                        n_random_starts=spa_n_random_starts,
+                                        cv_folds=folds
+                                    )
+
+                                elif varsel_method == 'uve':
+                                    # UVE: Uninformative Variable Elimination - filters noise
+                                    importances = uve_selection(
+                                        X_transformed, y_np,
+                                        cutoff_multiplier=uve_cutoff_multiplier,
+                                        n_components=uve_n_components,
+                                        cv_folds=folds
+                                    )
+
+                                elif varsel_method == 'uve_spa':
+                                    # UVE-SPA: Hybrid method - filters noise then reduces collinearity
+                                    n_to_select = min(n_top, n_features_for_validation)
+                                    importances = uve_spa_selection(
+                                        X_transformed, y_np,
+                                        n_features=n_to_select,
+                                        cutoff_multiplier=uve_cutoff_multiplier,
+                                        uve_n_components=uve_n_components,
+                                        uve_cv_folds=folds,
+                                        spa_n_random_starts=spa_n_random_starts,
+                                        spa_cv_folds=folds
+                                    )
+
+                                elif varsel_method == 'ipls':
+                                    # iPLS: Interval PLS - selects based on spectral regions
+                                    importances = ipls_selection(
+                                        X_transformed, y_np,
+                                        n_intervals=ipls_n_intervals,
+                                        n_components=uve_n_components,
+                                        cv_folds=folds
+                                    )
+
                                 else:
-                                    # For raw/SNV: indices map to original wavelengths, can reapply preprocessing
-                                    subset_result = _run_single_config(
-                                        X_np,
-                                        y_np,
-                                        wavelengths,
-                                        model,
-                                        model_name,
-                                        params,
-                                        preprocess_cfg,
-                                        cv_splitter,
-                                        task_type,
-                                        is_binary_classification,
-                                        subset_indices=top_indices,
-                                        subset_tag=f"top{n_top}",
-                                    )
-                                df_results = add_result(df_results, subset_result)
+                                    # This shouldn't happen due to filtering, but handle gracefully
+                                    print(f"  -> Skipping unimplemented method '{varsel_method}'")
+                                    continue
 
-                        except Exception as e:
-                            print(f"Warning: Could not compute importances for {model_name}: {e}")
+                                # Use user-specified variable counts, or default if not provided
+                                if variable_counts is None:
+                                    user_variable_counts = [10, 20, 50, 100, 250, 500, 1000]
+                                else:
+                                    user_variable_counts = variable_counts
+
+                                # For validation, use the feature count from the PREPROCESSED data
+                                # (derivatives reduce feature count, so use transformed shape)
+                                n_features_for_validation = X_transformed.shape[1]
+
+                                # Only test counts that are less than total features
+                                valid_variable_counts = [n for n in user_variable_counts if n < n_features_for_validation]
+
+                                print(f"  -> User variable counts: {user_variable_counts}")
+                                print(f"  -> Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}")
+                                print(f"  -> Variable selection method: {varsel_method}")
+
+                                if not valid_variable_counts:
+                                    print(f"  ⚠ Warning: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
+
+                                # Run subsets with user-selected counts
+                                for n_top in valid_variable_counts:
+                                    print(f"  -> Testing top-{n_top} variable subset (method: {varsel_method})...")
+                                    # Select top N most important features based on preprocessed importances
+                                    top_indices = np.argsort(importances)[-n_top:][::-1]
+
+                                    # For derivative preprocessing: importances are computed on transformed features
+                                    # We must use the TRANSFORMED data and skip reapplying preprocessing
+                                    # Otherwise window size (e.g., 17) > n_features (e.g., 10) causes errors
+                                    if preprocess_cfg["deriv"] is not None:
+                                        # Use preprocessed data, skip reprocessing
+                                        # Keep original preprocess_cfg for correct labeling in results
+                                        subset_result = _run_single_config(
+                                            X_transformed,
+                                            y_np,
+                                            wavelengths,
+                                            model,
+                                            model_name,
+                                            params,
+                                            preprocess_cfg,  # Keep original config for labeling
+                                            cv_splitter,
+                                            task_type,
+                                            is_binary_classification,
+                                            subset_indices=top_indices,
+                                            subset_tag=f"top{n_top}_{varsel_method}",
+                                            skip_preprocessing=True,  # Flag to skip reapplying
+                                        )
+                                    else:
+                                        # For raw/SNV: indices map to original wavelengths, can reapply preprocessing
+                                        subset_result = _run_single_config(
+                                            X_np,
+                                            y_np,
+                                            wavelengths,
+                                            model,
+                                            model_name,
+                                            params,
+                                            preprocess_cfg,
+                                            cv_splitter,
+                                            task_type,
+                                            is_binary_classification,
+                                            subset_indices=top_indices,
+                                            subset_tag=f"top{n_top}_{varsel_method}",
+                                        )
+                                    df_results = add_result(df_results, subset_result)
+
+                            except Exception as e:
+                                print(f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}")
 
                 # Run region-based subsets for ALL models (not just PLS/RF/MLP/NeuralBoosted)
                 # For derivatives: use preprocessed data to avoid reapplying preprocessing
