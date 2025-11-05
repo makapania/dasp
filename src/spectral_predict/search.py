@@ -738,6 +738,38 @@ def _run_single_config(
         "SubsetTag": subset_tag,
     }
 
+    # Extract individual hyperparameters for easier viewing in GUI
+    # These will appear as separate columns in the results table
+
+    # Ridge/Lasso: alpha (regularization strength)
+    if "alpha" in params:
+        result["Alpha"] = params["alpha"]
+
+    # RandomForest: n_estimators and max_depth
+    if "n_estimators" in params:
+        result["n_estimators"] = params["n_estimators"]
+    if "max_depth" in params:
+        result["max_depth"] = params["max_depth"] if params["max_depth"] is not None else "None"
+
+    # MLP: hidden_layer_sizes, alpha, learning_rate_init
+    if "hidden_layer_sizes" in params:
+        # Convert tuple to readable string (e.g., (64,) -> "64", (128,64) -> "128-64")
+        hidden = params["hidden_layer_sizes"]
+        if isinstance(hidden, tuple):
+            result["Hidden"] = "-".join(map(str, hidden))
+        else:
+            result["Hidden"] = str(hidden)
+    if "learning_rate_init" in params:
+        result["LR_init"] = params["learning_rate_init"]
+
+    # NeuralBoosted: n_estimators, learning_rate, hidden_layer_size, activation
+    if "learning_rate" in params:  # NeuralBoosted uses "learning_rate" not "learning_rate_init"
+        result["LearningRate"] = params["learning_rate"]
+    if "hidden_layer_size" in params:  # NeuralBoosted uses singular "hidden_layer_size"
+        result["HiddenSize"] = params["hidden_layer_size"]
+    if "activation" in params:
+        result["Activation"] = params["activation"]
+
     if task_type == "regression":
         result["RMSE"] = mean_rmse
         result["R2"] = mean_r2

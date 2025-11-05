@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spectral Predict — Modern GUI Mockup</title>
+  <style>
+    :root {
+      --bg-1: #0f0c29; /* deep navy */
+      --bg-2: #302b63; /* indigo */
+      --bg-3: #4b1c73; /* rich purple */
+      --accent-1: #7b2ff7; /* magenta-purple */
+      --accent-2: #f02fc2; /* neon magenta */
+      --accent-3: #00f5d4; /* mint teal */
+      --accent-4: #ff6a00; /* sunset orange */
+      --text-strong: #f8f9fb;
+      --text-muted: #b6b8c3;
+      --card-bg: rgba(255, 255, 255, 0.08);
+      --card-stroke: rgba(255, 255, 255, 0.18);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      color: var(--text-strong);
+      background:
+        radial-gradient(1200px 1200px at 12% 8%, rgba(255, 0, 128, 0.28), transparent 60%),
+        radial-gradient(1000px 1000px at 88% 92%, rgba(0, 240, 255, 0.22), transparent 60%),
+        linear-gradient(135deg, var(--bg-1) 0%, var(--bg-2) 50%, var(--bg-3) 100%);
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      grid-template-rows: 72px 48px 1fr;
+      min-height: 100vh;
+    }
+
+    .header {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      background: linear-gradient(135deg, rgba(123, 47, 247, 0.25), rgba(240, 47, 194, 0.25));
+      border-bottom: 1px solid var(--card-stroke);
+      backdrop-filter: saturate(130%) blur(8px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .brand .logo {
+      width: 36px; height: 36px; border-radius: 12px;
+      background: conic-gradient(from 210deg, var(--accent-1), var(--accent-2), var(--accent-3), var(--accent-4), var(--accent-1));
+      box-shadow: 0 8px 20px rgba(123, 47, 247, 0.35);
+    }
+    .brand .title { font-size: 18px; }
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+    .btn {
+      padding: 10px 14px; border-radius: 10px; border: 1px solid var(--card-stroke);
+      background: var(--card-bg); color: var(--text-strong);
+      cursor: pointer; transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+    .btn.primary { border: none; background: linear-gradient(135deg, var(--accent-1), var(--accent-2)); }
+
+    /* Top tabs to match left-to-right flow of original GUI */
+    .tabs {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--card-stroke);
+      backdrop-filter: saturate(130%) blur(6px);
+      background: linear-gradient(135deg, rgba(123, 47, 247, 0.12), rgba(0, 245, 212, 0.08));
+    }
+    .tabs a {
+      padding: 8px 12px;
+      border-radius: 10px;
+      text-decoration: none;
+      color: var(--text-strong);
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .tabs a:hover { background: rgba(255,255,255,0.08); border-color: var(--card-stroke); }
+    .tabs a.active { background: linear-gradient(135deg, rgba(123,47,247,0.24), rgba(240,47,194,0.24)); border-color: transparent; }
+
+    .sidebar {
+      grid-row: 3; display: flex; flex-direction: column; gap: 16px; padding: 18px;
+      border-right: 1px solid var(--card-stroke); backdrop-filter: saturate(130%) blur(6px);
+      background: linear-gradient(135deg, rgba(123, 47, 247, 0.12), rgba(0, 245, 212, 0.08));
+    }
+    .nav-group { display: flex; flex-direction: column; gap: 8px; }
+    .nav-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; }
+    .nav {
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .nav a {
+      padding: 10px 12px; border-radius: 10px; text-decoration: none; color: var(--text-strong);
+      border: 1px solid transparent; display: flex; align-items: center; gap: 10px;
+    }
+    .nav a:hover { background: rgba(255,255,255,0.08); border-color: var(--card-stroke); }
+    .nav a.active { background: linear-gradient(135deg, rgba(123,47,247,0.24), rgba(240,47,194,0.24)); border-color: transparent; }
+
+    .content {
+      grid-row: 3; padding: 24px; display: grid; gap: 24px;
+      grid-template-columns: repeat(12, 1fr);
+      grid-auto-flow: row;
+      grid-auto-rows: minmax(160px, auto);
+      align-items: start;
+      align-content: start;
+    }
+
+    /* Ensure hidden views truly collapse */
+    .content[hidden] { display: none !important; }
+
+    .section-title {
+      grid-column: 1 / -1; font-weight: 600; letter-spacing: 0.25px; opacity: 0.9; display: flex; align-items: center; gap: 10px;
+    }
+    .section-title .dot {
+      width: 8px; height: 8px; border-radius: 99px; background: linear-gradient(135deg, var(--accent-3), var(--accent-4)); box-shadow: 0 0 0 6px rgba(0,245,212,0.12);
+    }
+
+    .card {
+      grid-column: span 6; padding: 18px; border-radius: 16px; border: 1px solid var(--card-stroke);
+      background: var(--card-bg); box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+      backdrop-filter: blur(12px) saturate(130%);
+      position: relative; overflow: hidden; min-height: 160px;
+    }
+    .card h3 { margin: 0 0 12px 0; font-size: 16px; font-weight: 600; }
+    .sub { color: var(--text-muted); font-size: 13px; }
+
+    .field { display: grid; grid-template-columns: 140px 1fr auto; align-items: center; gap: 12px; margin: 10px 0; }
+    .field label { color: var(--text-muted); font-size: 13px; }
+    .input {
+      padding: 10px 12px; border-radius: 10px; border: 1px solid var(--card-stroke);
+      background: rgba(0,0,0,0.18); color: var(--text-strong);
+    }
+    .field .btn { justify-self: start; }
+    .chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .chip {
+      padding: 10px 12px; border-radius: 12px; border: 1px solid var(--card-stroke);
+      background: rgba(255,255,255,0.08); cursor: pointer; transition: all 120ms ease;
+    }
+    .chip.active { background: linear-gradient(135deg, rgba(123,47,247,0.25), rgba(240,47,194,0.22)); border-color: transparent; }
+
+    .kpi-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .kpi {
+      padding: 14px; border-radius: 14px; border: 1px solid var(--card-stroke); background: rgba(255,255,255,0.06);
+    }
+    .kpi .label { color: var(--text-muted); font-size: 12px; }
+    .kpi .value { font-size: 20px; font-weight: 700; }
+
+    .plot {
+      height: 280px; border-radius: 12px; border: 1px dashed rgba(255,255,255,0.22);
+      display: grid; place-items: center; overflow: hidden; position: relative;
+      background: linear-gradient(135deg, rgba(0,245,212,0.08), rgba(255,106,0,0.08));
+    }
+    .plot svg { width: 100%; height: 100%; opacity: 0.95; }
+    .plot .hint { position: absolute; bottom: 10px; right: 12px; color: var(--text-muted); font-size: 12px; }
+
+    .progress {
+      height: 12px; border-radius: 999px; background: rgba(255,255,255,0.12); overflow: hidden; border: 1px solid var(--card-stroke);
+    }
+    .progress > div { height: 100%; background: linear-gradient(90deg, var(--accent-1), var(--accent-2)); width: 42%; border-radius: 999px; }
+
+    /* Responsive */
+    @media (max-width: 1200px) { .card { grid-column: span 12; } }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      .sidebar { grid-column: 1; order: 2; }
+      .content { order: 3; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div class="title">Spectral Predict — Modern GUI Concept</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn">Theme</button>
+        <button class="btn primary">Start Analysis</button>
+      </div>
+    </header>
+
+    <!-- Horizontal tabs: left-to-right like the original GUI -->
+    <nav class="tabs">
+      <a href="#" class="active" data-view="import">Import & Preview</a>
+      <a href="#" data-view="quality">Data Quality Check</a>
+      <a href="#" data-view="config">Analysis Configuration</a>
+      <a href="#" data-view="progress">Analysis Progress</a>
+      <a href="#" data-view="results">Results</a>
+      <a href="#" data-view="refine">Custom Model Development</a>
+      <a href="#" data-view="predict">Model Prediction</a>
+    </nav>
+
+    <aside class="sidebar">
+      <div class="nav-group">
+        <div class="nav-label">Quick Actions</div>
+        <div class="chip-row">
+          <div class="chip">Load Example</div>
+          <div class="chip">Auto-Detect</div>
+          <div class="chip">Clear</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- IMPORT & PREVIEW -->
+    <main class="content" id="view-import" role="main">
+      <div class="section-title"><span class="dot"></span>Import & Preview</div>
+
+      <section class="card" style="grid-column: span 8;">
+        <h3>Data Sources</h3>
+        <div class="sub">Select paths and columns (mock inputs)</div>
+        <div class="field">
+          <label>Spectral Data</label>
+          <input class="input" placeholder="e.g., C:\\data\\spectra" />
+          <button class="btn">Browse</button>
+        </div>
+        <div class="field">
+          <label>Reference CSV</label>
+          <input class="input" placeholder="e.g., C:\\data\\reference.csv" />
+          <button class="btn">Browse</button>
+        </div>
+        <div class="field">
+          <label>File Column</label>
+          <input class="input" placeholder="spectral_file" />
+          <button class="btn">Map</button>
+        </div>
+        <div class="field">
+          <label>Sample ID</label>
+          <input class="input" placeholder="specimen_id" />
+          <button class="btn">Detect</button>
+        </div>
+        <div class="field">
+          <label>Target Column</label>
+          <input class="input" placeholder="target" />
+          <button class="btn">Detect</button>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: span 4;">
+        <h3>Wavelength Range</h3>
+        <div class="sub">Auto-fills after data load (mock)</div>
+        <div class="field" style="grid-template-columns: 100px 1fr 1fr;">
+          <label>Min</label>
+          <input class="input" placeholder="e.g., 350" />
+          <input class="input" placeholder="Max e.g., 2500" />
+        </div>
+        <div class="kpi-row">
+          <div class="kpi"><div class="label">Spectra</div><div class="value">50</div></div>
+          <div class="kpi"><div class="label">Samples</div><div class="value">50</div></div>
+          <div class="kpi"><div class="label">Wavelengths</div><div class="value">2,100</div></div>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: span 12;">
+        <h3>Spectral Preview</h3>
+        <div class="plot">
+          <!-- Inline SVG mock spectral lines -->
+          <svg viewBox="0 0 800 220" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="g1" x1="0" x2="1" y1="0" y2="0">
+                <stop offset="0%" stop-color="#7b2ff7" />
+                <stop offset="50%" stop-color="#f02fc2" />
+                <stop offset="100%" stop-color="#00f5d4" />
+              </linearGradient>
+            </defs>
+            <polyline fill="none" stroke="url(#g1)" stroke-width="2" points="
+              0,120 50,100 100,130 150,90 200,110 250,80 300,140 350,100 400,125 450,95
+              500,115 550,85 600,135 650,95 700,120 750,100 800,110" />
+            <polyline fill="none" opacity="0.5" stroke="#ff6a00" stroke-width="2" points="
+              0,140 50,120 100,150 150,110 200,130 250,100 300,160 350,120 400,145 450,115
+              500,135 550,105 600,155 650,115 700,140 750,120 800,130" />
+          </svg>
+          <div class="hint">Mock plot — for visual design only</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- DATA QUALITY CHECK -->
+    <main class="content" id="view-quality" hidden>
+      <div class="section-title"><span class="dot"></span>Data Quality Check</div>
+      <section class="card" style="grid-column: span 12;">
+        <h3>Outlier Detection</h3>
+        <div class="sub">Preview flagged samples and exclude them (mock)</div>
+        <div class="chip-row">
+          <div class="chip">Detect</div>
+          <div class="chip">Exclude Selected</div>
+          <div class="chip">Reset</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ANALYSIS CONFIGURATION (merged Models + Variable Selection + Preprocessing) -->
+    <main class="content" id="view-config" hidden>
+      <div class="section-title"><span class="dot"></span>Analysis Configuration</div>
+
+      <section class="card" style="grid-column: span 6;">
+        <h3>General Settings</h3>
+        <div class="field"><label>Output Dir</label><input class="input" placeholder="outputs" /><button class="btn">Browse</button></div>
+        <div class="field"><label>CV Folds</label><input class="input" placeholder="5" /><button class="btn">Suggest</button></div>
+        <div class="field"><label>Show Progress</label><input class="input" placeholder="true" /><button class="btn">Toggle</button></div>
+      </section>
+
+      <section class="card" style="grid-column: span 6;">
+        <h3>Preprocessing Methods</h3>
+        <div class="sub">Select multiple: Raw, SNV, MSC, SG1, SG2</div>
+        <div class="chip-row">
+          <div class="chip">Raw</div>
+          <div class="chip active">SNV</div>
+          <div class="chip">MSC</div>
+          <div class="chip active">SG1</div>
+          <div class="chip active">SG2</div>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: span 6;">
+        <h3>Derivative Settings</h3>
+        <div class="field"><label>Orders to test</label><input class="input" placeholder="1, 2" /><button class="btn">Guide</button></div>
+        <div class="field"><label>Window</label><input class="input" placeholder="11, 17" /><button class="btn">Suggest</button></div>
+        <div class="field"><label>Polyorder</label><input class="input" placeholder="2 or 3" /><button class="btn">Suggest</button></div>
+        <div class="chip-row">
+          <div class="chip">SNV → Deriv</div>
+          <div class="chip">Deriv → SNV</div>
+          <div class="chip">MSC → Deriv</div>
+          <div class="chip">Deriv → MSC</div>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: span 7;">
+        <h3>Models to Test</h3>
+        <div class="chip-row">
+          <div class="chip active">PLS</div>
+          <div class="chip active">Random Forest</div>
+          <div class="chip">MLP</div>
+          <div class="chip">Neural Boosted</div>
+          <div class="chip">Ridge</div>
+          <div class="chip">Lasso</div>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: span 5;">
+        <h3>Variable Selection</h3>
+        <div class="chip-row">
+          <div class="chip">Importance</div>
+          <div class="chip">SPA</div>
+          <div class="chip">UVE</div>
+          <div class="chip">iPLS</div>
+          <div class="chip">UVE‑SPA</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- CUSTOM MODEL DEVELOPMENT -->
+    <main class="content" id="view-refine" hidden>
+      <div class="section-title"><span class="dot"></span>Custom Model Development</div>
+      <section class="card" style="grid-column: span 6;">
+        <h3>Refinement Parameters</h3>
+        <div class="field"><label>Wavelengths</label><input class="input" placeholder="e.g., 1920, 1930-1940" /><button class="btn">Presets</button></div>
+        <div class="field"><label>Preprocessing</label><input class="input" placeholder="raw, snv, sg1, msc_sg2" /><button class="btn">Guide</button></div>
+        <div class="field"><label>CV Folds</label><input class="input" placeholder="5" /><button class="btn">Suggest</button></div>
+        <div class="field"><label>Max Iterations</label><input class="input" placeholder="100" /><button class="btn">Auto</button></div>
+      </section>
+      <section class="card" style="grid-column: span 6;">
+        <h3>Run & Save</h3>
+        <div class="chip-row"><div class="chip">Run Refined Model</div><div class="chip">Save Model</div></div>
+      </section>
+    </main>
+
+    <!-- RESULTS -->
+    <main class="content" id="view-results" hidden>
+      <div class="section-title"><span class="dot"></span>Results</div>
+      <section class="card" style="grid-column: span 6;">
+        <h3>Save/Load Models</h3>
+        <div class="chip-row">
+          <div class="chip">Save .dasp</div>
+          <div class="chip">Load .dasp</div>
+        </div>
+      </section>
+      <section class="card" style="grid-column: span 6;">
+        <h3>Export</h3>
+        <div class="chip-row">
+          <div class="chip">Export CSV</div>
+          <div class="chip">Export JSON</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- MODEL PREDICTION -->
+    <main class="content" id="view-predict" hidden>
+      <div class="section-title"><span class="dot"></span>Model Prediction</div>
+      <section class="card" style="grid-column: span 12;">
+        <h3>Load Models and Data</h3>
+        <div class="field"><label>Models (.dasp)</label><input class="input" placeholder="Select saved models" /><button class="btn">Browse</button></div>
+        <div class="field"><label>Prediction Data</label><input class="input" placeholder="e.g., C:\\data\\new.csv" /><button class="btn">Browse</button></div>
+        <div class="chip-row"><div class="chip">Run Predictions</div><div class="chip">Export CSV</div></div>
+      </section>
+    </main>
+
+    <!-- SETTINGS -->
+    <main class="content" id="view-settings" hidden>
+      <div class="section-title"><span class="dot"></span>Settings</div>
+      <section class="card" style="grid-column: span 6;">
+        <h3>General</h3>
+        <div class="field"><label>Output Dir</label><input class="input" placeholder="outputs" /><button class="btn">Browse</button></div>
+        <div class="field"><label>CV Folds</label><input class="input" placeholder="5" /><button class="btn">Suggest</button></div>
+        <div class="field"><label>Show Progress</label><input class="input" placeholder="true" /><button class="btn">Toggle</button></div>
+        <div class="field"><label>Interactive Preview</label><input class="input" placeholder="true" /><button class="btn">Toggle</button></div>
+      </section>
+      <section class="card" style="grid-column: span 6;">
+        <h3>Advanced</h3>
+        <div class="field"><label>Enable Julia Bridge</label><input class="input" placeholder="off" /><button class="btn">Info</button></div>
+        <div class="field"><label>Cache size</label><input class="input" placeholder="512MB" /><button class="btn">Auto</button></div>
+      </section>
+    </main>
+
+    <!-- PROGRESS -->
+    <main class="content" id="view-progress" hidden>
+      <div class="section-title"><span class="dot"></span>Analysis Progress</div>
+
+      <section class="card" style="grid-column: span 8;">
+        <h3>Live Monitor</h3>
+        <div class="progress"><div></div></div>
+        <div class="sub" style="margin-top:10px;">Mock progress bar — visual only</div>
+        <div class="kpi-row" style="margin-top:12px;">
+          <div class="kpi"><div class="label">Elapsed</div><div class="value">00:03:21</div></div>
+          <div class="kpi"><div class="label">Models</div><div class="value">4/6</div></div>
+          <div class="kpi"><div class="label">Status</div><div class="value">Running</div></div>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: span 4;">
+        <h3>Event Log</h3>
+        <div class="sub">Latest steps (mock)</div>
+        <ul style="margin:10px 0 0 0; padding-left: 18px; color: var(--text-muted);">
+          <li>Loaded spectra from folder</li>
+          <li>Parsed CSV — 50 samples</li>
+          <li>Applied SNV preprocessing</li>
+          <li>Training PLS (CV=5)</li>
+          <li>Evaluating Random Forest</li>
+        </ul>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    // Simple view toggler for top tabs — enforce single visible view
+    const links = document.querySelectorAll('.tabs a');
+    const views = {
+      import: document.getElementById('view-import'),
+      quality: document.getElementById('view-quality'),
+      config: document.getElementById('view-config'),
+      results: document.getElementById('view-results'),
+      progress: document.getElementById('view-progress'),
+      refine: document.getElementById('view-refine'),
+      predict: document.getElementById('view-predict'),
+    };
+
+    function showView(viewKey) {
+      Object.values(views).forEach(v => v.setAttribute('hidden', ''));
+      views[viewKey].removeAttribute('hidden');
+    }
+
+    // Init — ensure only the import view is visible
+    showView('import');
+
+    links.forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const view = link.dataset.view;
+        showView(view);
+        links.forEach(l => l.classList.remove('active'));
+        link.classList.add('active');
+      });
+    });
+  </script>
+</body>
+</html>

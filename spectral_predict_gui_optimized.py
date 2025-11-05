@@ -172,13 +172,16 @@ class SpectralPredictApp:
         self.window_11 = tk.BooleanVar(value=False)
         self.window_17 = tk.BooleanVar(value=True)
         self.window_19 = tk.BooleanVar(value=False)
+        self.custom_window_size = tk.StringVar(value="")  # Custom window size entry
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
         self.n_estimators_100 = tk.BooleanVar(value=True)  # Default
+        self.custom_n_estimators = tk.StringVar(value="")  # Custom n_estimators entry
         self.lr_005 = tk.BooleanVar(value=False)
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
+        self.custom_learning_rate = tk.StringVar(value="")  # Custom learning rate entry
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -660,6 +663,13 @@ class SpectralPredictApp:
         ttk.Checkbutton(window_frame, text="Window=17 ⭐", variable=self.window_17).grid(row=0, column=2, padx=5, pady=2)
         ttk.Checkbutton(window_frame, text="Window=19", variable=self.window_19).grid(row=0, column=3, padx=5, pady=2)
 
+        # Custom window size entry
+        custom_window_frame = ttk.Frame(preprocess_frame)
+        custom_window_frame.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=5)
+        ttk.Label(custom_window_frame, text="Custom:", style='Subheading.TLabel').grid(row=0, column=0, padx=(0, 5))
+        ttk.Entry(custom_window_frame, textvariable=self.custom_window_size, width=8).grid(row=0, column=1, padx=5)
+        ttk.Label(custom_window_frame, text="(odd number 5-51)", style='Caption.TLabel').grid(row=0, column=2, padx=5)
+
         # === Subset Analysis ===
         ttk.Label(content_frame, text="Subset Analysis", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
         row += 1
@@ -810,6 +820,11 @@ class SpectralPredictApp:
         ttk.Checkbutton(nest_frame, text="100 ⭐", variable=self.n_estimators_100).grid(row=0, column=1, padx=5)
         ttk.Label(nest_frame, text="(default: 100 only)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
 
+        # Custom n_estimators entry
+        ttk.Label(nest_frame, text="Custom:", style='Subheading.TLabel').grid(row=1, column=0, padx=(0, 5), pady=(5, 0))
+        ttk.Entry(nest_frame, textvariable=self.custom_n_estimators, width=8).grid(row=1, column=1, padx=5, pady=(5, 0))
+        ttk.Label(nest_frame, text="(positive integer)", style='Caption.TLabel').grid(row=1, column=2, padx=5, pady=(5, 0))
+
         # Learning rate options
         ttk.Label(advanced_frame, text="Learning rates:", style='Subheading.TLabel').grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
         lr_frame = ttk.Frame(advanced_frame)
@@ -818,6 +833,11 @@ class SpectralPredictApp:
         ttk.Checkbutton(lr_frame, text="0.1 ⭐", variable=self.lr_01).grid(row=0, column=1, padx=5)
         ttk.Checkbutton(lr_frame, text="0.2 ⭐", variable=self.lr_02).grid(row=0, column=2, padx=5)
         ttk.Label(lr_frame, text="(default: 0.1, 0.2)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        # Custom learning rate entry
+        ttk.Label(lr_frame, text="Custom:", style='Subheading.TLabel').grid(row=1, column=0, padx=(0, 5), pady=(5, 0))
+        ttk.Entry(lr_frame, textvariable=self.custom_learning_rate, width=8).grid(row=1, column=1, padx=5, pady=(5, 0))
+        ttk.Label(lr_frame, text="(0.001-1.0)", style='Caption.TLabel').grid(row=1, column=2, padx=5, pady=(5, 0))
 
         # Info label
         ttk.Label(advanced_frame, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
@@ -1194,6 +1214,22 @@ class SpectralPredictApp:
         residual_diagnostics_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
+        # Add explanatory text for residual diagnostics
+        residual_help_frame = ttk.Frame(residual_diagnostics_frame)
+        residual_help_frame.pack(fill='x', padx=10, pady=(5, 15))
+
+        residual_help_text = (
+            "Residuals Analysis: Good models show randomly scattered residuals around zero with no patterns.\n\n"
+            "• Residuals vs Fitted: Look for random scatter. Patterns (curves, funnels) indicate model issues.\n"
+            "• Residuals vs Index: Check for systematic trends across samples.\n"
+            "• Q-Q Plot: Points should follow the red diagonal line. Deviations suggest non-normal residuals.\n\n"
+            "✓ Good: Random scatter, points on diagonal | ⚠ Warning: Patterns, curved Q-Q plot"
+        )
+
+        residual_help_label = ttk.Label(residual_help_frame, text=residual_help_text,
+                                        style='Caption.TLabel', justify='left', wraplength=1200)
+        residual_help_label.pack(anchor='w')
+
         self.residual_diagnostics_frame = ttk.Frame(residual_diagnostics_frame)
         self.residual_diagnostics_frame.pack(fill='both', expand=True)
 
@@ -1205,6 +1241,22 @@ class SpectralPredictApp:
         leverage_frame = ttk.LabelFrame(content_frame, text="Influential Samples (Hat Values)", padding="20")
         leverage_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
+
+        # Add explanatory text for leverage diagnostics
+        leverage_help_frame = ttk.Frame(leverage_frame)
+        leverage_help_frame.pack(fill='x', padx=10, pady=(5, 15))
+
+        leverage_help_text = (
+            "Leverage Analysis: Identifies influential samples that strongly affect the model.\n\n"
+            "• Interpretation: High-leverage points (red, above threshold) have unusual feature values.\n"
+            "• Orange line (2p/n): Moderate influence | Red line (3p/n): High influence\n"
+            "  where p = number of model parameters, n = number of samples\n\n"
+            "✓ Good: Most points below orange line | ⚠ Warning: Many red points may indicate data quality issues"
+        )
+
+        leverage_help_label = ttk.Label(leverage_help_frame, text=leverage_help_text,
+                                        style='Caption.TLabel', justify='left', wraplength=1200)
+        leverage_help_label.pack(anchor='w')
 
         self.leverage_plot_frame = ttk.Frame(leverage_frame)
         self.leverage_plot_frame.pack(fill='both', expand=True)
@@ -2476,6 +2528,20 @@ class SpectralPredictApp:
             if self.window_19.get():
                 window_sizes.append(19)
 
+
+            # Add custom window size if provided
+            custom_win = self.custom_window_size.get().strip()
+            if custom_win:
+                try:
+                    custom_val = int(custom_win)
+                    if 5 <= custom_val <= 51 and custom_val % 2 == 1:  # Odd number in range
+                        if custom_val not in window_sizes:
+                            window_sizes.append(custom_val)
+                    else:
+                        self._log_progress(f"Warning: Custom window size {custom_val} must be odd and in range 5-51. Skipping.")
+                except ValueError:
+                    self._log_progress(f"Warning: Invalid custom window size ''{custom_win}''. Must be an integer. Skipping.")
+
             # Default to window size 17 if none specified
             if not window_sizes:
                 window_sizes = [17]
@@ -2486,6 +2552,20 @@ class SpectralPredictApp:
                 n_estimators_list.append(50)
             if self.n_estimators_100.get():
                 n_estimators_list.append(100)
+
+
+            # Add custom n_estimators if provided
+            custom_nest = self.custom_n_estimators.get().strip()
+            if custom_nest:
+                try:
+                    custom_val = int(custom_nest)
+                    if custom_val > 0:
+                        if custom_val not in n_estimators_list:
+                            n_estimators_list.append(custom_val)
+                    else:
+                        self._log_progress(f"Warning: Custom n_estimators {custom_val} must be positive. Skipping.")
+                except ValueError:
+                    self._log_progress(f"Warning: Invalid custom n_estimators ''{custom_nest}''. Must be an integer. Skipping.")
 
             # Default to 100 if none selected
             if not n_estimators_list:
@@ -2499,6 +2579,20 @@ class SpectralPredictApp:
                 learning_rates.append(0.1)
             if self.lr_02.get():
                 learning_rates.append(0.2)
+
+
+            # Add custom learning rate if provided
+            custom_lr = self.custom_learning_rate.get().strip()
+            if custom_lr:
+                try:
+                    custom_val = float(custom_lr)
+                    if 0.001 <= custom_val <= 1.0:
+                        if custom_val not in learning_rates:
+                            learning_rates.append(custom_val)
+                    else:
+                        self._log_progress(f"Warning: Custom learning rate {custom_val} must be in range 0.001-1.0. Skipping.")
+                except ValueError:
+                    self._log_progress(f"Warning: Invalid custom learning rate ''{custom_lr}''. Must be a number. Skipping.")
 
             # Default to [0.1, 0.2] if none selected
             if not learning_rates:
@@ -2828,6 +2922,15 @@ class SpectralPredictApp:
                 width = 120
             elif col in ['top_vars']:
                 width = 200
+            elif col in ['Activation', 'Hidden', 'HiddenSize']:
+                width = 90
+            elif col in ['LearningRate', 'LR_init', 'Alpha']:
+                width = 100
+            elif col in ['n_estimators', 'max_depth']:
+                width = 95
+            elif col in ['Params']:
+                # Make Params column wider since it contains full parameter dict
+                width = 250
             else:
                 width = 80
             self.results_tree.column(col, width=width, anchor='center')
@@ -3337,6 +3440,148 @@ Performance (Classification):
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add dynamic model assessment below the plots
+        self._add_residual_assessment(residuals, std_residuals)
+
+    def _add_residual_assessment(self, residuals, std_residuals):
+        """Add a dynamic assessment box that evaluates residual quality."""
+        # Create assessment frame
+        assessment_frame = ttk.Frame(self.residual_diagnostics_frame)
+        assessment_frame.pack(fill='x', padx=10, pady=(10, 5))
+
+        # Analyze residuals
+        assessment_lines = ["Model Assessment:"]
+        issues = []
+
+        # Check for outliers (residuals > 3 standard deviations)
+        outlier_threshold = 3.0
+        outlier_count = np.sum(np.abs(std_residuals) > outlier_threshold)
+        if outlier_count > 0:
+            issues.append(f"⚠ {outlier_count} potential outlier(s) detected (|residual| > 3σ)")
+        else:
+            assessment_lines.append("✓ No significant outliers detected")
+
+        # Check for normality using Q-Q plot deviation
+        # Simple check: compare quantiles at extremes
+        from spectral_predict.diagnostics import qq_plot_data
+        theoretical_q, sample_q = qq_plot_data(residuals)
+
+        # Calculate deviation from diagonal at extremes (first and last 10%)
+        n_check = max(1, len(theoretical_q) // 10)
+        lower_dev = np.mean(np.abs(sample_q[:n_check] - theoretical_q[:n_check]))
+        upper_dev = np.mean(np.abs(sample_q[-n_check:] - theoretical_q[-n_check:]))
+        residual_std = np.std(residuals)
+
+        # If deviation is more than 50% of std, flag it
+        if lower_dev > 0.5 * residual_std or upper_dev > 0.5 * residual_std:
+            issues.append("⚠ Q-Q plot shows deviation from normality at extremes")
+        else:
+            assessment_lines.append("✓ Residuals appear normally distributed")
+
+        # Check for heteroscedasticity (changing variance)
+        # Split residuals into lower and upper half by fitted values
+        if hasattr(self, 'refined_y_pred'):
+            y_pred = self.refined_y_pred
+            sorted_indices = np.argsort(y_pred)
+            n_half = len(residuals) // 2
+            lower_half_var = np.var(residuals[sorted_indices[:n_half]])
+            upper_half_var = np.var(residuals[sorted_indices[n_half:]])
+
+            # If variance ratio is > 2, flag it
+            var_ratio = max(lower_half_var, upper_half_var) / (min(lower_half_var, upper_half_var) + 1e-10)
+            if var_ratio > 2.0:
+                issues.append("⚠ Possible heteroscedasticity (non-constant variance)")
+            else:
+                assessment_lines.append("✓ Residual variance appears constant")
+
+        # Add issues to assessment
+        if issues:
+            assessment_lines.extend(issues)
+
+        # Create assessment text
+        assessment_text = "\n".join(assessment_lines)
+
+        # Choose background color based on issues
+        if len(issues) == 0:
+            bg_color = '#d4edda'  # Light green
+        elif len(issues) <= 2:
+            bg_color = '#fff3cd'  # Light yellow
+        else:
+            bg_color = '#f8d7da'  # Light red
+
+        # Create label with colored background
+        assessment_label = tk.Label(assessment_frame, text=assessment_text,
+                                    bg=bg_color, fg='#000000',
+                                    font=('TkDefaultFont', 9, 'bold'),
+                                    justify='left', anchor='w',
+                                    padx=15, pady=10, relief='solid', borderwidth=1)
+        assessment_label.pack(fill='x')
+
+    def _add_leverage_assessment(self, leverage, threshold_2p, threshold_3p, n_samples):
+        """Add a dynamic assessment box that evaluates leverage distribution."""
+        # Create assessment frame
+        assessment_frame = ttk.Frame(self.leverage_plot_frame)
+        assessment_frame.pack(fill='x', padx=10, pady=(10, 5))
+
+        # Analyze leverage
+        assessment_lines = ["Leverage Assessment:"]
+        issues = []
+
+        # Count high and moderate leverage points
+        n_high = np.sum(leverage > threshold_3p)
+        n_moderate = np.sum((leverage > threshold_2p) & (leverage <= threshold_3p))
+        n_normal = n_samples - n_high - n_moderate
+
+        # Calculate percentages
+        pct_high = (n_high / n_samples) * 100
+        pct_moderate = (n_moderate / n_samples) * 100
+        pct_normal = (n_normal / n_samples) * 100
+
+        # Check for concerning patterns
+        if pct_high > 10:
+            issues.append(f"⚠ {n_high} high-leverage points ({pct_high:.1f}%) - Consider investigating data quality")
+        elif pct_high > 5:
+            issues.append(f"⚠ {n_high} high-leverage points ({pct_high:.1f}%) - Some influential samples detected")
+        elif n_high > 0:
+            assessment_lines.append(f"✓ {n_high} high-leverage point(s) ({pct_high:.1f}%) - Within acceptable range")
+        else:
+            assessment_lines.append("✓ No high-leverage points detected")
+
+        # Check moderate leverage
+        if pct_moderate > 20:
+            issues.append(f"⚠ {n_moderate} moderate-leverage points ({pct_moderate:.1f}%) - Higher than expected")
+        elif n_moderate > 0:
+            assessment_lines.append(f"✓ {n_moderate} moderate-leverage point(s) ({pct_moderate:.1f}%) - Normal distribution")
+
+        # Overall assessment
+        if pct_normal >= 80:
+            assessment_lines.append(f"✓ {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Good data distribution")
+        elif pct_normal >= 70:
+            assessment_lines.append(f"✓ {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Acceptable")
+
+        # Add issues to assessment
+        if issues:
+            assessment_lines.extend(issues)
+
+        # Create assessment text
+        assessment_text = "\n".join(assessment_lines)
+
+        # Choose background color based on issues
+        if len(issues) == 0:
+            bg_color = '#d4edda'  # Light green
+        elif pct_high <= 10:
+            bg_color = '#fff3cd'  # Light yellow
+        else:
+            bg_color = '#f8d7da'  # Light red
+
+        # Create label with colored background
+        assessment_label = tk.Label(assessment_frame, text=assessment_text,
+                                    bg=bg_color, fg='#000000',
+                                    font=('TkDefaultFont', 9, 'bold'),
+                                    justify='left', anchor='w',
+                                    padx=15, pady=10, relief='solid', borderwidth=1)
+        assessment_label.pack(fill='x')
+
     def _plot_leverage_diagnostics(self):
         """Plot leverage (hat values) to identify influential samples."""
         if not HAS_MATPLOTLIB:
@@ -3419,6 +3664,9 @@ Performance (Classification):
         canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add dynamic leverage assessment below the plot
+        self._add_leverage_assessment(leverage, threshold_2p, threshold_3p, n_samples)
 
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
