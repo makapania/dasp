@@ -88,6 +88,8 @@ class SpectralPredictApp:
         # Results storage
         self.results_df = None  # Analysis results dataframe
         self.selected_model_config = None  # Selected model configuration for refinement
+        self.results_sort_column = None  # Current column being sorted
+        self.results_sort_reverse = False  # Sort direction (False = ascending, True = descending)
 
         # Refined/saved model storage (for model persistence)
         self.refined_model = None  # Fitted model from Custom Model Development tab
@@ -125,6 +127,14 @@ class SpectralPredictApp:
 
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
+
+        # Validation set tracking
+        self.validation_enabled = tk.BooleanVar(value=False)
+        self.validation_percentage = tk.DoubleVar(value=20.0)
+        self.validation_algorithm = tk.StringVar(value="Kennard-Stone")
+        self.validation_indices = set()  # Sample indices in validation set
+        self.validation_X = None  # Stored validation spectral data
+        self.validation_y = None  # Stored validation target data
 
         # Model selection
         self.use_pls = tk.BooleanVar(value=True)
@@ -168,8 +178,12 @@ class SpectralPredictApp:
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
 
-        # Variable selection method (NEW - for advanced methods)
-        self.variable_selection_method = tk.StringVar(value='importance')  # 'importance', 'spa', 'uve', 'uve_spa', 'ipls'
+        # Variable selection methods (multiple selection enabled)
+        self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
+        self.varsel_spa = tk.BooleanVar(value=False)
+        self.varsel_uve = tk.BooleanVar(value=False)
+        self.varsel_uve_spa = tk.BooleanVar(value=False)
+        self.varsel_ipls = tk.BooleanVar(value=False)
         self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
         self.uve_cutoff_multiplier = tk.DoubleVar(value=1.0)  # UVE threshold (0.7-1.5)
         self.uve_n_components = tk.StringVar(value="")  # PLS components for UVE (empty = auto)
@@ -691,31 +705,31 @@ class SpectralPredictApp:
         varsel_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        # Method selection (radio buttons)
-        ttk.Label(varsel_frame, text="Selection Method:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+        # Method selection (checkboxes - multiple selection enabled)
+        ttk.Label(varsel_frame, text="Selection Methods (select one or more):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
 
-        ttk.Radiobutton(varsel_frame, text="Feature Importance (default)",
-                       variable=self.variable_selection_method, value='importance').grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(varsel_frame, text="Feature Importance (default)",
+                       variable=self.varsel_importance).grid(row=1, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Uses model-specific importance scores",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Radiobutton(varsel_frame, text="SPA (Successive Projections)",
-                       variable=self.variable_selection_method, value='spa').grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(varsel_frame, text="SPA (Successive Projections) [Not yet implemented]",
+                       variable=self.varsel_spa).grid(row=2, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Collinearity-aware selection",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Radiobutton(varsel_frame, text="UVE (Uninformative Variable Elimination)",
-                       variable=self.variable_selection_method, value='uve').grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(varsel_frame, text="UVE (Uninformative Variable Elimination) [Not yet implemented]",
+                       variable=self.varsel_uve).grid(row=3, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Radiobutton(varsel_frame, text="UVE-SPA Hybrid",
-                       variable=self.variable_selection_method, value='uve_spa').grid(row=4, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(varsel_frame, text="UVE-SPA Hybrid [Not yet implemented]",
+                       variable=self.varsel_uve_spa).grid(row=4, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Combines noise filtering + collinearity reduction",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Radiobutton(varsel_frame, text="iPLS (Interval PLS)",
-                       variable=self.variable_selection_method, value='ipls').grid(row=5, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS) [Not yet implemented]",
+                       variable=self.varsel_ipls).grid(row=5, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
@@ -809,6 +823,74 @@ class SpectralPredictApp:
                        variable=self.export_preprocessed_csv).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
         row += 1
 
+        # === Validation Set Configuration ===
+        ttk.Label(content_frame, text="Validation Set Configuration 🆕", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        validation_frame = ttk.LabelFrame(content_frame, text="Holdout Validation Set", padding="20")
+        validation_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Enable checkbox
+        ttk.Checkbutton(validation_frame, text="Enable Validation Set (holdout samples for independent testing)",
+                       variable=self.validation_enabled).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        # Percentage slider
+        ttk.Label(validation_frame, text="Validation Set Size:", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        val_pct_frame = ttk.Frame(validation_frame)
+        val_pct_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+
+        ttk.Scale(val_pct_frame, from_=5, to=40, variable=self.validation_percentage, orient=tk.HORIZONTAL, length=300).pack(side=tk.LEFT, padx=(0, 10))
+
+        val_pct_display = ttk.Label(val_pct_frame, text="20%")
+        val_pct_display.pack(side=tk.LEFT)
+
+        # Update label when slider changes
+        def update_pct_label(*args):
+            val_pct_display.config(text=f"{int(self.validation_percentage.get())}%")
+        self.validation_percentage.trace_add('write', update_pct_label)
+
+        # Algorithm selection
+        ttk.Label(validation_frame, text="Selection Algorithm:", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(15, 5))
+
+        algo_frame = ttk.Frame(validation_frame)
+        algo_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
+
+        ttk.Radiobutton(algo_frame, text="Kennard-Stone ⭐",
+                       variable=self.validation_algorithm, value="Kennard-Stone").grid(row=0, column=0, sticky=tk.W, padx=(0, 15))
+        ttk.Label(algo_frame, text="Maximizes spectral diversity (recommended for spectra)",
+                 style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
+
+        ttk.Radiobutton(algo_frame, text="SPXY",
+                       variable=self.validation_algorithm, value="SPXY").grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Balances spectral and target variable diversity",
+                 style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
+
+        ttk.Radiobutton(algo_frame, text="Random",
+                       variable=self.validation_algorithm, value="Random").grid(row=2, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Simple random selection",
+                 style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, pady=3)
+
+        ttk.Radiobutton(algo_frame, text="Stratified",
+                       variable=self.validation_algorithm, value="Stratified").grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
+                 style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, pady=3)
+
+        # Buttons
+        button_frame = ttk.Frame(validation_frame)
+        button_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(15, 5))
+
+        ttk.Button(button_frame, text="Create Validation Set", command=self._create_validation_set).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Reset", command=self._reset_validation_set).pack(side=tk.LEFT)
+
+        # Status label
+        self.validation_status_label = ttk.Label(validation_frame, text="No validation set created", style='Caption.TLabel')
+        self.validation_status_label.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+
+        ttk.Label(validation_frame, text="💡 Validation set will be held out during model training and used for independent testing",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+
         # Run button
         ttk.Button(content_frame, text="▶ Run Analysis", command=self._run_analysis,
                   style='Accent.TButton').grid(row=row, column=0, columnspan=2, pady=20, ipadx=30, ipady=10)
@@ -900,10 +982,17 @@ class SpectralPredictApp:
         # Bind double-click event
         self.results_tree.bind('<Double-Button-1>', self._on_result_double_click)
 
+        # Button frame for actions
+        button_frame = ttk.Frame(content_frame)
+        button_frame.pack(pady=10, fill='x')
+
+        ttk.Button(button_frame, text="📥 Export Results to CSV",
+                   command=self._export_results_table).pack(side='left', padx=5)
+
         # Status label
         self.results_status = ttk.Label(content_frame, text="No results yet. Run an analysis to see results here.",
                                        style='Caption.TLabel')
-        self.results_status.pack(pady=10)
+        self.results_status.pack(pady=5)
 
     def _create_tab6_refine_model(self):
         """Tab 6: Custom Model Development - Interactive model parameter refinement."""
@@ -1352,6 +1441,264 @@ class SpectralPredictApp:
             self.exclusion_status.config(text="1 spectrum excluded")
         else:
             self.exclusion_status.config(text=f"{n_excluded} spectra excluded")
+
+    # ==================== Validation Set Selection Methods ====================
+
+    def _validation_kennard_stone(self, X, n_samples):
+        """
+        Select validation samples using Kennard-Stone algorithm.
+        Maximizes Euclidean distance in X-space for spectral diversity.
+
+        Args:
+            X: pandas DataFrame of spectral data
+            n_samples: number of samples to select
+
+        Returns:
+            list of indices to include in validation set
+        """
+        from scipy.spatial.distance import pdist, squareform
+
+        X_array = X.values
+        n_total = len(X_array)
+
+        if n_samples >= n_total:
+            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+
+        # Compute pairwise Euclidean distances
+        distances = squareform(pdist(X_array, metric='euclidean'))
+
+        # Start with the two samples that are farthest apart
+        max_dist_idx = np.unravel_index(distances.argmax(), distances.shape)
+        selected = [max_dist_idx[0], max_dist_idx[1]]
+
+        # Iteratively select samples that maximize minimum distance to already selected
+        remaining = list(set(range(n_total)) - set(selected))
+
+        while len(selected) < n_samples:
+            # For each remaining sample, find minimum distance to selected samples
+            min_distances = []
+            for idx in remaining:
+                min_dist = min(distances[idx, s] for s in selected)
+                min_distances.append((min_dist, idx))
+
+            # Select the sample with maximum minimum distance
+            _, best_idx = max(min_distances)
+            selected.append(best_idx)
+            remaining.remove(best_idx)
+
+        # Convert array indices to DataFrame indices
+        return X.index[selected].tolist()
+
+    def _validation_spxy(self, X, y, n_samples):
+        """
+        Select validation samples using SPXY algorithm.
+        Maximizes distance in both X-space and Y-space.
+
+        Args:
+            X: pandas DataFrame of spectral data
+            y: pandas Series of target values
+            n_samples: number of samples to select
+
+        Returns:
+            list of indices to include in validation set
+        """
+        from scipy.spatial.distance import pdist, squareform
+
+        X_array = X.values
+        y_array = y.values.reshape(-1, 1)
+        n_total = len(X_array)
+
+        if n_samples >= n_total:
+            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+
+        # Normalize X and y to [0, 1]
+        X_norm = (X_array - X_array.min(axis=0)) / (X_array.max(axis=0) - X_array.min(axis=0) + 1e-10)
+        y_norm = (y_array - y_array.min()) / (y_array.max() - y_array.min() + 1e-10)
+
+        # Compute distances in X-space
+        dist_X = squareform(pdist(X_norm, metric='euclidean'))
+
+        # Compute distances in y-space
+        dist_y = squareform(pdist(y_norm, metric='euclidean'))
+
+        # Combine distances: d_SPXY = d_X + d_y
+        distances = dist_X + dist_y
+
+        # Start with the two samples that are farthest apart
+        max_dist_idx = np.unravel_index(distances.argmax(), distances.shape)
+        selected = [max_dist_idx[0], max_dist_idx[1]]
+
+        # Iteratively select samples that maximize minimum distance to already selected
+        remaining = list(set(range(n_total)) - set(selected))
+
+        while len(selected) < n_samples:
+            # For each remaining sample, find minimum distance to selected samples
+            min_distances = []
+            for idx in remaining:
+                min_dist = min(distances[idx, s] for s in selected)
+                min_distances.append((min_dist, idx))
+
+            # Select the sample with maximum minimum distance
+            _, best_idx = max(min_distances)
+            selected.append(best_idx)
+            remaining.remove(best_idx)
+
+        # Convert array indices to DataFrame indices
+        return X.index[selected].tolist()
+
+    def _validation_random(self, X, y, n_samples):
+        """
+        Select validation samples using random sampling.
+
+        Args:
+            X: pandas DataFrame of spectral data
+            y: pandas Series of target values
+            n_samples: number of samples to select
+
+        Returns:
+            list of indices to include in validation set
+        """
+        from sklearn.model_selection import train_test_split
+
+        n_total = len(X)
+
+        if n_samples >= n_total:
+            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+
+        # Calculate test size as fraction
+        test_size = n_samples / n_total
+
+        # Use train_test_split for random selection with fixed random_state
+        _, X_val, _, y_val = train_test_split(
+            X, y, test_size=test_size, random_state=42
+        )
+
+        return X_val.index.tolist()
+
+    def _validation_stratified(self, X, y, n_samples):
+        """
+        Select validation samples using stratified sampling.
+        For classification: stratifies by class.
+        For regression: bins y into quartiles and stratifies.
+
+        Args:
+            X: pandas DataFrame of spectral data
+            y: pandas Series of target values
+            n_samples: number of samples to select
+
+        Returns:
+            list of indices to include in validation set
+        """
+        from sklearn.model_selection import train_test_split
+
+        n_total = len(X)
+
+        if n_samples >= n_total:
+            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+
+        # Calculate test size as fraction
+        test_size = n_samples / n_total
+
+        # Determine if y is continuous or categorical
+        if y.dtype in ['object', 'category'] or len(y.unique()) < 10:
+            # Classification: use y directly for stratification
+            stratify = y
+        else:
+            # Regression: bin y into quartiles for pseudo-stratification
+            stratify = pd.qcut(y, q=4, labels=False, duplicates='drop')
+
+        try:
+            _, X_val, _, y_val = train_test_split(
+                X, y, test_size=test_size, random_state=42, stratify=stratify
+            )
+            return X_val.index.tolist()
+        except ValueError as e:
+            # If stratification fails (e.g., too few samples per bin), fall back to random
+            self._log(f"Stratified sampling failed, using random: {e}")
+            return self._validation_random(X, y, n_samples)
+
+    def _create_validation_set(self):
+        """Create validation set using the selected algorithm."""
+        if self.X is None or self.y is None:
+            messagebox.showwarning("No Data", "Please load data first")
+            return
+
+        try:
+            # Get current data (after exclusions)
+            X_available = self.X[~self.X.index.isin(self.excluded_spectra)]
+            y_available = self.y[~self.y.index.isin(self.excluded_spectra)]
+
+            if len(X_available) < 10:
+                messagebox.showwarning("Insufficient Data",
+                                     "Need at least 10 samples to create validation set")
+                return
+
+            # Calculate number of validation samples
+            val_pct = self.validation_percentage.get() / 100.0
+            n_val = int(len(X_available) * val_pct)
+
+            if n_val < 3:
+                messagebox.showwarning("Validation Set Too Small",
+                                     f"Validation set would have only {n_val} samples. Increase percentage or dataset size.")
+                return
+
+            if n_val > len(X_available) * 0.4:
+                messagebox.showwarning("Validation Set Too Large",
+                                     f"Validation set of {n_val} samples is more than 40% of data. Consider reducing percentage.")
+                return
+
+            # Select validation samples based on algorithm
+            algorithm = self.validation_algorithm.get()
+
+            if algorithm == "Kennard-Stone":
+                selected_indices = self._validation_kennard_stone(X_available, n_val)
+            elif algorithm == "SPXY":
+                selected_indices = self._validation_spxy(X_available, y_available, n_val)
+            elif algorithm == "Random":
+                selected_indices = self._validation_random(X_available, y_available, n_val)
+            elif algorithm == "Stratified":
+                selected_indices = self._validation_stratified(X_available, y_available, n_val)
+            else:
+                messagebox.showerror("Invalid Algorithm", f"Unknown algorithm: {algorithm}")
+                return
+
+            # Store validation set
+            self.validation_indices = set(selected_indices)
+            self.validation_X = self.X.loc[selected_indices]
+            self.validation_y = self.y.loc[selected_indices]
+            self.validation_enabled.set(True)
+
+            # Update status label
+            n_cal = len(X_available) - n_val
+            if hasattr(self, 'validation_status_label'):
+                self.validation_status_label.config(
+                    text=f"✓ {n_val} validation samples selected ({algorithm})\n"
+                         f"Calibration: {n_cal} samples | Validation: {n_val} samples"
+                )
+
+            messagebox.showinfo("Success",
+                              f"Created validation set with {n_val} samples using {algorithm} algorithm\n"
+                              f"Calibration: {n_cal} samples\n"
+                              f"Validation: {n_val} samples")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create validation set:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def _reset_validation_set(self):
+        """Reset/clear the validation set."""
+        self.validation_indices.clear()
+        self.validation_X = None
+        self.validation_y = None
+        self.validation_enabled.set(False)
+
+        if hasattr(self, 'validation_status_label'):
+            self.validation_status_label.config(text="No validation set created")
+
+        messagebox.showinfo("Validation Set Reset", "Validation set has been cleared")
+
+    # ==================== End Validation Set Methods ====================
 
     def _on_spectrum_click(self, event):
         """Handle clicking on a spectrum line to toggle its visibility."""
@@ -2155,6 +2502,32 @@ class SpectralPredictApp:
                 X_filtered = self.X
                 y_filtered = self.y
 
+            # Filter out validation set (if enabled)
+            if self.validation_enabled.get() and self.validation_indices:
+                # Remove validation samples from training data
+                X_filtered = X_filtered[~X_filtered.index.isin(self.validation_indices)]
+                y_filtered = y_filtered[~y_filtered.index.isin(self.validation_indices)]
+
+                n_val = len(self.validation_indices)
+                n_cal = len(X_filtered)
+
+                # Update progress with validation info
+                self.root.after(0, lambda: self.progress_text.insert(tk.END,
+                    f"\n🔬 Validation Set Enabled:\n"))
+                self.root.after(0, lambda: self.progress_text.insert(tk.END,
+                    f"   • Calibration samples: {n_cal}\n"))
+                self.root.after(0, lambda: self.progress_text.insert(tk.END,
+                    f"   • Validation samples (held out): {n_val}\n"))
+                self.root.after(0, lambda: self.progress_text.insert(tk.END,
+                    f"   • Algorithm: {self.validation_algorithm.get()}\n\n"))
+                self.root.after(0, lambda: self.progress_text.see(tk.END))
+
+                self._log_progress(f"\n🔬 VALIDATION SET:")
+                self._log_progress(f"   Calibration samples: {n_cal}")
+                self._log_progress(f"   Validation samples (held out): {n_val}")
+                self._log_progress(f"   Selection algorithm: {self.validation_algorithm.get()}")
+                self._log_progress(f"")
+
             # Parse UVE n_components (empty string = None)
             uve_n_comp = None
             if self.uve_n_components.get().strip():
@@ -2328,11 +2701,44 @@ class SpectralPredictApp:
 """
         messagebox.showinfo("Help", help_text)
 
-    def _populate_results_table(self, results_df):
+    def _sort_results_by_column(self, col):
+        """Sort results table by the specified column."""
+        if self.results_df is None or len(self.results_df) == 0:
+            return
+
+        # Toggle sort direction if clicking the same column
+        if self.results_sort_column == col:
+            self.results_sort_reverse = not self.results_sort_reverse
+        else:
+            self.results_sort_column = col
+            self.results_sort_reverse = False  # Start with ascending
+
+        # Create a copy to sort
+        sorted_df = self.results_df.copy()
+
+        # Convert column to numeric if possible for proper sorting
+        try:
+            sorted_df[col] = pd.to_numeric(sorted_df[col])
+        except (ValueError, TypeError):
+            pass  # Keep as string if not numeric
+
+        # Sort the dataframe
+        sorted_df = sorted_df.sort_values(by=col, ascending=not self.results_sort_reverse)
+
+        # Repopulate with sorted data
+        self._populate_results_table(sorted_df, is_sorted=True)
+
+    def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
         if results_df is None or len(results_df) == 0:
             self.results_status.config(text="No results to display")
             return
+
+        # Store original results if this is the first population (not a sort)
+        if not is_sorted:
+            self.results_df = results_df
+            self.results_sort_column = None
+            self.results_sort_reverse = False
 
         # Clear existing items
         for item in self.results_tree.get_children():
@@ -2342,9 +2748,20 @@ class SpectralPredictApp:
         columns = list(results_df.columns)
         self.results_tree['columns'] = columns
 
-        # Configure column headings
+        # Configure column headings with sort indicators
         for col in columns:
-            self.results_tree.heading(col, text=col)
+            # Add sort indicator if this column is currently sorted
+            header_text = col
+            if self.results_sort_column == col:
+                if self.results_sort_reverse:
+                    header_text = f"{col} ▼"  # Descending (high to low)
+                else:
+                    header_text = f"{col} ▲"  # Ascending (low to high)
+
+            # Bind click event to sort by this column
+            self.results_tree.heading(col, text=header_text,
+                                     command=lambda c=col: self._sort_results_by_column(c))
+
             # Set column width based on content
             if col in ['Model', 'Preprocess', 'Subset']:
                 width = 120
@@ -2392,6 +2809,50 @@ class SpectralPredictApp:
 
         # Switch to the Custom Model Development tab
         self.notebook.select(5)  # Tab 6 (index 5)
+
+    def _export_results_table(self):
+        """Export the current results table to a CSV file."""
+        if self.results_df is None or len(self.results_df) == 0:
+            messagebox.showwarning(
+                "No Results",
+                "No results to export. Run an analysis first.")
+            return
+
+        try:
+            # Get default directory from spectral data path
+            initial_dir = None
+            if self.spectral_data_path.get():
+                data_path = Path(self.spectral_data_path.get())
+                initial_dir = str(data_path.parent if data_path.is_file() else data_path)
+
+            # Ask user for save location
+            default_name = f"analysis_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialfile=default_name,
+                initialdir=initial_dir,
+                title="Export Results to CSV"
+            )
+
+            if not filepath:
+                return  # User cancelled
+
+            # Export the dataframe
+            self.results_df.to_csv(filepath, index=False)
+
+            messagebox.showinfo(
+                "Export Successful",
+                f"Results exported successfully to:\n\n{filepath}"
+            )
+
+            self.results_status.config(text=f"✓ Results exported to {Path(filepath).name}")
+
+        except Exception as e:
+            messagebox.showerror(
+                "Export Error",
+                f"Failed to export results:\n\n{str(e)}"
+            )
 
     def _validate_data_for_refinement(self):
         """Validate that required data is available for refinement."""
@@ -2757,6 +3218,28 @@ Performance (Classification):
             else:
                 X_base_df = X_source
                 y_series = self.y
+
+            # Filter out validation set (if enabled) - CRITICAL FIX
+            # This ensures Model Development uses the same data split as the main search
+            if self.validation_enabled.get() and self.validation_indices:
+                # Remove validation samples from training data
+                initial_samples = len(X_base_df)
+                X_base_df = X_base_df[~X_base_df.index.isin(self.validation_indices)]
+                y_series = y_series[~y_series.index.isin(self.validation_indices)]
+
+                n_val = len(self.validation_indices)
+                n_removed = initial_samples - len(X_base_df)
+                n_cal = len(X_base_df)
+
+                if n_cal < n_folds:
+                    raise ValueError(
+                        f"Only {n_cal} calibration samples remain after validation set exclusion; "
+                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                    )
+
+                print(f"DEBUG: Excluding {n_removed} validation samples from Model Development")
+                print(f"DEBUG: Calibration: {n_cal} samples | Validation: {n_val} samples")
+                print(f"DEBUG: This matches the data split used in the main search (Results tab)")
 
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
@@ -3148,10 +3631,18 @@ Configuration:
             # Ask for save location
             default_name = f"model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dasp"
 
+            # Get initial directory from spectral data path
+            initial_dir = None
+            if self.spectral_data_path.get():
+                data_path = Path(self.spectral_data_path.get())
+                # If it's a file, get its parent directory; if it's a directory, use it
+                initial_dir = str(data_path.parent if data_path.is_file() else data_path)
+
             filepath = filedialog.asksaveasfilename(
                 defaultextension=".dasp",
                 filetypes=[("DASP Model", "*.dasp"), ("All files", "*.*")],
                 initialfile=default_name,
+                initialdir=initial_dir,
                 title="Save Trained Model"
             )
 
@@ -3170,7 +3661,12 @@ Configuration:
                 'cv_folds': self.refined_config['cv_folds'],
                 'performance': {},
                 'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
-                'full_wavelengths': self.refined_full_wavelengths  # All wavelengths for derivative+subset
+                'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
+                # Validation set metadata
+                'validation_set_enabled': self.validation_enabled.get(),
+                'validation_indices': list(self.validation_indices) if self.validation_indices else [],
+                'validation_size': len(self.validation_indices) if self.validation_indices else 0,
+                'validation_algorithm': self.validation_algorithm.get() if self.validation_enabled.get() else None
             }
 
             # Add performance metrics based on task type
@@ -3584,21 +4080,28 @@ Configuration:
         source_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         ttk.Radiobutton(source_frame, text="Directory (ASD/SPC)",
-                       variable=self.pred_data_source, value='directory').pack(side='left', padx=5)
+                       variable=self.pred_data_source, value='directory',
+                       command=self._on_pred_source_change).pack(side='left', padx=5)
         ttk.Radiobutton(source_frame, text="CSV File",
-                       variable=self.pred_data_source, value='csv').pack(side='left', padx=5)
+                       variable=self.pred_data_source, value='csv',
+                       command=self._on_pred_source_change).pack(side='left', padx=5)
+        ttk.Radiobutton(source_frame, text="Use Pre-Selected Validation Set 🔬",
+                       variable=self.pred_data_source, value='validation',
+                       command=self._on_pred_source_change).pack(side='left', padx=5)
 
         # File path entry
-        ttk.Label(step2_frame, text="Path:", style='Caption.TLabel').grid(
-            row=2, column=0, sticky=tk.W, pady=(10, 5))
+        self.pred_path_label = ttk.Label(step2_frame, text="Path:", style='Caption.TLabel')
+        self.pred_path_label.grid(row=2, column=0, sticky=tk.W, pady=(10, 5))
 
         path_frame = ttk.Frame(step2_frame)
         path_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
 
         self.pred_data_path = tk.StringVar()
-        ttk.Entry(path_frame, textvariable=self.pred_data_path, width=60).pack(side='left', fill='x', expand=True)
-        ttk.Button(path_frame, text="Browse...",
-                   command=self._browse_prediction_data).pack(side='left', padx=5)
+        self.pred_path_entry = ttk.Entry(path_frame, textvariable=self.pred_data_path, width=60)
+        self.pred_path_entry.pack(side='left', fill='x', expand=True)
+        self.pred_browse_button = ttk.Button(path_frame, text="Browse...",
+                   command=self._browse_prediction_data)
+        self.pred_browse_button.pack(side='left', padx=5)
 
         # Load button and status
         button_frame2 = ttk.Frame(step2_frame)
@@ -3810,8 +4313,60 @@ Configuration:
         if path:
             self.pred_data_path.set(path)
 
+    def _on_pred_source_change(self):
+        """Handle data source radio button change - enable/disable path widgets."""
+        source = self.pred_data_source.get()
+
+        if source == 'validation':
+            # Disable path entry and browse button when validation set is selected
+            self.pred_path_entry.config(state='disabled')
+            self.pred_browse_button.config(state='disabled')
+            self.pred_data_path.set("(Using pre-selected validation set)")
+        else:
+            # Enable path entry and browse button for directory and CSV options
+            self.pred_path_entry.config(state='normal')
+            self.pred_browse_button.config(state='normal')
+            if self.pred_data_path.get() == "(Using pre-selected validation set)":
+                self.pred_data_path.set("")
+
     def _load_prediction_data(self):
         """Load spectral data for predictions."""
+        source = self.pred_data_source.get()
+
+        # Handle validation set separately
+        if source == 'validation':
+            if self.validation_X is None or self.validation_y is None:
+                messagebox.showerror("No Validation Set",
+                    "No validation set has been created yet.\n\n"
+                    "Please go to the Analysis Configuration tab and create a validation set first.")
+                return
+
+            try:
+                self.prediction_data = self.validation_X.copy()
+
+                # Update status
+                n_samples = len(self.prediction_data)
+                n_wavelengths = len(self.prediction_data.columns)
+
+                self.pred_data_status.config(
+                    text=f"✓ Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths"
+                )
+
+                messagebox.showinfo("Success",
+                    f"Validation set loaded successfully:\n"
+                    f"{n_samples} spectra\n"
+                    f"{n_wavelengths} wavelengths\n"
+                    f"Algorithm: {self.validation_algorithm.get()}")
+
+                return
+
+            except Exception as e:
+                messagebox.showerror("Load Error",
+                    f"Failed to load validation set:\n{str(e)}")
+                self.pred_data_status.config(text="Load failed")
+                return
+
+        # For directory and CSV options, need a path
         path_str = self.pred_data_path.get()
 
         if not path_str:
@@ -3823,8 +4378,6 @@ Configuration:
         if not path.exists():
             messagebox.showerror("Path Error", f"Path does not exist:\n{path_str}")
             return
-
-        source = self.pred_data_source.get()
 
         try:
             from spectral_predict.io import read_asd_dir, read_spc_dir, read_csv_spectra
@@ -4002,8 +4555,19 @@ Configuration:
         self.pred_stats_text.config(state='normal')
         self.pred_stats_text.delete('1.0', 'end')
 
-        stats_text = "Prediction Statistics:\n"
-        stats_text += "=" * 60 + "\n\n"
+        # Check if we're using validation set (has actual y values)
+        is_validation = (self.pred_data_source.get() == 'validation' and
+                        self.validation_y is not None)
+
+        if is_validation:
+            stats_text = "🔬 VALIDATION SET RESULTS\n"
+            stats_text += "=" * 60 + "\n"
+            stats_text += f"Algorithm: {self.validation_algorithm.get()}\n"
+            stats_text += f"Validation Samples: {len(self.validation_y)}\n"
+            stats_text += "=" * 60 + "\n\n"
+        else:
+            stats_text = "Prediction Statistics:\n"
+            stats_text += "=" * 60 + "\n\n"
 
         # Calculate stats for each prediction column (skip 'Sample' column)
         prediction_cols = [col for col in self.predictions_df.columns if col != 'Sample']
@@ -4016,12 +4580,43 @@ Configuration:
 
                 if len(values) > 0:
                     stats_text += f"{col}:\n"
-                    stats_text += f"  Count: {len(values)}\n"
-                    stats_text += f"  Mean:  {values.mean():.4f}\n"
-                    stats_text += f"  Std:   {values.std():.4f}\n"
-                    stats_text += f"  Min:   {values.min():.4f}\n"
-                    stats_text += f"  Max:   {values.max():.4f}\n"
-                    stats_text += f"  Median:{values.median():.4f}\n"
+
+                    # If validation set, calculate performance metrics
+                    if is_validation:
+                        try:
+                            from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+
+                            # Get actual values aligned with predictions
+                            y_true = self.validation_y.loc[self.predictions_df['Sample']].values
+                            y_pred = values.values
+
+                            # Calculate metrics
+                            r2 = r2_score(y_true, y_pred)
+                            rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+                            mae = mean_absolute_error(y_true, y_pred)
+
+                            stats_text += f"  ✓ R² Score:     {r2:.4f}\n"
+                            stats_text += f"  ✓ RMSE:         {rmse:.4f}\n"
+                            stats_text += f"  ✓ MAE:          {mae:.4f}\n"
+                            stats_text += f"  • Samples:      {len(y_true)}\n"
+                            stats_text += f"  • Pred Mean:    {y_pred.mean():.4f}\n"
+                            stats_text += f"  • Actual Mean:  {y_true.mean():.4f}\n"
+                            stats_text += f"  • Pred Range:   [{y_pred.min():.4f}, {y_pred.max():.4f}]\n"
+                            stats_text += f"  • Actual Range: [{y_true.min():.4f}, {y_true.max():.4f}]\n"
+                        except Exception as e:
+                            stats_text += f"  ⚠ Could not calculate validation metrics: {e}\n"
+                            stats_text += f"  • Count:  {len(values)}\n"
+                            stats_text += f"  • Mean:   {values.mean():.4f}\n"
+                            stats_text += f"  • Std:    {values.std():.4f}\n"
+                    else:
+                        # Regular prediction statistics
+                        stats_text += f"  Count: {len(values)}\n"
+                        stats_text += f"  Mean:  {values.mean():.4f}\n"
+                        stats_text += f"  Std:   {values.std():.4f}\n"
+                        stats_text += f"  Min:   {values.min():.4f}\n"
+                        stats_text += f"  Max:   {values.max():.4f}\n"
+                        stats_text += f"  Median:{values.median():.4f}\n"
+
                     stats_text += "\n"
 
         self.pred_stats_text.insert('1.0', stats_text)
@@ -4038,12 +4633,19 @@ Configuration:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         default_filename = f"predictions_{timestamp}.csv"
 
+        # Get initial directory from spectral data path
+        initial_dir = None
+        if self.spectral_data_path.get():
+            data_path = Path(self.spectral_data_path.get())
+            initial_dir = str(data_path.parent if data_path.is_file() else data_path)
+
         # Ask user for save location
         filepath = filedialog.asksaveasfilename(
             title="Export Predictions",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=default_filename
+            initialfile=default_filename,
+            initialdir=initial_dir
         )
 
         if not filepath:
