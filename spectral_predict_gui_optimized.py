@@ -175,6 +175,9 @@ class SpectralPredictApp:
         self.spa_n_random_starts = tk.IntVar(value=10)  # Random starts for SPA
         self.ipls_n_intervals = tk.IntVar(value=20)  # Number of intervals for iPLS
 
+        # CSV export option
+        self.export_preprocessed_csv = tk.BooleanVar(value=False)
+
         # Outlier detection variables (Phase 3)
         self.n_pca_components = tk.IntVar(value=5)
         self.y_min_bound = tk.StringVar(value="")
@@ -800,9 +803,14 @@ class SpectralPredictApp:
         ttk.Label(advanced_frame, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
+        # CSV export checkbox
+        ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
+                       variable=self.export_preprocessed_csv).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
+        row += 1
+
         # Run button
         ttk.Button(content_frame, text="▶ Run Analysis", command=self._run_analysis,
-                  style='Accent.TButton').grid(row=row, column=0, columnspan=2, pady=40, ipadx=30, ipady=10)
+                  style='Accent.TButton').grid(row=row, column=0, columnspan=2, pady=20, ipadx=30, ipady=10)
         row += 1
 
         self.tab3_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')
@@ -1881,6 +1889,74 @@ class SpectralPredictApp:
 
     # ========== END OUTLIER DETECTION METHODS ==========
 
+    def _export_preprocessed_csv(self, window_size=None):
+        """
+        Export preprocessed spectral data (2nd derivative) to CSV.
+
+        Parameters
+        ----------
+        window_size : int, optional
+            Window size for Savitzky-Golay filter. If None, uses first selected window size or defaults to 17.
+        """
+        try:
+            from spectral_predict.preprocess import SavgolDerivative
+            import pandas as pd
+
+            # Determine window size
+            if window_size is None:
+                # Collect window sizes from checkboxes
+                window_sizes = []
+                if self.window_7.get():
+                    window_sizes.append(7)
+                if self.window_11.get():
+                    window_sizes.append(11)
+                if self.window_17.get():
+                    window_sizes.append(17)
+                if self.window_19.get():
+                    window_sizes.append(19)
+
+                # Use first selected or default to 17
+                window_size = window_sizes[0] if window_sizes else 17
+
+            # Apply second derivative preprocessing
+            preprocessor = SavgolDerivative(deriv=2, window=window_size, polyorder=3)
+            X_preprocessed = preprocessor.transform(self.X.values)
+
+            # Create DataFrame with wavelength column names
+            df_preprocessed = pd.DataFrame(
+                X_preprocessed,
+                columns=self.X.columns,
+                index=self.X.index
+            )
+
+            # Add response variable as first column
+            target_name = self.target_column.get()
+            df_export = pd.DataFrame({target_name: self.y})
+            df_export = pd.concat([df_export, df_preprocessed], axis=1)
+
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = Path(self.output_dir.get())
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            csv_path = output_dir / f"preprocessed_data_{target_name}_w{window_size}_{timestamp}.csv"
+
+            # Save to CSV
+            df_export.to_csv(csv_path, index=False)
+
+            # Log success
+            self._log_progress(f"✓ Preprocessed CSV exported: {csv_path}")
+            self._log_progress(f"  - Window size: {window_size}, Polyorder: 3 (2nd derivative)")
+            self._log_progress(f"  - Shape: {df_export.shape[0]} samples × {df_export.shape[1]} columns")
+
+            return str(csv_path)
+
+        except Exception as e:
+            error_msg = f"Failed to export preprocessed CSV: {str(e)}"
+            self._log_progress(f"✗ {error_msg}")
+            messagebox.showerror("Export Error", error_msg)
+            return None
+
     def _run_analysis(self):
         """Run analysis in background thread."""
         # Validate data is loaded
@@ -1920,6 +1996,17 @@ class SpectralPredictApp:
 
         # Reset start time
         self.analysis_start_time = datetime.now()
+
+        # Export preprocessed CSV if requested
+        if self.export_preprocessed_csv.get():
+            self._log_progress("\n" + "="*70)
+            self._log_progress("EXPORTING PREPROCESSED DATA CSV")
+            self._log_progress("="*70)
+            csv_path = self._export_preprocessed_csv()
+            if csv_path:
+                self._log_progress(f"✓ CSV export complete\n")
+            else:
+                self._log_progress(f"✗ CSV export failed\n")
 
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models,))
