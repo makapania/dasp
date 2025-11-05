@@ -1130,7 +1130,7 @@ class SpectralPredictApp:
         ttk.Label(params_frame, text="Preprocessing:", style='Subheading.TLabel').grid(row=11, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_preprocess = tk.StringVar(value='raw')
         preprocess_combo = ttk.Combobox(params_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
-        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'msc', 'msc_sg1', 'msc_sg2', 'deriv_msc']
         preprocess_combo.grid(row=12, column=0, sticky=tk.W, pady=5)
 
         # CV Folds
@@ -1180,6 +1180,30 @@ class SpectralPredictApp:
 
         self.refine_plot_frame = ttk.Frame(plot_frame)
         self.refine_plot_frame.pack(fill='both', expand=True)
+
+        # Residual Diagnostics (regression only)
+        ttk.Label(content_frame, text="Residual Diagnostics", style='Heading.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        residual_diagnostics_frame = ttk.LabelFrame(content_frame, text="Residual Analysis", padding="20")
+        residual_diagnostics_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        self.residual_diagnostics_frame = ttk.Frame(residual_diagnostics_frame)
+        self.residual_diagnostics_frame.pack(fill='both', expand=True)
+
+        # Leverage Diagnostics (linear models only)
+        ttk.Label(content_frame, text="Leverage Analysis", style='Heading.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        leverage_frame = ttk.LabelFrame(content_frame, text="Influential Samples (Hat Values)", padding="20")
+        leverage_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        self.leverage_plot_frame = ttk.Frame(leverage_frame)
+        self.leverage_plot_frame.pack(fill='both', expand=True)
 
         # Status
         self.refine_status = ttk.Label(content_frame, text="No model loaded", style='Caption.TLabel')
@@ -3193,6 +3217,22 @@ Performance (Classification):
         # Scatter plot
         ax.scatter(y_true, y_pred, alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
 
+        # Add error bars if prediction intervals available (using ±1 SE)
+        if hasattr(self, 'refined_prediction_intervals') and self.refined_prediction_intervals is not None:
+            # Reconstruct standard errors from CV folds
+            n_samples = len(y_true)
+            std_errors_full = np.zeros(n_samples)
+
+            for fold_data in self.refined_prediction_intervals:
+                test_idx = fold_data['test_idx']
+                std_errors_full[test_idx] = fold_data['std_err']
+
+            # Add error bars showing ±1 SE (much more reasonable than 95% CI)
+            ax.errorbar(y_true, y_pred,
+                        yerr=std_errors_full,  # ±1 SE
+                        fmt='none', ecolor='gray', alpha=0.3, linewidth=0.5, capsize=2,
+                        label='±1 SE (Jackknife)')
+
         # 1:1 line
         min_val = min(y_true.min(), y_pred.min())
         max_val = max(y_true.max(), y_pred.max())
@@ -3219,6 +3259,157 @@ Performance (Classification):
         fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.refine_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _plot_residual_diagnostics(self):
+        """Plot three residual diagnostic plots in Tab 6."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Only for regression
+        if not hasattr(self, 'refined_config') or self.refined_config.get('task_type') != 'regression':
+            return
+
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            return
+
+        from spectral_predict.diagnostics import compute_residuals, qq_plot_data
+
+        # Clear existing plot
+        for widget in self.residual_diagnostics_frame.winfo_children():
+            widget.destroy()
+
+        y_true = self.refined_y_true
+        y_pred = self.refined_y_pred
+
+        # Compute residuals
+        residuals, std_residuals = compute_residuals(y_true, y_pred)
+
+        # Create 1x3 subplot figure
+        fig = Figure(figsize=(18, 5))
+
+        # Plot 1: Residuals vs Fitted
+        ax1 = fig.add_subplot(131)
+        ax1.scatter(y_pred, residuals, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+        ax1.axhline(y=0, color='r', linestyle='--', linewidth=2)
+        ax1.set_xlabel('Fitted Values', fontsize=10)
+        ax1.set_ylabel('Residuals', fontsize=10)
+        ax1.set_title('Residuals vs Fitted', fontsize=11, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Residuals vs Index
+        ax2 = fig.add_subplot(132)
+        indices = np.arange(len(residuals))
+        ax2.scatter(indices, residuals, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+        ax2.axhline(y=0, color='r', linestyle='--', linewidth=2)
+        ax2.set_xlabel('Sample Index', fontsize=10)
+        ax2.set_ylabel('Residuals', fontsize=10)
+        ax2.set_title('Residuals vs Index', fontsize=11, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+
+        # Plot 3: Q-Q Plot
+        ax3 = fig.add_subplot(133)
+        theoretical_q, sample_q = qq_plot_data(residuals)
+        ax3.scatter(theoretical_q, sample_q, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+
+        # Add reference line
+        min_q = min(theoretical_q.min(), sample_q.min())
+        max_q = max(theoretical_q.max(), sample_q.max())
+        ax3.plot([min_q, max_q], [min_q, max_q], 'r--', linewidth=2)
+
+        ax3.set_xlabel('Theoretical Quantiles', fontsize=10)
+        ax3.set_ylabel('Sample Quantiles', fontsize=10)
+        ax3.set_title('Q-Q Plot (Normality)', fontsize=11, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _plot_leverage_diagnostics(self):
+        """Plot leverage (hat values) to identify influential samples."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Only for regression with linear/PLS models
+        if not hasattr(self, 'refined_config'):
+            return
+
+        task_type = self.refined_config.get('task_type')
+        model_name = self.refined_config.get('model_name')
+
+        # Leverage only meaningful for linear models (PLS, Ridge, Lasso)
+        if task_type != 'regression' or model_name not in ['PLS', 'Ridge', 'Lasso']:
+            return
+
+        if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
+            return  # Need X data for leverage calculation
+
+        from spectral_predict.diagnostics import compute_leverage
+
+        # Clear existing plot
+        for widget in self.leverage_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Compute leverage on the CV data
+        X_data = self.refined_X_cv
+        leverage, threshold_2p = compute_leverage(X_data)
+
+        # Calculate 3p/n threshold manually
+        n_samples, n_features = X_data.shape
+        n_params = n_features + 1  # Include intercept
+        threshold_3p = 3.0 * n_params / n_samples
+
+        # Create figure
+        fig = Figure(figsize=(12, 6))
+        ax = fig.add_subplot(111)
+
+        # Determine colors based on leverage thresholds
+        colors = []
+        for h in leverage:
+            if h > threshold_3p:
+                colors.append('red')  # High leverage
+            elif h > threshold_2p:
+                colors.append('orange')  # Moderate leverage
+            else:
+                colors.append('steelblue')  # Normal
+
+        indices = np.arange(len(leverage))
+        ax.scatter(indices, leverage, c=colors, alpha=0.7, edgecolors='black', linewidths=0.5, s=60)
+
+        # Add threshold lines
+        ax.axhline(y=threshold_2p, color='orange', linestyle='--', linewidth=2,
+                   label=f'Moderate Leverage (2p/n = {threshold_2p:.3f})')
+        ax.axhline(y=threshold_3p, color='red', linestyle='--', linewidth=2,
+                   label=f'High Leverage (3p/n = {threshold_3p:.3f})')
+
+        # Label high-leverage points
+        high_leverage_indices = np.where(leverage > threshold_3p)[0]
+        for idx in high_leverage_indices:
+            ax.annotate(f'{idx}', (idx, leverage[idx]),
+                       xytext=(5, 5), textcoords='offset points', fontsize=8)
+
+        ax.set_xlabel('Sample Index', fontsize=11)
+        ax.set_ylabel('Leverage (Hat Values)', fontsize=11)
+        ax.set_title('Leverage Plot - Influential Samples', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right')
+
+        # Add info text
+        n_high = np.sum(leverage > threshold_3p)
+        n_moderate = np.sum((leverage > threshold_2p) & (leverage <= threshold_3p))
+        info_text = f'High leverage: {n_high} samples\nModerate leverage: {n_moderate} samples'
+        ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+                fontsize=9, family='monospace')
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -3336,7 +3527,11 @@ Performance (Classification):
                 'sg2': 'deriv',
                 'snv_sg1': 'snv_deriv',
                 'snv_sg2': 'snv_deriv',
-                'deriv_snv': 'deriv_snv'
+                'deriv_snv': 'deriv_snv',
+                'msc': 'msc',
+                'msc_sg1': 'msc_deriv',
+                'msc_sg2': 'msc_deriv',
+                'deriv_msc': 'deriv_msc'
             }
 
             deriv_map = {
@@ -3346,7 +3541,11 @@ Performance (Classification):
                 'sg2': 2,
                 'snv_sg1': 1,
                 'snv_sg2': 2,
-                'deriv_snv': 1
+                'deriv_snv': 1,
+                'msc': 0,
+                'msc_sg1': 1,
+                'msc_sg2': 2,
+                'deriv_msc': 1
             }
 
             polyorder_map = {
@@ -3356,7 +3555,11 @@ Performance (Classification):
                 'sg2': 3,
                 'snv_sg1': 2,
                 'snv_sg2': 3,
-                'deriv_snv': 2
+                'deriv_snv': 2,
+                'msc': 2,
+                'msc_sg1': 2,
+                'msc_sg2': 3,
+                'deriv_msc': 2
             }
 
             preprocess_name = preprocess_name_map.get(preprocess, 'raw')
@@ -3388,7 +3591,7 @@ Performance (Classification):
 
             # CRITICAL FIX: Detect if we have derivative preprocessing + variable subset
             # This matches the behavior in search.py (lines 434-449)
-            is_derivative = preprocess in ['sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+            is_derivative = preprocess in ['sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'msc_sg1', 'msc_sg2', 'deriv_msc']
             base_full_vars = len(X_base_df.columns)
             if self.selected_model_config is not None:
                 cfg_full_vars = self.selected_model_config.get('full_vars')
@@ -3562,6 +3765,62 @@ Performance (Classification):
                 results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
                 results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
 
+            # Compute prediction intervals for PLS models (jackknife method)
+            # Do this BEFORE building results_text so we can include interval info
+            prediction_intervals = None
+            avg_std_error = None
+
+            if model_name == 'PLS' and task_type == 'regression' and len(X_raw) < 300:
+                # Only compute for PLS regression with reasonable sample size
+                # Skip if n > 300 (too slow - jackknife is O(n^2 * fit_time))
+                from spectral_predict.diagnostics import jackknife_prediction_intervals
+
+                print("DEBUG: Computing jackknife prediction intervals (may take 1-2 min)...")
+                all_intervals = []
+
+                # Recompute CV to get intervals for each fold
+                for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
+                    X_train, X_test = X_raw[train_idx], X_raw[test_idx]
+                    y_train, y_test = y_array[train_idx], y_array[test_idx]
+
+                    # Clone and fit ENTIRE pipeline (not just model!)
+                    # CRITICAL: Pass entire pipeline to jackknife function to preserve preprocessing
+                    pipe_fold = clone(pipe)
+                    pipe_fold.fit(X_train, y_train)
+
+                    # Compute intervals - pass PIPELINE, not extracted model
+                    try:
+                        _, lower, upper, std_err = jackknife_prediction_intervals(
+                            pipe_fold,  # Pass entire pipeline (preprocessing + model)
+                            X_train, y_train, X_test, confidence=0.95
+                        )
+
+                        all_intervals.append({
+                            'test_idx': test_idx,
+                            'lower': lower,
+                            'upper': upper,
+                            'std_err': std_err
+                        })
+                        print(f"DEBUG: Fold {fold_idx+1}/{n_folds} intervals computed (n_test={len(test_idx)})")
+                    except Exception as e:
+                        print(f"WARNING: Failed to compute intervals for fold {fold_idx}: {e}")
+                        all_intervals = None
+                        break
+
+                if all_intervals is not None and len(all_intervals) > 0:
+                    prediction_intervals = all_intervals
+                    # Compute average standard error for display
+                    all_std_errors = []
+                    for fold_data in prediction_intervals:
+                        all_std_errors.extend(fold_data['std_err'])
+                    avg_std_error = np.mean(all_std_errors)
+                    print(f"DEBUG: Prediction intervals computed successfully. Avg SE: ±{avg_std_error:.4f}")
+                else:
+                    print("DEBUG: Prediction interval computation failed - continuing without intervals.")
+            else:
+                if model_name == 'PLS' and task_type == 'regression' and len(X_raw) >= 300:
+                    print(f"DEBUG: Skipping prediction intervals (n={len(X_raw)} >= 300, too slow)")
+
             # Format results with detailed diagnostics
             if task_type == "regression":
                 # Add comparison to loaded model if available
@@ -3574,13 +3833,23 @@ Performance (Classification):
                         r2_diff_value = results['r2_mean'] - loaded_r2_value
                         r2_diff = f"{r2_diff_value:+.4f}"
 
+                # Build interval info text if available
+                interval_text = ""
+                if avg_std_error is not None:
+                    interval_text = f"""
+Prediction Uncertainty (Standard Error):
+  Average SE: ±{avg_std_error:.4f}
+  Method: Jackknife (leave-one-out)
+  Note: Error bars (±1 SE) shown in prediction plot
+"""
+
                 results_text = f"""Refined Model Results:
 
 Cross-Validation Performance ({self.refine_folds.get()} folds):
   RMSE: {results['rmse_mean']:.4f} ± {results['rmse_std']:.4f}
   R²: {results['r2_mean']:.4f} ± {results['r2_std']:.4f}
   MAE: {results['mae_mean']:.4f} ± {results['mae_std']:.4f}
-
+{interval_text}
 COMPARISON TO LOADED MODEL:
   Original R² (from Results tab): {loaded_r2}
   Refined R² (just computed):     {results['r2_mean']:.4f}
@@ -3669,6 +3938,23 @@ Configuration:
             self.refined_y_true = np.array(all_y_true)
             self.refined_y_pred = np.array(all_y_pred)
 
+            # Store prediction intervals for plotting
+            self.refined_prediction_intervals = prediction_intervals
+
+            # Store preprocessed X data for leverage calculation
+            # CRITICAL: Must use PREPROCESSED X, not raw X
+            if len(pipe_steps) > 1:
+                # Pipeline has preprocessing steps - extract transformed X
+                preprocessor = Pipeline(pipe_steps[:-1])  # All steps except model
+                preprocessor.fit(X_raw)  # Fit on raw data
+                X_transformed = preprocessor.transform(X_raw)
+                self.refined_X_cv = X_transformed
+                print(f"DEBUG: Stored preprocessed X for leverage calculation (shape: {X_transformed.shape})")
+            else:
+                # No preprocessing - use raw X
+                self.refined_X_cv = X_raw.copy()
+                print(f"DEBUG: Stored raw X for leverage calculation (shape: {X_raw.shape})")
+
             # Store full wavelengths for derivative + subset case
             if use_full_spectrum_preprocessing:
                 self.refined_full_wavelengths = list(all_wavelengths)
@@ -3704,6 +3990,9 @@ Configuration:
             self.refine_save_button.config(state='normal')
             # Plot the predictions
             self._plot_refined_predictions()
+            # Plot diagnostic plots
+            self._plot_residual_diagnostics()
+            self._plot_leverage_diagnostics()
             messagebox.showinfo("Success", "Refined model analysis complete!")
 
     def _save_refined_model(self):

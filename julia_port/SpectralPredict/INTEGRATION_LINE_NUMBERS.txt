@@ -1,0 +1,295 @@
+================================================================================
+NeuralBoostedRegressor Integration - Line-by-Line Changes
+================================================================================
+
+FILE: C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\src\models.jl
+--------------------------------------------------------------------------------
+
+Line 12: Updated module docstring
+  Added: "- Neural Boosted Regression (Gradient Boosting with Neural Network weak learners)"
+
+Lines 26-29: Import NeuralBoosted module
+  Added:
+    # Import NeuralBoosted module
+    include("neural_boosted.jl")
+    using .NeuralBoosted
+
+Line 41: Updated get_model_configs docstring
+  Changed: "PLS", "Ridge", "Lasso", "ElasticNet", "RandomForest", "MLP"
+  To:      "PLS", "Ridge", "Lasso", "ElasticNet", "RandomForest", "MLP", "NeuralBoosted"
+
+Lines 75-79: Added NeuralBoosted hyperparameter documentation
+  Added:
+    ## NeuralBoosted
+    - `n_estimators`: [50, 100, 200]
+    - `learning_rate`: [0.05, 0.1, 0.2]
+    - `hidden_layer_size`: [3, 5]
+    - `activation`: ["tanh", "relu"]
+
+Lines 128-148: Added NeuralBoosted configuration generator
+  Added:
+    elseif model_name == "NeuralBoosted"
+        n_estimators_list = [50, 100, 200]
+        learning_rate_list = [0.05, 0.1, 0.2]
+        hidden_layer_size_list = [3, 5]
+        activation_list = ["tanh", "relu"]
+        configs = Dict{String, Any}[]
+        for n_est in n_estimators_list
+            for lr in learning_rate_list
+                for hidden_size in hidden_layer_size_list
+                    for act in activation_list
+                        push!(configs, Dict(
+                            "n_estimators" => n_est,
+                            "learning_rate" => lr,
+                            "hidden_layer_size" => hidden_size,
+                            "activation" => act
+                        ))
+                    end
+                end
+            end
+        end
+        return configs
+
+Line 151: Updated error message
+  Changed: "Unknown model name: $model_name. Supported models: PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP"
+  To:      "Unknown model name: $model_name. Supported models: PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP, NeuralBoosted"
+
+Lines 280-318: Added NeuralBoostedModel wrapper struct
+  Added:
+    """
+        NeuralBoostedModel
+
+    Wrapper for Neural Boosted Regressor (gradient boosting with neural network weak learners).
+
+    # Fields
+    - `model::Union{Nothing, NeuralBoostedRegressor}`: The fitted NeuralBoosted model
+    - `n_estimators::Int`: Maximum number of boosting stages
+    - `learning_rate::Float64`: Shrinkage parameter for boosting
+    - `hidden_layer_size::Int`: Number of neurons in weak learner hidden layer
+    - `activation::String`: Activation function for weak learners
+    - `alpha::Float64`: L2 regularization parameter (default: 0.0001)
+    - `max_iter::Int`: Maximum iterations per weak learner (default: 100)
+    - `early_stopping::Bool`: Use validation-based early stopping (default: true)
+    - `verbose::Int`: Verbosity level (default: 0)
+    """
+    mutable struct NeuralBoostedModel
+        model::Union{Nothing, NeuralBoostedRegressor}
+        n_estimators::Int
+        learning_rate::Float64
+        hidden_layer_size::Int
+        activation::String
+        alpha::Float64
+        max_iter::Int
+        early_stopping::Bool
+        verbose::Int
+    end
+
+    NeuralBoostedModel(
+        n_estimators::Int,
+        learning_rate::Float64,
+        hidden_layer_size::Int,
+        activation::String;
+        alpha::Float64=0.0001,
+        max_iter::Int=100,
+        early_stopping::Bool=true,
+        verbose::Int=0
+    ) = NeuralBoostedModel(nothing, n_estimators, learning_rate, hidden_layer_size, activation, alpha, max_iter, early_stopping, verbose)
+
+Lines 375-386: Added build_model case for NeuralBoosted
+  Added:
+    elseif model_name == "NeuralBoosted"
+        n_estimators = config["n_estimators"]
+        learning_rate = config["learning_rate"]
+        hidden_layer_size = config["hidden_layer_size"]
+        activation = config["activation"]
+        # Optional parameters with defaults
+        alpha = get(config, "alpha", 0.0001)
+        max_iter = get(config, "max_iter", 100)
+        early_stopping = get(config, "early_stopping", true)
+        verbose = get(config, "verbose", 0)
+        return NeuralBoostedModel(n_estimators, learning_rate, hidden_layer_size, activation,
+                                  alpha=alpha, max_iter=max_iter, early_stopping=early_stopping, verbose=verbose)
+
+Lines 649-682: Added fit_model! implementation for NeuralBoosted
+  Added:
+    """
+        fit_model!(model::NeuralBoostedModel, X::Matrix{Float64}, y::Vector{Float64})
+
+    Train a Neural Boosted Regressor model.
+
+    # Arguments
+    - `model::NeuralBoostedModel`: Neural Boosted model instance to train
+    - `X::Matrix{Float64}`: Training features (n_samples × n_features)
+    - `y::Vector{Float64}`: Training target values (n_samples,)
+
+    # Notes
+    - Uses gradient boosting with neural network weak learners
+    - Implements early stopping on validation set by default
+    - Weak learners are small MLPs (typically 3-5 hidden neurons)
+    - Learning rate shrinks each weak learner contribution
+    """
+    function fit_model!(model::NeuralBoostedModel, X::Matrix{Float64}, y::Vector{Float64})
+        # Create NeuralBoostedRegressor with configured hyperparameters
+        model.model = NeuralBoostedRegressor(
+            n_estimators=model.n_estimators,
+            learning_rate=model.learning_rate,
+            hidden_layer_size=model.hidden_layer_size,
+            activation=model.activation,
+            alpha=model.alpha,
+            max_iter=model.max_iter,
+            early_stopping=model.early_stopping,
+            verbose=model.verbose
+        )
+
+        # Fit the model (uses NeuralBoosted.fit!)
+        NeuralBoosted.fit!(model.model, X, y)
+
+        return model
+    end
+
+Lines 859-878: Added predict_model implementation for NeuralBoosted
+  Added:
+    """
+        predict_model(model::NeuralBoostedModel, X::Matrix{Float64})::Vector{Float64}
+
+    Generate predictions using a fitted Neural Boosted model.
+
+    # Arguments
+    - `model::NeuralBoostedModel`: Fitted Neural Boosted model
+    - `X::Matrix{Float64}`: Features for prediction (n_samples × n_features)
+
+    # Returns
+    - `Vector{Float64}`: Predicted values (n_samples,)
+    """
+    function predict_model(model::NeuralBoostedModel, X::Matrix{Float64})::Vector{Float64}
+        if isnothing(model.model)
+            throw(ArgumentError("Model has not been fitted yet"))
+        end
+
+        # Use NeuralBoosted.predict
+        return NeuralBoosted.predict(model.model, X)
+    end
+
+Lines 1066-1072: Added feature importance support for NeuralBoosted
+  Added:
+    elseif model_name == "NeuralBoosted"
+        # Use NeuralBoosted.feature_importances
+        if isnothing(model.model)
+            throw(ArgumentError("Model has not been fitted yet"))
+        end
+
+        return NeuralBoosted.feature_importances(model.model)
+
+Line 1145: Added export
+  Added: export NeuralBoostedModel
+
+
+FILE: C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\src\SpectralPredict.jl
+--------------------------------------------------------------------------------
+
+Line 8: Updated module docstring
+  Changed: "- Multiple ML models (PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP)"
+  To:      "- Multiple ML models (PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP, NeuralBoosted)"
+
+Line 126: Added export
+  Changed: export PLSModel, RidgeModel, LassoModel, ElasticNetModel, RandomForestModel, MLPModel
+  To:      export PLSModel, RidgeModel, LassoModel, ElasticNetModel, RandomForestModel, MLPModel, NeuralBoostedModel
+
+
+FILE: C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test_neural_boosted_integration.jl
+--------------------------------------------------------------------------------
+Created: Complete test suite for NeuralBoosted integration
+Tests:
+  1. Model configuration generation (36 configs)
+  2. Model building from config
+  3. Model fitting with training data
+  4. Prediction on new data
+  5. Feature importance extraction
+  6. Cross-validation compatibility
+
+
+FILE: C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\NEURAL_BOOSTED_INTEGRATION_SUMMARY.md
+--------------------------------------------------------------------------------
+Created: Comprehensive documentation of integration
+Contents:
+  - Overview of changes
+  - File-by-file modifications
+  - Default hyperparameters (36 configurations)
+  - Design decisions and rationale
+  - Usage examples (5 scenarios)
+  - Performance considerations
+  - Known limitations
+  - Future enhancements
+
+
+FILE: C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\NEURAL_BOOSTED_QUICKSTART.md
+--------------------------------------------------------------------------------
+Created: User-friendly quick start guide
+Contents:
+  - What is NeuralBoosted?
+  - Quick usage examples
+  - Hyperparameter explanations
+  - When to use NeuralBoosted
+  - Performance tips
+  - Interpreting results
+  - Comparison with other models
+  - Common issues & solutions
+  - Advanced usage
+  - Example workflow
+
+
+================================================================================
+SUMMARY STATISTICS
+================================================================================
+
+Files Modified:      2 (models.jl, SpectralPredict.jl)
+Files Created:       3 (test file, 2 documentation files)
+Total Lines Added:   ~380 lines
+New Functions:       3 (build_model, fit_model!, predict_model for NeuralBoostedModel)
+New Structs:         1 (NeuralBoostedModel)
+Configurations:      36 (3 × 3 × 2 × 2 = 36 hyperparameter combinations)
+Export Statements:   2 (models.jl, SpectralPredict.jl)
+
+Integration Status:  ✓ COMPLETE
+Testing Status:      ✓ TEST SUITE CREATED
+Documentation:       ✓ COMPREHENSIVE
+
+================================================================================
+INTEGRATION CHECKLIST
+================================================================================
+
+[✓] Import NeuralBoosted module in models.jl
+[✓] Add NeuralBoosted to get_model_configs()
+[✓] Create NeuralBoostedModel wrapper struct
+[✓] Implement build_model() case
+[✓] Implement fit_model!() method
+[✓] Implement predict_model() method
+[✓] Implement get_feature_importances() case
+[✓] Export NeuralBoostedModel from models.jl
+[✓] Export NeuralBoostedModel from SpectralPredict.jl
+[✓] Update module documentation strings
+[✓] Update function documentation strings
+[✓] Create comprehensive test script
+[✓] Create integration summary document
+[✓] Create quick start guide
+[✓] Verify all syntax and structure
+
+================================================================================
+READY FOR USE
+================================================================================
+
+The NeuralBoostedRegressor is now fully integrated and can be used in:
+
+1. run_search() - Main hyperparameter search function
+   Example: run_search(X, y, wavelengths, models=["NeuralBoosted"])
+
+2. Manual model building and fitting
+   Example: model = build_model("NeuralBoosted", config, "regression")
+
+3. Cross-validation framework
+   Example: Automatic through run_search() with n_folds parameter
+
+4. Feature importance extraction
+   Example: importances = get_feature_importances(model, "NeuralBoosted", X, y)
+
+================================================================================

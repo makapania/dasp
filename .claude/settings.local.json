@@ -21,7 +21,16 @@
       "Bash(else echo \"venv not found\")",
       "Bash(fi)",
       "Bash(julia --version:*)",
-      "Bash(julia --project=. -e:*)"
+      "Bash(julia --project=. -e:*)",
+      "Bash(nul)",
+      "Bash(test:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_diagnostics.py tests/test_msc.py -v)",
+      "Bash(if [ -f \"C:/Users/sponheim/git/dasp/.venv/Scripts/activate\" ])",
+      "Bash(find:*)",
+      "WebSearch",
+      "Bash(git checkout:*)",
+      "Bash(julia test:*)",
+      "Bash(julia --project=. test/test_integration.jl:*)"
     ],
     "deny": [],
     "ask": []

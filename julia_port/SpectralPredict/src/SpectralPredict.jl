@@ -5,7 +5,7 @@ Julia port of the DASP Spectral Prediction system for machine learning-based spe
 
 This package provides comprehensive tools for:
 - Spectral data preprocessing (SNV, Savitzky-Golay derivatives)
-- Multiple ML models (PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP)
+- Multiple ML models (PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP, NeuralBoosted)
 - Automated hyperparameter search with cross-validation
 - Feature subset selection (variable and region-based)
 - Model ranking and comparison
@@ -88,6 +88,7 @@ using DecisionTree
 using Flux
 using SavitzkyGolay
 using DSP
+using Distributions
 
 # Include all module files
 include("preprocessing.jl")
@@ -97,6 +98,9 @@ include("regions.jl")
 include("scoring.jl")
 include("search.jl")
 include("io.jl")
+include("variable_selection.jl")
+include("diagnostics.jl")
+include("neural_boosted.jl")
 
 # Export main functions
 
@@ -109,6 +113,8 @@ export generate_preprocessing_configs
 export apply_preprocessing
 export apply_snv
 export apply_derivative
+export apply_msc
+export fit_msc
 export build_preprocessing_pipeline
 
 ## Models
@@ -117,7 +123,7 @@ export fit_model!
 export predict_model
 export get_feature_importances
 export get_model_configs
-export PLSModel, RidgeModel, LassoModel, ElasticNetModel, RandomForestModel, MLPModel
+export PLSModel, RidgeModel, LassoModel, ElasticNetModel, RandomForestModel, MLPModel, NeuralBoostedModel
 
 ## Cross-validation
 export run_cross_validation
@@ -135,6 +141,24 @@ export combine_region_indices
 ## Scoring
 export compute_composite_score
 export rank_results!
+
+## Variable Selection
+export uve_selection
+export spa_selection
+export ipls_selection
+export uve_spa_selection
+
+## Diagnostics
+export compute_residuals
+export compute_leverage
+export qq_plot_data
+export jackknife_prediction_intervals
+
+## Neural Boosted Regressor
+export NeuralBoostedRegressor
+export fit!
+export predict
+export feature_importances
 
 ## I/O
 export load_spectral_dataset

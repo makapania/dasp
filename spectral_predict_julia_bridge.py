@@ -67,6 +67,7 @@ def run_search_julia(
     learning_rates: Optional[List[float]] = None,
     enable_variable_subsets: bool = True,
     variable_counts: Optional[List[int]] = None,
+    variable_selection_methods: Optional[List[str]] = None,
     enable_region_subsets: bool = True,
     n_top_regions: int = 5,
     progress_callback: Optional[Callable] = None,
@@ -96,13 +97,12 @@ def run_search_julia(
     max_iter : int, default=500
         Maximum iterations for MLP (passed to Julia)
     models_to_test : list of str, optional
-        Models to test. Options: 'PLS', 'RandomForest', 'MLP', 'Ridge', 'Lasso'
-        Note: NeuralBoosted is not yet implemented in Julia
+        Models to test. Options: 'PLS', 'RandomForest', 'MLP', 'Ridge', 'Lasso', 'NeuralBoosted'
         If None, tests: ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP']
     preprocessing_methods : dict, optional
-        Dict with keys: 'raw', 'snv', 'sg1', 'sg2', 'deriv_snv'
+        Dict with keys: 'raw', 'snv', 'sg1', 'sg2', 'deriv_snv', 'msc'
         Values are booleans indicating whether to use each method.
-        If None, uses all methods.
+        If None, uses all methods (excluding MSC by default).
     window_sizes : list of int, optional
         Window sizes for Savitzky-Golay derivatives (default: [17])
     n_estimators_list : list of int, optional
@@ -114,6 +114,14 @@ def run_search_julia(
     variable_counts : list of int, optional
         Variable counts to test (e.g., [10, 20, 50, 100, 250])
         If None, uses: [10, 20, 50, 100, 250]
+    variable_selection_methods : list of str, optional
+        Variable selection methods to use. Options:
+        - 'importance': Model-based feature importance (default)
+        - 'SPA': Successive Projections Algorithm
+        - 'UVE': Uninformative Variable Elimination
+        - 'iPLS': Interval PLS
+        - 'UVE-SPA': Hybrid UVE-SPA approach
+        If None, uses ['importance']
     enable_region_subsets : bool, default=True
         Enable spectral region subset analysis
     n_top_regions : int, default=5
@@ -216,6 +224,7 @@ def run_search_julia(
             window_sizes=window_sizes,
             enable_variable_subsets=enable_variable_subsets,
             variable_counts=variable_counts,
+            variable_selection_methods=variable_selection_methods,
             enable_region_subsets=enable_region_subsets,
             n_top_regions=n_top_regions
         )
@@ -301,11 +310,20 @@ def _validate_inputs(X, y, task_type, folds, lambda_penalty):
     if len(X) != len(y):
         raise ValueError(f"X rows ({len(X)}) must match y length ({len(y)})")
 
+    if X.shape[0] < 2:
+        raise ValueError(f"Need at least 2 samples, got {X.shape[0]}")
+
+    if X.shape[1] < 1:
+        raise ValueError(f"Need at least 1 feature, got {X.shape[1]}")
+
     if task_type not in ['regression', 'classification']:
         raise ValueError("task_type must be 'regression' or 'classification'")
 
     if folds < 2:
         raise ValueError("folds must be at least 2")
+
+    if folds > len(X):
+        raise ValueError(f"folds ({folds}) cannot exceed number of samples ({len(X)})")
 
     if not (0.0 <= lambda_penalty <= 1.0):
         raise ValueError("lambda_penalty must be between 0.0 and 1.0")
@@ -363,6 +381,7 @@ def _create_config(
     window_sizes,
     enable_variable_subsets,
     variable_counts,
+    variable_selection_methods,
     enable_region_subsets,
     n_top_regions
 ):
@@ -376,21 +395,20 @@ def _create_config(
         'Ridge': 'Ridge',
         'Lasso': 'Lasso',
         'ElasticNet': 'ElasticNet',
-        # NeuralBoosted not supported in Julia yet
+        'NeuralBoosted': 'NeuralBoosted',
     }
 
     # Default models if not specified
     if models_to_test is None:
         julia_models = ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP']
     else:
-        # Filter out NeuralBoosted and map to Julia names
+        # Map to Julia names and validate
         julia_models = []
         for model in models_to_test:
-            if model == 'NeuralBoosted':
-                print("Warning: NeuralBoosted not yet implemented in Julia backend, skipping")
-                continue
             if model in model_mapping:
                 julia_models.append(model_mapping[model])
+            else:
+                print(f"Warning: Unknown model '{model}' specified, skipping")
 
         if not julia_models:
             raise ValueError("No valid models specified for Julia backend")
@@ -407,6 +425,8 @@ def _create_config(
             julia_preprocessing.append('raw')
         if preprocessing_methods.get('snv', False):
             julia_preprocessing.append('snv')
+        if preprocessing_methods.get('msc', False):
+            julia_preprocessing.append('msc')
 
         # Handle derivatives
         has_deriv = False
@@ -441,6 +461,23 @@ def _create_config(
     if variable_counts is None:
         variable_counts = [10, 20, 50, 100, 250]
 
+    # Variable selection methods
+    if variable_selection_methods is None:
+        julia_var_selection_methods = ['importance']
+    else:
+        # Map Python names to Julia names (they're the same) and validate
+        valid_methods = ['importance', 'SPA', 'UVE', 'iPLS', 'UVE-SPA']
+        julia_var_selection_methods = []
+
+        for method in variable_selection_methods:
+            if method in valid_methods:
+                julia_var_selection_methods.append(method)
+            else:
+                print(f"Warning: Unknown variable selection method '{method}' specified, skipping")
+
+        if not julia_var_selection_methods:
+            julia_var_selection_methods = ['importance']
+
     config = {
         'task_type': task_type,
         'models': julia_models,
@@ -450,6 +487,7 @@ def _create_config(
         'derivative_polyorder': 3,  # Standard
         'enable_variable_subsets': enable_variable_subsets,
         'variable_counts': variable_counts,
+        'variable_selection_methods': julia_var_selection_methods,
         'enable_region_subsets': enable_region_subsets,
         'n_top_regions': n_top_regions,
         'n_folds': folds,
@@ -494,6 +532,17 @@ using DataFrames
 include("{spectral_predict_module}")
 using .SpectralPredict
 
+# Import new modules if they exist (for forward compatibility)
+if isdefined(SpectralPredict, :VariableSelection)
+    using .SpectralPredict.VariableSelection
+end
+if isdefined(SpectralPredict, :NeuralBoosted)
+    using .SpectralPredict.NeuralBoosted
+end
+if isdefined(SpectralPredict, :Diagnostics)
+    using .SpectralPredict.Diagnostics
+end
+
 println("="^70)
 println("SpectralPredict Julia Bridge - Analysis Starting")
 println("="^70)
@@ -509,6 +558,7 @@ config = Dict(
     "derivative_polyorder" => {config['derivative_polyorder']},
     "enable_variable_subsets" => {str(config['enable_variable_subsets']).lower()},
     "variable_counts" => {to_julia_array(config['variable_counts'])},
+    "variable_selection_methods" => {to_julia_array(config['variable_selection_methods'])},
     "enable_region_subsets" => {str(config['enable_region_subsets']).lower()},
     "n_top_regions" => {config['n_top_regions']},
     "n_folds" => {config['n_folds']},
@@ -556,6 +606,7 @@ try
         derivative_polyorder=config["derivative_polyorder"],
         enable_variable_subsets=config["enable_variable_subsets"],
         variable_counts=config["variable_counts"],
+        variable_selection_methods=config["variable_selection_methods"],
         enable_region_subsets=config["enable_region_subsets"],
         n_top_regions=config["n_top_regions"],
         n_folds=config["n_folds"],
@@ -844,9 +895,10 @@ def main():
             X, y,
             task_type='regression',
             models_to_test=['PLS', 'Ridge'],
-            preprocessing_methods={'raw': True, 'snv': True},
+            preprocessing_methods={'raw': True, 'snv': True, 'msc': False},
             enable_variable_subsets=True,
             variable_counts=[10, 20],
+            variable_selection_methods=['importance', 'SPA'],
             enable_region_subsets=False,
             folds=3,
             progress_callback=lambda info: print(f"  Progress: {info.get('message', '')}")

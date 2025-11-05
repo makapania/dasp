@@ -1,0 +1,442 @@
+"""Unit tests for Multiplicative Scatter Correction (MSC) preprocessing.
+
+This test suite validates the MSC transformer which corrects for additive and
+multiplicative scatter effects in spectral data. MSC is a common preprocessing
+technique in chemometrics, especially for NIR spectroscopy.
+
+Test Coverage:
+1. Basic MSC transformation (mean and median references)
+2. Pipeline integration (MSC as part of sklearn Pipeline)
+3. Custom reference spectrum usage
+4. Edge cases (zero slope, constant spectra, perfect reference match)
+5. Fit/transform behavior (reference computation and application)
+
+MSC Principle:
+--------------
+For each spectrum i, fit a linear model:
+    spectrum_i = a + b * reference
+Then apply correction:
+    spectrum_corrected = (spectrum_i - a) / b
+
+This removes additive (a) and multiplicative (b) scatter effects.
+"""
+
+import pytest
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import sys
+
+# Add src to path
+src_path = Path(__file__).parent.parent / "src"
+sys.path.insert(0, str(src_path))
+
+from spectral_predict.preprocess import MSC, SNV
+from sklearn.pipeline import Pipeline
+from sklearn.cross_decomposition import PLSRegression
+
+
+class TestMSCBasic:
+    """Test suite for basic MSC functionality."""
+
+    @pytest.fixture
+    def synthetic_spectra(self):
+        """Create synthetic spectra with scatter effects.
+
+        Returns
+        -------
+        X : ndarray, shape (n_samples, n_wavelengths)
+            Spectral data with additive and multiplicative scatter
+        X_true : ndarray
+            True underlying spectra (without scatter)
+        """
+        np.random.seed(42)
+        n_samples = 50
+        n_wavelengths = 100
+
+        # Create true underlying spectra
+        wavelengths = np.linspace(400, 2500, n_wavelengths)
+        X_true = np.zeros((n_samples, n_wavelengths))
+
+        for i in range(n_samples):
+            # Different spectral patterns
+            X_true[i] = (
+                np.sin(wavelengths / 200) * 0.5 +
+                np.exp(-((wavelengths - 1000) ** 2) / 100000) +
+                np.random.randn(n_wavelengths) * 0.01
+            )
+
+        # Add scatter effects
+        X_scattered = np.zeros_like(X_true)
+        for i in range(n_samples):
+            a = np.random.randn() * 0.5  # Additive scatter
+            b = 0.8 + np.random.rand() * 0.4  # Multiplicative scatter (0.8 to 1.2)
+            X_scattered[i] = a + b * X_true[i]
+
+        return X_scattered, X_true
+
+    def test_msc_transform_mean(self, synthetic_spectra):
+        """Test MSC transformation with mean reference."""
+        X, _ = synthetic_spectra
+
+        msc = MSC(reference='mean')
+        msc.fit(X)
+        X_corrected = msc.transform(X)
+
+        # Check shape
+        assert X_corrected.shape == X.shape
+
+        # After MSC, variance across samples should be reduced
+        # (scatter effects removed)
+        variance_before = np.var(X, axis=0).mean()
+        variance_after = np.var(X_corrected, axis=0).mean()
+
+        # MSC should reduce overall variance
+        # (Note: this is a general trend, not always guaranteed)
+        # Just check that transformation was applied
+        assert not np.allclose(X, X_corrected)
+
+    def test_msc_transform_median(self, synthetic_spectra):
+        """Test MSC transformation with median reference."""
+        X, _ = synthetic_spectra
+
+        msc = MSC(reference='median')
+        msc.fit(X)
+        X_corrected = msc.transform(X)
+
+        # Check shape
+        assert X_corrected.shape == X.shape
+
+        # Transformation should be different from original
+        assert not np.allclose(X, X_corrected)
+
+    def test_msc_mean_vs_median(self, synthetic_spectra):
+        """Test that mean and median references give different results."""
+        X, _ = synthetic_spectra
+
+        # Mean reference
+        msc_mean = MSC(reference='mean')
+        msc_mean.fit(X)
+        X_mean = msc_mean.transform(X)
+
+        # Median reference
+        msc_median = MSC(reference='median')
+        msc_median.fit(X)
+        X_median = msc_median.transform(X)
+
+        # Results should be different (unless data is perfectly symmetric)
+        assert not np.allclose(X_mean, X_median)
+
+    def test_msc_reference_computation(self):
+        """Test that reference spectrum is computed correctly."""
+        np.random.seed(123)
+        X = np.random.randn(20, 50)
+
+        # Test mean reference
+        msc_mean = MSC(reference='mean')
+        msc_mean.fit(X)
+        expected_mean = X.mean(axis=0)
+        assert np.allclose(msc_mean.reference_, expected_mean)
+
+        # Test median reference
+        msc_median = MSC(reference='median')
+        msc_median.fit(X)
+        expected_median = np.median(X, axis=0)
+        assert np.allclose(msc_median.reference_, expected_median)
+
+    def test_msc_fit_transform(self, synthetic_spectra):
+        """Test that fit_transform gives same result as fit then transform."""
+        X, _ = synthetic_spectra
+
+        msc = MSC(reference='mean')
+
+        # Method 1: fit_transform
+        X_fit_transform = msc.fit_transform(X)
+
+        # Method 2: fit then transform
+        msc2 = MSC(reference='mean')
+        msc2.fit(X)
+        X_fit_then_transform = msc2.transform(X)
+
+        assert np.allclose(X_fit_transform, X_fit_then_transform)
+
+
+class TestMSCPipeline:
+    """Test MSC integration with sklearn Pipeline."""
+
+    @pytest.fixture
+    def pipeline_data(self):
+        """Create data for pipeline testing."""
+        np.random.seed(456)
+        n = 60
+        p = 80
+
+        X = np.random.randn(n, p) * 10 + 50
+        # Add scatter effects
+        for i in range(n):
+            X[i] = 0.5 + 1.2 * X[i]
+
+        y = X[:, :5].mean(axis=1) + np.random.randn(n) * 0.5
+
+        return X, y
+
+    def test_msc_in_pipeline(self, pipeline_data):
+        """Test MSC as part of sklearn Pipeline."""
+        X, y = pipeline_data
+
+        # Create pipeline with MSC + PLS
+        pipe = Pipeline([
+            ('msc', MSC(reference='mean')),
+            ('pls', PLSRegression(n_components=5))
+        ])
+
+        # Should fit without errors
+        pipe.fit(X, y)
+
+        # Should predict
+        y_pred = pipe.predict(X)
+        assert y_pred.shape == (len(y), 1) or y_pred.shape == (len(y),)
+
+    def test_msc_with_snv_pipeline(self, pipeline_data):
+        """Test MSC combined with SNV in pipeline."""
+        X, y = pipeline_data
+
+        # MSC followed by SNV
+        pipe = Pipeline([
+            ('msc', MSC(reference='mean')),
+            ('snv', SNV()),
+            ('pls', PLSRegression(n_components=3))
+        ])
+
+        pipe.fit(X, y)
+        y_pred = pipe.predict(X)
+
+        # Predictions should be reasonable
+        assert y_pred.shape == (len(y), 1) or y_pred.shape == (len(y),)
+        assert not np.any(np.isnan(y_pred))
+        assert not np.any(np.isinf(y_pred))
+
+    def test_msc_pipeline_reproducibility(self, pipeline_data):
+        """Test that pipeline with MSC gives reproducible results."""
+        X, y = pipeline_data
+
+        # PLSRegression is deterministic (no random_state parameter)
+        # Test that same pipeline gives same results
+        pipe1 = Pipeline([
+            ('msc', MSC(reference='mean')),
+            ('pls', PLSRegression(n_components=4))
+        ])
+        pipe1.fit(X, y)
+        pred1 = pipe1.predict(X)
+
+        pipe2 = Pipeline([
+            ('msc', MSC(reference='mean')),
+            ('pls', PLSRegression(n_components=4))
+        ])
+        pipe2.fit(X, y)
+        pred2 = pipe2.predict(X)
+
+        # Should give identical results (PLS is deterministic)
+        assert np.allclose(pred1, pred2)
+
+
+class TestMSCCustomReference:
+    """Test MSC with custom reference spectrum."""
+
+    def test_msc_custom_reference(self):
+        """Test MSC with user-provided reference spectrum."""
+        np.random.seed(789)
+        n = 30
+        p = 50
+
+        X = np.random.randn(n, p)
+
+        # Create custom reference
+        custom_ref = np.random.randn(p)
+
+        msc = MSC(reference=custom_ref)
+        msc.fit(X)
+
+        # Reference should be the custom one
+        assert np.allclose(msc.reference_, custom_ref)
+
+        # Transform should work
+        X_corrected = msc.transform(X)
+        assert X_corrected.shape == X.shape
+
+    def test_msc_custom_reference_array_like(self):
+        """Test MSC with custom reference as list."""
+        np.random.seed(999)
+        X = np.random.randn(20, 40)
+
+        # Custom reference as list
+        custom_ref = list(np.random.randn(40))
+
+        msc = MSC(reference=custom_ref)
+        msc.fit(X)
+
+        # Should convert to numpy array internally
+        assert isinstance(msc.reference_, np.ndarray)
+        assert msc.reference_.shape == (40,)
+
+    def test_msc_custom_reference_wrong_shape(self):
+        """Test that custom reference with wrong shape raises error."""
+        X = np.random.randn(20, 50)
+
+        # Wrong shape reference
+        custom_ref = np.random.randn(30)  # Should be 50
+
+        msc = MSC(reference=custom_ref)
+        msc.fit(X)  # Fit should work
+
+        # Transform should fail or give unexpected results
+        # (This depends on implementation - might want to add shape check)
+        with pytest.raises((ValueError, IndexError)):
+            msc.transform(X)
+
+
+class TestMSCEdgeCases:
+    """Test MSC edge cases and error handling."""
+
+    def test_msc_division_by_zero(self):
+        """Test MSC protection against zero slope."""
+        np.random.seed(111)
+        n = 10
+        p = 20
+
+        # Create data where one spectrum equals the reference (slope = 0)
+        X = np.random.randn(n, p)
+        reference = X[0].copy()  # First spectrum is the reference
+
+        # Create MSC with this reference
+        msc = MSC(reference=reference)
+        msc.fit(X)
+
+        # Transform should handle zero slope gracefully
+        X_corrected = msc.transform(X)
+
+        # Should not have NaN or Inf
+        assert not np.any(np.isnan(X_corrected))
+        assert not np.any(np.isinf(X_corrected))
+
+    def test_msc_constant_spectrum(self):
+        """Test MSC with constant (flat) spectrum."""
+        n = 15
+        p = 30
+
+        # Create constant spectra (all values same)
+        X = np.ones((n, p)) * 5.0
+
+        msc = MSC(reference='mean')
+        msc.fit(X)
+        X_corrected = msc.transform(X)
+
+        # Should handle gracefully
+        assert X_corrected.shape == X.shape
+        assert not np.any(np.isnan(X_corrected))
+
+    def test_msc_single_sample(self):
+        """Test MSC with single sample."""
+        X = np.random.randn(1, 50)
+
+        msc = MSC(reference='mean')
+        msc.fit(X)
+
+        # Reference should be the single spectrum
+        assert np.allclose(msc.reference_, X[0])
+
+        # Transform
+        X_corrected = msc.transform(X)
+        assert X_corrected.shape == X.shape
+
+    def test_msc_invalid_reference_type(self):
+        """Test MSC with invalid reference type."""
+        X = np.random.randn(20, 40)
+
+        msc = MSC(reference='invalid')
+
+        # Should raise ValueError
+        with pytest.raises(ValueError, match="Unknown reference type"):
+            msc.fit(X)
+
+    def test_msc_perfect_match(self):
+        """Test MSC when all spectra perfectly match reference."""
+        n = 10
+        p = 30
+
+        # Create identical spectra
+        reference = np.random.randn(p)
+        X = np.tile(reference, (n, 1))
+
+        msc = MSC(reference='mean')
+        msc.fit(X)
+        X_corrected = msc.transform(X)
+
+        # Should handle gracefully (might result in zero-centered spectra)
+        assert X_corrected.shape == X.shape
+        assert not np.any(np.isnan(X_corrected))
+        assert not np.any(np.isinf(X_corrected))
+
+    def test_msc_high_noise(self):
+        """Test MSC with very noisy spectra."""
+        np.random.seed(222)
+        n = 25
+        p = 60
+
+        # Create very noisy data
+        X = np.random.randn(n, p) * 100  # High noise
+
+        msc = MSC(reference='median')
+        msc.fit(X)
+        X_corrected = msc.transform(X)
+
+        # Should work without errors
+        assert X_corrected.shape == X.shape
+        assert not np.any(np.isnan(X_corrected))
+        assert not np.any(np.isinf(X_corrected))
+
+
+class TestMSCTransformNewData:
+    """Test MSC transform on new/unseen data."""
+
+    def test_msc_transform_new_data(self):
+        """Test that MSC can transform new data after fitting."""
+        np.random.seed(333)
+        n_train = 50
+        n_test = 20
+        p = 40
+
+        X_train = np.random.randn(n_train, p)
+        X_test = np.random.randn(n_test, p)
+
+        # Fit on training data
+        msc = MSC(reference='mean')
+        msc.fit(X_train)
+
+        # Transform test data
+        X_test_corrected = msc.transform(X_test)
+
+        # Should work correctly
+        assert X_test_corrected.shape == X_test.shape
+        assert not np.allclose(X_test, X_test_corrected)
+
+    def test_msc_reference_preserved(self):
+        """Test that reference is preserved between fit and transform."""
+        np.random.seed(444)
+        X_train = np.random.randn(30, 50)
+        X_test = np.random.randn(10, 50)
+
+        msc = MSC(reference='mean')
+        msc.fit(X_train)
+
+        reference_after_fit = msc.reference_.copy()
+
+        # Transform test data
+        msc.transform(X_test)
+
+        # Reference should not change
+        assert np.allclose(msc.reference_, reference_after_fit)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

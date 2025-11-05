@@ -33,9 +33,13 @@ include("models.jl")
 include("cv.jl")
 include("regions.jl")
 include("scoring.jl")
+include("variable_selection.jl")
 
 using .Regions
 using .Scoring
+
+# Import variable selection functions
+import .uve_selection, .spa_selection, .ipls_selection, .uve_spa_selection
 
 
 # ============================================================================
@@ -55,6 +59,7 @@ using .Scoring
         derivative_polyorder::Int=3,
         enable_variable_subsets::Bool=true,
         variable_counts::Vector{Int}=[10, 20, 50, 100, 250],
+        variable_selection_methods::Vector{String}=String[],
         enable_region_subsets::Bool=true,
         n_top_regions::Int=5,
         n_folds::Int=5,
@@ -108,6 +113,10 @@ For each model:
 - `derivative_polyorder::Int`: Polynomial order for Savitzky-Golay filter (default: 3)
 - `enable_variable_subsets::Bool`: Enable top-N variable subset analysis (default: true)
 - `variable_counts::Vector{Int}`: Variable counts to test (default: [10, 20, 50, 100, 250])
+- `variable_selection_methods::Vector{String}`: Variable selection methods to use (default: String[])
+  - Options: "uve", "spa", "ipls", "uve_spa"
+  - Empty array means use model-based feature importance (default behavior)
+  - Variable selection happens BEFORE preprocessing for each method
 - `enable_region_subsets::Bool`: Enable spectral region subset analysis (default: true)
 - `n_top_regions::Int`: Number of top regions to analyze (default: 5)
 - `n_folds::Int`: Number of cross-validation folds (default: 5)
@@ -145,6 +154,19 @@ results = run_search(
     lambda_penalty=0.15
 )
 
+# Using variable selection methods
+results = run_search(
+    X, y, wavelengths,
+    task_type="regression",
+    models=["PLS", "Ridge"],
+    preprocessing=["snv", "deriv"],
+    enable_variable_subsets=true,
+    variable_counts=[10, 20, 50, 100],
+    variable_selection_methods=["uve", "spa", "ipls", "uve_spa"],
+    enable_region_subsets=true,
+    n_folds=5
+)
+
 # View top models
 first(sort(results, :Rank), 10)
 ```
@@ -168,6 +190,7 @@ function run_search(
     derivative_polyorder::Int=3,
     enable_variable_subsets::Bool=true,
     variable_counts::Vector{Int}=[10, 20, 50, 100, 250],
+    variable_selection_methods::Vector{String}=String[],
     enable_region_subsets::Bool=true,
     n_top_regions::Int=5,
     n_folds::Int=5,
@@ -297,51 +320,136 @@ function run_search(
                     (:Status, "Full model")
                 ])
 
-                # B. Variable subsets (for models with feature importance)
-                if enable_variable_subsets && model_name in ["PLS", "RandomForest", "MLP"]
-                    # Fit model on FULL PREPROCESSED data to get importances
-                    model = build_model(model_name, config, task_type)
-                    fit_model!(model, X_preprocessed, y)
-                    importances = get_feature_importances(model, model_name, X_preprocessed, y)
+                # B. Variable subsets
+                if enable_variable_subsets
+                    # Determine which variable selection methods to use
+                    methods_to_use = String[]
 
-                    # Get valid variable counts (must be less than available features)
-                    valid_counts = [n for n in variable_counts if n < n_features_preprocessed]
-
-                    if length(valid_counts) > 0
-                        println("    → Variable subsets: testing $(length(valid_counts)) counts")
+                    # If variable_selection_methods is specified, use those
+                    if !isempty(variable_selection_methods)
+                        methods_to_use = variable_selection_methods
+                    elseif model_name in ["PLS", "RandomForest", "MLP"]
+                        # Default: use model-based feature importance for compatible models
+                        push!(methods_to_use, "importance")
                     end
 
-                    for n_top in valid_counts
-                        # Select top-N features based on importances
-                        top_indices = sortperm(importances, rev=true)[1:n_top]
+                    # Process each variable selection method
+                    for method in methods_to_use
+                        # Get valid variable counts (must be less than available features)
+                        valid_counts = [n for n in variable_counts if n < n_features_preprocessed]
 
-                        # CRITICAL: Check if derivatives are used
-                        if preprocess_cfg["deriv"] !== nothing
-                            # For derivatives: use preprocessed data, skip reapplying
-                            result = run_single_config(
-                                X_preprocessed[:, top_indices], y,
-                                model_name, config,
-                                preprocess_cfg, task_type,
-                                n_folds,
-                                skip_preprocessing=true,  # Don't reapply!
-                                subset_tag="top$(n_top)",
-                                n_vars=n_top,
-                                full_vars=full_vars
-                            )
-                        else
-                            # For raw/SNV: use raw data, will reapply preprocessing
-                            result = run_single_config(
-                                X[:, top_indices], y,
-                                model_name, config,
-                                preprocess_cfg, task_type,
-                                n_folds,
-                                skip_preprocessing=false,
-                                subset_tag="top$(n_top)",
-                                n_vars=n_top,
-                                full_vars=full_vars
-                            )
+                        if isempty(valid_counts)
+                            continue
                         end
-                        push!(results, result)
+
+                        println("    → Variable selection ($method): testing $(length(valid_counts)) counts")
+
+                        for n_top in valid_counts
+                            local importances::Vector{Float64}
+                            local selected_indices::Vector{Int}
+                            local subset_tag::String
+
+                            # Apply variable selection method
+                            if method == "importance"
+                                # Model-based feature importance (original method)
+                                model = build_model(model_name, config, task_type)
+                                fit_model!(model, X_preprocessed, y)
+                                importances = get_feature_importances(model, model_name, X_preprocessed, y)
+                                selected_indices = sortperm(importances, rev=true)[1:n_top]
+                                subset_tag = "top$(n_top)"
+
+                            elseif method == "uve"
+                                # UVE selection on preprocessed data
+                                importances = uve_selection(
+                                    X_preprocessed, y;
+                                    cutoff_multiplier=1.0,
+                                    cv_folds=n_folds
+                                )
+                                # Select top n_top variables by UVE score
+                                selected_indices = sortperm(importances, rev=true)[1:min(n_top, count(x -> x > 0, importances))]
+                                subset_tag = "uve$(n_top)"
+
+                            elseif method == "spa"
+                                # SPA selection on preprocessed data
+                                importances = spa_selection(
+                                    X_preprocessed, y, n_top;
+                                    n_random_starts=10,
+                                    cv_folds=n_folds
+                                )
+                                # SPA returns scores, select non-zero ones
+                                selected_indices = findall(x -> x > 0, importances)
+                                if length(selected_indices) > n_top
+                                    # If SPA selected more than requested, take top by score
+                                    selected_indices = sortperm(importances, rev=true)[1:n_top]
+                                end
+                                subset_tag = "spa$(n_top)"
+
+                            elseif method == "ipls"
+                                # iPLS selection on preprocessed data
+                                importances = ipls_selection(
+                                    X_preprocessed, y;
+                                    n_intervals=20,
+                                    cv_folds=n_folds
+                                )
+                                # Select top n_top variables by interval score
+                                selected_indices = sortperm(importances, rev=true)[1:n_top]
+                                subset_tag = "ipls$(n_top)"
+
+                            elseif method == "uve_spa"
+                                # UVE-SPA hybrid selection on preprocessed data
+                                importances = uve_spa_selection(
+                                    X_preprocessed, y, n_top;
+                                    cutoff_multiplier=1.0,
+                                    spa_n_random_starts=10,
+                                    cv_folds=n_folds
+                                )
+                                # UVE-SPA returns combined scores
+                                selected_indices = findall(x -> x > 0, importances)
+                                subset_tag = "uve_spa$(n_top)"
+
+                            else
+                                @warn "Unknown variable selection method: $method (skipping)"
+                                continue
+                            end
+
+                            # Handle edge case: no variables selected
+                            if isempty(selected_indices)
+                                @warn "No variables selected by $method for $n_top variables (skipping)"
+                                continue
+                            end
+
+                            # CRITICAL: Check if derivatives are used
+                            if preprocess_cfg["deriv"] !== nothing
+                                # For derivatives: use preprocessed data, skip reapplying
+                                result = run_single_config(
+                                    X_preprocessed[:, selected_indices], y,
+                                    model_name, config,
+                                    preprocess_cfg, task_type,
+                                    n_folds,
+                                    skip_preprocessing=true,  # Don't reapply!
+                                    subset_tag=subset_tag,
+                                    n_vars=length(selected_indices),
+                                    full_vars=full_vars,
+                                    var_selection_method=method,
+                                    var_selection_indices=selected_indices
+                                )
+                            else
+                                # For raw/SNV: use raw data, will reapply preprocessing
+                                result = run_single_config(
+                                    X[:, selected_indices], y,
+                                    model_name, config,
+                                    preprocess_cfg, task_type,
+                                    n_folds,
+                                    skip_preprocessing=false,
+                                    subset_tag=subset_tag,
+                                    n_vars=length(selected_indices),
+                                    full_vars=full_vars,
+                                    var_selection_method=method,
+                                    var_selection_indices=selected_indices
+                                )
+                            end
+                            push!(results, result)
+                        end
                     end
                 end
 
@@ -561,7 +669,9 @@ end
         skip_preprocessing::Bool=false,
         subset_tag::String="full",
         n_vars::Int=size(X, 2),
-        full_vars::Int=size(X, 2)
+        full_vars::Int=size(X, 2),
+        var_selection_method::Union{String,Nothing}=nothing,
+        var_selection_indices::Union{Vector{Int},Nothing}=nothing
     )::Dict{String, Any}
 
 Run a single model configuration with cross-validation.
@@ -600,6 +710,8 @@ end
 - `subset_tag::String`: Tag for this subset ("full", "top10", "region_400-450nm")
 - `n_vars::Int`: Number of variables in this subset
 - `full_vars::Int`: Total number of variables in full dataset
+- `var_selection_method::Union{String,Nothing}`: Variable selection method used (if any)
+- `var_selection_indices::Union{Vector{Int},Nothing}`: Indices of selected variables (if any)
 
 # Returns
 - `Dict{String, Any}`: Results dictionary with keys:
@@ -639,7 +751,9 @@ function run_single_config(
     skip_preprocessing::Bool=false,
     subset_tag::String="full",
     n_vars::Int=size(X, 2),
-    full_vars::Int=size(X, 2)
+    full_vars::Int=size(X, 2),
+    var_selection_method::Union{String,Nothing}=nothing,
+    var_selection_indices::Union{Vector{Int},Nothing}=nothing
 )::Dict{String, Any}
 
     # Build model
@@ -681,7 +795,9 @@ function run_single_config(
         "SubsetTag" => subset_tag,
         "n_vars" => n_vars,
         "full_vars" => full_vars,
-        "task_type" => task_type
+        "task_type" => task_type,
+        "VarSelectionMethod" => var_selection_method,
+        "VarSelectionIndices" => var_selection_indices
     )
 
     # Add metrics

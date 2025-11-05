@@ -1,0 +1,484 @@
+"""Unit tests for regression diagnostics.
+
+This test suite validates diagnostic functions for regression model evaluation:
+- compute_residuals: Raw and standardized residual calculation
+- compute_leverage: Hat matrix leverage detection for influential observations
+- jackknife_prediction_intervals: Prediction intervals with jackknife resampling
+- qq_plot_data: Q-Q plot data generation for normality assessment
+
+Test Coverage:
+1. Basic functionality tests (correct shapes, expected values)
+2. Edge cases (perfect fit, high-dimensional data, small samples)
+3. Pipeline integration (preprocessing correctness)
+4. Statistical properties (standardized residuals std H 1, leverage sum = p)
+"""
+
+import pytest
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import sys
+
+# Add src to path
+src_path = Path(__file__).parent.parent / "src"
+sys.path.insert(0, str(src_path))
+
+from spectral_predict.diagnostics import (
+    compute_residuals,
+    compute_leverage,
+    jackknife_prediction_intervals,
+    qq_plot_data
+)
+from spectral_predict.preprocess import SNV
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.pipeline import Pipeline
+
+
+class TestComputeResiduals:
+    """Test suite for compute_residuals function."""
+
+    @pytest.fixture
+    def simple_data(self):
+        """Create simple linear data for testing."""
+        np.random.seed(42)
+        n_samples = 100
+        n_features = 5
+
+        X = np.random.randn(n_samples, n_features)
+        # Create y with known relationship
+        true_coef = np.array([2.0, -1.0, 0.5, 0.0, 1.5])
+        y = X @ true_coef + np.random.randn(n_samples) * 0.5
+
+        return X, y, true_coef
+
+    def test_compute_residuals_basic(self, simple_data):
+        """Test basic residual calculation with LinearRegression."""
+        X, y, _ = simple_data
+
+        model = LinearRegression()
+        model.fit(X, y)
+
+        result = compute_residuals(model, X, y, standardize=True)
+
+        # Check return structure
+        assert 'raw' in result
+        assert 'standardized' in result
+        assert 'rse' in result
+        assert 'mean' in result
+        assert 'std' in result
+
+        # Check shapes
+        assert result['raw'].shape == (len(y),)
+        assert result['standardized'].shape == (len(y),)
+
+        # Mean of residuals should be close to 0
+        assert abs(result['mean']) < 0.1
+
+        # RSE should be positive
+        assert result['rse'] > 0
+
+    def test_standardized_residuals_properties(self, simple_data):
+        """Test that standardized residuals have std H 1."""
+        X, y, _ = simple_data
+
+        model = LinearRegression()
+        model.fit(X, y)
+
+        result = compute_residuals(model, X, y, standardize=True)
+
+        # Standardized residuals should have std close to 1
+        std_resid_std = np.std(result['standardized'], ddof=1)
+        assert 0.8 < std_resid_std < 1.2, f"Expected std H 1, got {std_resid_std}"
+
+    def test_residuals_without_standardization(self, simple_data):
+        """Test residuals without standardization."""
+        X, y, _ = simple_data
+
+        model = LinearRegression()
+        model.fit(X, y)
+
+        result = compute_residuals(model, X, y, standardize=False)
+
+        # Should not have standardized key
+        assert 'standardized' not in result
+
+        # Should still have raw residuals
+        assert 'raw' in result
+        assert len(result['raw']) == len(y)
+
+    def test_residuals_perfect_fit(self):
+        """Test residuals with perfect fit (no noise)."""
+        np.random.seed(123)
+        n = 50
+        X = np.random.randn(n, 3)
+        true_coef = np.array([1.0, 2.0, -1.0])
+        y = X @ true_coef  # No noise
+
+        model = LinearRegression()
+        model.fit(X, y)
+
+        result = compute_residuals(model, X, y, standardize=True)
+
+        # Residuals should be essentially zero
+        assert np.allclose(result['raw'], 0, atol=1e-10)
+        assert result['rse'] < 1e-8
+
+        # Standardized residuals should be zero (division by zero handled)
+        assert np.allclose(result['standardized'], 0, atol=1e-10)
+
+    def test_residuals_with_pipeline(self):
+        """Test residuals with sklearn Pipeline."""
+        np.random.seed(456)
+        n = 80
+        X = np.random.randn(n, 10) * 10 + 50  # High offset/scale
+        y = X[:, 0] * 2 + np.random.randn(n) * 0.5
+
+        # Create pipeline with SNV + Ridge
+        pipe = Pipeline([
+            ('snv', SNV()),
+            ('ridge', Ridge(alpha=1.0))
+        ])
+        pipe.fit(X, y)
+
+        result = compute_residuals(pipe, X, y, standardize=True)
+
+        # Should work correctly with pipeline
+        assert 'raw' in result
+        assert 'standardized' in result
+        assert result['raw'].shape == (n,)
+
+        # Mean should be close to zero
+        assert abs(result['mean']) < 0.2
+
+
+class TestComputeLeverage:
+    """Test suite for compute_leverage function."""
+
+    @pytest.fixture
+    def standard_data(self):
+        """Create data with n > p (standard case)."""
+        np.random.seed(42)
+        n_samples = 100
+        n_features = 10
+        X = np.random.randn(n_samples, n_features)
+        return X
+
+    @pytest.fixture
+    def high_dim_data(self):
+        """Create data with p > n (high-dimensional case)."""
+        np.random.seed(789)
+        n_samples = 20
+        n_features = 50
+        X = np.random.randn(n_samples, n_features)
+        return X
+
+    def test_leverage_small_p(self, standard_data):
+        """Test leverage computation with n > p (standard case)."""
+        X = standard_data
+
+        result = compute_leverage(X, threshold_multipliers=(2, 3))
+
+        # Check return structure
+        assert 'leverage' in result
+        assert 'mean_leverage' in result
+        assert 'threshold_moderate' in result
+        assert 'threshold_high' in result
+        assert 'moderate_flags' in result
+        assert 'high_flags' in result
+        assert 'method' in result
+
+        # Check shapes
+        assert result['leverage'].shape == (X.shape[0],)
+        assert result['moderate_flags'].shape == (X.shape[0],)
+        assert result['high_flags'].shape == (X.shape[0],)
+
+        # Leverage values should be between 0 and 1
+        assert np.all(result['leverage'] >= 0)
+        assert np.all(result['leverage'] <= 1)
+
+        # Should use standard method for n > p
+        assert result['method'] == 'standard'
+
+    def test_leverage_large_p(self, high_dim_data):
+        """Test leverage computation with p > n (SVD fallback)."""
+        X = high_dim_data
+
+        result = compute_leverage(X, threshold_multipliers=(2, 3))
+
+        # Should use SVD method for p > n
+        assert result['method'] == 'svd'
+
+        # Leverage values should still be between 0 and 1
+        # Note: In high-dimensional case (p > n), leverage can equal 1.0
+        assert np.all(result['leverage'] >= 0)
+        assert np.all(result['leverage'] <= 1.0 + 1e-10)  # Allow small numerical error
+
+        # Check shapes
+        assert result['leverage'].shape == (X.shape[0],)
+
+    def test_leverage_thresholds(self, standard_data):
+        """Test that leverage thresholds are computed correctly."""
+        X = standard_data
+        n_samples, n_features = X.shape
+        n_params = n_features + 1  # Include intercept
+
+        result = compute_leverage(X, threshold_multipliers=(2, 3))
+
+        # Mean leverage should be p/n
+        expected_mean = n_params / n_samples
+        assert abs(result['mean_leverage'] - expected_mean) < 1e-10
+
+        # Thresholds should be multiples of mean leverage
+        assert abs(result['threshold_moderate'] - 2 * expected_mean) < 1e-10
+        assert abs(result['threshold_high'] - 3 * expected_mean) < 1e-10
+
+        # High flags should be subset of moderate flags
+        assert np.all(result['high_flags'] <= result['moderate_flags'])
+
+    def test_leverage_sum_property(self, standard_data):
+        """Test that sum of leverage values equals p (number of parameters)."""
+        X = standard_data
+        n_features = X.shape[1]
+        n_params = n_features + 1  # Include intercept
+
+        result = compute_leverage(X)
+
+        # Sum of leverage should equal p
+        leverage_sum = np.sum(result['leverage'])
+        assert abs(leverage_sum - n_params) < 0.1, f"Expected sum H {n_params}, got {leverage_sum}"
+
+    def test_leverage_with_outlier(self):
+        """Test leverage detection with artificial outlier."""
+        np.random.seed(999)
+        n = 50
+        X = np.random.randn(n, 5)
+
+        # Add a high-leverage outlier
+        X[0, :] = 10.0  # Far from center
+
+        result = compute_leverage(X)
+
+        # First sample should have high leverage
+        assert result['leverage'][0] > result['threshold_moderate']
+
+
+class TestQQPlotData:
+    """Test suite for qq_plot_data function."""
+
+    def test_qq_plot_basic(self):
+        """Test Q-Q plot data generation with normal residuals."""
+        np.random.seed(42)
+        # Generate normal residuals
+        residuals = np.random.randn(100)
+
+        result = qq_plot_data(residuals, standardize=True)
+
+        # Check return structure
+        assert 'theoretical_quantiles' in result
+        assert 'sample_quantiles' in result
+        assert 'sorted_residuals' in result
+        assert 'original_residuals' in result
+        assert 'standardized' in result
+
+        # Check shapes
+        assert result['theoretical_quantiles'].shape == (100,)
+        assert result['sample_quantiles'].shape == (100,)
+
+        # Theoretical quantiles should be sorted
+        assert np.all(np.diff(result['theoretical_quantiles']) > 0)
+
+        # Sample quantiles should be sorted
+        assert np.all(np.diff(result['sample_quantiles']) >= 0)
+
+    def test_qq_plot_sorting(self):
+        """Test that residuals are sorted correctly."""
+        residuals = np.array([3.0, -1.0, 0.0, 2.0, -2.0])
+
+        result = qq_plot_data(residuals, standardize=False)
+
+        # Sorted residuals should be in ascending order
+        expected_sorted = np.array([-2.0, -1.0, 0.0, 2.0, 3.0])
+        assert np.allclose(result['sorted_residuals'], expected_sorted)
+
+    def test_qq_plot_standardization(self):
+        """Test standardization in Q-Q plot."""
+        np.random.seed(123)
+        # Create residuals with specific mean and std
+        residuals = np.random.randn(100) * 5.0 + 10.0  # mean=10, stdH5
+
+        result = qq_plot_data(residuals, standardize=True)
+
+        # After standardization, should have meanH0, stdH1
+        assert abs(np.mean(result['sample_quantiles'])) < 0.2
+        assert abs(np.std(result['sample_quantiles'], ddof=1) - 1.0) < 0.2
+
+    def test_qq_plot_without_standardization(self):
+        """Test Q-Q plot without standardization."""
+        residuals = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+
+        result = qq_plot_data(residuals, standardize=False)
+
+        # Should preserve original scale
+        assert np.allclose(result['sorted_residuals'], residuals)
+
+
+class TestJackknifePredictionIntervals:
+    """Test suite for jackknife_prediction_intervals function."""
+
+    @pytest.fixture
+    def small_pls_data(self):
+        """Create small dataset for jackknife testing with PLS."""
+        np.random.seed(42)
+        n_train = 50
+        n_test = 10
+        n_features = 20
+
+        X_train = np.random.randn(n_train, n_features)
+        # Create y with known relationship
+        y_train = X_train[:, :5].mean(axis=1) + np.random.randn(n_train) * 0.3
+
+        X_test = np.random.randn(n_test, n_features)
+
+        return X_train, y_train, X_test
+
+    def test_jackknife_small(self, small_pls_data):
+        """Test jackknife with small PLS pipeline (n=50, p=20)."""
+        X_train, y_train, X_test = small_pls_data
+
+        # Build pipeline: SNV + PLS
+        pipe = Pipeline([
+            ('snv', SNV()),
+            ('pls', PLSRegression(n_components=5))
+        ])
+        pipe.fit(X_train, y_train)
+
+        # Compute jackknife intervals
+        preds, lower, upper, stderr = jackknife_prediction_intervals(
+            pipe, X_train, y_train, X_test, confidence=0.95
+        )
+
+        # Check return shapes
+        assert preds.shape == (len(X_test),)
+        assert lower.shape == (len(X_test),)
+        assert upper.shape == (len(X_test),)
+        assert stderr.shape == (len(X_test),)
+
+        # Upper bounds should be greater than lower bounds
+        assert np.all(upper > lower)
+
+        # Standard errors should be positive
+        assert np.all(stderr > 0)
+
+        # Predictions should be within intervals (approximately)
+        assert np.all(preds >= lower - 1e-10)
+        assert np.all(preds <= upper + 1e-10)
+
+    def test_jackknife_interval_widths(self, small_pls_data):
+        """Test that jackknife intervals have reasonable widths."""
+        X_train, y_train, X_test = small_pls_data
+
+        pipe = Pipeline([
+            ('snv', SNV()),
+            ('pls', PLSRegression(n_components=5))
+        ])
+        pipe.fit(X_train, y_train)
+
+        preds, lower, upper, stderr = jackknife_prediction_intervals(
+            pipe, X_train, y_train, X_test, confidence=0.95
+        )
+
+        # Interval widths should be positive
+        widths = upper - lower
+        assert np.all(widths > 0)
+
+        # Widths should be reasonable (not too small or too large)
+        # For 95% CI with t-distribution, width H 2 * t_crit * SE
+        # With n=50, t_crit H 2.0, so width H 4 * SE
+        assert np.allclose(widths, 2 * 2.0 * stderr, rtol=0.2)
+
+    def test_jackknife_pipeline_vs_model(self):
+        """Verify jackknife uses pipeline preprocessing, not bypasses it."""
+        np.random.seed(789)
+        n = 30
+        p = 20
+
+        # Create data where SNV changes values significantly
+        X = np.random.randn(n, p) * 10 + 50  # High offset/scale
+        y = X[:, 0] * 2 + np.random.randn(n) * 0.1
+
+        # Build pipeline with SNV + PLS
+        pipe = Pipeline([
+            ('snv', SNV()),
+            ('pls', PLSRegression(n_components=2))
+        ])
+        pipe.fit(X, y)
+
+        # Jackknife with pipeline should work correctly
+        preds, lower, upper, stderr = jackknife_prediction_intervals(
+            pipe, X, y, X[:10], confidence=0.95
+        )
+
+        # Basic sanity checks
+        assert len(preds) == 10
+        assert np.all(upper > lower)
+        assert np.all(stderr > 0)
+
+        # Verify preprocessing was applied (predictions should be reasonable)
+        # If preprocessing was bypassed, predictions would be wildly off
+        # The true y values are around 100 (X[:, 0] * 2), so predictions
+        # should be in that ballpark
+        assert np.all(np.abs(preds) < 200)  # Reasonable scale
+        assert np.mean(np.abs(preds - y[:10])) < 50  # Predictions reasonably close to true values
+
+    def test_jackknife_confidence_levels(self, small_pls_data):
+        """Test jackknife with different confidence levels."""
+        X_train, y_train, X_test = small_pls_data
+
+        model = PLSRegression(n_components=5)
+        model.fit(X_train, y_train)
+
+        # Compute intervals at different confidence levels
+        _, lower_90, upper_90, _ = jackknife_prediction_intervals(
+            model, X_train, y_train, X_test, confidence=0.90
+        )
+        _, lower_95, upper_95, _ = jackknife_prediction_intervals(
+            model, X_train, y_train, X_test, confidence=0.95
+        )
+        _, lower_99, upper_99, _ = jackknife_prediction_intervals(
+            model, X_train, y_train, X_test, confidence=0.99
+        )
+
+        # Higher confidence should give wider intervals
+        width_90 = upper_90 - lower_90
+        width_95 = upper_95 - lower_95
+        width_99 = upper_99 - lower_99
+
+        assert np.all(width_95 > width_90)
+        assert np.all(width_99 > width_95)
+
+    def test_jackknife_with_linear_regression(self):
+        """Test jackknife with simple LinearRegression model."""
+        np.random.seed(999)
+        n_train = 40
+        n_test = 8
+
+        X_train = np.random.randn(n_train, 5)
+        y_train = X_train @ np.array([1, -1, 2, 0, 0.5]) + np.random.randn(n_train) * 0.2
+        X_test = np.random.randn(n_test, 5)
+
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+
+        preds, lower, upper, stderr = jackknife_prediction_intervals(
+            model, X_train, y_train, X_test, confidence=0.95
+        )
+
+        # Basic checks
+        assert len(preds) == n_test
+        assert np.all(upper > lower)
+        assert np.all(stderr > 0)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

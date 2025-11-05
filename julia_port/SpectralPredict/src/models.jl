@@ -9,6 +9,7 @@ used in spectral prediction, including:
 - Elastic Net Regression
 - Random Forest
 - Multi-Layer Perceptron (MLP)
+- Neural Boosted Regression (Gradient Boosting with Neural Network weak learners)
 
 Each model type has specific hyperparameter grids and methods for training,
 prediction, and feature importance extraction.
@@ -23,6 +24,10 @@ using Flux
 using Random
 using StatsBase
 
+# Import NeuralBoosted module
+include("neural_boosted.jl")
+using .NeuralBoosted
+
 # ============================================================================
 # Model Configuration Generator
 # ============================================================================
@@ -34,7 +39,7 @@ Generate hyperparameter configuration grids for a specified model type.
 
 # Arguments
 - `model_name::String`: Name of the model ("PLS", "Ridge", "Lasso", "ElasticNet",
-                        "RandomForest", "MLP")
+                        "RandomForest", "MLP", "NeuralBoosted")
 
 # Returns
 - `Vector{Dict{String, Any}}`: Array of hyperparameter dictionaries to search over
@@ -67,6 +72,12 @@ configs = get_model_configs("PLS")
 ## MLP (Multi-Layer Perceptron)
 - `hidden_layers`: [(50,), (100,), (50, 50)]
 - `learning_rate`: [0.001, 0.01]
+
+## NeuralBoosted
+- `n_estimators`: [50, 100, 200]
+- `learning_rate`: [0.05, 0.1, 0.2]
+- `hidden_layer_size`: [3, 5]
+- `activation`: ["tanh", "relu"]
 """
 function get_model_configs(model_name::String)::Vector{Dict{String, Any}}
     if model_name == "PLS"
@@ -114,8 +125,30 @@ function get_model_configs(model_name::String)::Vector{Dict{String, Any}}
         end
         return configs
 
+    elseif model_name == "NeuralBoosted"
+        n_estimators_list = [50, 100, 200]
+        learning_rate_list = [0.05, 0.1, 0.2]
+        hidden_layer_size_list = [3, 5]
+        activation_list = ["tanh", "relu"]
+        configs = Dict{String, Any}[]
+        for n_est in n_estimators_list
+            for lr in learning_rate_list
+                for hidden_size in hidden_layer_size_list
+                    for act in activation_list
+                        push!(configs, Dict(
+                            "n_estimators" => n_est,
+                            "learning_rate" => lr,
+                            "hidden_layer_size" => hidden_size,
+                            "activation" => act
+                        ))
+                    end
+                end
+            end
+        end
+        return configs
+
     else
-        throw(ArgumentError("Unknown model name: $model_name. Supported models: PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP"))
+        throw(ArgumentError("Unknown model name: $model_name. Supported models: PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP, NeuralBoosted"))
     end
 end
 
@@ -246,6 +279,46 @@ MLPModel(hidden_layers::Tuple, learning_rate::Float64) =
 
 
 """
+    NeuralBoostedModel
+
+Wrapper for Neural Boosted Regressor (gradient boosting with neural network weak learners).
+
+# Fields
+- `model::Union{Nothing, NeuralBoostedRegressor}`: The fitted NeuralBoosted model
+- `n_estimators::Int`: Maximum number of boosting stages
+- `learning_rate::Float64`: Shrinkage parameter for boosting
+- `hidden_layer_size::Int`: Number of neurons in weak learner hidden layer
+- `activation::String`: Activation function for weak learners
+- `alpha::Float64`: L2 regularization parameter (default: 0.0001)
+- `max_iter::Int`: Maximum iterations per weak learner (default: 100)
+- `early_stopping::Bool`: Use validation-based early stopping (default: true)
+- `verbose::Int`: Verbosity level (default: 0)
+"""
+mutable struct NeuralBoostedModel
+    model::Union{Nothing, NeuralBoostedRegressor}
+    n_estimators::Int
+    learning_rate::Float64
+    hidden_layer_size::Int
+    activation::String
+    alpha::Float64
+    max_iter::Int
+    early_stopping::Bool
+    verbose::Int
+end
+
+NeuralBoostedModel(
+    n_estimators::Int,
+    learning_rate::Float64,
+    hidden_layer_size::Int,
+    activation::String;
+    alpha::Float64=0.0001,
+    max_iter::Int=100,
+    early_stopping::Bool=true,
+    verbose::Int=0
+) = NeuralBoostedModel(nothing, n_estimators, learning_rate, hidden_layer_size, activation, alpha, max_iter, early_stopping, verbose)
+
+
+"""
     build_model(model_name::String, config::Dict{String, Any}, task_type::String)
 
 Create and return a model instance based on the specified configuration.
@@ -299,6 +372,19 @@ function build_model(model_name::String, config::Dict{String, Any}, task_type::S
         hidden_layers = config["hidden_layers"]
         learning_rate = config["learning_rate"]
         return MLPModel(hidden_layers, learning_rate)
+
+    elseif model_name == "NeuralBoosted"
+        n_estimators = config["n_estimators"]
+        learning_rate = config["learning_rate"]
+        hidden_layer_size = config["hidden_layer_size"]
+        activation = config["activation"]
+        # Optional parameters with defaults
+        alpha = get(config, "alpha", 0.0001)
+        max_iter = get(config, "max_iter", 100)
+        early_stopping = get(config, "early_stopping", true)
+        verbose = get(config, "verbose", 0)
+        return NeuralBoostedModel(n_estimators, learning_rate, hidden_layer_size, activation,
+                                  alpha=alpha, max_iter=max_iter, early_stopping=early_stopping, verbose=verbose)
 
     else
         throw(ArgumentError("Unknown model name: $model_name"))
@@ -562,6 +648,42 @@ end
 
 
 """
+    fit_model!(model::NeuralBoostedModel, X::Matrix{Float64}, y::Vector{Float64})
+
+Train a Neural Boosted Regressor model.
+
+# Arguments
+- `model::NeuralBoostedModel`: Neural Boosted model instance to train
+- `X::Matrix{Float64}`: Training features (n_samples × n_features)
+- `y::Vector{Float64}`: Training target values (n_samples,)
+
+# Notes
+- Uses gradient boosting with neural network weak learners
+- Implements early stopping on validation set by default
+- Weak learners are small MLPs (typically 3-5 hidden neurons)
+- Learning rate shrinks each weak learner contribution
+"""
+function fit_model!(model::NeuralBoostedModel, X::Matrix{Float64}, y::Vector{Float64})
+    # Create NeuralBoostedRegressor with configured hyperparameters
+    model.model = NeuralBoostedRegressor(
+        n_estimators=model.n_estimators,
+        learning_rate=model.learning_rate,
+        hidden_layer_size=model.hidden_layer_size,
+        activation=model.activation,
+        alpha=model.alpha,
+        max_iter=model.max_iter,
+        early_stopping=model.early_stopping,
+        verbose=model.verbose
+    )
+
+    # Fit the model (uses NeuralBoosted.fit!)
+    NeuralBoosted.fit!(model.model, X, y)
+
+    return model
+end
+
+
+"""
     fit_model!(model, X::Matrix{Float64}, y::Vector{Float64})
 
 Generic fit function that dispatches to specific model implementations.
@@ -732,6 +854,28 @@ function predict_model(model::MLPModel, X::Matrix{Float64})::Vector{Float64}
     y_pred = vec(y_norm) .* model.std_y .+ model.mean_y
 
     return y_pred
+end
+
+
+"""
+    predict_model(model::NeuralBoostedModel, X::Matrix{Float64})::Vector{Float64}
+
+Generate predictions using a fitted Neural Boosted model.
+
+# Arguments
+- `model::NeuralBoostedModel`: Fitted Neural Boosted model
+- `X::Matrix{Float64}`: Features for prediction (n_samples × n_features)
+
+# Returns
+- `Vector{Float64}`: Predicted values (n_samples,)
+"""
+function predict_model(model::NeuralBoostedModel, X::Matrix{Float64})::Vector{Float64}
+    if isnothing(model.model)
+        throw(ArgumentError("Model has not been fitted yet"))
+    end
+
+    # Use NeuralBoosted.predict
+    return NeuralBoosted.predict(model.model, X)
 end
 
 
@@ -920,6 +1064,14 @@ function get_feature_importances(
 
         return importances
 
+    elseif model_name == "NeuralBoosted"
+        # Use NeuralBoosted.feature_importances
+        if isnothing(model.model)
+            throw(ArgumentError("Model has not been fitted yet"))
+        end
+
+        return NeuralBoosted.feature_importances(model.model)
+
     else
         throw(ArgumentError("Feature importance not implemented for model: $model_name"))
     end
@@ -991,3 +1143,4 @@ export LassoModel
 export ElasticNetModel
 export RandomForestModel
 export MLPModel
+export NeuralBoostedModel
