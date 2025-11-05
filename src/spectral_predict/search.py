@@ -64,8 +64,9 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         - 'best_model': Best model found so far (dict with RMSE/R2 or Acc/AUC)
     variable_selection_methods : list of str or None, default=None
         List of variable selection methods to use. Can include multiple methods:
-        'importance', 'spa', 'uve', 'uve_spa', 'ipls'. If None, defaults to ['importance'].
-        Note: Currently only 'importance' is implemented; others are placeholders.
+        'importance', 'spa'/'SPA', 'uve'/'UVE', 'uve_spa'/'UVE-SPA', 'ipls'/'iPLS'.
+        Accepts both Python-style (lowercase) and Julia-style (uppercase) naming.
+        If None, defaults to ['importance']. All methods are fully functional.
     apply_uve_prefilter : bool, default=False
         Placeholder flag indicating whether to run a UVE prefilter step.
     uve_cutoff_multiplier : float, default=1.0
@@ -94,6 +95,34 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     # Handle variable selection methods (support multiple methods)
     if variable_selection_methods is None or not variable_selection_methods:
         variable_selection_methods = ['importance']
+
+    # Normalize method names to lowercase and handle Julia-style names
+    # Julia uses: 'SPA', 'UVE', 'iPLS', 'UVE-SPA'
+    # Python uses: 'spa', 'uve', 'ipls', 'uve_spa'
+    method_map = {
+        'SPA': 'spa',
+        'UVE': 'uve',
+        'IPLS': 'ipls',
+        'iPLS': 'ipls',
+        'UVE-SPA': 'uve_spa',
+        'UVE_SPA': 'uve_spa',
+        'importance': 'importance'
+    }
+
+    # Normalize input methods
+    normalized_methods = []
+    for m in variable_selection_methods:
+        # Try exact match first (case-sensitive)
+        if m in method_map:
+            normalized_methods.append(method_map[m])
+        # Try lowercase version
+        elif m.lower() in ['importance', 'spa', 'uve', 'ipls', 'uve_spa']:
+            normalized_methods.append(m.lower())
+        else:
+            # Unknown method, keep as-is for error reporting
+            normalized_methods.append(m)
+
+    variable_selection_methods = normalized_methods
 
     # Filter to only implemented methods
     implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls']  # All methods now functional

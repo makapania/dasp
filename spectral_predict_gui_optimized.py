@@ -148,6 +148,7 @@ class SpectralPredictApp:
         # Preprocessing method selection
         self.use_raw = tk.BooleanVar(value=True)
         self.use_snv = tk.BooleanVar(value=True)
+        self.use_msc = tk.BooleanVar(value=False)  # MSC (Multiplicative Scatter Correction)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
         self.use_deriv_snv = tk.BooleanVar(value=False)  # deriv_snv (less common combo)
@@ -634,15 +635,18 @@ class SpectralPredictApp:
         ttk.Checkbutton(preprocess_frame, text="✓ SNV (Standard Normal Variate)", variable=self.use_snv).grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Scatter correction", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(preprocess_frame, text="✓ SG1 (1st derivative)", variable=self.use_sg1).grid(row=2, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Removes baseline drift", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(preprocess_frame, text="MSC (Multiplicative Scatter Correction)", variable=self.use_msc).grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Reference-based scatter correction", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(preprocess_frame, text="✓ SG2 (2nd derivative)", variable=self.use_sg2).grid(row=3, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(preprocess_frame, text="✓ SG1 (1st derivative)", variable=self.use_sg1).grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Removes baseline drift", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(preprocess_frame, text="✓ SG2 (2nd derivative)", variable=self.use_sg2).grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
         # Advanced: deriv_snv option
-        ttk.Checkbutton(preprocess_frame, text="deriv_snv (advanced)", variable=self.use_deriv_snv).grid(row=4, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(preprocess_frame, text="deriv_snv (advanced)", variable=self.use_deriv_snv).grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
         # Derivative window size settings
         ttk.Label(preprocess_frame, text="Derivative Window Sizes:", style='Subheading.TLabel').grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
@@ -2414,6 +2418,7 @@ class SpectralPredictApp:
             preprocessing_methods = {
                 'raw': self.use_raw.get(),
                 'snv': self.use_snv.get(),
+                'msc': self.use_msc.get(),
                 'sg1': self.use_sg1.get(),
                 'sg2': self.use_sg2.get(),
                 'deriv_snv': self.use_deriv_snv.get()
@@ -2573,17 +2578,19 @@ class SpectralPredictApp:
                     self._log_progress("⚠️ Warning: Invalid UVE n_components, using auto-determination")
 
             # Collect selected variable selection methods
+            # NOTE: Method names must match Julia bridge expectations:
+            # 'importance', 'SPA', 'UVE', 'iPLS', 'UVE-SPA'
             selected_varsel_methods = []
             if self.varsel_importance.get():
                 selected_varsel_methods.append('importance')
             if self.varsel_spa.get():
-                selected_varsel_methods.append('spa')
+                selected_varsel_methods.append('SPA')
             if self.varsel_uve.get():
-                selected_varsel_methods.append('uve')
+                selected_varsel_methods.append('UVE')
             if self.varsel_uve_spa.get():
-                selected_varsel_methods.append('uve_spa')
+                selected_varsel_methods.append('UVE-SPA')
             if self.varsel_ipls.get():
-                selected_varsel_methods.append('ipls')
+                selected_varsel_methods.append('iPLS')
 
             # Default to importance if none selected
             if not selected_varsel_methods:
