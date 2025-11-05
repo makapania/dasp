@@ -290,29 +290,85 @@ def predict_with_model(
 
     required_wl = metadata['wavelengths']
 
+    # Check if model uses full-spectrum preprocessing (derivative + subset case)
+    use_full_spectrum_preprocessing = metadata.get('use_full_spectrum_preprocessing', False)
+    full_wavelengths = metadata.get('full_wavelengths', None)
+
     # Convert to numpy array if needed
     if isinstance(X_new, pd.DataFrame):
         if validate_wavelengths:
-            # Validate and select wavelengths
-            X_selected = _select_wavelengths_from_dataframe(X_new, required_wl)
+            # For derivative + subset: select ALL wavelengths for preprocessing, then subset
+            if use_full_spectrum_preprocessing and full_wavelengths is not None:
+                # Step 1: Select ALL wavelengths needed for preprocessing
+                X_full = _select_wavelengths_from_dataframe(X_new, full_wavelengths)
+
+                # Step 2: Apply preprocessing to full spectrum
+                if preprocessor is not None:
+                    X_full_preprocessed = preprocessor.transform(X_full)
+                else:
+                    X_full_preprocessed = X_full
+
+                # Step 3: Find indices of subset wavelengths in full wavelengths
+                wavelength_indices = []
+                for wl in required_wl:
+                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+                    else:
+                        raise ValueError(f"Required wavelength {wl} not found in full_wavelengths")
+
+                # Step 4: Subset the preprocessed data
+                X_processed = X_full_preprocessed[:, wavelength_indices]
+            else:
+                # Standard case: select subset wavelengths, then preprocess
+                X_selected = _select_wavelengths_from_dataframe(X_new, required_wl)
+
+                # Apply preprocessing if present
+                if preprocessor is not None:
+                    X_processed = preprocessor.transform(X_selected)
+                else:
+                    X_processed = X_selected
         else:
             X_selected = X_new.values
+            # Apply preprocessing if present
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X_selected)
+            else:
+                X_processed = X_selected
     elif isinstance(X_new, np.ndarray):
         # Assume array is already in correct format
-        if validate_wavelengths and X_new.shape[1] != len(required_wl):
-            raise ValueError(
-                f"X_new has {X_new.shape[1]} features but model requires "
-                f"{len(required_wl)} wavelengths"
-            )
-        X_selected = X_new
+        if validate_wavelengths:
+            expected_features = len(full_wavelengths) if use_full_spectrum_preprocessing and full_wavelengths else len(required_wl)
+            if X_new.shape[1] != expected_features:
+                raise ValueError(
+                    f"X_new has {X_new.shape[1]} features but model requires "
+                    f"{expected_features} wavelengths"
+                )
+
+        # For arrays, preprocessing still needs to be applied
+        if use_full_spectrum_preprocessing and full_wavelengths is not None:
+            # Apply preprocessing, then subset
+            if preprocessor is not None:
+                X_full_preprocessed = preprocessor.transform(X_new)
+            else:
+                X_full_preprocessed = X_new
+
+            # Find indices of subset wavelengths
+            wavelength_indices = []
+            for wl in required_wl:
+                idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
+                if len(idx) > 0:
+                    wavelength_indices.append(idx[0])
+
+            X_processed = X_full_preprocessed[:, wavelength_indices]
+        else:
+            # Standard case
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X_new)
+            else:
+                X_processed = X_new
     else:
         raise TypeError(f"X_new must be DataFrame or ndarray, got {type(X_new)}")
-
-    # Apply preprocessing if present
-    if preprocessor is not None:
-        X_processed = preprocessor.transform(X_selected)
-    else:
-        X_processed = X_selected
 
     # Make predictions
     predictions = model.predict(X_processed)

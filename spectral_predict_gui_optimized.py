@@ -93,7 +93,8 @@ class SpectralPredictApp:
         self.refined_model = None  # Fitted model from Custom Model Development tab
         self.refined_preprocessor = None  # Fitted preprocessing pipeline
         self.refined_performance = None  # Performance metrics dict (R2, RMSE, etc.)
-        self.refined_wavelengths = None  # List of wavelengths used in refined model
+        self.refined_wavelengths = None  # List of wavelengths used in refined model (subset for derivative+subset)
+        self.refined_full_wavelengths = None  # List of ALL wavelengths (for derivative+subset preprocessing)
         self.refined_config = None  # Configuration dict for refined model
 
         # Model Prediction Tab (Tab 7) variables
@@ -3090,8 +3091,15 @@ Configuration:
                 'window': window,
                 'n_vars': len(selected_wl),
                 'n_samples': X_raw.shape[0],
-                'cv_folds': n_folds
+                'cv_folds': n_folds,
+                'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing
             }
+
+            # Store full wavelengths for derivative + subset case
+            if use_full_spectrum_preprocessing:
+                self.refined_full_wavelengths = list(all_wavelengths)
+            else:
+                self.refined_full_wavelengths = None
 
             # Update UI
             self.root.after(0, lambda: self._update_refined_results(results_text))
@@ -3160,7 +3168,9 @@ Configuration:
                 'n_vars': self.refined_config['n_vars'],
                 'n_samples': self.refined_config['n_samples'],
                 'cv_folds': self.refined_config['cv_folds'],
-                'performance': {}
+                'performance': {},
+                'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
+                'full_wavelengths': self.refined_full_wavelengths  # All wavelengths for derivative+subset
             }
 
             # Add performance metrics based on task type
@@ -3537,7 +3547,7 @@ Configuration:
         button_frame1 = ttk.Frame(step1_frame)
         button_frame1.grid(row=0, column=0, columnspan=2, pady=5)
 
-        ttk.Button(button_frame1, text="📂 Load Model File",
+        ttk.Button(button_frame1, text="📂 Load Model File(s)",
                    command=self._load_model_for_prediction).pack(side='left', padx=5)
         ttk.Button(button_frame1, text="🗑️ Clear All Models",
                    command=self._clear_loaded_models).pack(side='left', padx=5)
@@ -3670,37 +3680,63 @@ Configuration:
         self.pred_stats_text.config(yscrollcommand=stats_scrollbar.set)
 
     def _load_model_for_prediction(self):
-        """Browse and load a .dasp model file."""
-        filepath = filedialog.askopenfilename(
-            title="Select DASP Model File",
+        """Browse and load one or more .dasp model files."""
+        filepaths = filedialog.askopenfilenames(
+            title="Select DASP Model File(s)",
             filetypes=[("DASP Model", "*.dasp"), ("All files", "*.*")]
         )
 
-        if not filepath:
+        if not filepaths:
             return
 
         try:
             from spectral_predict.model_io import load_model
 
-            # Load the model
-            model_dict = load_model(filepath)
+            # Load each model
+            loaded_count = 0
+            failed_models = []
 
-            # Add file information
-            model_dict['filepath'] = filepath
-            model_dict['filename'] = Path(filepath).name
+            for filepath in filepaths:
+                try:
+                    # Load the model
+                    model_dict = load_model(filepath)
 
-            # Add to loaded models list
-            self.loaded_models.append(model_dict)
+                    # Add file information
+                    model_dict['filepath'] = filepath
+                    model_dict['filename'] = Path(filepath).name
+
+                    # Add to loaded models list
+                    self.loaded_models.append(model_dict)
+                    loaded_count += 1
+
+                except Exception as e:
+                    failed_models.append((Path(filepath).name, str(e)))
 
             # Update display
             self._update_loaded_models_display()
 
-            messagebox.showinfo("Success",
-                f"Model loaded successfully:\n{Path(filepath).name}")
+            # Show appropriate message
+            if loaded_count > 0 and not failed_models:
+                messagebox.showinfo("Success",
+                    f"Successfully loaded {loaded_count} model(s).")
+            elif loaded_count > 0 and failed_models:
+                error_msg = f"Successfully loaded {loaded_count} model(s), but {len(failed_models)} failed:\n\n"
+                for name, error in failed_models[:3]:  # Show first 3 failures
+                    error_msg += f"- {name}: {error}\n"
+                if len(failed_models) > 3:
+                    error_msg += f"... and {len(failed_models) - 3} more"
+                messagebox.showwarning("Partial Success", error_msg)
+            else:
+                error_msg = f"Failed to load all {len(failed_models)} model(s):\n\n"
+                for name, error in failed_models[:3]:
+                    error_msg += f"- {name}: {error}\n"
+                if len(failed_models) > 3:
+                    error_msg += f"... and {len(failed_models) - 3} more"
+                messagebox.showerror("Load Error", error_msg)
 
         except Exception as e:
             messagebox.showerror("Load Error",
-                f"Failed to load model:\n{str(e)}")
+                f"Unexpected error during model loading:\n{str(e)}")
 
     def _update_loaded_models_display(self):
         """Update the list of loaded models display."""
@@ -3708,7 +3744,7 @@ Configuration:
         self.loaded_models_text.delete('1.0', 'end')
 
         if not self.loaded_models:
-            self.loaded_models_text.insert('1.0', "No models loaded. Click 'Load Model File' to add models.")
+            self.loaded_models_text.insert('1.0', "No models loaded. Click 'Load Model File(s)' to add models.")
         else:
             for i, model_dict in enumerate(self.loaded_models, 1):
                 metadata = model_dict['metadata']
