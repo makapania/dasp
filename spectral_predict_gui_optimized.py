@@ -103,6 +103,7 @@ class SpectralPredictApp:
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
         self.predictions_df = None  # Results dataframe
+        self.predictions_model_map = {}  # Map column names to model metadata
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -131,7 +132,7 @@ class SpectralPredictApp:
         # Validation set tracking
         self.validation_enabled = tk.BooleanVar(value=False)
         self.validation_percentage = tk.DoubleVar(value=20.0)
-        self.validation_algorithm = tk.StringVar(value="Kennard-Stone")
+        self.validation_algorithm = tk.StringVar(value="SPXY")
         self.validation_indices = set()  # Sample indices in validation set
         self.validation_X = None  # Stored validation spectral data
         self.validation_y = None  # Stored validation target data
@@ -713,22 +714,22 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Uses model-specific importance scores",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="SPA (Successive Projections) [Not yet implemented]",
+        ttk.Checkbutton(varsel_frame, text="✓ SPA (Successive Projections)",
                        variable=self.varsel_spa).grid(row=2, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Collinearity-aware selection",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE (Uninformative Variable Elimination) [Not yet implemented]",
+        ttk.Checkbutton(varsel_frame, text="✓ UVE (Uninformative Variable Elimination)",
                        variable=self.varsel_uve).grid(row=3, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-SPA Hybrid [Not yet implemented]",
+        ttk.Checkbutton(varsel_frame, text="✓ UVE-SPA Hybrid",
                        variable=self.varsel_uve_spa).grid(row=4, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Combines noise filtering + collinearity reduction",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS) [Not yet implemented]",
+        ttk.Checkbutton(varsel_frame, text="✓ iPLS (Interval PLS)",
                        variable=self.varsel_ipls).grid(row=5, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
@@ -857,14 +858,14 @@ class SpectralPredictApp:
         algo_frame = ttk.Frame(validation_frame)
         algo_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
 
-        ttk.Radiobutton(algo_frame, text="Kennard-Stone ⭐",
+        ttk.Radiobutton(algo_frame, text="Kennard-Stone",
                        variable=self.validation_algorithm, value="Kennard-Stone").grid(row=0, column=0, sticky=tk.W, padx=(0, 15))
-        ttk.Label(algo_frame, text="Maximizes spectral diversity (recommended for spectra)",
+        ttk.Label(algo_frame, text="Maximizes spectral diversity only (ignores y distribution)",
                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
 
-        ttk.Radiobutton(algo_frame, text="SPXY",
+        ttk.Radiobutton(algo_frame, text="SPXY ⭐",
                        variable=self.validation_algorithm, value="SPXY").grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Balances spectral and target variable diversity",
+        ttk.Label(algo_frame, text="Balances spectral and target diversity (recommended)",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
 
         ttk.Radiobutton(algo_frame, text="Random",
@@ -1168,6 +1169,17 @@ class SpectralPredictApp:
         self.refine_results_text.pack(fill='both', expand=True)
         self.refine_results_text.insert('1.0', "Run a refined model to see results here.")
         self.refine_results_text.config(state='disabled')
+
+        # Prediction plot
+        ttk.Label(content_frame, text="Prediction Plot", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        plot_frame = ttk.LabelFrame(content_frame, text="Reference vs Predicted", padding="20")
+        plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        self.refine_plot_frame = ttk.Frame(plot_frame)
+        self.refine_plot_frame.pack(fill='both', expand=True)
 
         # Status
         self.refine_status = ttk.Label(content_frame, text="No model loaded", style='Caption.TLabel')
@@ -2536,6 +2548,24 @@ class SpectralPredictApp:
                 except ValueError:
                     self._log_progress("⚠️ Warning: Invalid UVE n_components, using auto-determination")
 
+            # Collect selected variable selection methods
+            selected_varsel_methods = []
+            if self.varsel_importance.get():
+                selected_varsel_methods.append('importance')
+            if self.varsel_spa.get():
+                selected_varsel_methods.append('spa')
+            if self.varsel_uve.get():
+                selected_varsel_methods.append('uve')
+            if self.varsel_uve_spa.get():
+                selected_varsel_methods.append('uve_spa')
+            if self.varsel_ipls.get():
+                selected_varsel_methods.append('ipls')
+
+            # Default to importance if none selected
+            if not selected_varsel_methods:
+                selected_varsel_methods = ['importance']
+                self._log_progress("⚠️ No variable selection method selected, defaulting to 'importance'")
+
             results_df = run_search(
                 X_filtered,
                 y_filtered,
@@ -2554,8 +2584,8 @@ class SpectralPredictApp:
                 enable_region_subsets=enable_region_subsets,
                 n_top_regions=self.n_top_regions.get(),
                 progress_callback=self._progress_callback,
-                # Variable selection parameters (NEW)
-                variable_selection_method=self.variable_selection_method.get(),
+                # Variable selection parameters (NEW - supports multiple methods)
+                variable_selection_methods=selected_varsel_methods,
                 apply_uve_prefilter=self.apply_uve_prefilter.get(),
                 uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
                 uve_n_components=uve_n_comp,
@@ -3141,6 +3171,57 @@ Performance (Classification):
         # Update the wavelength count display
         self._update_wavelength_count()
 
+    def _plot_refined_predictions(self):
+        """Plot reference vs predicted values for refined model."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            return
+
+        # Clear existing plot
+        for widget in self.refine_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Create figure
+        fig = Figure(figsize=(8, 6))
+        ax = fig.add_subplot(111)
+
+        y_true = self.refined_y_true
+        y_pred = self.refined_y_pred
+
+        # Scatter plot
+        ax.scatter(y_true, y_pred, alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+
+        # 1:1 line
+        min_val = min(y_true.min(), y_pred.min())
+        max_val = max(y_true.max(), y_pred.max())
+        ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='1:1 Line')
+
+        # Calculate statistics
+        from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+        r2 = r2_score(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        mae = mean_absolute_error(y_true, y_pred)
+
+        # Add statistics text box
+        stats_text = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}\nn = {len(y_true)}'
+        ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+                fontsize=10, family='monospace')
+
+        ax.set_xlabel('Reference Values', fontsize=11)
+        ax.set_ylabel('Predicted Values', fontsize=11)
+        ax.set_title('Cross-Validation: Reference vs Predicted', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='lower right')
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.refine_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
         if self.X is None or self.y is None:
@@ -3430,6 +3511,8 @@ Performance (Classification):
 
             # Collect metrics for each fold
             fold_metrics = []
+            all_y_true = []
+            all_y_pred = []
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
@@ -3443,6 +3526,10 @@ Performance (Classification):
                 # Fit pipeline (preprocessing + model) and predict
                 pipe_fold.fit(X_train, y_train)
                 y_pred = pipe_fold.predict(X_test)
+
+                # Store predictions for plotting
+                all_y_true.extend(y_test)
+                all_y_pred.extend(y_pred)
 
                 if task_type == "regression":
                     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -3578,6 +3665,10 @@ Configuration:
                 'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing
             }
 
+            # Store predictions for plotting
+            self.refined_y_true = np.array(all_y_true)
+            self.refined_y_pred = np.array(all_y_pred)
+
             # Store full wavelengths for derivative + subset case
             if use_full_spectrum_preprocessing:
                 self.refined_full_wavelengths = list(all_wavelengths)
@@ -3611,6 +3702,8 @@ Configuration:
             self.refine_status.config(text="✓ Refined model complete")
             # Enable Save Model button after successful run
             self.refine_save_button.config(state='normal')
+            # Plot the predictions
+            self._plot_refined_predictions()
             messagebox.showinfo("Success", "Refined model analysis complete!")
 
     def _save_refined_model(self):
@@ -4440,6 +4533,9 @@ Configuration:
             results = pd.DataFrame()
             results['Sample'] = self.prediction_data.index
 
+            # Clear and initialize model map
+            self.predictions_model_map = {}
+
             # Setup progress bar
             self.pred_progress['maximum'] = len(self.loaded_models)
             self.pred_progress['value'] = 0
@@ -4475,6 +4571,10 @@ Configuration:
                         counter += 1
 
                     results[col_name] = predictions
+
+                    # Store mapping to model metadata
+                    self.predictions_model_map[col_name] = metadata
+
                     successful_models += 1
 
                 except Exception as e:
@@ -4580,6 +4680,20 @@ Configuration:
 
                 if len(values) > 0:
                     stats_text += f"{col}:\n"
+
+                    # Add variable information from model metadata
+                    if col in self.predictions_model_map:
+                        metadata = self.predictions_model_map[col]
+                        n_vars = metadata.get('n_vars', 'Unknown')
+                        wavelengths = metadata.get('wavelengths', None)
+
+                        stats_text += f"  • Variables: {n_vars}\n"
+
+                        # Format wavelengths if available and not too many
+                        if wavelengths is not None:
+                            wl_spec = self._format_wavelengths_as_spec(wavelengths)
+                            if wl_spec and len(wl_spec) < 500:  # Only show if reasonable length
+                                stats_text += f"  • Wavelengths: {wl_spec}\n"
 
                     # If validation set, calculate performance metrics
                     if is_validation:
