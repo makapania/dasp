@@ -530,13 +530,30 @@ function run_search(
     println("="^80)
     println()
 
-    # 4. Convert to DataFrame
+    # 4. Normalize results to have consistent keys (add missing hyperparameters)
+    # This is necessary because different models have different hyperparameters
+    # (e.g., Ridge has "alpha", PLS has "n_components", RandomForest has "n_trees")
+    all_keys = Set{String}()
+    for result in results
+        union!(all_keys, keys(result))
+    end
+
+    # Add missing keys to each result with missing value
+    for result in results
+        for key in all_keys
+            if !haskey(result, key)
+                result[key] = missing
+            end
+        end
+    end
+
+    # 5. Convert to DataFrame
     results_df = DataFrame(results)
 
-    # 5. Compute composite scores and ranks
+    # 6. Compute composite scores and ranks
     rank_results!(results_df)
 
-    # 6. Sort by rank
+    # 7. Sort by rank
     sort!(results_df, :Rank)
 
     return results_df
