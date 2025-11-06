@@ -59,18 +59,63 @@ After systematic debugging with multiple specialized investigation teams, **3 cr
 
 ---
 
-## ⚠️ Known Issues
+## 🔧 URGENT: Testing Required Before Production
 
-### NeuralBoosted Model Training Failures
-**Status:** ❌ Training fails (API is fixed, but training loop has issues)
-**Symptoms:** "No weak learners successfully trained" error
-**Root Cause:** Separate from API fix - training algorithm needs debugging
-**Workaround:** **DISABLE NeuralBoosted in Analysis Configuration**
-**Note:** All other models (PLS, Ridge, Lasso, RandomForest, MLP) work perfectly
+### 1. Test R² Fix (Just Applied - Line 3818-3825)
+**What was fixed:** DataFrame index reset after exclusions to match Julia's sequential indexing
+**File:** spectral_predict_gui_optimized.py
+**Test now:**
+1. Run analysis with exclusions enabled (Results tab)
+2. Select a Ridge or RandomForest model
+3. Double-click to load in Model Development
+4. Run refined model
+5. **Expected:** R² matches Results tab exactly (within ±0.0001)
 
-### Model Development R² Discrepancy
-**Status:** ⚠️ Likely FIXED by preprocessing combinations fix (needs verification)
-**Action Required:** Test with real data to verify Results → Model Development reproduction
+**If R² still doesn't match:** Report exact values (Results vs Model Development) and which model
+
+---
+
+### 2. Test NeuralBoosted (CRITICAL - ENTIRE REASON FOR JULIA PORT)
+**Status:** ⚠️ Training failures reported, fixes attempted in neural_boosted.jl
+**Recent fixes in neural_boosted.jl:**
+- Reduced learning rate from 0.01 to 0.001 (line 279)
+- Added NaN/Inf gradient checks (line 302)
+- Added early convergence detection (line 319)
+- Added prediction validation (line 458, 476)
+
+**Test now:**
+1. Load example/BoneCollagen.csv
+2. Analysis Configuration → Check ☑ NeuralBoosted
+3. Run analysis
+4. **Expected:** NeuralBoosted models appear in results (no "all weak learners failed" error)
+
+**If still failing:**
+- Check console for specific error messages
+- Try with verbose=1 to see individual learner failures
+- Report which stage fails (gradient computation, prediction validation, etc.)
+
+---
+
+### 3. Test Preprocessing Combinations
+**What was fixed:** Bridge now auto-generates combinations (snv_deriv, msc_deriv)
+**Test:**
+1. Check ☑ SNV + ☑ SG2
+2. Run analysis
+3. **Expected:** Results show "SNV→Deriv2" (not separate rows)
+
+---
+
+## ⚠️ Known Status
+
+### NeuralBoosted
+**Priority:** **CRITICAL** - This is the ONLY reason we ported to Julia
+**Status:** Fixes applied to training loop, NEEDS TESTING
+**If broken:** This blocks the entire Julia port value proposition
+
+### Model Development R²
+**Priority:** **CRITICAL** - Production blocking
+**Status:** Fix applied (index reset), NEEDS TESTING
+**If broken:** Cannot trust Model Development tab
 
 ---
 

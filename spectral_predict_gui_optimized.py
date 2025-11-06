@@ -2936,9 +2936,49 @@ class SpectralPredictApp:
                 width = 80
             self.results_tree.column(col, width=width, anchor='center')
 
-        # Insert data rows
+        # Insert data rows with improved preprocessing display
         for idx, row in results_df.iterrows():
-            values = [row[col] for col in columns]
+            values = []
+            for col in columns:
+                value = row[col]
+                # Make preprocessing names more descriptive
+                if col == 'Preprocess' and isinstance(value, str):
+                    deriv = row.get('Deriv', None)
+                    if value == 'deriv_snv':
+                        if deriv == 1:
+                            value = 'Deriv1→SNV'  # Derivative THEN SNV
+                        elif deriv == 2:
+                            value = 'Deriv2→SNV'
+                        else:
+                            value = 'Deriv→SNV'
+                    elif value == 'snv_deriv':
+                        if deriv == 1:
+                            value = 'SNV→Deriv1'  # SNV THEN Derivative
+                        elif deriv == 2:
+                            value = 'SNV→Deriv2'
+                        else:
+                            value = 'SNV→Deriv'
+                    elif value == 'msc_deriv':
+                        if deriv == 1:
+                            value = 'MSC→Deriv1'
+                        elif deriv == 2:
+                            value = 'MSC→Deriv2'
+                        else:
+                            value = 'MSC→Deriv'
+                    elif value == 'deriv_msc':
+                        if deriv == 1:
+                            value = 'Deriv1→MSC'
+                        elif deriv == 2:
+                            value = 'Deriv2→MSC'
+                        else:
+                            value = 'Deriv→MSC'
+                    elif value == 'deriv':
+                        if deriv == 1:
+                            value = 'Deriv1'
+                        elif deriv == 2:
+                            value = 'Deriv2'
+                    # raw, snv, msc stay as-is
+                values.append(value)
             self.results_tree.insert('', 'end', iid=str(idx), values=values)
 
         # Update status
@@ -3260,6 +3300,12 @@ Performance (Classification):
         window = config.get('Window', 17)
         if not pd.isna(window) and window in [7, 11, 17, 19]:
             self.refine_window.set(int(window))
+
+        # Set number of CV folds (CRITICAL FIX: Use same folds as Results tab)
+        n_folds = config.get('n_folds', 5)
+        if not pd.isna(n_folds) and n_folds in range(3, 11):
+            self.refine_folds.set(int(n_folds))
+            print(f"DEBUG: Loaded n_folds={n_folds} from config (ensures same CV strategy as Results)")
 
         # Set model type
         model_name = config.get('Model', 'PLS')
@@ -3769,6 +3815,15 @@ Performance (Classification):
                 print(f"DEBUG: Calibration: {n_cal} samples | Validation: {n_val} samples")
                 print(f"DEBUG: This matches the data split used in the main search (Results tab)")
 
+            # CRITICAL FIX: Reset DataFrame index to ensure sequential 0-based indexing
+            # After exclusions and validation splits, index may have gaps (e.g., [0,1,2,5,7,9,...])
+            # Julia's Matrix conversion creates sequential indices, so we must match that behavior
+            # Without this, CV folds assign different physical rows despite same indices
+            X_base_df = X_base_df.reset_index(drop=True)
+            y_series = y_series.reset_index(drop=True)
+            print(f"DEBUG: Reset index after exclusions - X_base_df.index now: {list(X_base_df.index[:10])}...")
+            print(f"DEBUG: This ensures CV folds match Julia backend (sequential row indexing)")
+
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
             # Get user-selected preprocessing method and map to build_preprocessing_pipeline format
@@ -3886,22 +3941,48 @@ Performance (Classification):
                 max_iter=self.refine_max_iter.get()
             )
 
-            # Reapply tuned hyperparameters from the search results when available
+            # CRITICAL FIX: Reapply tuned hyperparameters from the search results
+            # Julia backend stores hyperparameters as individual fields (alpha, n_trees, etc.)
+            # NOT in a 'Params' string field like old Python implementation
             params_from_search = {}
             if self.selected_model_config is not None:
-                raw_params = self.selected_model_config.get('Params')
-                if isinstance(raw_params, str) and raw_params.strip():
-                    try:
-                        parsed = ast.literal_eval(raw_params)
-                        if isinstance(parsed, dict):
-                            params_from_search = parsed
-                    except (ValueError, SyntaxError) as parse_err:
-                        print(f"WARNING: Could not parse saved Params '{raw_params}': {parse_err}")
+                # Extract hyperparameters based on model type
+                if model_name == 'Ridge' or model_name == 'Lasso':
+                    if 'alpha' in self.selected_model_config and not pd.isna(self.selected_model_config.get('alpha')):
+                        params_from_search['alpha'] = float(self.selected_model_config['alpha'])
+                        print(f"DEBUG: Loaded alpha={params_from_search['alpha']} for {model_name}")
+
+                elif model_name == 'RandomForest':
+                    if 'n_trees' in self.selected_model_config and not pd.isna(self.selected_model_config.get('n_trees')):
+                        # Julia uses n_trees, scikit-learn uses n_estimators
+                        params_from_search['n_estimators'] = int(self.selected_model_config['n_trees'])
+                        print(f"DEBUG: Loaded n_estimators={params_from_search['n_estimators']} for RandomForest")
+                    if 'max_features' in self.selected_model_config and not pd.isna(self.selected_model_config.get('max_features')):
+                        params_from_search['max_features'] = str(self.selected_model_config['max_features'])
+                        print(f"DEBUG: Loaded max_features={params_from_search['max_features']} for RandomForest")
+
+                elif model_name == 'MLP':
+                    if 'learning_rate' in self.selected_model_config and not pd.isna(self.selected_model_config.get('learning_rate')):
+                        params_from_search['learning_rate_init'] = float(self.selected_model_config['learning_rate'])
+                        print(f"DEBUG: Loaded learning_rate_init={params_from_search['learning_rate_init']} for MLP")
+                    # Note: hidden_layers would need special handling as it's a tuple
+
+                elif model_name == 'NeuralBoosted':
+                    if 'n_estimators' in self.selected_model_config and not pd.isna(self.selected_model_config.get('n_estimators')):
+                        params_from_search['n_estimators'] = int(self.selected_model_config['n_estimators'])
+                    if 'learning_rate' in self.selected_model_config and not pd.isna(self.selected_model_config.get('learning_rate')):
+                        params_from_search['learning_rate'] = float(self.selected_model_config['learning_rate'])
+                    if 'hidden_layer_size' in self.selected_model_config and not pd.isna(self.selected_model_config.get('hidden_layer_size')):
+                        params_from_search['hidden_layer_size'] = int(self.selected_model_config['hidden_layer_size'])
+                    if 'activation' in self.selected_model_config and not pd.isna(self.selected_model_config.get('activation')):
+                        params_from_search['activation'] = str(self.selected_model_config['activation'])
+                    if params_from_search:
+                        print(f"DEBUG: Loaded NeuralBoosted params: {params_from_search}")
 
             if params_from_search:
                 try:
                     model.set_params(**params_from_search)
-                    print(f"DEBUG: Applied saved search parameters: {params_from_search}")
+                    print(f"DEBUG: ✓ Applied tuned hyperparameters from Results: {params_from_search}")
                 except Exception as e:
                     print(f"WARNING: Failed to apply saved parameters {params_from_search}: {e}")
 
@@ -3910,11 +3991,15 @@ Performance (Classification):
             from sklearn.pipeline import Pipeline
 
             # Prepare cross-validation
+            # CRITICAL FIX: Use shuffle=False to ensure identical fold splits as Julia backend
+            # Julia and Python use different RNG algorithms, so even with same seed (42),
+            # they create different splits when shuffle=True. Using shuffle=False ensures
+            # deterministic, data-order-based folds that match between backends.
             y_array = y_series.values
             if task_type == "regression":
-                cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+                cv = KFold(n_splits=n_folds, shuffle=False)  # No shuffle for consistency
             else:
-                cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+                cv = StratifiedKFold(n_splits=n_folds, shuffle=False)  # No shuffle for consistency
 
             if use_full_spectrum_preprocessing:
                 # === PATH A: Derivative + Subset (matches search.py lines 434-449) ===
