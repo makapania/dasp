@@ -10,6 +10,8 @@ User reported:
 2. NeuralBoosted does not work in Julia even though it works in Python
 3. "A good deal of this is not working in the Julia implementation"
 
+**Update:** User then reported error `KeyError: 'SubsetTag'` during report generation
+
 ## Investigation Summary
 
 ### What I Found
@@ -48,6 +50,36 @@ early_stopping = get(config, "early_stopping", true)
 # Changed default to false because early_stopping=true causes issues with small datasets
 # (after CV split, training sets can be very small, e.g. n=17 samples)
 early_stopping = get(config, "early_stopping", false)
+```
+
+**2. Report Generation Column Name Mismatch**
+
+**Problem:**
+- Julia backend returns column named `SubsetTag`
+- Julia bridge renames it to `Subset` for consistency with Python version
+- But report generator (`report.py`) was still looking for `SubsetTag`
+- Result: `KeyError: 'SubsetTag'` when generating markdown report
+
+**Fix Applied:**
+- Changed all 3 references in `src/spectral_predict/report.py`:
+  - Line 48: Top 5 models heading
+  - Line 85: Regression table columns
+  - Line 97: Classification table columns
+- All now use `Subset` instead of `SubsetTag`
+
+**Code Changes:**
+```python
+# Before (line 48):
+lines.append(f"### Rank {row['Rank']}: {row['Model']} ({row['SubsetTag']})")
+
+# After:
+lines.append(f"### Rank {row['Rank']}: {row['Model']} ({row['Subset']})")
+
+# Before (lines 85, 97):
+"SubsetTag"  # in column lists
+
+# After:
+"Subset"  # in column lists
 ```
 
 #### ⚠️ Remaining Limitations
@@ -194,6 +226,11 @@ This is **correct behavior** - failed models should not appear in results.
 1. `julia_port/SpectralPredict/src/models.jl`
    - Line 385: Changed NeuralBoosted early_stopping default to false
    - Added explanatory comment
+
+2. `src/spectral_predict/report.py`
+   - Line 48: Changed `SubsetTag` to `Subset` in top models heading
+   - Line 85: Changed `SubsetTag` to `Subset` in regression column list
+   - Line 97: Changed `SubsetTag` to `Subset` in classification column list
 
 ## Next Steps
 
