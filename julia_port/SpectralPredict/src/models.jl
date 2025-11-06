@@ -380,7 +380,9 @@ function build_model(model_name::String, config::Dict{String, Any}, task_type::S
         # Optional parameters with defaults
         alpha = get(config, "alpha", 0.0001)
         max_iter = get(config, "max_iter", 100)
-        early_stopping = get(config, "early_stopping", true)
+        # Changed default to false because early_stopping=true causes issues with small datasets
+        # (after CV split, training sets can be very small, e.g. n=17 samples)
+        early_stopping = get(config, "early_stopping", false)
         verbose = get(config, "verbose", 0)
         return NeuralBoostedModel(n_estimators, learning_rate, hidden_layer_size, activation,
                                   alpha=alpha, max_iter=max_iter, early_stopping=early_stopping, verbose=verbose)
