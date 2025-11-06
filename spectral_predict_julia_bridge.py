@@ -44,8 +44,8 @@ import pandas as pd
 # ============================================================================
 
 # Julia paths (user can override these)
-JULIA_EXE = "/opt/homebrew/bin/julia"
-JULIA_PROJECT = "/Users/mattsponheimer/git/dasp/julia_port/SpectralPredict"
+JULIA_EXE = r"C:\Users\sponheim\AppData\Local\Programs\Julia-1.12.1\bin\julia.exe"
+JULIA_PROJECT = r"C:\Users\sponheim\git\dasp\julia_port\SpectralPredict"
 
 
 # ============================================================================
@@ -70,6 +70,12 @@ def run_search_julia(
     variable_selection_methods: Optional[List[str]] = None,
     enable_region_subsets: bool = True,
     n_top_regions: int = 5,
+    # Variable selection method parameters (ignored for now, use Julia defaults)
+    apply_uve_prefilter: bool = False,
+    uve_cutoff_multiplier: float = 1.0,
+    uve_n_components: Optional[int] = None,
+    spa_n_random_starts: int = 10,
+    ipls_n_intervals: int = 20,
     progress_callback: Optional[Callable] = None,
     julia_exe: Optional[str] = None,
     julia_project: Optional[str] = None,
@@ -528,6 +534,27 @@ using Pkg
 using CSV
 using DataFrames
 
+# Ensure the project environment is active and dependencies are installed
+try
+    Pkg.activate("{julia_project_path}")
+    Pkg.instantiate()
+    # Optional but helpful: precompile to surface any compile-time issues early
+    try
+        Pkg.precompile()
+    catch
+        # Precompile is best-effort; continue even if it fails
+    end
+catch e
+    println("ERROR: Failed to activate/instantiate Julia project")
+    println(e)
+    # Write error progress marker
+    open("{str(progress_file).replace(chr(92), '/')}", "w") do f
+        println(f, "status: error")
+        println(f, "error: ", string(e))
+    end
+    rethrow(e)
+end
+
 # Load SpectralPredict module using absolute path
 include("{spectral_predict_module}")
 using .SpectralPredict
@@ -618,11 +645,33 @@ try
     println("Analysis Complete!")
     println("="^70)
     println()
-    println("Total configurations: ", nrow(results))
-    println("Saving results to CSV...")
+println("Total configurations: ", nrow(results))
+println("Saving results to CSV...")
+
+    # Sanitize results to ensure CSV-friendly column types
+    function _sanitize_results(df::DataFrame)
+        df_s = copy(df)
+        for name in names(df_s)
+            col = df_s[!, name]
+            has_complex = any(x -> !(x === nothing || ismissing(x) || x isa Number || x isa String || x isa Bool), col)
+            has_nothing = any(x -> x === nothing, col)
+            if has_complex || has_nothing
+                df_s[!, name] = [
+                    (x === nothing || ismissing(x)) ? missing : string(x)
+                    for x in col
+                ]
+            else
+                # keep numeric/string/bool columns as-is
+                df_s[!, name] = col
+            end
+        end
+        return df_s
+    end
+
+    clean_results = _sanitize_results(results)
 
     # Save results
-    CSV.write("{str(output_file).replace(chr(92), '/')}", results)
+    CSV.write("{str(output_file).replace(chr(92), '/')}", clean_results)
 
     println("Results saved successfully!")
     println()

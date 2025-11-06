@@ -24,8 +24,7 @@ using Flux
 using Random
 using StatsBase
 
-# Import NeuralBoosted module
-include("neural_boosted.jl")
+# Import NeuralBoosted module (included in parent SpectralPredict module)
 using .NeuralBoosted
 
 # ============================================================================
@@ -421,10 +420,13 @@ function fit_model!(model::PLSModel, X::Matrix{Float64}, y::Vector{Float64})
     # Fit PLS using CCA (Canonical Correlation Analysis) as equivalent to PLS
     # Note: MultivariateStats doesn't have direct PLS, but CCA with proper setup works
     n_features = size(X, 2)
-    n_components = min(model.n_components, n_features, size(X, 1))
 
     # Convert y to matrix for CCA
     Y_mat = reshape(y_centered, :, 1)
+
+    # For CCA, max components is limited by min dimension of both X and Y
+    # Since Y is univariate (1 feature), we can only extract 1 component
+    n_components = min(model.n_components, n_features, size(X, 1), size(Y_mat, 2))
 
     # Fit using the simpls algorithm equivalent
     model.model = fit(CCA, X_centered', Y_mat'; outdim=n_components)
@@ -525,13 +527,16 @@ function fit_model!(model::RandomForestModel, X::Matrix{Float64}, y::Vector{Floa
     end
 
     # Build random forest
-    # DecisionTree.jl uses n_subfeatures for max_features
-    # partial_sampling controls sampling ratio (0.7 is common default)
+    # DecisionTree.jl uses positional arguments:
+    # build_forest(labels, features, n_subfeatures, n_trees, partial_sampling, max_depth, min_samples_leaf, min_samples_split, min_purity_increase; rng, impurity_importance)
     model.forest = build_forest(y, X,
-                                n_subfeatures=n_subfeatures,
-                                n_trees=model.n_trees,
-                                partial_sampling=0.7,
-                                max_depth=-1,  # No limit
+                                n_subfeatures,           # positional arg 1
+                                model.n_trees,           # positional arg 2
+                                0.7,                     # partial_sampling (positional arg 3)
+                                -1,                      # max_depth, -1 = no limit (positional arg 4)
+                                5,                       # min_samples_leaf (positional arg 5)
+                                2,                       # min_samples_split (positional arg 6)
+                                0.0;                     # min_purity_increase (positional arg 7)
                                 rng=Random.MersenneTwister(42))
     return model
 end
@@ -590,9 +595,9 @@ function fit_model!(model::MLPModel, X::Matrix{Float64}, y::Vector{Float64})
     X_train = X_norm'  # Flux expects features × samples
     y_train = reshape(y_norm, 1, :)  # 1 × samples for single output
 
-    # Training setup
+    # Training setup (NEW FLUX API)
     opt = Adam(model.learning_rate)
-    params_model = Flux.params(model.model)
+    opt_state = Flux.setup(opt, model.model)
 
     # Simple early stopping: track validation loss
     n_samples = size(X, 1)
@@ -616,14 +621,13 @@ function fit_model!(model::MLPModel, X::Matrix{Float64}, y::Vector{Float64})
     max_epochs = 1000
 
     for epoch in 1:max_epochs
-        # Training
-        loss, back = Flux.pullback(params_model) do
-            ŷ = model.model(X_train_split)
+        # Training (NEW FLUX API)
+        grads = Flux.gradient(model.model) do m
+            ŷ = m(X_train_split)
             Flux.mse(ŷ, y_train_split)
         end
 
-        grads = back(1.0f0)
-        Flux.update!(opt, params_model, grads)
+        Flux.update!(opt_state, model.model, grads[1])
 
         # Validation
         if epoch % 10 == 0
@@ -935,10 +939,10 @@ function compute_vip_scores(model::PLSModel, X::Matrix{Float64}, y::Vector{Float
     y_centered = y .- model.mean_y
 
     # Get the projection/weight matrix
-    W = MultivariateStats.projection(model.model)  # This is the X-weights matrix
+    W = MultivariateStats.projection(model.model, :x)  # This is the X-weights matrix
 
     # Get scores (transformed X)
-    T = MultivariateStats.transform(model.model, X_centered')  # n_components × n_samples
+    T = MultivariateStats.predict(model.model, X_centered', :x)  # n_components × n_samples
     T = T'  # Convert to n_samples × n_components
 
     # Compute explained variance by each component

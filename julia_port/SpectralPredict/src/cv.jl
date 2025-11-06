@@ -716,6 +716,17 @@ function extract_model_config(model, model_name::String)::Dict{String, Any}
         return Dict("n_trees" => model.n_trees, "max_features" => model.max_features)
     elseif model_name == "MLP"
         return Dict("hidden_layers" => model.hidden_layers, "learning_rate" => model.learning_rate)
+    elseif model_name == "NeuralBoosted"
+        return Dict(
+            "n_estimators" => model.n_estimators,
+            "learning_rate" => model.learning_rate,
+            "hidden_layer_size" => model.hidden_layer_size,
+            "activation" => model.activation,
+            "alpha" => model.alpha,
+            "max_iter" => model.max_iter,
+            "early_stopping" => model.early_stopping,
+            "verbose" => model.verbose
+        )
     else
         throw(ArgumentError("Unknown model name: $model_name"))
     end

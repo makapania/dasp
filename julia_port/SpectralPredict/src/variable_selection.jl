@@ -215,11 +215,13 @@ function uve_selection(
             y_matrix = reshape(y_centered, :, 1)
 
             # Fit CCA model
-            n_comp = min(n_components, size(X_centered, 2), size(X_centered, 1) - 1)
+            # For CCA, max components is limited by min dimension of both X and Y
+            # Since Y is univariate (1 feature), we can only extract 1 component
+            n_comp = min(n_components, size(X_centered, 2), size(X_centered, 1) - 1, size(y_matrix, 2))
             model = fit(CCA, X_centered', y_matrix'; outdim=n_comp)
 
             # Get the projection weights for X
-            W = projection(model)  # Returns X projection matrix
+            W = projection(model, :x)  # Returns X projection matrix
 
             # Approximate PLS coefficients using the projection weights
             # For PLS regression: coef ≈ W * (W'W)^(-1) * W' * y

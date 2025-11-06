@@ -27,13 +27,8 @@ using DataFrames
 using Statistics
 using ProgressMeter
 
-# Import from other modules
-include("preprocessing.jl")
-include("models.jl")
-include("cv.jl")
-include("regions.jl")
-include("scoring.jl")
-include("variable_selection.jl")
+# Note: All module files are included in parent SpectralPredict.jl module
+# No need to re-include them here
 
 using .Regions
 using .Scoring
@@ -310,7 +305,10 @@ function run_search(
                     n_vars=n_features_preprocessed,
                     full_vars=full_vars
                 )
-                push!(results, result_full)
+                # Only add result if training succeeded (not nothing)
+                if !isnothing(result_full)
+                    push!(results, result_full)
+                end
 
                 # Update progress
                 next!(progress, showvalues=[
@@ -348,15 +346,29 @@ function run_search(
                             local importances::Vector{Float64}
                             local selected_indices::Vector{Int}
                             local subset_tag::String
+                            local selection_succeeded = false
 
-                            # Apply variable selection method
-                            if method == "importance"
+                            # Apply variable selection method (wrapped in try-catch for safety)
+                            try
+                                if method == "importance"
                                 # Model-based feature importance (original method)
-                                model = build_model(model_name, config, task_type)
-                                fit_model!(model, X_preprocessed, y)
-                                importances = get_feature_importances(model, model_name, X_preprocessed, y)
-                                selected_indices = sortperm(importances, rev=true)[1:n_top]
-                                subset_tag = "top$(n_top)"
+                                # Wrap in try-catch to handle models that fail on small datasets
+                                local model_trained = false
+                                try
+                                    model = build_model(model_name, config, task_type)
+                                    fit_model!(model, X_preprocessed, y)
+                                    importances = get_feature_importances(model, model_name, X_preprocessed, y)
+                                    selected_indices = sortperm(importances, rev=true)[1:n_top]
+                                    subset_tag = "top$(n_top)"
+                                    model_trained = true
+                                catch e
+                                    @warn "Failed to compute feature importances for $model_name: $(sprint(showerror, e)). Skipping variable selection for this model/count."
+                                end
+
+                                # Skip this iteration if model training failed
+                                if !model_trained
+                                    continue
+                                end
 
                             elseif method == "uve"
                                 # UVE selection on preprocessed data
@@ -407,8 +419,21 @@ function run_search(
                                 selected_indices = findall(x -> x > 0, importances)
                                 subset_tag = "uve_spa$(n_top)"
 
-                            else
-                                @warn "Unknown variable selection method: $method (skipping)"
+                                else
+                                    @warn "Unknown variable selection method: $method (skipping)"
+                                    continue
+                                end
+
+                                # Mark selection as successful
+                                selection_succeeded = true
+
+                            catch e
+                                @warn "Variable selection failed for $model_name with method $method, n_top=$n_top: $(sprint(showerror, e)). Skipping."
+                                continue
+                            end
+
+                            # Skip if selection didn't succeed
+                            if !selection_succeeded
                                 continue
                             end
 
@@ -448,7 +473,10 @@ function run_search(
                                     var_selection_indices=selected_indices
                                 )
                             end
-                            push!(results, result)
+                            # Only add result if training succeeded (not nothing)
+                            if !isnothing(result)
+                                push!(results, result)
+                            end
                         end
                     end
                 end
@@ -484,7 +512,10 @@ function run_search(
                                 full_vars=full_vars
                             )
                         end
-                        push!(results, result)
+                        # Only add result if training succeeded (not nothing)
+                        if !isnothing(result)
+                            push!(results, result)
+                        end
                     end
                 end
             end
@@ -754,19 +785,26 @@ function run_single_config(
     full_vars::Int=size(X, 2),
     var_selection_method::Union{String,Nothing}=nothing,
     var_selection_indices::Union{Vector{Int},Nothing}=nothing
-)::Dict{String, Any}
+)::Union{Dict{String, Any}, Nothing}
 
     # Build model
     model = build_model(model_name, config, task_type)
 
-    # Run cross-validation
-    cv_results = run_cross_validation(
-        X, y,
-        model, model_name,
-        preprocess_config, task_type,
-        n_folds=n_folds,
-        skip_preprocessing=skip_preprocessing
-    )
+    # Run cross-validation with error handling
+    local cv_results
+    try
+        cv_results = run_cross_validation(
+            X, y,
+            model, model_name,
+            preprocess_config, task_type,
+            n_folds=n_folds,
+            skip_preprocessing=skip_preprocessing
+        )
+    catch e
+        # Log the error and return nothing to indicate failure
+        @warn "Model training failed for $model_name with config $config: $(sprint(showerror, e))"
+        return nothing  # Signal that this configuration failed
+    end
 
     # Extract metrics
     if task_type == "regression"

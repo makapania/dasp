@@ -2455,7 +2455,7 @@ class SpectralPredictApp:
     def _run_analysis_thread(self, selected_models):
         """Run analysis in background thread."""
         try:
-            from spectral_predict.search import run_search
+            from spectral_predict_julia_bridge import run_search_julia as run_search
             from spectral_predict.report import write_markdown_report
 
             # Determine task type
@@ -2747,9 +2747,10 @@ class SpectralPredictApp:
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
+            error_str = str(e)  # Capture error message before lambda
             self._log_progress(f"\n✗ Error: {e}\n{error_msg}")
             self.root.after(0, lambda: self.progress_status.config(text="✗ Analysis failed"))
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{e}"))
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{error_str}"))
 
     def _progress_callback(self, info):
         """Handle progress updates."""

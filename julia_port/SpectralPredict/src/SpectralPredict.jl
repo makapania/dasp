@@ -90,19 +90,19 @@ using SavitzkyGolay
 using DSP
 using Distributions
 
-# Include all module files
+# Include all module files (must happen BEFORE exports)
 include("preprocessing.jl")
+include("neural_boosted.jl")  # Must be before models.jl
 include("models.jl")
 include("cv.jl")
 include("regions.jl")
 include("scoring.jl")
+include("variable_selection.jl")  # Moved before search.jl since search uses these
+include("diagnostics.jl")
 include("search.jl")
 include("io.jl")
-include("variable_selection.jl")
-include("diagnostics.jl")
-include("neural_boosted.jl")
 
-# Export main functions
+# Export main functions (must happen AFTER all includes)
 
 ## Search and analysis
 export run_search

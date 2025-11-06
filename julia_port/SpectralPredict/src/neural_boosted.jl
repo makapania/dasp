@@ -273,32 +273,32 @@ function train_weak_learner!(
     X_t = Float32.(X')
     y_t = Float32.(reshape(y, 1, :))
 
-    # Define loss function with L2 regularization
-    function loss_fn()
-        pred = model(X_t)
-        mse = Flux.mse(pred, y_t)
-
-        # L2 regularization: sum of squared weights
-        l2_penalty = sum(sum(p.^2) for p in Flux.params(model))
-
-        return mse + alpha * l2_penalty
-    end
-
-    # Optimizer: Adam with learning rate 0.01
+    # Optimizer: Adam with learning rate 0.01 (NEW FLUX API)
     opt = Adam(0.01)
+    opt_state = Flux.setup(opt, model)
 
-    # Get model parameters
-    ps = Flux.params(model)
-
-    # Training loop
+    # Training loop (NEW FLUX API)
     for epoch in 1:max_iter
         # Compute gradients and update weights
-        gs = gradient(loss_fn, ps)
-        Flux.update!(opt, ps, gs)
+        grads = Flux.gradient(model) do m
+            pred = m(X_t)
+            mse = Flux.mse(pred, y_t)
+
+            # L2 regularization: sum of squared weights
+            l2_penalty = sum(sum(p.^2) for p in Flux.params(m))
+
+            mse + alpha * l2_penalty
+        end
+
+        Flux.update!(opt_state, model, grads[1])
 
         # Verbose output
         if verbose >= 2 && epoch % 20 == 0
-            current_loss = loss_fn()
+            # Compute current loss for logging
+            pred = model(X_t)
+            mse = Flux.mse(pred, y_t)
+            l2_penalty = sum(sum(p.^2) for p in Flux.params(model))
+            current_loss = mse + alpha * l2_penalty
             println("    Epoch $epoch: loss = $(current_loss)")
         end
     end
@@ -349,12 +349,20 @@ function fit!(
 
     # Step 1: Train/validation split (if early stopping)
     if model.early_stopping
+        # Check if dataset is too small for reliable early stopping
         if n_samples < 20
-            @warn "Dataset is very small (<20 samples). Consider setting early_stopping=false."
+            @warn "Dataset is very small (n=$n_samples < 20). Consider setting early_stopping=false."
         end
 
         n_val = Int(floor(n_samples * model.validation_fraction))
         n_train = n_samples - n_val
+
+        # Additional validation for extremely small datasets
+        if n_train < 5
+            error("Training set too small (n_train=$n_train) after validation split. " *
+                  "Either use early_stopping=false or provide more samples. " *
+                  "Minimum recommended: 20 samples with early_stopping=true, or 10 samples with early_stopping=false.")
+        end
 
         # Random shuffle and split
         indices = randperm(n_samples)
@@ -386,6 +394,9 @@ function fit!(
     best_val_score = Inf
     no_improvement_count = 0
 
+    # Track weak learner failures for diagnostics
+    n_failed_learners = 0
+
     # Step 2: Boosting loop
     for m in 1:model.n_estimators
         if model.verbose >= 1
@@ -413,6 +424,7 @@ function fit!(
                 model.verbose
             )
         catch e
+            n_failed_learners += 1
             if model.verbose >= 1
                 @warn "Weak learner $m failed to converge: $e. Skipping."
             end
@@ -480,6 +492,27 @@ function fit!(
     end
 
     model.n_estimators_ = length(model.estimators_)
+
+    # Critical validation: ensure at least one estimator was successfully trained
+    if isempty(model.estimators_)
+        error("NeuralBoosted training failed: No weak learners were successfully trained. " *
+              "All $(n_failed_learners) weak learners failed during training. " *
+              "This may be due to:\n" *
+              "  1. Dataset too small (n=$(size(X_train, 1)) samples, try early_stopping=false for small datasets)\n" *
+              "  2. Numerical instability (check for NaN/Inf values in your data)\n" *
+              "  3. Weak learner convergence issues (try increasing max_iter or adjusting learning_rate)\n" *
+              "Set verbose=1 to see individual weak learner failures.")
+    end
+
+    # Warn if a significant portion of learners failed
+    if n_failed_learners > 0 && model.verbose >= 1
+        failure_rate = n_failed_learners / (model.n_estimators_ + n_failed_learners)
+        if failure_rate > 0.5
+            @warn "$(n_failed_learners) out of $(model.n_estimators_ + n_failed_learners) weak learners failed ($(round(failure_rate*100, digits=1))% failure rate). Model may be unstable."
+        elseif n_failed_learners > 5
+            println("  Note: $(n_failed_learners) weak learners failed but $(model.n_estimators_) succeeded.")
+        end
+    end
 
     if model.verbose >= 1
         println("Fitting complete! $(model.n_estimators_) weak learners trained.")

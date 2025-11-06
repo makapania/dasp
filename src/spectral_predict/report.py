@@ -31,7 +31,7 @@ def write_markdown_report(target, df_ranked, out_dir):
     top5 = df_ranked.head(5)
 
     # Determine task type
-    task_type = top5.iloc[0]["Task"]
+    task_type = top5.iloc[0]["task_type"]
 
     # Build markdown content
     lines = [
