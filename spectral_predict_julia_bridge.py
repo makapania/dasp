@@ -798,6 +798,26 @@ def _postprocess_results(results_df, task_type):
     # Sort by Rank
     results_df = results_df.sort_values('Rank').reset_index(drop=True)
 
+    # Reorder columns for better display
+    # Order: Rank -> Model descriptors -> Metrics -> Score -> Internal columns
+    column_order = ['Rank', 'Model', 'Preprocess', 'Deriv', 'Window', 'Poly', 'LVs',
+                    'Subset', 'n_vars']
+
+    if task_type == 'regression':
+        column_order.extend(['RMSE', 'R2', 'MAE'])
+    else:
+        column_order.extend(['Accuracy', 'Precision', 'Recall', 'F1', 'ROC_AUC'])
+
+    column_order.append('CompositeScore')
+
+    # Add any remaining columns (like task_type, full_vars, VarSelectionMethod, etc.)
+    remaining_cols = [col for col in results_df.columns if col not in column_order]
+    column_order.extend(remaining_cols)
+
+    # Reorder, keeping only columns that exist
+    final_order = [col for col in column_order if col in results_df.columns]
+    results_df = results_df[final_order]
+
     return results_df
 
 
