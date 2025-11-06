@@ -434,24 +434,55 @@ def _create_config(
         if preprocessing_methods.get('msc', False):
             julia_preprocessing.append('msc')
 
-        # Handle derivatives
+        # Handle derivatives and auto-generate combinations
         has_deriv = False
+        has_snv = preprocessing_methods.get('snv', False)
+        has_msc = preprocessing_methods.get('msc', False)
+
         if preprocessing_methods.get('sg1', False):
-            if 'deriv' not in julia_preprocessing:
-                julia_preprocessing.append('deriv')
             derivative_orders.append(1)
             has_deriv = True
 
         if preprocessing_methods.get('sg2', False):
-            if 'deriv' not in julia_preprocessing:
-                julia_preprocessing.append('deriv')
             if 2 not in derivative_orders:
                 derivative_orders.append(2)
             has_deriv = True
 
-        # Handle deriv_snv (not directly supported in Julia yet)
-        if preprocessing_methods.get('deriv_snv', False):
-            print("Warning: deriv_snv preprocessing not yet implemented in Julia backend")
+        # Auto-generate combinations when multiple methods selected
+        if has_snv and has_deriv:
+            # User wants SNV + Derivative → create snv_deriv (SNV first, then derivative)
+            if 'snv_deriv' not in julia_preprocessing:
+                julia_preprocessing.append('snv_deriv')
+            # Remove standalone snv (we want combination only)
+            if 'snv' in julia_preprocessing:
+                julia_preprocessing.remove('snv')
+        elif has_snv:
+            # SNV only (already added above at line 433)
+            pass
+
+        if has_msc and has_deriv:
+            # User wants MSC + Derivative → create msc_deriv (MSC first, then derivative)
+            if 'msc_deriv' not in julia_preprocessing:
+                julia_preprocessing.append('msc_deriv')
+            # Remove standalone msc (we want combination only)
+            if 'msc' in julia_preprocessing:
+                julia_preprocessing.remove('msc')
+        elif has_msc and not has_deriv:
+            # MSC only (already added above at line 435)
+            pass
+
+        # Handle deriv_snv checkbox (derivative THEN SNV - opposite order)
+        if preprocessing_methods.get('deriv_snv', False) and has_deriv:
+            if 'deriv_snv' not in julia_preprocessing:
+                julia_preprocessing.append('deriv_snv')
+            # Remove snv_deriv if present (user wants opposite order)
+            if 'snv_deriv' in julia_preprocessing:
+                julia_preprocessing.remove('snv_deriv')
+
+        # Add standalone derivative if no combinations were created
+        if has_deriv and 'snv_deriv' not in julia_preprocessing and 'msc_deriv' not in julia_preprocessing and 'deriv_snv' not in julia_preprocessing:
+            if 'deriv' not in julia_preprocessing:
+                julia_preprocessing.append('deriv')
 
         if not julia_preprocessing:
             julia_preprocessing = ['raw']  # Default fallback
@@ -739,16 +770,39 @@ def _run_julia_process(julia_exe, julia_project, script_file, progress_file, pro
                 except:
                     pass
 
-            # Track progress through log messages
-            if "Testing" in line or "Running" in line:
-                current_config += 1
-                if progress_callback and config_count > 0:
-                    progress_callback({
-                        'stage': 'julia_execution',
-                        'message': line.strip(),
-                        'current': current_config,
-                        'total': config_count
-                    })
+            # Parse detailed PROGRESS: messages from Julia
+            # Format: "PROGRESS: Testing PLS | deriv_snv (d2) | top50 (importance) | Config 15/120"
+            if line.startswith("PROGRESS:"):
+                try:
+                    # Extract parts: "Testing MODEL | PREPROCESS | SUBSET | Config X/Y"
+                    parts = line[len("PROGRESS:"):].strip().split("|")
+                    if len(parts) >= 4:
+                        model_info = parts[0].strip()  # "Testing PLS"
+                        preprocess_info = parts[1].strip()  # "deriv_snv (d2)"
+                        subset_info = parts[2].strip()  # "top50 (importance)" or "Full model"
+                        config_info = parts[3].strip()  # "Config 15/120"
+
+                        # Extract config numbers
+                        if "Config" in config_info:
+                            config_nums = config_info.split("Config")[-1].strip().split("/")
+                            if len(config_nums) == 2:
+                                current_config = int(config_nums[0])
+                                config_count = int(config_nums[1])
+
+                        # Format detailed message
+                        model_name = model_info.replace("Testing", "").strip()
+                        detailed_msg = f"{model_name} | {preprocess_info} | {subset_info}"
+
+                        if progress_callback and config_count > 0:
+                            progress_callback({
+                                'stage': 'julia_execution',
+                                'message': detailed_msg,
+                                'current': current_config,
+                                'total': config_count
+                            })
+                except Exception as e:
+                    # If parsing fails, just continue
+                    pass
 
         # Wait for completion
         return_code = process.wait()

@@ -1071,12 +1071,12 @@ function get_feature_importances(
         return importances
 
     elseif model_name == "NeuralBoosted"
-        # Use NeuralBoosted.feature_importances
+        # Use NeuralBoosted.get_feature_importances
         if isnothing(model.model)
             throw(ArgumentError("Model has not been fitted yet"))
         end
 
-        return NeuralBoosted.feature_importances(model.model)
+        return NeuralBoosted.get_feature_importances(model.model)
 
     else
         throw(ArgumentError("Feature importance not implemented for model: $model_name"))

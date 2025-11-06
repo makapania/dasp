@@ -295,6 +295,9 @@ function run_search(
                 current_config += 1
 
                 # A. Full model (all features)
+                # Print explicit progress message for Python GUI
+                println("PROGRESS: Testing $model_name | $prep_display | Full model | Config $(current_config)/$total_configs")
+
                 result_full = run_single_config(
                     X, y,
                     model_name, config,
@@ -303,7 +306,8 @@ function run_search(
                     skip_preprocessing=false,
                     subset_tag="full",
                     n_vars=n_features_preprocessed,
-                    full_vars=full_vars
+                    full_vars=full_vars,
+                    wavelengths=wavelengths  # Pass wavelengths for storing actual values
                 )
                 # Only add result if training succeeded (not nothing)
                 if !isnothing(result_full)
@@ -443,6 +447,9 @@ function run_search(
                                 continue
                             end
 
+                            # Print explicit progress message for Python GUI
+                            println("PROGRESS: Testing $model_name | $prep_display | $subset_tag ($method) | Config $(current_config)/$total_configs")
+
                             # CRITICAL: Check if derivatives are used
                             if preprocess_cfg["deriv"] !== nothing
                                 # For derivatives: use preprocessed data, skip reapplying
@@ -456,7 +463,8 @@ function run_search(
                                     n_vars=length(selected_indices),
                                     full_vars=full_vars,
                                     var_selection_method=method,
-                                    var_selection_indices=selected_indices
+                                    var_selection_indices=selected_indices,
+                                    wavelengths=wavelengths  # Pass wavelengths for storing actual values
                                 )
                             else
                                 # For raw/SNV: use raw data, will reapply preprocessing
@@ -470,7 +478,8 @@ function run_search(
                                     n_vars=length(selected_indices),
                                     full_vars=full_vars,
                                     var_selection_method=method,
-                                    var_selection_indices=selected_indices
+                                    var_selection_indices=selected_indices,
+                                    wavelengths=wavelengths  # Pass wavelengths for storing actual values
                                 )
                             end
                             # Only add result if training succeeded (not nothing)
@@ -486,6 +495,9 @@ function run_search(
                     println("    → Region subsets: testing $(length(region_subsets)) regions")
 
                     for region in region_subsets
+                        # Print explicit progress message for Python GUI
+                        println("PROGRESS: Testing $model_name | $prep_display | $(region["tag"]) (region) | Config $(current_config)/$total_configs")
+
                         # Same logic: check if derivatives used
                         if preprocess_cfg["deriv"] !== nothing
                             # For derivatives: use preprocessed data, skip reapplying
@@ -497,7 +509,9 @@ function run_search(
                                 skip_preprocessing=true,
                                 subset_tag=region["tag"],
                                 n_vars=length(region["indices"]),
-                                full_vars=full_vars
+                                full_vars=full_vars,
+                                var_selection_indices=region["indices"],  # Pass indices for wavelength storage
+                                wavelengths=wavelengths  # Pass wavelengths for storing actual values
                             )
                         else
                             # For raw/SNV: use raw data, reapply preprocessing
@@ -509,7 +523,9 @@ function run_search(
                                 skip_preprocessing=false,
                                 subset_tag=region["tag"],
                                 n_vars=length(region["indices"]),
-                                full_vars=full_vars
+                                full_vars=full_vars,
+                                var_selection_indices=region["indices"],  # Pass indices for wavelength storage
+                                wavelengths=wavelengths  # Pass wavelengths for storing actual values
                             )
                         end
                         # Only add result if training succeeded (not nothing)
@@ -696,6 +712,39 @@ function generate_preprocessing_configs(
                 ))
             end
 
+        elseif method == "msc"
+            # MSC only
+            push!(configs, Dict{String, Any}(
+                "name" => "msc",
+                "deriv" => nothing,
+                "window" => nothing,
+                "polyorder" => nothing
+            ))
+
+        elseif method == "msc_deriv"
+            # MSC then derivative - one config per order
+            for deriv_order in derivative_orders
+                poly = deriv_order == 1 ? 2 : 3
+                push!(configs, Dict{String, Any}(
+                    "name" => "msc_deriv",
+                    "deriv" => deriv_order,
+                    "window" => window,
+                    "polyorder" => poly
+                ))
+            end
+
+        elseif method == "deriv_msc"
+            # Derivative then MSC - one config per order
+            for deriv_order in derivative_orders
+                poly = deriv_order == 1 ? 2 : 3
+                push!(configs, Dict{String, Any}(
+                    "name" => "deriv_msc",
+                    "deriv" => deriv_order,
+                    "window" => window,
+                    "polyorder" => poly
+                ))
+            end
+
         else
             @warn "Unknown preprocessing method: $method (skipping)"
         end
@@ -801,7 +850,8 @@ function run_single_config(
     n_vars::Int=size(X, 2),
     full_vars::Int=size(X, 2),
     var_selection_method::Union{String,Nothing}=nothing,
-    var_selection_indices::Union{Vector{Int},Nothing}=nothing
+    var_selection_indices::Union{Vector{Int},Nothing}=nothing,
+    wavelengths::Union{Vector{Float64},Nothing}=nothing  # CRITICAL FIX: wavelengths for storing actual values
 )::Union{Dict{String, Any}, Nothing}
 
     # Build model
@@ -852,7 +902,8 @@ function run_single_config(
         "full_vars" => full_vars,
         "task_type" => task_type,
         "VarSelectionMethod" => var_selection_method,
-        "VarSelectionIndices" => var_selection_indices
+        "VarSelectionIndices" => var_selection_indices,
+        "n_folds" => n_folds  # CRITICAL: Store CV folds for reproducibility
     )
 
     # Add metrics
@@ -862,6 +913,23 @@ function run_single_config(
     else
         result["Accuracy"] = accuracy
         result["ROC_AUC"] = roc_auc
+    end
+
+    # CRITICAL FIX: Store actual wavelength values for Python GUI
+    # Python GUI expects "all_vars" to contain actual wavelengths, not indices
+    if !isnothing(wavelengths)
+        if !isnothing(var_selection_indices)
+            # Subset model: store only selected wavelengths
+            selected_wavelengths = wavelengths[var_selection_indices]
+            result["all_vars"] = join([string(wl) for wl in selected_wavelengths], ", ")
+        elseif subset_tag == "full"
+            # Full model: store all wavelengths
+            result["all_vars"] = join([string(wl) for wl in wavelengths], ", ")
+        else
+            result["all_vars"] = "N/A"
+        end
+    else
+        result["all_vars"] = "N/A"
     end
 
     # Add all hyperparameters from config

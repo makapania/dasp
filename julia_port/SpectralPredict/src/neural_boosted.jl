@@ -20,7 +20,7 @@ using LinearAlgebra
 using Statistics
 using Random
 
-export NeuralBoostedRegressor, fit!, predict, feature_importances
+export NeuralBoostedRegressor, fit!, predict, get_feature_importances
 
 """
     NeuralBoostedRegressor
@@ -615,7 +615,7 @@ contribute most to predictions.
 # Throws
 - Error if model is not fitted yet
 """
-function feature_importances(
+function get_feature_importances(
     model::NeuralBoostedRegressor
 )::Vector{Float64}
 
