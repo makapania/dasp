@@ -45,7 +45,7 @@ def write_markdown_report(target, df_ranked, out_dir):
     ]
 
     for idx, row in top5.iterrows():
-        lines.append(f"### Rank {row['Rank']}: {row['Model']} ({row['SubsetTag']})")
+        lines.append(f"### Rank {row['Rank']}: {row['Model']} ({row['Subset']})")
         lines.append("")
         lines.append(f"- **Composite Score:** {row['CompositeScore']:.4f}")
         lines.append(f"- **Model:** {row['Model']}")
@@ -82,7 +82,7 @@ def write_markdown_report(target, df_ranked, out_dir):
             "Rank",
             "Model",
             "Preprocess",
-            "SubsetTag",
+            "Subset",
             "LVs",
             "n_vars",
             "RMSE",
@@ -94,7 +94,7 @@ def write_markdown_report(target, df_ranked, out_dir):
             "Rank",
             "Model",
             "Preprocess",
-            "SubsetTag",
+            "Subset",
             "LVs",
             "n_vars",
             "Accuracy",
