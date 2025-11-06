@@ -82,6 +82,54 @@ lines.append(f"### Rank {row['Rank']}: {row['Model']} ({row['Subset']})")
 "Subset"  # in column lists
 ```
 
+**3. DataFrame Construction with Inconsistent Keys**
+
+**Problem:**
+- Different models have different hyperparameters (Ridge has `alpha`, PLS doesn't, RandomForest has `n_trees`, etc.)
+- Each model adds its hyperparameters to the result dictionary
+- When converting Vector{Dict} to DataFrame, Julia requires all dictionaries to have same keys
+- Result: `KeyError: key "alpha" not found` when mixing model types (e.g., PLS + Ridge)
+
+**Root Cause:**
+- `run_single_config()` adds all model config parameters to result dictionary
+- Ridge/Lasso add `"alpha"`, RandomForest adds `"n_trees"`, `"max_features"`, etc.
+- Results vector contains dictionaries with inconsistent key sets
+- `DataFrame(results)` fails because it expects uniform schema across all rows
+
+**Fix Applied:**
+- Added normalization step before DataFrame conversion in `search.jl`
+- Collect all unique keys from all result dictionaries
+- Add missing keys to each dictionary with value `missing`
+- Now all dictionaries have identical key sets, DataFrame construction succeeds
+
+**Code Changes:**
+```julia
+# In search.jl before line 534 (DataFrame conversion):
+
+# Normalize results to have consistent keys
+all_keys = Set{String}()
+for result in results
+    union!(all_keys, keys(result))
+end
+
+# Add missing keys to each result with missing value
+for result in results
+    for key in all_keys
+        if !haskey(result, key)
+            result[key] = missing
+        end
+    end
+end
+
+# Now DataFrame conversion works
+results_df = DataFrame(results)
+```
+
+**Impact:**
+- Can now mix any combination of models without errors
+- Model-specific hyperparameters appear as columns with `missing` for models that don't use them
+- Example: `alpha` column has values for Ridge/Lasso, `missing` for PLS/RandomForest
+
 #### ⚠️ Remaining Limitations
 
 **NeuralBoosted Still May Fail On:**
@@ -231,6 +279,20 @@ This is **correct behavior** - failed models should not appear in results.
    - Line 48: Changed `SubsetTag` to `Subset` in top models heading
    - Line 85: Changed `SubsetTag` to `Subset` in regression column list
    - Line 97: Changed `SubsetTag` to `Subset` in classification column list
+
+3. `julia_port/SpectralPredict/src/search.jl`
+   - Lines 533-548: Added result dictionary normalization before DataFrame conversion
+   - Ensures all dictionaries have consistent keys (model-specific params filled with `missing`)
+
+4. `spectral_predict_julia_bridge.py`
+   - Lines 801-819: Added column reordering in `_postprocess_results()`
+   - Order: Rank → Model descriptors → Metrics → CompositeScore → Internal columns
+
+## Test Files Created
+
+1. `test_julia_backend.py` - Basic Julia backend functionality test
+2. `test_null_rows.py` - Tests for NULL values and NeuralBoosted
+3. `test_mixed_models.py` - Tests mixing model types (PLS + Ridge)
 
 ## Next Steps
 
