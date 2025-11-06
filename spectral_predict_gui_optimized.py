@@ -4177,14 +4177,42 @@ Configuration:
             # Store the fitted model and metadata for later saving
             self.refined_model = final_model
             self.refined_preprocessor = final_preprocessor
-            self.refined_wavelengths = list(selected_wl)
+
+            # CRITICAL FIX: Store wavelengths AFTER preprocessing, not before
+            # Derivatives remove edge wavelengths, so model expects fewer features than original
+            if final_preprocessor is not None:
+                # Apply preprocessor to get actual feature count
+                dummy_input = X_raw[:1]  # Single sample for testing
+                transformed = final_preprocessor.transform(dummy_input)
+                n_features_after_preprocessing = transformed.shape[1]
+
+                if use_full_spectrum_preprocessing:
+                    # Derivative + subset: wavelengths already determined by subset indices
+                    self.refined_wavelengths = list(selected_wl)  # Already the subset wavelengths
+                else:
+                    # Regular preprocessing: derivatives trim edges
+                    # Calculate which wavelengths remain after edge trimming
+                    n_trimmed = len(selected_wl) - n_features_after_preprocessing
+                    if n_trimmed > 0:
+                        # Edges were trimmed symmetrically
+                        trim_per_side = n_trimmed // 2
+                        self.refined_wavelengths = list(selected_wl[trim_per_side:len(selected_wl)-trim_per_side])
+                        print(f"DEBUG: Derivative preprocessing trimmed {n_trimmed} edge wavelengths")
+                        print(f"DEBUG: Storing {len(self.refined_wavelengths)} wavelengths (after trimming)")
+                    else:
+                        # No trimming (raw/SNV/MSC)
+                        self.refined_wavelengths = list(selected_wl)
+            else:
+                # No preprocessor - use original wavelengths
+                self.refined_wavelengths = list(selected_wl)
+
             self.refined_performance = results
             self.refined_config = {
                 'model_name': model_name,
                 'task_type': task_type,
                 'preprocessing': preprocess,
                 'window': window,
-                'n_vars': len(selected_wl),
+                'n_vars': len(self.refined_wavelengths),
                 'n_samples': X_raw.shape[0],
                 'cv_folds': n_folds,
                 'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing
