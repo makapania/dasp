@@ -2734,6 +2734,21 @@ class SpectralPredictApp:
             # Store results for Results tab
             self.results_df = results_df
 
+            # FIX: Check if NeuralBoosted was selected but produced no results
+            selected_models = [model for model, var in self.model_checkboxes.items() if var.get()]
+            if (self.results_df is None or len(self.results_df) == 0):
+                if 'NeuralBoosted' in selected_models:
+                    warning_msg = (
+                        "NeuralBoosted training failed for all configurations.\n\n"
+                        "This model requires specific conditions to train successfully.\n"
+                        "Check the console output for detailed error messages.\n\n"
+                        "Note: Other models may have completed successfully."
+                    )
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "NeuralBoosted Training Failed", warning_msg
+                    ))
+                    self._log_progress("\n[WARN] WARNING: NeuralBoosted produced no results (all training attempts failed)")
+
             # Populate Results tab
             self.root.after(0, lambda: self._populate_results_table(results_df))
 
@@ -3821,8 +3836,10 @@ Performance (Classification):
             # Without this, CV folds assign different physical rows despite same indices
             X_base_df = X_base_df.reset_index(drop=True)
             y_series = y_series.reset_index(drop=True)
-            print(f"DEBUG: Reset index after exclusions - X_base_df.index now: {list(X_base_df.index[:10])}...")
-            print(f"DEBUG: This ensures CV folds match Julia backend (sequential row indexing)")
+            print(f"DEBUG: Reset index after exclusions")
+            print(f"DEBUG:   X_base_df shape: {X_base_df.shape}, first 5 indices: {list(X_base_df.index[:5])}")
+            print(f"DEBUG:   y_series shape: {y_series.shape}, first 5 y values: {list(y_series.values[:5])}")
+            print(f"DEBUG:   This ensures CV folds match Julia backend (sequential row indexing)")
 
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
@@ -3960,6 +3977,19 @@ Performance (Classification):
                     if 'max_features' in self.selected_model_config and not pd.isna(self.selected_model_config.get('max_features')):
                         params_from_search['max_features'] = str(self.selected_model_config['max_features'])
                         print(f"DEBUG: Loaded max_features={params_from_search['max_features']} for RandomForest")
+                    # FIX: Load max_depth if available
+                    if 'max_depth' in self.selected_model_config and not pd.isna(self.selected_model_config.get('max_depth')):
+                        max_depth_val = self.selected_model_config['max_depth']
+                        # Julia uses 'nothing' for unlimited depth, Python uses None
+                        if str(max_depth_val).lower() in ['nothing', 'none', 'null']:
+                            params_from_search['max_depth'] = None
+                            print(f"DEBUG: Set RandomForest max_depth=None (unlimited)")
+                        else:
+                            params_from_search['max_depth'] = int(max_depth_val)
+                            print(f"DEBUG: Loaded max_depth={params_from_search['max_depth']} for RandomForest")
+                    # FIX: Set random_state for reproducibility (Julia uses fixed random state)
+                    params_from_search['random_state'] = 42
+                    print(f"DEBUG: Set RandomForest random_state=42 for reproducibility")
 
                 elif model_name == 'MLP':
                     if 'learning_rate' in self.selected_model_config and not pd.isna(self.selected_model_config.get('learning_rate')):

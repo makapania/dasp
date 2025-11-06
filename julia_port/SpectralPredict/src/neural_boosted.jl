@@ -270,12 +270,19 @@ function train_weak_learner!(
     verbose::Int
 )
     # Transpose for Flux (features × samples)
-    X_t = Float32.(X')
-    y_t = Float32.(reshape(y, 1, :))
+    # PHASE 1 FIX: Use Float64 for numerical precision during residual fitting
+    X_t = Float64.(X')
+    y_t = Float64.(reshape(y, 1, :))
 
-    # Optimizer: Adam with learning rate 0.01 (NEW FLUX API)
+    # Optimizer: Adam with learning rate 0.01
+    # Note: sklearn uses LBFGS (ideal for small networks). Consider Optim.jl LBFGS in Phase 2
     opt = Adam(0.01)
     opt_state = Flux.setup(opt, model)
+
+    # PHASE 1 FIX: Track convergence for early stopping
+    prev_loss = Inf
+    patience_counter = 0
+    max_patience = 5  # Stop if no improvement for 5 iterations
 
     # Training loop (NEW FLUX API)
     for epoch in 1:max_iter
@@ -290,16 +297,47 @@ function train_weak_learner!(
             mse + alpha * l2_penalty
         end
 
+        # PHASE 1 FIX: Validate gradients before update
+        if grads[1] === nothing || any(x -> any(isnan.(x)) || any(isinf.(x)), values(grads[1]))
+            if verbose >= 2
+                println("    WARNING: NaN/Inf gradients at epoch $epoch. Stopping.")
+            end
+            break
+        end
+
         Flux.update!(opt_state, model, grads[1])
+
+        # Compute current loss for convergence check and logging
+        pred = model(X_t)
+        mse = Flux.mse(pred, y_t)
+        l2_penalty = sum(sum(p.^2) for p in Flux.params(model))
+        current_loss = mse + alpha * l2_penalty
+
+        # PHASE 1 FIX: Early convergence detection (tolerance relaxed to 1e-4)
+        if current_loss >= prev_loss - 1e-4
+            patience_counter += 1
+            if patience_counter >= max_patience
+                if verbose >= 2
+                    println("    Converged at epoch $epoch (loss plateaued)")
+                end
+                break
+            end
+        else
+            patience_counter = 0
+        end
+        prev_loss = current_loss
 
         # Verbose output
         if verbose >= 2 && epoch % 20 == 0
-            # Compute current loss for logging
-            pred = model(X_t)
-            mse = Flux.mse(pred, y_t)
-            l2_penalty = sum(sum(p.^2) for p in Flux.params(model))
-            current_loss = mse + alpha * l2_penalty
             println("    Epoch $epoch: loss = $(current_loss)")
+        end
+
+        # PHASE 1 FIX: Detect NaN/Inf in loss
+        if isnan(current_loss) || isinf(current_loss)
+            if verbose >= 2
+                println("    WARNING: Loss became NaN/Inf at epoch $epoch. Stopping.")
+            end
+            error("Training diverged: NaN/Inf loss detected")
         end
     end
 
@@ -417,6 +455,9 @@ function fit!(
 
     # Step 2: Boosting loop
     for m in 1:model.n_estimators
+        # PHASE 1 FIX: Set unique random seed for each weak learner (diversity)
+        Random.seed!(model.random_state + m)
+
         if model.verbose >= 1
             println("  Stage $m/$(model.n_estimators)...")
         end
@@ -450,8 +491,17 @@ function fit!(
         end
 
         # Get predictions from weak learner
-        X_train_t = Float32.(X_train')
+        X_train_t = Float64.(X_train')
         h_m_train = vec(weak_learner(X_train_t))
+
+        # PHASE 1 FIX: Validate predictions before updating ensemble
+        if any(isnan.(h_m_train)) || any(isinf.(h_m_train))
+            n_failed_learners += 1
+            if model.verbose >= 1
+                @warn "Weak learner $m produced invalid predictions (NaN/Inf). Skipping."
+            end
+            continue
+        end
 
         # Update ensemble predictions: F_m(x) = F_{m-1}(x) + ν * h_m(x)
         F_train .+= model.learning_rate .* h_m_train
@@ -469,8 +519,21 @@ function fit!(
 
         # Early stopping check (only if validation set exists)
         if early_stopping_active
-            X_val_t = Float32.(X_val')
+            X_val_t = Float64.(X_val')
             h_m_val = vec(weak_learner(X_val_t))
+
+            # PHASE 1 FIX: Validate validation predictions
+            if any(isnan.(h_m_val)) || any(isinf.(h_m_val))
+                if model.verbose >= 1
+                    @warn "Weak learner $m produced invalid validation predictions (NaN/Inf)."
+                end
+                # Remove already-added estimator
+                pop!(model.estimators_)
+                pop!(model.train_score_)
+                n_failed_learners += 1
+                continue
+            end
+
             F_val .+= model.learning_rate .* h_m_val
 
             if model.loss == "mse"
@@ -576,7 +639,7 @@ function predict(
     predictions = zeros(n_samples)
 
     # Transpose for Flux (features × samples)
-    X_t = Float32.(X')
+    X_t = Float64.(X')
 
     # Aggregate predictions from all weak learners
     for weak_learner in model.estimators_

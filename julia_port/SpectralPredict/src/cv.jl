@@ -99,9 +99,11 @@ function create_cv_folds(n_samples::Int, n_folds::Int=5)::Vector{Tuple{Vector{In
         throw(ArgumentError("n_folds ($n_folds) cannot exceed n_samples ($n_samples)"))
     end
 
-    # Create random permutation of indices for shuffling
-    Random.seed!(42)  # Fixed seed for reproducibility
-    shuffled_indices = randperm(n_samples)
+    # CRITICAL FIX: Use sequential indices instead of shuffling to ensure
+    # identical fold splits between Julia and Python backends
+    # This is necessary because Julia's randperm() and sklearn's KFold use
+    # different RNG algorithms, creating different splits even with same seed
+    shuffled_indices = collect(1:n_samples)  # Sequential order (no shuffle)
 
     # Calculate fold sizes
     base_fold_size = div(n_samples, n_folds)
