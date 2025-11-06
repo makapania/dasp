@@ -236,7 +236,7 @@ const HTML_PAGE = """
                     <h2>2. Select Models</h2>
                     <div class="note">
                         <strong>Note:</strong> PLS is currently disabled due to implementation issues.
-                        Ridge and Lasso work excellently for spectroscopy!
+                        Ridge, Lasso, and NeuralBoosted work excellently for spectroscopy!
                     </div>
                     <label>Choose models to test:</label>
                     <div class="checkbox-group">
@@ -259,6 +259,10 @@ const HTML_PAGE = """
                         <label class="checkbox-item">
                             <input type="checkbox" name="models" value="MLP">
                             MLP (Neural Net)
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" name="models" value="NeuralBoosted">
+                            NeuralBoosted (Gradient Boosting)
                         </label>
                     </div>
                 </div>

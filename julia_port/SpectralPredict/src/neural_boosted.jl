@@ -347,38 +347,56 @@ function fit!(
         println("  activation: $(model.activation)")
     end
 
+    # Step 0: Validate minimum sample size
+    # Need enough samples to train weak learners (at least hidden_layer_size + 2 for network)
+    min_required_for_training = model.hidden_layer_size + 2
+    if n_samples < min_required_for_training
+        error("NeuralBoostedRegressor requires at least $(min_required_for_training) samples " *
+              "for hidden_layer_size=$(model.hidden_layer_size), got $n_samples. " *
+              "Try reducing hidden_layer_size or use a different model.")
+    end
+
     # Step 1: Train/validation split (if early stopping)
     if model.early_stopping
-        # Check if dataset is too small for reliable early stopping
-        if n_samples < 20
-            @warn "Dataset is very small (n=$n_samples < 20). Consider setting early_stopping=false."
-        end
-
+        # Calculate validation set size
         n_val = Int(floor(n_samples * model.validation_fraction))
-        n_train = n_samples - n_val
 
-        # Additional validation for extremely small datasets
-        if n_train < 5
-            error("Training set too small (n_train=$n_train) after validation split. " *
-                  "Either use early_stopping=false or provide more samples. " *
-                  "Minimum recommended: 20 samples with early_stopping=true, or 10 samples with early_stopping=false.")
-        end
+        # CRITICAL FIX: Ensure validation set has at least 1 sample
+        # and training set has enough samples for weak learner training
+        min_train_samples = max(10, min_required_for_training)
 
-        # Random shuffle and split
-        indices = randperm(n_samples)
-        train_idx = indices[1:n_train]
-        val_idx = indices[n_train+1:end]
+        if n_val < 1 || (n_samples - n_val) < min_train_samples
+            if model.verbose >= 1
+                println("  WARNING: Dataset too small for early stopping validation split.")
+                println("           (n_samples=$n_samples requires at least $(min_train_samples + 1) for early stopping)")
+                println("           Disabling early stopping for this fit.")
+            end
+            # Disable early stopping for this fit
+            X_train, y_train = X, y
+            X_val, y_val = nothing, nothing
+            early_stopping_active = false
+        else
+            # Validation set will be non-empty, proceed with split
+            n_train = n_samples - n_val
 
-        X_train, y_train = X[train_idx, :], y[train_idx]
-        X_val, y_val = X[val_idx, :], y[val_idx]
+            # Random shuffle and split
+            indices = randperm(n_samples)
+            train_idx = indices[1:n_train]
+            val_idx = indices[n_train+1:end]
 
-        if model.verbose >= 1
-            println("  Training samples: $n_train")
-            println("  Validation samples: $n_val")
+            X_train, y_train = X[train_idx, :], y[train_idx]
+            X_val, y_val = X[val_idx, :], y[val_idx]
+            early_stopping_active = true
+
+            if model.verbose >= 1
+                println("  Training samples: $n_train")
+                println("  Validation samples: $n_val")
+            end
         end
     else
         X_train, y_train = X, y
         X_val, y_val = nothing, nothing
+        early_stopping_active = false
     end
 
     # Initialize ensemble
@@ -388,7 +406,7 @@ function fit!(
 
     # Initialize predictions to zero (F_0(x) = 0)
     F_train = zeros(size(X_train, 1))
-    F_val = model.early_stopping ? zeros(size(X_val, 1)) : nothing
+    F_val = early_stopping_active ? zeros(size(X_val, 1)) : nothing
 
     # Early stopping tracking
     best_val_score = Inf
@@ -449,8 +467,8 @@ function fit!(
         # Save estimator
         push!(model.estimators_, weak_learner)
 
-        # Early stopping check
-        if model.early_stopping
+        # Early stopping check (only if validation set exists)
+        if early_stopping_active
             X_val_t = Float32.(X_val')
             h_m_val = vec(weak_learner(X_val_t))
             F_val .+= model.learning_rate .* h_m_val
@@ -517,7 +535,7 @@ function fit!(
     if model.verbose >= 1
         println("Fitting complete! $(model.n_estimators_) weak learners trained.")
         println("  Final train loss: $(model.train_score_[end])")
-        if model.early_stopping && !isempty(model.validation_score_)
+        if early_stopping_active && !isempty(model.validation_score_)
             println("  Final val loss: $(model.validation_score_[end])")
         end
     end
