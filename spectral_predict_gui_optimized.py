@@ -116,6 +116,7 @@ class SpectralPredictApp:
         self.tab7_y_true = None  # True values (for plotting)
         self.tab7_y_pred = None  # Predicted values (for plotting)
         self.tab7_loaded_config = None  # Config loaded from Results tab
+        self.tab7_source_backend = None  # Backend used for original analysis
         self.tab7_run_history = []  # History of model runs
         self.tab7_performance_history = []  # Performance tracking for comparison plot
 
@@ -3497,6 +3498,10 @@ If the problem persists, please report this error.
         print("\n[STEP 7/7] Finalizing...")
         self.tab7_loaded_config = config.copy()
 
+        # Store which backend was used for the original analysis
+        self.tab7_source_backend = self.backend_choice.get()
+        print(f"  🔧 Backend used for original analysis: {self.tab7_source_backend}")
+
         # Store expected R² for comparison after execution
         expected_r2 = config.get('R2', None)
         expected_accuracy = config.get('Accuracy', None)
@@ -6326,9 +6331,197 @@ Performance (Classification):
         thread = threading.Thread(target=self._run_refined_model_thread)
         thread.start()
 
+    def _run_refined_model_julia(self):
+        """Execute Tab 7 model using Julia backend (matches Results tab Julia execution)."""
+        try:
+            from spectral_predict_julia_bridge import run_search_julia
+            import numpy as np
+            import pandas as pd
+
+            print(f"\n🔧 Preparing Tab 7 configuration for Julia execution...")
+
+            # Get configuration from GUI
+            model_type = self.refine_model_type.get()
+            preprocess_method = self.refine_preprocess.get()
+            task_type = self.refine_task_type.get()
+            n_folds = self.refine_folds.get()
+            window = self.refine_window.get()
+            polyorder = self.refine_polyorder.get()
+
+            # Get data (respect excluded spectra and validation set)
+            if self.X is not None:
+                X_source = self.X
+            else:
+                X_source = self.X_original
+
+            # Apply exclusions
+            total_samples = len(X_source)
+            excluded_indices = sorted(idx for idx in self.excluded_spectra if 0 <= idx < total_samples)
+            if excluded_indices:
+                excluded_set = set(excluded_indices)
+                include_indices = [i for i in range(total_samples) if i not in excluded_set]
+                X_data = X_source.iloc[include_indices]
+                y_data = self.y.iloc[include_indices]
+            else:
+                X_data = X_source
+                y_data = self.y
+
+            # Apply validation set exclusion if this is a loaded model
+            if self.tab7_loaded_config is not None and self.validation_enabled.get() and self.validation_indices:
+                X_data = X_data[~X_data.index.isin(self.validation_indices)]
+                y_data = y_data[~y_data.index.isin(self.validation_indices)]
+
+            # Get wavelength selection
+            wl_spec_text = self.refine_wl_spec.get('1.0', 'end')
+            available_wl = X_source.columns.astype(float).values
+            selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+
+            # Filter to selected wavelengths
+            wavelength_columns = X_data.columns
+            wl_to_col = {float(col): col for col in wavelength_columns}
+            selected_cols = [wl_to_col[wl] for wl in selected_wl if wl in wl_to_col]
+            X_subset = X_data[selected_cols]
+
+            # Map GUI preprocessing names to Julia/search.py names
+            preprocess_map = {
+                'raw': 'raw',
+                'snv': 'snv',
+                'sg1': 'deriv',
+                'sg2': 'deriv',
+                'snv_sg1': 'snv_deriv',
+                'snv_sg2': 'snv_deriv',
+                'msc': 'msc',
+                'msc_sg1': 'msc_deriv',
+                'msc_sg2': 'msc_deriv'
+            }
+            julia_preprocess = preprocess_map.get(preprocess_method, 'raw')
+
+            # Determine derivative order
+            deriv_order = 0
+            if 'sg1' in preprocess_method:
+                deriv_order = 1
+            elif 'sg2' in preprocess_method:
+                deriv_order = 2
+
+            # Call Julia backend with constrained parameters (single model/preprocessing)
+            print(f"\n⚡ Calling Julia backend...")
+            print(f"   Model: {model_type}")
+            print(f"   Preprocessing: {julia_preprocess} (deriv={deriv_order})")
+            print(f"   Wavelengths: {len(selected_wl)}")
+            print(f"   Samples: {len(X_subset)}")
+            print(f"   Folds: {n_folds}")
+
+            results_df = run_search_julia(
+                X_subset,
+                y_data,
+                task_type=task_type,
+                folds=n_folds,
+                models_to_test=[model_type],
+                preprocessing_methods={julia_preprocess: True},
+                window_sizes=[window],
+                derivative_orders=[deriv_order] if deriv_order > 0 else [],
+                enable_variable_subsets=False,  # Disabled - we already selected wavelengths
+                enable_region_subsets=False,     # Disabled - we already selected wavelengths
+                lambda_penalty=self.lambda_penalty.get(),
+                max_n_components=self.max_n_components.get(),
+                max_iter=self.max_iter.get(),
+                progress_callback=None  # No progress updates for Tab 7
+            )
+
+            if len(results_df) == 0:
+                raise RuntimeError("Julia backend returned no results")
+
+            # Extract top result
+            top_result = results_df.iloc[0]
+
+            # Convert Julia results to Tab 7 format
+            self.after(0, lambda: self._display_julia_results(top_result, selected_wl))
+
+            print(f"✅ Julia execution complete!")
+
+        except Exception as e:
+            error_msg = f"Julia execution failed: {str(e)}"
+            print(f"\n❌ ERROR: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            self.after(0, lambda: self.refine_output.insert('end', f"\nERROR: {error_msg}\n"))
+
+    def _display_julia_results(self, result, wavelengths):
+        """Display Julia backend results in Tab 7 UI."""
+        try:
+            # Extract metrics
+            r2 = result.get('R2', 0.0)
+            rmse = result.get('RMSE', 0.0)
+
+            # Display results in output text
+            output_text = f"""
+{'='*70}
+JULIA BACKEND EXECUTION RESULTS
+{'='*70}
+
+Model: {result.get('Model', 'N/A')}
+Preprocessing: {result.get('Preprocess', 'N/A')}
+Wavelengths: {len(wavelengths)}
+
+Cross-Validation Results ({result.get('n_folds', 5)} folds):
+  R²:   {r2:.4f}
+  RMSE: {rmse:.4f}
+  MAE:  {result.get('MAE', 0.0):.4f}
+
+{'='*70}
+"""
+            self.refine_output.delete('1.0', 'end')
+            self.refine_output.insert('end', output_text)
+
+            # Compare with expected R² if available
+            if hasattr(self, 'tab7_expected_r2'):
+                expected = self.tab7_expected_r2
+                diff = abs(r2 - expected)
+                tolerance = 0.01
+
+                comparison_text = f"\n🔍 BACKEND CONSISTENCY CHECK (Julia vs Julia):\n"
+                comparison_text += f"   Results tab R²: {expected:.4f}\n"
+                comparison_text += f"   Tab 7 R²:       {r2:.4f}\n"
+                comparison_text += f"   Difference:     {diff:.4f}\n"
+
+                if diff < tolerance:
+                    comparison_text += f"   ✅ MATCH! Backends are consistent.\n"
+                else:
+                    comparison_text += f"   ⚠️  Difference exceeds tolerance ({tolerance})\n"
+                    comparison_text += f"   This may indicate configuration mismatch\n"
+
+                self.refine_output.insert('end', comparison_text)
+
+            print("✓ Julia results displayed in Tab 7")
+
+        except Exception as e:
+            print(f"Error displaying Julia results: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _run_refined_model_thread(self):
         """Execute the refined model in a background thread."""
         try:
+            # Check which backend to use
+            backend_to_use = getattr(self, 'tab7_source_backend', None) or self.backend_choice.get()
+
+            print(f"\n{'='*70}")
+            print(f"BACKEND SELECTION FOR TAB 7 EXECUTION")
+            print(f"{'='*70}")
+            print(f"Original analysis backend: {backend_to_use}")
+            print(f"Current backend setting: {self.backend_choice.get()}")
+
+            # Route to appropriate execution path
+            if backend_to_use == "julia":
+                print(f"\n⚡ Using JULIA backend for execution (matching original analysis)")
+                print(f"   This ensures R² consistency with Results tab")
+                return self._run_refined_model_julia()
+            else:
+                print(f"\n🐍 Using PYTHON backend for execution")
+                print(f"   Standard Python sklearn-based execution")
+
+            print(f"{'='*70}\n")
+
             from spectral_predict.models import get_model
             from spectral_predict.preprocess import SavgolDerivative, SNV
             from sklearn.model_selection import KFold, StratifiedKFold
