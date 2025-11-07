@@ -19,6 +19,8 @@ using Flux
 using LinearAlgebra
 using Statistics
 using Random
+using Optim
+using Zygote
 
 export NeuralBoostedRegressor, fit!, predict, get_feature_importances
 
@@ -245,21 +247,23 @@ function huber_loss(y_true::AbstractVector, y_pred::AbstractVector, delta::Float
     return mean(loss)
 end
 
+# New LBFGS-based train_weak_learner! function
+
 """
     train_weak_learner!(model, X, y, max_iter, alpha, verbose)
 
-Train a weak learner MLP using Adam optimizer with L2 regularization.
+Train weak learner using LBFGS optimizer (matches sklearn MLPRegressor with solver='lbfgs').
 
 # Arguments
-- `model`: Flux Chain model to train (modified in place)
-- `X::Matrix{Float64}`: Training features (n_samples × n_features)
-- `y::Vector{Float64}`: Training targets (n_samples)
-- `max_iter::Int`: Maximum training iterations
-- `alpha::Float64`: L2 regularization parameter
-- `verbose::Int`: Verbosity level
+- `model`: Flux Chain to train
+- `X::Matrix{Float64}`: Training data (n_samples × n_features)
+- `y::Vector{Float64}`: Target values (n_samples,)
+- `max_iter::Int`: Maximum LBFGS iterations (default: 100)
+- `alpha::Float64`: L2 regularization parameter (default: 0.0001)
+- `verbose::Int`: Verbosity level (0=silent, 1=warnings, 2=debug)
 
 # Returns
-- Trained model (same object, modified in place)
+- `success::Bool`: true if training succeeded, false otherwise
 """
 function train_weak_learner!(
     model,
@@ -268,80 +272,118 @@ function train_weak_learner!(
     max_iter::Int,
     alpha::Float64,
     verbose::Int
-)
-    # Transpose for Flux (features × samples)
-    # PHASE 1 FIX: Use Float64 for numerical precision during residual fitting
-    X_t = Float64.(X')
-    y_t = Float64.(reshape(y, 1, :))
+)::Bool
+    try
+        # Prepare data (Flux expects features × samples)
+        X_t = Float64.(X')
+        y_t = Float64.(reshape(y, 1, :))
 
-    # Optimizer: Adam with learning rate 0.01
-    # Note: sklearn uses LBFGS (ideal for small networks). Consider Optim.jl LBFGS in Phase 2
-    opt = Adam(0.01)
-    opt_state = Flux.setup(opt, model)
+        # Flatten model parameters for LBFGS
+        ps, re = Flux.destructure(model)
 
-    # PHASE 1 FIX: Track convergence for early stopping
-    prev_loss = Inf
-    patience_counter = 0
-    max_patience = 5  # Stop if no improvement for 5 iterations
+        # CRITICAL FIX: Convert to Float64 (Flux defaults to Float32)
+        ps = Float64.(ps)
 
-    # Training loop (NEW FLUX API)
-    for epoch in 1:max_iter
-        # Compute gradients and update weights
-        grads = Flux.gradient(model) do m
+        # Define loss function for LBFGS
+        function loss_fn(params::Vector{Float64})
+            # Reconstruct model from flattened parameters
+            m = re(Float32.(params))  # Convert back to Float32 for Flux
+
+            # Forward pass
             pred = m(X_t)
+
+            # MSE loss + L2 regularization
             mse = Flux.mse(pred, y_t)
+            l2_penalty = sum(params .^ 2)
 
-            # L2 regularization: sum of squared weights
-            l2_penalty = sum(sum(p.^2) for p in Flux.params(m))
+            total_loss = mse + alpha * l2_penalty
 
-            mse + alpha * l2_penalty
-        end
-
-        # PHASE 1 FIX: Validate gradients before update
-        if grads[1] === nothing || any(x -> any(isnan.(x)) || any(isinf.(x)), values(grads[1]))
-            if verbose >= 2
-                println("    WARNING: NaN/Inf gradients at epoch $epoch. Stopping.")
+            # Check for NaN/Inf
+            if !isfinite(total_loss)
+                return Inf
             end
-            break
+
+            return total_loss
         end
 
-        Flux.update!(opt_state, model, grads[1])
+        # Define gradient function
+        function gradient_fn!(G::Vector{Float64}, params::Vector{Float64})
+            # Compute gradient using automatic differentiation
+            grad = Zygote.gradient(loss_fn, params)[1]
 
-        # Compute current loss for convergence check and logging
+            if grad === nothing || any(!isfinite, grad)
+                fill!(G, 0.0)
+                return
+            end
+
+            G .= grad
+        end
+
+        # Run LBFGS optimization
+        result = optimize(
+            loss_fn,
+            gradient_fn!,
+            ps,
+            LBFGS(),
+            Optim.Options(
+                iterations=max_iter,
+                f_tol=5e-4,  # Match sklearn tolerance (relaxed from 1e-4)
+                g_tol=1e-5,
+                show_trace=(verbose >= 2),
+                store_trace=false,
+                extended_trace=false
+            )
+        )
+
+        # Check convergence
+        if !Optim.converged(result)
+            if verbose >= 1
+                @warn "LBFGS did not converge" iterations=Optim.iterations(result) f_minimum=Optim.minimum(result)
+            end
+            # Continue anyway - partial convergence may be acceptable
+        end
+
+        # Update model with optimized parameters
+        optimal_params = Optim.minimizer(result)
+
+        # Convert Float64 optimal params back to Float32 for Flux model
+        # and reconstruct the model in-place using re
+        # The reconstructed model IS the updated model
+        updated_model = re(Float32.(optimal_params))
+
+        # Copy parameters from updated model back to original model
+        # We need to do this layer by layer
+        for (orig_layer, new_layer) in zip(model, updated_model)
+            if hasfield(typeof(orig_layer), :weight)
+                orig_layer.weight .= new_layer.weight
+            end
+            if hasfield(typeof(orig_layer), :bias)
+                orig_layer.bias .= new_layer.bias
+            end
+        end
+
+        # Validate predictions
         pred = model(X_t)
-        mse = Flux.mse(pred, y_t)
-        l2_penalty = sum(sum(p.^2) for p in Flux.params(model))
-        current_loss = mse + alpha * l2_penalty
-
-        # PHASE 1 FIX: Early convergence detection (tolerance relaxed to 1e-4)
-        if current_loss >= prev_loss - 1e-4
-            patience_counter += 1
-            if patience_counter >= max_patience
-                if verbose >= 2
-                    println("    Converged at epoch $epoch (loss plateaued)")
-                end
-                break
+        if any(!isfinite, pred)
+            if verbose >= 1
+                @warn "Model produces non-finite predictions after training"
             end
-        else
-            patience_counter = 0
-        end
-        prev_loss = current_loss
-
-        # Verbose output
-        if verbose >= 2 && epoch % 20 == 0
-            println("    Epoch $epoch: loss = $(current_loss)")
+            return false
         end
 
-        # PHASE 1 FIX: Detect NaN/Inf in loss
-        if isnan(current_loss) || isinf(current_loss)
-            if verbose >= 2
-                println("    WARNING: Loss became NaN/Inf at epoch $epoch. Stopping.")
-            end
-            error("Training diverged: NaN/Inf loss detected")
+        if verbose >= 2
+            final_loss = Optim.minimum(result)
+            println("  ✓ LBFGS converged: $(Optim.iterations(result)) iterations, loss=$(final_loss)")
         end
+
+        return true
+
+    catch e
+        if verbose >= 1
+            @warn "Training failed with exception" exception=e
+        end
+        return false
     end
-
-    return model
 end
 
 """

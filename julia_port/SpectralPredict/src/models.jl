@@ -84,7 +84,7 @@ function get_model_configs(model_name::String)::Vector{Dict{String, Any}}
         return [Dict("n_components" => nc) for nc in n_components_list]
 
     elseif model_name == "Ridge"
-        alpha_list = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+        alpha_list = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
         return [Dict("alpha" => a) for a in alpha_list]
 
     elseif model_name == "Lasso"
@@ -536,7 +536,7 @@ function fit_model!(model::RandomForestModel, X::Matrix{Float64}, y::Vector{Floa
                                 model.n_trees,           # positional arg 2
                                 0.7,                     # partial_sampling (positional arg 3)
                                 -1,                      # max_depth, -1 = no limit (positional arg 4)
-                                5,                       # min_samples_leaf (positional arg 5)
+                                1,                       # min_samples_leaf (positional arg 5)
                                 2,                       # min_samples_split (positional arg 6)
                                 0.0;                     # min_purity_increase (positional arg 7)
                                 rng=Random.MersenneTwister(42))
