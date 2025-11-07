@@ -28,6 +28,7 @@ Date: October 2025
 """
 
 import os
+import shutil
 import sys
 import json
 import subprocess
@@ -194,6 +195,29 @@ def run_search_julia(
     julia_exe = julia_exe or JULIA_EXE
     julia_project = julia_project or JULIA_PROJECT
 
+    # Fallback discovery for Julia executable
+    if not os.path.exists(julia_exe):
+        # Try environment variables
+        env_exe = os.environ.get('JULIA_EXE') or os.environ.get('JULIA_BIN')
+        if env_exe and os.path.exists(env_exe):
+            julia_exe = env_exe
+        else:
+            # Try PATH resolution
+            which_exe = shutil.which('julia.exe') or shutil.which('julia')
+            if which_exe:
+                julia_exe = which_exe
+
+    # Fallback discovery for Julia project
+    if not os.path.exists(julia_project):
+        env_proj = os.environ.get('JULIA_PROJECT')
+        if env_proj and os.path.exists(env_proj):
+            julia_project = env_proj
+        else:
+            # Try repo-relative default
+            repo_default = Path(__file__).parent / 'julia_port' / 'SpectralPredict'
+            if repo_default.exists():
+                julia_project = str(repo_default)
+
     # Validate Julia installation
     _validate_julia_installation(julia_exe, julia_project)
 
@@ -232,7 +256,12 @@ def run_search_julia(
             variable_counts=variable_counts,
             variable_selection_methods=variable_selection_methods,
             enable_region_subsets=enable_region_subsets,
-            n_top_regions=n_top_regions
+            n_top_regions=n_top_regions,
+            apply_uve_prefilter=apply_uve_prefilter,
+            uve_cutoff_multiplier=uve_cutoff_multiplier,
+            uve_n_components=uve_n_components,
+            spa_n_random_starts=spa_n_random_starts,
+            ipls_n_intervals=ipls_n_intervals
         )
 
         with open(config_file, 'w') as f:
@@ -260,6 +289,15 @@ def run_search_julia(
         script_file = temp_path / "run_analysis.jl"
         with open(script_file, 'w') as f:
             f.write(julia_script)
+
+        # Debug: also write the generated script to repo root for inspection
+        try:
+            debug_script_path = Path(__file__).parent / "run_analysis_debug.jl"
+            with open(debug_script_path, 'w') as fdbg:
+                fdbg.write(julia_script)
+        except Exception:
+            # Non-fatal; continue
+            pass
 
         # 5. Execute Julia process
         try:
@@ -389,7 +427,13 @@ def _create_config(
     variable_counts,
     variable_selection_methods,
     enable_region_subsets,
-    n_top_regions
+    n_top_regions,
+    # Variable selection parameter overrides (bridged to Julia)
+    apply_uve_prefilter=False,
+    uve_cutoff_multiplier=1.0,
+    uve_n_components=None,
+    spa_n_random_starts=10,
+    ipls_n_intervals=20
 ):
     """Create configuration dictionary for Julia."""
 
@@ -448,39 +492,30 @@ def _create_config(
                 derivative_orders.append(2)
             has_deriv = True
 
-        # Auto-generate combinations when multiple methods selected
+        # CRITICAL FIX: Add combinations WITHOUT removing base methods (additive approach)
+        # This matches Python backend behavior where all selected methods are tested
+
+        # Add derivative combinations if both base method AND derivative selected
         if has_snv and has_deriv:
-            # User wants SNV + Derivative → create snv_deriv (SNV first, then derivative)
+            # User wants SNV + Derivative combination
             if 'snv_deriv' not in julia_preprocessing:
                 julia_preprocessing.append('snv_deriv')
-            # Remove standalone snv (we want combination only)
-            if 'snv' in julia_preprocessing:
-                julia_preprocessing.remove('snv')
-        elif has_snv:
-            # SNV only (already added above at line 433)
-            pass
+            # KEEP standalone 'snv' - user may want to test both!
 
         if has_msc and has_deriv:
-            # User wants MSC + Derivative → create msc_deriv (MSC first, then derivative)
+            # User wants MSC + Derivative combination
             if 'msc_deriv' not in julia_preprocessing:
                 julia_preprocessing.append('msc_deriv')
-            # Remove standalone msc (we want combination only)
-            if 'msc' in julia_preprocessing:
-                julia_preprocessing.remove('msc')
-        elif has_msc and not has_deriv:
-            # MSC only (already added above at line 435)
-            pass
+            # KEEP standalone 'msc' - user may want to test both!
 
         # Handle deriv_snv checkbox (derivative THEN SNV - opposite order)
         if preprocessing_methods.get('deriv_snv', False) and has_deriv:
             if 'deriv_snv' not in julia_preprocessing:
                 julia_preprocessing.append('deriv_snv')
-            # Remove snv_deriv if present (user wants opposite order)
-            if 'snv_deriv' in julia_preprocessing:
-                julia_preprocessing.remove('snv_deriv')
+            # KEEP snv_deriv - user may want both orders!
 
-        # Add standalone derivative if no combinations were created
-        if has_deriv and 'snv_deriv' not in julia_preprocessing and 'msc_deriv' not in julia_preprocessing and 'deriv_snv' not in julia_preprocessing:
+        # Add standalone derivative (always add if derivatives selected)
+        if has_deriv:
             if 'deriv' not in julia_preprocessing:
                 julia_preprocessing.append('deriv')
 
@@ -502,18 +537,40 @@ def _create_config(
     if variable_selection_methods is None:
         julia_var_selection_methods = ['importance']
     else:
-        # Map Python names to Julia names (they're the same) and validate
-        valid_methods = ['importance', 'SPA', 'UVE', 'iPLS', 'UVE-SPA']
+        # Normalize Python names to Julia's expected lowercase identifiers
+        # Accept common synonyms and punctuation variations
+        method_map = {
+            'importance': 'importance',
+            'spa': 'spa',
+            'uve': 'uve',
+            'ipls': 'ipls',
+            'uve_spa': 'uve_spa',
+        }
+
+        def _normalize_method(name: str) -> str:
+            key = name.strip().lower().replace('-', '_').replace(' ', '_')
+            return method_map.get(key, '')
+
         julia_var_selection_methods = []
 
         for method in variable_selection_methods:
-            if method in valid_methods:
-                julia_var_selection_methods.append(method)
+            normalized = _normalize_method(method)
+            if normalized:
+                julia_var_selection_methods.append(normalized)
             else:
                 print(f"Warning: Unknown variable selection method '{method}' specified, skipping")
 
         if not julia_var_selection_methods:
             julia_var_selection_methods = ['importance']
+
+    # Variable selection parameter map (kept simple, Julia will read keys)
+    varsel_params = {
+        'apply_uve_prefilter': bool(apply_uve_prefilter),
+        'uve_cutoff_multiplier': float(uve_cutoff_multiplier),
+        'uve_n_components': (None if uve_n_components is None else int(uve_n_components)),
+        'spa_n_random_starts': int(spa_n_random_starts),
+        'ipls_n_intervals': int(ipls_n_intervals),
+    }
 
     config = {
         'task_type': task_type,
@@ -525,6 +582,7 @@ def _create_config(
         'enable_variable_subsets': enable_variable_subsets,
         'variable_counts': variable_counts,
         'variable_selection_methods': julia_var_selection_methods,
+        'varsel_params': varsel_params,
         'enable_region_subsets': enable_region_subsets,
         'n_top_regions': n_top_regions,
         'n_folds': folds,
@@ -548,14 +606,31 @@ def _create_julia_script(X_file, y_file, wavelengths_file, config_file, output_f
     julia_project_path = str(julia_project).replace(chr(92), '/')
     spectral_predict_module = f"{julia_project_path}/src/SpectralPredict.jl"
 
-    # Helper function to convert Python lists to Julia syntax
+    # Helper functions to convert Python types to Julia syntax
     def to_julia_array(items):
+        # Robust conversion of Python lists to Julia array literals
+        # Uses to_julia_value for each element to ensure correct quoting for strings
         if isinstance(items, list):
-            if all(isinstance(x, str) for x in items):
-                return '[' + ', '.join(f'"{x}"' for x in items) + ']'
-            else:
-                return '[' + ', '.join(str(x) for x in items) + ']'
+            return '[' + ', '.join(to_julia_value(x) for x in items) + ']'
         return '[]'
+
+    def to_julia_value(x):
+        # Convert simple Python values to Julia literals
+        if x is None:
+            return 'nothing'
+        if isinstance(x, bool):
+            return 'true' if x else 'false'
+        if isinstance(x, (int, float)):
+            return str(x)
+        if isinstance(x, str):
+            return f'"{x}"'
+        return 'nothing'
+
+    def to_julia_dict(d):
+        if not isinstance(d, dict) or not d:
+            return 'Dict{String,Any}()'
+        items = ', '.join([f'"{k}" => {to_julia_value(v)}' for k, v in d.items()])
+        return f'Dict({items})'
 
     script = f'''
 # SpectralPredict Julia Analysis Script
@@ -617,6 +692,7 @@ config = Dict(
     "enable_variable_subsets" => {str(config['enable_variable_subsets']).lower()},
     "variable_counts" => {to_julia_array(config['variable_counts'])},
     "variable_selection_methods" => {to_julia_array(config['variable_selection_methods'])},
+    "varsel_params" => {to_julia_dict(config['varsel_params'])},
     "enable_region_subsets" => {str(config['enable_region_subsets']).lower()},
     "n_top_regions" => {config['n_top_regions']},
     "n_folds" => {config['n_folds']},
@@ -665,6 +741,7 @@ try
         enable_variable_subsets=config["enable_variable_subsets"],
         variable_counts=config["variable_counts"],
         variable_selection_methods=config["variable_selection_methods"],
+        varsel_params=config["varsel_params"],
         enable_region_subsets=config["enable_region_subsets"],
         n_top_regions=config["n_top_regions"],
         n_folds=config["n_folds"],
@@ -1023,6 +1100,9 @@ def main():
             variable_counts=[10, 20],
             variable_selection_methods=['importance', 'SPA'],
             enable_region_subsets=False,
+            # Verify variable selection parameter bridging
+            spa_n_random_starts=5,
+            uve_cutoff_multiplier=1.25,
             folds=3,
             progress_callback=lambda info: print(f"  Progress: {info.get('message', '')}")
         )
