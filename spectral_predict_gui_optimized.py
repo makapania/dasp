@@ -3316,8 +3316,9 @@ If the problem persists, please report this error.
                     f"  Found {len(invalid_wls)} wavelengths not in current dataset\n"
                     f"SOLUTION: Load the original dataset.")
 
-            model_wavelengths = sorted(model_wavelengths)
-            print(f"  ✓ Validation passed: {len(model_wavelengths)} wavelengths valid")
+            # CRITICAL: Do NOT sort wavelengths! Order matters for feature-importance-based subsets
+            # model_wavelengths = sorted(model_wavelengths)  # REMOVED - preserves importance order
+            print(f"  ✓ Validation passed: {len(model_wavelengths)} wavelengths valid (order preserved)")
         else:
             print(f"  Full model detected - using all {len(all_wavelengths)} wavelengths")
             model_wavelengths = list(all_wavelengths)
@@ -3527,11 +3528,17 @@ If the problem persists, please report this error.
         print(f"{'='*80}\n")
 
     def _format_wavelengths_for_NEW_tab7(self, wavelengths_list):
-        """Format wavelength list for display in Tab 7."""
+        """
+        Format wavelength list for display in Tab 7.
+
+        CRITICAL: Preserves original order! For feature-importance-based subsets,
+        the order of wavelengths matters and must match the Results tab exactly.
+        """
         if not wavelengths_list:
             return "# No wavelengths specified"
 
-        wls = sorted(wavelengths_list)
+        # CRITICAL: Do NOT sort! Preserve the original order from Results tab
+        wls = list(wavelengths_list)  # Make a copy but don't sort
         n_wls = len(wls)
 
         if n_wls <= 50:
@@ -3540,8 +3547,9 @@ If the problem persists, please report this error.
         else:
             first_10 = [f"{w:.1f}" for w in wls[:10]]
             last_10 = [f"{w:.1f}" for w in wls[-10:]]
+            wls_sorted_for_range = sorted(wls)  # Only for displaying min/max range
             return (", ".join(first_10) + ", ..., " + ", ".join(last_10) +
-                   f"\n\n# Total: {n_wls} wavelengths\n# Range: {wls[0]:.1f}-{wls[-1]:.1f} nm")
+                   f"\n\n# Total: {n_wls} wavelengths\n# Range: {wls_sorted_for_range[0]:.1f}-{wls_sorted_for_range[-1]:.1f} nm")
 
     # === Helper Methods ===
 
