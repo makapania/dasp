@@ -3421,6 +3421,19 @@ Performance (Classification):
         if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']:
             self.refine_preprocess.set(gui_preprocess)
 
+        # CRITICAL FIX: Load Window parameter from config
+        window = config.get('Window', None)
+        if window is not None and not pd.isna(window):
+            window_val = int(float(window))
+            if window_val in [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25]:
+                self.refine_window.set(window_val)
+                print(f"DEBUG: Loaded window={window_val} from config")
+            else:
+                print(f"WARNING: Invalid window={window_val} in config, using default")
+
+        # Note: Poly parameter is inferred from deriv order in the execution code (lines 3966-3975)
+        # No need to load it separately as it's automatically determined
+
         # Enable the run button
         self.refine_run_button.config(state='normal')
         self.refine_status.config(text=f"Loaded: {config.get('Model', 'N/A')} | {config.get('Preprocess', 'N/A')}")
@@ -4028,11 +4041,17 @@ Performance (Classification):
             # NOT in a 'Params' string field like old Python implementation
             params_from_search = {}
             if self.selected_model_config is not None:
+                print(f"DEBUG: Loading hyperparameters for model_name='{model_name}'")
+                print(f"DEBUG: Config keys available: {list(self.selected_model_config.keys())}")
+                print(f"DEBUG: Config alpha value: {self.selected_model_config.get('alpha', 'NOT_FOUND')}")
+
                 # Extract hyperparameters based on model type
                 if model_name == 'Ridge' or model_name == 'Lasso':
                     if 'alpha' in self.selected_model_config and not pd.isna(self.selected_model_config.get('alpha')):
                         params_from_search['alpha'] = float(self.selected_model_config['alpha'])
-                        print(f"DEBUG: Loaded alpha={params_from_search['alpha']} for {model_name}")
+                        print(f"DEBUG: ✓ Loaded alpha={params_from_search['alpha']} for {model_name}")
+                    else:
+                        print(f"DEBUG: ✗ Alpha not found or is NaN for {model_name}")
 
                 elif model_name == 'RandomForest':
                     if 'n_trees' in self.selected_model_config and not pd.isna(self.selected_model_config.get('n_trees')):
