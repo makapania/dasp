@@ -2160,8 +2160,15 @@ class SpectralPredictApp:
                 if 'n_components' not in hyperparams:
                     hyperparams['n_components'] = 10
             elif model_name in ['Ridge', 'Lasso']:
+                # DIAGNOSTIC: Alpha extraction from widgets
+                print(f"\n🔍 DIAGNOSTIC [Execution]: Alpha extraction for {model_name}")
+                print(f"  Extracted from widgets: {hyperparams.get('alpha', 'NOT FOUND')}")
+                print(f"  'alpha' in hyperparams? {'alpha' in hyperparams}")
                 if 'alpha' not in hyperparams:
+                    print(f"  ⚠️  Alpha NOT in hyperparams - using default 1.0")
                     hyperparams['alpha'] = 1.0
+                else:
+                    print(f"  ✅ Alpha extracted successfully: {hyperparams['alpha']}")
             elif model_name == 'RandomForest':
                 if 'n_estimators' not in hyperparams:
                     hyperparams['n_estimators'] = 100
@@ -2502,6 +2509,21 @@ class SpectralPredictApp:
                 print(f"  R²:   {results['r2_mean']:.4f} ± {results['r2_std']:.4f}")
                 print(f"  MAE:  {results['mae_mean']:.4f} ± {results['mae_std']:.4f}")
                 print(f"  Bias: {results['bias_mean']:.4f} ± {results['bias_std']:.4f}")
+
+                # DIAGNOSTIC: Compare with expected R² from Results tab
+                if hasattr(self, 'tab7_expected_r2') and self.tab7_expected_r2 is not None:
+                    print(f"\n🔍 DIAGNOSTIC [Validation]: R² Comparison")
+                    print(f"  Results tab R²: {self.tab7_expected_r2:.4f}")
+                    print(f"  Tab 7 R²:       {results['r2_mean']:.4f}")
+                    r2_diff = abs(results['r2_mean'] - self.tab7_expected_r2)
+                    print(f"  Difference:     {r2_diff:.4f} ({r2_diff*100:.2f} percentage points)")
+                    if r2_diff < 0.001:
+                        print(f"  ✅ MATCH! (tolerance: 0.001)")
+                    elif r2_diff < 0.01:
+                        print(f"  ⚠️  CLOSE (tolerance: 0.01)")
+                    else:
+                        print(f"  ❌ MISMATCH! Expected difference < 0.01")
+                        print(f"  This indicates a BUG in configuration loading/execution!")
             else:
                 results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
                 results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
@@ -3177,6 +3199,21 @@ If the problem persists, please report this error.
 
         print(f"✓ Data validation passed: X={self.X_original.shape}, y={len(self.y)}, wavelengths={len(self.X_original.columns)}")
 
+        # DIAGNOSTIC: Print full config dict
+        print("\n" + "="*80)
+        print("🔍 DIAGNOSTIC: FULL CONFIG DICT")
+        print("="*80)
+        for key, value in sorted(config.items()):
+            value_type = type(value).__name__
+            if pd.isna(value) if isinstance(value, (float, np.floating)) else False:
+                value_display = "NaN"
+            elif value is None:
+                value_display = "None"
+            else:
+                value_display = str(value)[:100]  # Truncate long values
+            print(f"  {key:20s} = {value_display:50s} (type: {value_type})")
+        print("="*80 + "\n")
+
         # STEP 2: Build Config Info
         print("\n[STEP 2/7] Building configuration information...")
         model_name = config.get('Model', 'N/A')
@@ -3269,6 +3306,13 @@ If the problem persists, please report this error.
             if lv_val: hyper_lines.append(f"  n_components: {lv_val}")
         elif model_name in ['Ridge', 'Lasso']:
             alpha_val = _get_config_value(['Alpha', 'alpha'])
+            # DIAGNOSTIC: Alpha extraction (display only)
+            print(f"\n🔍 DIAGNOSTIC [Display]: Alpha extraction for {model_name}")
+            print(f"  alpha_val = {alpha_val}")
+            print(f"  type = {type(alpha_val)}")
+            print(f"  is None? {alpha_val is None}")
+            if alpha_val is not None:
+                print(f"  is NaN? {pd.isna(alpha_val) if isinstance(alpha_val, (float, np.floating)) else False}")
             if alpha_val: hyper_lines.append(f"  alpha: {alpha_val}")
         elif model_name == 'RandomForest':
             n_est = _get_config_value(['n_estimators', 'n_trees'])
@@ -3312,8 +3356,39 @@ If the problem persists, please report this error.
                     self.tab7_hyperparam_widgets['n_components'].set(int(lv_val))
             elif model_name in ['Ridge', 'Lasso']:
                 alpha_val = _get_config_value(['Alpha', 'alpha'])
-                if alpha_val and 'alpha' in self.tab7_hyperparam_widgets:
+                # DIAGNOSTIC: Alpha extraction (widget population)
+                print(f"\n🔍 DIAGNOSTIC [Widget]: Alpha extraction for {model_name}")
+                print(f"  alpha_val = {alpha_val}")
+                print(f"  type = {type(alpha_val)}")
+                print(f"  is None? {alpha_val is None}")
+                if alpha_val is not None:
+                    print(f"  is NaN? {pd.isna(alpha_val) if isinstance(alpha_val, (float, np.floating)) else False}")
+                print(f"  'alpha' in widgets? {'alpha' in self.tab7_hyperparam_widgets}")
+
+                # CRITICAL FIX: Use 'is not None' instead of truthiness check
+                # This handles alpha=0.0 case (rare but valid - would be falsy!)
+                if alpha_val is not None and 'alpha' in self.tab7_hyperparam_widgets:
                     self.tab7_hyperparam_widgets['alpha'].set(str(alpha_val))
+                    widget_value_after = self.tab7_hyperparam_widgets['alpha'].get()
+                    print(f"  ✅ Widget.set() called with: {str(alpha_val)}")
+                    print(f"  Widget.get() returns: {widget_value_after}")
+                    print(f"  Match? {widget_value_after == str(alpha_val)}")
+                else:
+                    if 'alpha' in self.tab7_hyperparam_widgets:
+                        widget_value = self.tab7_hyperparam_widgets['alpha'].get()
+                        print(f"  ⚠️  Widget.set() NOT called (alpha_val={alpha_val})")
+                        print(f"  Widget retains default value: {widget_value}")
+                        # FAIL LOUD: Raise error if alpha is None for Ridge/Lasso
+                        if alpha_val is None:
+                            raise ValueError(
+                                f"CRITICAL ERROR: Alpha parameter not found in config for {model_name} model!\n"
+                                f"  Rank: {rank}\n"
+                                f"  Available fields: {list(config.keys())}\n\n"
+                                f"This indicates Results tab is not storing alpha correctly.\n"
+                                f"SOLUTION: Re-run the analysis to generate complete results.")
+                    else:
+                        print(f"  ⚠️  Widget.set() NOT called ('alpha' not in widgets)")
+
             elif model_name == 'RandomForest':
                 n_est = _get_config_value(['n_estimators', 'n_trees'])
                 if n_est and 'n_estimators' in self.tab7_hyperparam_widgets:
@@ -3376,6 +3451,20 @@ If the problem persists, please report this error.
         # STEP 7: Finalize
         print("\n[STEP 7/7] Finalizing...")
         self.tab7_loaded_config = config.copy()
+
+        # Store expected R² for comparison after execution
+        expected_r2 = config.get('R2', None)
+        expected_accuracy = config.get('Accuracy', None)
+        if expected_r2 is not None and not pd.isna(expected_r2):
+            self.tab7_expected_r2 = float(expected_r2)
+            print(f"  📊 Expected R² from Results tab: {self.tab7_expected_r2:.4f}")
+        elif expected_accuracy is not None and not pd.isna(expected_accuracy):
+            self.tab7_expected_accuracy = float(expected_accuracy)
+            print(f"  📊 Expected Accuracy from Results tab: {self.tab7_expected_accuracy:.4f}")
+        else:
+            self.tab7_expected_r2 = None
+            self.tab7_expected_accuracy = None
+
         self.tab7_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})",
                                     foreground=self.colors['success'])
         self._tab7_update_wavelength_count()
@@ -5156,6 +5245,43 @@ If the problem persists, please report this error.
                 values.append(value)
             self.results_tree.insert('', 'end', iid=str(idx), values=values)
 
+        # AUTO-LOAD TOP MODEL: When analysis completes, automatically load rank #1 model into Tab 7
+        if not is_sorted and len(results_df) > 0:
+            try:
+                # Get the top-ranking model (rank 1)
+                top_model = results_df.iloc[0]
+                model_name = top_model.get('Model', '?')
+                rank = top_model.get('Rank', '?')
+                r2_or_acc = top_model.get('R2', top_model.get('Accuracy', '?'))
+
+                print(f"\n{'='*80}")
+                print(f"⚡ AUTO-LOAD: Top-ranking model detected")
+                print(f"{'='*80}")
+                print(f"  Rank: {rank}")
+                print(f"  Model: {model_name}")
+                print(f"  Performance: {r2_or_acc}")
+                print(f"  Loading into Tab 7 and auto-running...")
+
+                # Schedule auto-load after 1 second (let user see Results tab first)
+                def auto_load_top_model():
+                    try:
+                        model_config = top_model.to_dict()
+                        self._load_model_to_NEW_tab7(model_config)
+                        # Switch to Tab 7
+                        self.notebook.select(6)
+                        # Auto-run after 500ms
+                        self.root.after(500, self._tab7_run_model)
+                    except Exception as e:
+                        print(f"⚠️  AUTO-LOAD FAILED: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                self.root.after(1000, auto_load_top_model)
+                print(f"✅ Auto-load scheduled")
+                print(f"{'='*80}\n")
+            except Exception as e:
+                print(f"⚠️  Could not auto-load top model: {e}")
+
         # Update status
         self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
 
@@ -5200,6 +5326,11 @@ If the problem persists, please report this error.
             self.notebook.select(6)
 
             print(f"✅ Successfully loaded and switched to Custom Model Development tab")
+
+            # AUTO-RUN: Run the model after 500ms delay to allow GUI to update
+            print(f"⚡ AUTO-RUN: Scheduling model execution in 500ms...")
+            self.root.after(500, self._tab7_run_model)
+
             print(f"{'='*80}\n")
 
         except ValueError as ve:
