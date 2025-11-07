@@ -41,10 +41,10 @@ from sklearn.pipeline import Pipeline
 
 TEST_CONFIGS = {
     'quick': {
-        'models': ['Lasso', 'PLS'],
-        'preprocessing': ['raw'],
+        'models': ['PLS', 'Lasso'],
+        'preprocessing': ['snv_sg2'],
         'variable_counts': [50],
-        'description': 'Quick test (2 models, 1 preprocessing)'
+        'description': 'Quick test (PLS + Lasso, snv_sg2, 50 vars)'
     },
     'full': {
         'models': ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted'],
@@ -192,7 +192,10 @@ def simulate_tab7_execution(X_data, y_data, config):
         X_work = X_full_preprocessed[:, wavelength_indices]
 
         # Pipeline with only model
-        model = get_model(model_name, task_type, hyperparams.get('n_components'), min(20, len(X_work)//5), 100)
+        # Use higher max_iter for Lasso to ensure convergence parity with GUI
+        effective_max_iter = 2000 if model_name == 'Lasso' else 100
+        n_components = hyperparams.get('n_components', 10)
+        model = get_model(model_name, task_type, n_components, min(20, len(X_work)//5), effective_max_iter)
 
         # Apply hyperparameters
         if model_name in ['Ridge', 'Lasso']:
@@ -221,7 +224,9 @@ def simulate_tab7_execution(X_data, y_data, config):
             deriv_val = deriv
 
         pipe_steps = build_preprocessing_pipeline(preprocess_name, deriv_val, window, polyorder) if preprocess_name != 'raw' else []
-        model = get_model(model_name, task_type, hyperparams.get('n_components'), min(20, len(X_work)//5), 100)
+        effective_max_iter = 2000 if model_name == 'Lasso' else 100
+        n_components = hyperparams.get('n_components', 10)
+        model = get_model(model_name, task_type, n_components, min(20, len(X_work)//5), effective_max_iter)
         pipe_steps.append(('model', model))
         pipe = Pipeline(pipe_steps)
 
@@ -231,7 +236,8 @@ def simulate_tab7_execution(X_data, y_data, config):
 
     # Run cross-validation (same as Tab 7)
     n_folds = 5
-    kfold = KFold(n_splits=n_folds, shuffle=False, random_state=None)
+    # Match Tab 7 CV settings: shuffle=True, deterministic seed
+    kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     fold_metrics = []
     for fold_idx, (train_idx, test_idx) in enumerate(kfold.split(X_work)):
