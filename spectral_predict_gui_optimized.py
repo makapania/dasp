@@ -34,6 +34,7 @@ try:
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
     from matplotlib.figure import Figure
+    from matplotlib.patches import Patch
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -99,11 +100,24 @@ class SpectralPredictApp:
         self.refined_full_wavelengths = None  # List of ALL wavelengths (for derivative+subset preprocessing)
         self.refined_config = None  # Configuration dict for refined model
 
-        # Model Prediction Tab (Tab 7) variables
+        # Model Prediction Tab (Tab 8) variables
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
+
+        # Tab 7 Model Development variables
+        self.tab7_trained_model = None  # Trained model from Tab 7
+        self.tab7_preprocessing_pipeline = None  # Fitted preprocessing pipeline
+        self.tab7_wavelengths = None  # Wavelengths used (after preprocessing)
+        self.tab7_full_wavelengths = None  # Full wavelengths (for derivative+subset)
+        self.tab7_config = None  # Configuration dict
+        self.tab7_performance = None  # Performance metrics dict
+        self.tab7_y_true = None  # True values (for plotting)
+        self.tab7_y_pred = None  # Predicted values (for plotting)
+        self.tab7_loaded_config = None  # Config loaded from Results tab
+        self.tab7_run_history = []  # History of model runs
+        self.tab7_performance_history = []  # Performance tracking for comparison plot
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -283,7 +297,8 @@ class SpectralPredictApp:
         self._create_tab4_progress()
         self._create_tab5_results()
         self._create_tab6_refine_model()
-        self._create_tab7_model_prediction()
+        self._create_tab7_model_development()  # NEW: Fresh Model Development
+        self._create_tab8_model_prediction()  # Renamed from tab7
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -1308,6 +1323,2086 @@ class SpectralPredictApp:
         # Status
         self.refine_status = ttk.Label(content_frame, text="No model loaded", style='Caption.TLabel')
         self.refine_status.grid(row=row, column=0, columnspan=2)
+
+    def _create_tab7_model_development(self):
+        """Tab 7: Model Development - Fresh implementation with full control.
+
+        This tab allows users to:
+        - Develop models from scratch with full parameter control
+        - Load models from Results tab for refinement
+        - Configure all model parameters (type, preprocessing, wavelengths, hyperparameters)
+        - Run cross-validation with diagnostic plots
+        - Save developed models
+        """
+        self.tab7 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab7, text='  🔬 Model Development  ')
+
+        # Create scrollable canvas
+        canvas = tk.Canvas(self.tab7, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab7, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # =============================================================================
+        # HEADER SECTION
+        # =============================================================================
+
+        header_frame = ttk.Frame(content_frame, style='TFrame')
+        header_frame.pack(fill='x', pady=(0, 20))
+
+        # Title
+        ttk.Label(header_frame, text="Model Development",
+                  style='Title.TLabel').pack(side='left')
+
+        # Mode indicator (updates when model loaded from Results)
+        self.tab7_mode_label = ttk.Label(header_frame, text="Mode: Fresh Development",
+                                          style='Heading.TLabel', foreground=self.colors['success'])
+        self.tab7_mode_label.pack(side='left', padx=20)
+
+        # Reset button
+        ttk.Button(header_frame, text="🔄 Reset to Fresh",
+                   command=self._tab7_reset_to_fresh,
+                   style='Modern.TButton').pack(side='right')
+
+        # Configuration info display (shows loaded model info)
+        info_frame = ttk.LabelFrame(content_frame, text="Configuration Info", padding=10)
+        info_frame.pack(fill='x', pady=(0, 20))
+
+        self.tab7_config_text = tk.Text(info_frame, height=5, width=120,
+                                        font=('Consolas', 9), wrap=tk.WORD,
+                                        bg='#F0F8FF', relief='flat', state='disabled')
+        self.tab7_config_text.pack(fill='x')
+
+        # Initialize with fresh mode message
+        self.tab7_config_text.config(state='normal')
+        self.tab7_config_text.insert('1.0',
+            "🆕 Fresh Development Mode\n"
+            "Configure all parameters below to develop a new model from scratch.\n"
+            "Or switch to Results tab and double-click a model to refine it.")
+        self.tab7_config_text.config(state='disabled')
+
+        # =============================================================================
+        # PARAMETER CONTROLS (2-COLUMN LAYOUT)
+        # =============================================================================
+
+        params_frame = ttk.LabelFrame(content_frame, text="Model Parameters", padding=15)
+        params_frame.pack(fill='both', expand=True, pady=(0, 20))
+
+        # Create left and right columns
+        left_col = ttk.Frame(params_frame, style='TFrame')
+        left_col.grid(row=0, column=0, sticky='nsew', padx=(0, 20))
+
+        right_col = ttk.Frame(params_frame, style='TFrame')
+        right_col.grid(row=0, column=1, sticky='nsew')
+
+        params_frame.columnconfigure(0, weight=1)
+        params_frame.columnconfigure(1, weight=1)
+
+        # -----------------------------------------------------------------------------
+        # LEFT COLUMN: Core Parameters
+        # -----------------------------------------------------------------------------
+
+        row = 0
+
+        # Model Type
+        ttk.Label(left_col, text="Model Type:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+        self.tab7_model_type = tk.StringVar(value='PLS')
+        model_combo = ttk.Combobox(left_col, textvariable=self.tab7_model_type,
+                                   values=['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted'],
+                                   state='readonly', width=25)
+        model_combo.grid(row=row, column=1, sticky='w', pady=5)
+        model_combo.bind('<<ComboboxSelected>>', self._tab7_update_hyperparameters)
+        row += 1
+
+        # Task Type
+        ttk.Label(left_col, text="Task Type:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+        self.tab7_task_type = tk.StringVar(value='regression')
+        task_combo = ttk.Combobox(left_col, textvariable=self.tab7_task_type,
+                                  values=['regression', 'classification'],
+                                  state='readonly', width=25)
+        task_combo.grid(row=row, column=1, sticky='w', pady=5)
+        row += 1
+
+        # Backend
+        ttk.Label(left_col, text="Backend:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+        self.tab7_backend = tk.StringVar(value='python')
+        backend_combo = ttk.Combobox(left_col, textvariable=self.tab7_backend,
+                                     values=['python'],
+                                     state='readonly', width=25)
+        backend_combo.grid(row=row, column=1, sticky='w', pady=5)
+        row += 1
+
+        # Preprocessing
+        ttk.Label(left_col, text="Preprocessing:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+        self.tab7_preprocess = tk.StringVar(value='raw')
+        preproc_combo = ttk.Combobox(left_col, textvariable=self.tab7_preprocess,
+                                     values=['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2',
+                                            'deriv_snv', 'msc', 'msc_sg1', 'msc_sg2', 'deriv_msc'],
+                                     state='readonly', width=25)
+        preproc_combo.grid(row=row, column=1, sticky='w', pady=5)
+        row += 1
+
+        # Window Size (for Savitzky-Golay)
+        ttk.Label(left_col, text="Window Size:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+
+        window_frame = ttk.Frame(left_col, style='TFrame')
+        window_frame.grid(row=row, column=1, sticky='w', pady=5)
+
+        self.tab7_window = tk.IntVar(value=17)
+        for i, val in enumerate([7, 11, 17, 19]):
+            ttk.Radiobutton(window_frame, text=str(val), variable=self.tab7_window,
+                           value=val).grid(row=0, column=i, padx=5)
+        row += 1
+
+        # CV Folds
+        ttk.Label(left_col, text="CV Folds:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+        self.tab7_folds = tk.IntVar(value=5)
+        cv_spin = ttk.Spinbox(left_col, from_=3, to=10, textvariable=self.tab7_folds,
+                              width=23)
+        cv_spin.grid(row=row, column=1, sticky='w', pady=5)
+        row += 1
+
+        # Max Iterations
+        ttk.Label(left_col, text="Max Iterations:", style='TLabel').grid(
+            row=row, column=0, sticky='w', pady=5)
+        self.tab7_max_iter = tk.IntVar(value=100)
+        iter_spin = ttk.Spinbox(left_col, from_=50, to=500, textvariable=self.tab7_max_iter,
+                                width=23)
+        iter_spin.grid(row=row, column=1, sticky='w', pady=5)
+        row += 1
+
+        # -----------------------------------------------------------------------------
+        # RIGHT COLUMN: Wavelength Specification
+        # -----------------------------------------------------------------------------
+
+        row = 0
+
+        # Wavelength specification label with format info
+        wl_label_text = ("Wavelength Specification:\n"
+                        "(One wavelength per line, or ranges like '400-700')")
+        ttk.Label(right_col, text=wl_label_text, style='TLabel',
+                  justify='left').grid(row=row, column=0, columnspan=2, sticky='w', pady=(0, 5))
+        row += 1
+
+        # Wavelength text widget
+        wl_text_frame = ttk.Frame(right_col, style='TFrame')
+        wl_text_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(0, 10))
+
+        self.tab7_wl_spec = tk.Text(wl_text_frame, height=4, width=40,
+                                    font=('Consolas', 10), wrap=tk.WORD)
+        self.tab7_wl_spec.pack(side='left', fill='both', expand=True)
+
+        wl_scrollbar = ttk.Scrollbar(wl_text_frame, orient='vertical',
+                                     command=self.tab7_wl_spec.yview)
+        wl_scrollbar.pack(side='right', fill='y')
+        self.tab7_wl_spec.config(yscrollcommand=wl_scrollbar.set)
+
+        # Bind update event for real-time wavelength count
+        self.tab7_wl_spec.bind('<KeyRelease>', self._tab7_update_wavelength_count)
+        row += 1
+
+        # Wavelength preset buttons
+        preset_frame = ttk.Frame(right_col, style='TFrame')
+        preset_frame.grid(row=row, column=0, columnspan=2, sticky='w', pady=(0, 10))
+
+        ttk.Label(preset_frame, text="Presets:", style='TLabel').pack(side='left', padx=(0, 10))
+        ttk.Button(preset_frame, text="All",
+                   command=lambda: self._tab7_apply_wl_preset('all'),
+                   style='Modern.TButton').pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="NIR (1000-2500)",
+                   command=lambda: self._tab7_apply_wl_preset('nir'),
+                   style='Modern.TButton').pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="Visible (400-700)",
+                   command=lambda: self._tab7_apply_wl_preset('visible'),
+                   style='Modern.TButton').pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="Custom Range...",
+                   command=self._tab7_custom_range_dialog,
+                   style='Modern.TButton').pack(side='left', padx=2)
+        row += 1
+
+        # Wavelength count display
+        self.tab7_wl_count_label = ttk.Label(right_col, text="Wavelengths: 0",
+                                             style='Subheading.TLabel')
+        self.tab7_wl_count_label.grid(row=row, column=0, columnspan=2, sticky='w', pady=(0, 10))
+        row += 1
+
+        # -----------------------------------------------------------------------------
+        # Dynamic Hyperparameter Frame
+        # -----------------------------------------------------------------------------
+
+        self.tab7_hyperparam_container = ttk.LabelFrame(right_col, text="Hyperparameters",
+                                                        padding=10)
+        self.tab7_hyperparam_container.grid(row=row, column=0, columnspan=2,
+                                            sticky='ew', pady=(10, 0))
+
+        # This frame will be populated dynamically based on model type
+        self.tab7_hyperparam_frame = ttk.Frame(self.tab7_hyperparam_container, style='TFrame')
+        self.tab7_hyperparam_frame.pack(fill='both', expand=True)
+
+        # Dictionary to store hyperparameter widgets for easy access
+        self.tab7_hyperparam_widgets = {}
+
+        # Initialize hyperparameters for default model (PLS)
+        self._tab7_create_hyperparam_widgets('PLS')
+
+        # =============================================================================
+        # ACTION BUTTONS
+        # =============================================================================
+
+        action_frame = ttk.Frame(content_frame, style='TFrame')
+        action_frame.pack(fill='x', pady=20)
+
+        # Run Model button
+        self.tab7_run_button = ttk.Button(action_frame, text="▶ Run Model Development",
+                                       command=self._tab7_run_model,
+                                       style='Accent.TButton')
+        self.tab7_run_button.pack(side='left', padx=(0, 10))
+
+        # Save Model button (disabled initially)
+        self.tab7_save_button = ttk.Button(action_frame, text="💾 Save Model",
+                                        command=self._tab7_save_model,
+                                        style='Modern.TButton', state='disabled')
+        self.tab7_save_button.pack(side='left')
+
+        # =============================================================================
+        # RESULTS DISPLAY
+        # =============================================================================
+
+        results_frame = ttk.LabelFrame(content_frame, text="Results", padding=10)
+        results_frame.pack(fill='both', expand=True, pady=(0, 20))
+
+        self.tab7_results_text = tk.Text(results_frame, height=8, width=120,
+                                         font=('Consolas', 10), wrap=tk.WORD,
+                                         bg='#FFFFFF', relief='solid', borderwidth=1)
+        self.tab7_results_text.pack(fill='both', expand=True)
+
+        # Initialize with placeholder
+        self.tab7_results_text.insert('1.0',
+            "No results yet. Configure parameters above and click 'Run Model Development'.")
+        self.tab7_results_text.config(state='disabled')
+
+        # =============================================================================
+        # DIAGNOSTIC PLOTS (3 side-by-side)
+        # =============================================================================
+
+        plots_frame = ttk.LabelFrame(content_frame, text="Diagnostic Plots", padding=10)
+        plots_frame.pack(fill='both', expand=True, pady=(0, 20))
+
+        plots_container = ttk.Frame(plots_frame, style='TFrame')
+        plots_container.pack(fill='both', expand=True)
+
+        # Configure columns for equal width
+        plots_container.columnconfigure(0, weight=1)
+        plots_container.columnconfigure(1, weight=1)
+        plots_container.columnconfigure(2, weight=1)
+
+        # Plot 1: Prediction (Observed vs Predicted)
+        plot1_frame = ttk.LabelFrame(plots_container, text="Prediction Plot", padding=5)
+        plot1_frame.grid(row=0, column=0, sticky='nsew', padx=5)
+
+        self.tab7_plot1_frame = ttk.Frame(plot1_frame, style='TFrame',
+                                          width=300, height=250)
+        self.tab7_plot1_frame.pack(fill='both', expand=True)
+        self.tab7_plot1_frame.pack_propagate(False)
+
+        # Placeholder label
+        ttk.Label(self.tab7_plot1_frame,
+                  text="Prediction plot will appear here\nafter running model",
+                  style='Caption.TLabel', justify='center').place(relx=0.5, rely=0.5, anchor='center')
+
+        # Plot 2: Residuals
+        plot2_frame = ttk.LabelFrame(plots_container, text="Residual Diagnostics", padding=5)
+        plot2_frame.grid(row=0, column=1, sticky='nsew', padx=5)
+
+        self.tab7_plot2_frame = ttk.Frame(plot2_frame, style='TFrame',
+                                          width=300, height=250)
+        self.tab7_plot2_frame.pack(fill='both', expand=True)
+        self.tab7_plot2_frame.pack_propagate(False)
+
+        ttk.Label(self.tab7_plot2_frame,
+                  text="Residual plot will appear here\nafter running model",
+                  style='Caption.TLabel', justify='center').place(relx=0.5, rely=0.5, anchor='center')
+
+        # Plot 3: Model Comparison
+        plot3_frame = ttk.LabelFrame(plots_container, text="Model Comparison", padding=5)
+        plot3_frame.grid(row=0, column=2, sticky='nsew', padx=5)
+
+        self.tab7_plot3_frame = ttk.Frame(plot3_frame, style='TFrame',
+                                          width=300, height=250)
+        self.tab7_plot3_frame.pack(fill='both', expand=True)
+        self.tab7_plot3_frame.pack_propagate(False)
+
+        ttk.Label(self.tab7_plot3_frame,
+                  text="Comparison plot will appear here\nafter multiple runs",
+                  style='Caption.TLabel', justify='center').place(relx=0.5, rely=0.5, anchor='center')
+
+        # =============================================================================
+        # STATUS LABEL
+        # =============================================================================
+
+        self.tab7_status = ttk.Label(content_frame, text="Ready. Configure parameters and run model.",
+                                     style='Caption.TLabel')
+        self.tab7_status.pack(pady=10)
+
+    # =============================================================================
+    # TAB 7 HELPER METHODS
+    # =============================================================================
+
+    def _tab7_create_hyperparam_widgets(self, model_type):
+        """Create hyperparameter widgets based on model type.
+
+        Args:
+            model_type: One of 'PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted'
+        """
+        # Clear existing widgets
+        for widget in self.tab7_hyperparam_frame.winfo_children():
+            widget.destroy()
+        self.tab7_hyperparam_widgets.clear()
+
+        row = 0
+
+        if model_type == 'PLS':
+            # n_components (1-50)
+            ttk.Label(self.tab7_hyperparam_frame, text="n_components:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['n_components'] = tk.IntVar(value=10)
+            ttk.Spinbox(self.tab7_hyperparam_frame, from_=1, to=50,
+                       textvariable=self.tab7_hyperparam_widgets['n_components'],
+                       width=20).grid(row=row, column=1, sticky='w', pady=5)
+
+        elif model_type in ['Ridge', 'Lasso']:
+            # alpha (float entry)
+            ttk.Label(self.tab7_hyperparam_frame, text="alpha:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['alpha'] = tk.StringVar(value='1.0')
+            ttk.Entry(self.tab7_hyperparam_frame,
+                     textvariable=self.tab7_hyperparam_widgets['alpha'],
+                     width=22).grid(row=row, column=1, sticky='w', pady=5)
+
+        elif model_type == 'RandomForest':
+            # n_estimators
+            ttk.Label(self.tab7_hyperparam_frame, text="n_estimators:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['n_estimators'] = tk.IntVar(value=100)
+            ttk.Spinbox(self.tab7_hyperparam_frame, from_=10, to=500,
+                       textvariable=self.tab7_hyperparam_widgets['n_estimators'],
+                       width=20).grid(row=row, column=1, sticky='w', pady=5)
+            row += 1
+
+            # max_depth
+            ttk.Label(self.tab7_hyperparam_frame, text="max_depth:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['max_depth'] = tk.StringVar(value='None')
+            ttk.Entry(self.tab7_hyperparam_frame,
+                     textvariable=self.tab7_hyperparam_widgets['max_depth'],
+                     width=22).grid(row=row, column=1, sticky='w', pady=5)
+            row += 1
+
+            # max_features
+            ttk.Label(self.tab7_hyperparam_frame, text="max_features:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['max_features'] = tk.StringVar(value='sqrt')
+            ttk.Combobox(self.tab7_hyperparam_frame,
+                        textvariable=self.tab7_hyperparam_widgets['max_features'],
+                        values=['auto', 'sqrt', 'log2'], state='readonly',
+                        width=20).grid(row=row, column=1, sticky='w', pady=5)
+
+        elif model_type == 'MLP':
+            # hidden_layer_sizes
+            ttk.Label(self.tab7_hyperparam_frame, text="hidden_layer_sizes:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['hidden_layer_sizes'] = tk.StringVar(value='(100,)')
+            ttk.Entry(self.tab7_hyperparam_frame,
+                     textvariable=self.tab7_hyperparam_widgets['hidden_layer_sizes'],
+                     width=22).grid(row=row, column=1, sticky='w', pady=5)
+            row += 1
+
+            # learning_rate_init
+            ttk.Label(self.tab7_hyperparam_frame, text="learning_rate_init:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['learning_rate_init'] = tk.StringVar(value='0.001')
+            ttk.Entry(self.tab7_hyperparam_frame,
+                     textvariable=self.tab7_hyperparam_widgets['learning_rate_init'],
+                     width=22).grid(row=row, column=1, sticky='w', pady=5)
+
+        elif model_type == 'NeuralBoosted':
+            # n_estimators
+            ttk.Label(self.tab7_hyperparam_frame, text="n_estimators:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['n_estimators'] = tk.IntVar(value=50)
+            ttk.Spinbox(self.tab7_hyperparam_frame, from_=10, to=200,
+                       textvariable=self.tab7_hyperparam_widgets['n_estimators'],
+                       width=20).grid(row=row, column=1, sticky='w', pady=5)
+            row += 1
+
+            # learning_rate
+            ttk.Label(self.tab7_hyperparam_frame, text="learning_rate:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['learning_rate'] = tk.StringVar(value='0.1')
+            ttk.Entry(self.tab7_hyperparam_frame,
+                     textvariable=self.tab7_hyperparam_widgets['learning_rate'],
+                     width=22).grid(row=row, column=1, sticky='w', pady=5)
+            row += 1
+
+            # hidden_layer_size
+            ttk.Label(self.tab7_hyperparam_frame, text="hidden_layer_size:",
+                      style='TLabel').grid(row=row, column=0, sticky='w', pady=5)
+            self.tab7_hyperparam_widgets['hidden_layer_size'] = tk.IntVar(value=10)
+            ttk.Spinbox(self.tab7_hyperparam_frame, from_=3, to=20,
+                       textvariable=self.tab7_hyperparam_widgets['hidden_layer_size'],
+                       width=20).grid(row=row, column=1, sticky='w', pady=5)
+
+        # Add help text
+        row += 1
+        help_texts = {
+            'PLS': 'Number of PLS components to use (more = more complex)',
+            'Ridge': 'Regularization strength (higher = more regularization)',
+            'Lasso': 'Regularization strength (higher = more regularization)',
+            'RandomForest': 'Configure ensemble parameters (None = unlimited)',
+            'MLP': 'Format: (layer1, layer2, ...) e.g., (100,50)',
+            'NeuralBoosted': 'Boosted neural network ensemble parameters'
+        }
+
+        if model_type in help_texts:
+            ttk.Label(self.tab7_hyperparam_frame, text=help_texts[model_type],
+                      style='Caption.TLabel', wraplength=250).grid(
+                          row=row, column=0, columnspan=2, sticky='w', pady=(10, 0))
+
+    def _tab7_update_hyperparameters(self, event=None):
+        """Callback when model type changes - recreate hyperparameter widgets."""
+        model_type = self.tab7_model_type.get()
+        self._tab7_create_hyperparam_widgets(model_type)
+        self.tab7_status.config(text=f"Model type changed to {model_type}. Configure hyperparameters.")
+
+    def _tab7_update_wavelength_count(self, event=None):
+        """Update wavelength count label in real-time."""
+        try:
+            wl_text = self.tab7_wl_spec.get('1.0', 'end').strip()
+
+            if not wl_text:
+                self.tab7_wl_count_label.config(text="Wavelengths: 0")
+                return
+
+            # Parse wavelengths (simplified - Phase 4 will have full parser)
+            wavelengths = []
+            lines = wl_text.split('\n')
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Check for range (e.g., "400-700")
+                if '-' in line and not line.startswith('-'):
+                    parts = line.split('-')
+                    if len(parts) == 2:
+                        try:
+                            start = float(parts[0].strip())
+                            end = float(parts[1].strip())
+                            # Estimate count (assume 1nm intervals)
+                            count = int(end - start) + 1
+                            wavelengths.extend(range(int(start), int(end) + 1))
+                        except:
+                            pass
+                else:
+                    # Single wavelength
+                    try:
+                        wl = float(line)
+                        wavelengths.append(wl)
+                    except:
+                        pass
+
+            # Remove duplicates
+            wavelengths = sorted(set(wavelengths))
+            count = len(wavelengths)
+
+            self.tab7_wl_count_label.config(text=f"Wavelengths: {count}")
+
+        except Exception as e:
+            self.tab7_wl_count_label.config(text="Wavelengths: Error")
+
+    def _tab7_apply_wl_preset(self, preset):
+        """Apply wavelength presets.
+
+        Args:
+            preset: One of 'all', 'nir', 'visible'
+        """
+        self.tab7_wl_spec.delete('1.0', 'end')
+
+        if preset == 'all':
+            # Use all available wavelengths from loaded data
+            if self.X_original is not None:
+                wavelengths = [str(int(wl)) for wl in self.X_original.columns[:50]]  # First 50 for display
+                self.tab7_wl_spec.insert('1.0', '\n'.join(wavelengths) + '\n...')
+                self.tab7_status.config(text="All wavelengths selected (from loaded data)")
+            else:
+                self.tab7_wl_spec.insert('1.0', 'Load data first in Tab 1 to use this preset')
+                self.tab7_status.config(text="No data loaded. Load data in Tab 1 first.")
+
+        elif preset == 'nir':
+            self.tab7_wl_spec.insert('1.0', '1000-2500')
+            self.tab7_status.config(text="NIR range (1000-2500 nm) selected")
+
+        elif preset == 'visible':
+            self.tab7_wl_spec.insert('1.0', '400-700')
+            self.tab7_status.config(text="Visible range (400-700 nm) selected")
+
+        # Update count
+        self._tab7_update_wavelength_count()
+
+    def _tab7_custom_range_dialog(self):
+        """Show dialog for custom wavelength range."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Custom Wavelength Range")
+        dialog.geometry("400x200")
+        dialog.configure(bg=self.colors['bg'])
+
+        # Center dialog
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Content
+        frame = ttk.Frame(dialog, style='TFrame', padding=20)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text="Enter Wavelength Range",
+                  style='Heading.TLabel').pack(pady=(0, 20))
+
+        # Start wavelength
+        start_frame = ttk.Frame(frame, style='TFrame')
+        start_frame.pack(fill='x', pady=5)
+        ttk.Label(start_frame, text="Start (nm):", style='TLabel').pack(side='left', padx=(0, 10))
+        start_var = tk.StringVar(value='400')
+        ttk.Entry(start_frame, textvariable=start_var, width=15).pack(side='left')
+
+        # End wavelength
+        end_frame = ttk.Frame(frame, style='TFrame')
+        end_frame.pack(fill='x', pady=5)
+        ttk.Label(end_frame, text="End (nm):", style='TLabel').pack(side='left', padx=(0, 10))
+        end_var = tk.StringVar(value='700')
+        ttk.Entry(end_frame, textvariable=end_var, width=15).pack(side='left')
+
+        # Buttons
+        btn_frame = ttk.Frame(frame, style='TFrame')
+        btn_frame.pack(pady=20)
+
+        def apply():
+            try:
+                start = float(start_var.get())
+                end = float(end_var.get())
+
+                if start >= end:
+                    messagebox.showerror("Invalid Range",
+                                       "Start wavelength must be less than end wavelength.")
+                    return
+
+                self.tab7_wl_spec.delete('1.0', 'end')
+                self.tab7_wl_spec.insert('1.0', f'{int(start)}-{int(end)}')
+                self._tab7_update_wavelength_count()
+                self.tab7_status.config(text=f"Custom range ({int(start)}-{int(end)} nm) applied")
+                dialog.destroy()
+
+            except ValueError:
+                messagebox.showerror("Invalid Input",
+                                   "Please enter valid numbers for wavelengths.")
+
+        ttk.Button(btn_frame, text="Apply", command=apply,
+                   style='Accent.TButton').pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy,
+                   style='Modern.TButton').pack(side='left', padx=5)
+
+    def _tab7_reset_to_fresh(self):
+        """Reset all parameters to defaults for fresh development."""
+        # Confirm reset
+        if not messagebox.askyesno("Reset to Fresh",
+                                   "This will reset all parameters to defaults. Continue?"):
+            return
+
+        # Reset all parameters
+        self.tab7_model_type.set('PLS')
+        self.tab7_task_type.set('regression')
+        self.tab7_backend.set('python')
+        self.tab7_preprocess.set('raw')
+        self.tab7_window.set(11)
+        self.tab7_folds.set(5)
+        self.tab7_wl_spec.delete('1.0', 'end')
+
+        # Reset mode label
+        self.tab7_mode_label.config(text="Mode: Fresh Development",
+                                    foreground=self.colors['success'])
+
+        # Reset config text
+        self.tab7_config_text.config(state='normal')
+        self.tab7_config_text.delete('1.0', 'end')
+        self.tab7_config_text.insert('1.0',
+            "🆕 Fresh Development Mode\n"
+            "Configure all parameters below to develop a new model from scratch.\n"
+            "Or switch to Results tab and click 'Load to Model Development' to refine an existing model.")
+        self.tab7_config_text.config(state='disabled')
+
+        # Reset results
+        self.tab7_results_text.config(state='normal')
+        self.tab7_results_text.delete('1.0', 'end')
+        self.tab7_results_text.insert('1.0',
+            "No results yet. Configure parameters above and click 'Run Model Development'.")
+        self.tab7_results_text.config(state='disabled')
+
+        # Disable save button
+        self.tab7_save_btn.config(state='disabled')
+
+        # Recreate hyperparameters for PLS
+        self._tab7_create_hyperparam_widgets('PLS')
+
+        # Update counts
+        self._tab7_update_wavelength_count()
+
+        # Clear run history
+        self.tab7_run_history = []
+
+        # Update status
+        self.tab7_status.config(text="Reset to fresh development mode. Configure parameters and run model.")
+
+    def _tab7_run_model(self):
+        """
+        Entry point when user clicks 'Run Model' button.
+
+        This method:
+        1. Validates that data is loaded
+        2. Validates all parameters
+        3. Disables the run button
+        4. Launches background thread for execution
+        """
+        # Check if data is loaded
+        if self.X is None or self.y is None:
+            messagebox.showwarning("No Data", "Please load data first in Tab 1: Import & Preview")
+            return
+
+        # Validate parameters
+        if not self._tab7_validate_parameters():
+            return
+
+        # Disable button during execution
+        self.tab7_run_button.config(state='disabled')
+        self.tab7_status.config(text="Running model...")
+
+        # Clear previous results
+        self.tab7_results_text.config(state='normal')
+        self.tab7_results_text.delete('1.0', tk.END)
+        self.tab7_results_text.insert('1.0', "Executing model... please wait.\n\nThis may take 30-60 seconds depending on model complexity.")
+        self.tab7_results_text.config(state='disabled')
+
+        # Run in background thread to avoid freezing GUI
+        import threading
+        thread = threading.Thread(target=self._tab7_run_model_thread)
+        thread.start()
+
+    def _tab7_validate_parameters(self):
+        """
+        Validate all parameters before execution.
+
+        Checks:
+        - Wavelength specification is not empty
+        - Wavelength parsing succeeds
+        - Model type is valid
+        - CV folds is in valid range (3-10)
+
+        Returns:
+            bool: True if all validations pass, False otherwise
+        """
+        errors = []
+
+        # Validate wavelength specification
+        wl_spec_text = self.tab7_wl_spec.get('1.0', 'end').strip()
+        if not wl_spec_text:
+            errors.append("Wavelength specification is empty.\n\nPlease specify wavelengths (e.g., '1500-2500' or '1500-1800, 2000-2400')")
+        else:
+            # Try to parse wavelengths
+            try:
+                available_wl = self.X_original.columns.astype(float).values
+                parsed_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+                if not parsed_wl:
+                    errors.append("No valid wavelengths found in specification.\n\nPlease check your wavelength ranges.")
+            except Exception as e:
+                errors.append(f"Failed to parse wavelength specification:\n{str(e)}")
+
+        # Validate model type
+        model_type = self.tab7_model_type.get()
+        valid_models = ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']
+        if model_type not in valid_models:
+            errors.append(f"Invalid model type: {model_type}\n\nValid options: {', '.join(valid_models)}")
+
+        # Validate CV folds
+        cv_folds = self.tab7_folds.get()
+        if cv_folds < 3 or cv_folds > 10:
+            errors.append(f"CV folds must be between 3 and 10 (got {cv_folds})")
+
+        # Show errors if any
+        if errors:
+            messagebox.showerror("Validation Error", "\n\n".join(errors))
+            return False
+
+        return True
+
+    def _tab7_run_model_thread(self):
+        """Main execution engine running in background thread."""
+        try:
+            # ===================================================================
+            # IMPORTS
+            # ===================================================================
+            from spectral_predict.models import get_model
+            from spectral_predict.preprocess import build_preprocessing_pipeline
+            from sklearn.model_selection import KFold, StratifiedKFold
+            from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+            from sklearn.pipeline import Pipeline
+            from sklearn.base import clone
+
+            print("\n" + "="*80)
+            print("TAB 7: MODEL DEVELOPMENT - EXECUTION START")
+            print("="*80)
+
+            # ===================================================================
+            # STEP 1: PARSE PARAMETERS
+            # ===================================================================
+            print("\n[STEP 1] Parsing parameters...")
+
+            # Get basic parameters
+            model_name = self.tab7_model_type.get()
+            task_type = self.tab7_task_type.get()
+            preprocess = self.tab7_preprocess.get()
+            window = self.tab7_window.get()
+            n_folds = self.tab7_folds.get()
+            max_iter = self.tab7_max_iter.get()
+
+            print(f"  Model Type: {model_name}")
+            print(f"  Task Type: {task_type}")
+            print(f"  Preprocessing: {preprocess}")
+            print(f"  Window Size: {window}")
+            print(f"  CV Folds: {n_folds}")
+            print(f"  Max Iterations: {max_iter}")
+
+            # Parse wavelength specification
+            available_wl = self.X_original.columns.astype(float).values
+            wl_spec_text = self.tab7_wl_spec.get('1.0', 'end')
+            selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+
+            if not selected_wl:
+                raise ValueError("No valid wavelengths selected. Please check your wavelength specification.")
+
+            print(f"  Wavelengths: {len(selected_wl)} selected ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)")
+
+            # Map GUI preprocessing names to search.py format
+            preprocess_name_map = {
+                'raw': 'raw',
+                'snv': 'snv',
+                'sg1': 'deriv',
+                'sg2': 'deriv',
+                'snv_sg1': 'snv_deriv',
+                'snv_sg2': 'snv_deriv',
+                'deriv_snv': 'deriv_snv',
+                'msc': 'msc',
+                'msc_sg1': 'msc_deriv',
+                'msc_sg2': 'msc_deriv',
+                'deriv_msc': 'deriv_msc'
+            }
+
+            deriv_map = {
+                'raw': 0, 'snv': 0,
+                'sg1': 1, 'sg2': 2,
+                'snv_sg1': 1, 'snv_sg2': 2,
+                'deriv_snv': 1,
+                'msc': 0, 'msc_sg1': 1, 'msc_sg2': 2,
+                'deriv_msc': 1
+            }
+
+            polyorder_map = {
+                'raw': 2, 'snv': 2,
+                'sg1': 2, 'sg2': 3,
+                'snv_sg1': 2, 'snv_sg2': 3,
+                'deriv_snv': 2,
+                'msc': 2, 'msc_sg1': 2, 'msc_sg2': 3,
+                'deriv_msc': 2
+            }
+
+            preprocess_name = preprocess_name_map.get(preprocess, 'raw')
+            deriv = deriv_map.get(preprocess, 0)
+            polyorder = polyorder_map.get(preprocess, 2)
+
+            print(f"  Preprocessing Config: {preprocess_name} (deriv={deriv}, polyorder={polyorder})")
+
+            # Extract hyperparameters from hyperparam_widgets
+            hyperparams = {}
+            if hasattr(self, 'tab7_hyperparam_widgets') and self.tab7_hyperparam_widgets:
+                for param_name, widget in self.tab7_hyperparam_widgets.items():
+                    try:
+                        value = widget.get()
+                        if param_name in ['n_components', 'n_estimators', 'max_depth']:
+                            hyperparams[param_name] = int(value)
+                        else:
+                            hyperparams[param_name] = float(value)
+                    except Exception as e:
+                        print(f"  Warning: Could not extract {param_name}: {e}")
+
+            # Set model-specific defaults ONLY (prevent cross-contamination)
+            if model_name == 'PLS':
+                if 'n_components' not in hyperparams:
+                    hyperparams['n_components'] = 10
+            elif model_name in ['Ridge', 'Lasso']:
+                if 'alpha' not in hyperparams:
+                    hyperparams['alpha'] = 1.0
+            elif model_name == 'RandomForest':
+                if 'n_estimators' not in hyperparams:
+                    hyperparams['n_estimators'] = 100
+                if 'max_depth' not in hyperparams:
+                    hyperparams['max_depth'] = None
+            elif model_name == 'MLP':
+                if 'learning_rate_init' not in hyperparams:
+                    hyperparams['learning_rate_init'] = 0.001
+            elif model_name == 'NeuralBoosted':
+                if 'n_estimators' not in hyperparams:
+                    hyperparams['n_estimators'] = 100
+                if 'learning_rate' not in hyperparams:
+                    hyperparams['learning_rate'] = 0.1
+                if 'hidden_layer_size' not in hyperparams:
+                    hyperparams['hidden_layer_size'] = 50
+
+            print(f"  Model-specific hyperparameters for {model_name}: {hyperparams}")
+            print(f"  ✓ No cross-contamination from other model types")
+
+            # ===================================================================
+            # STEP 2: FILTER DATA
+            # ===================================================================
+            print("\n[STEP 2] Filtering data...")
+
+            # Start with original data
+            X_source = self.X_original if self.X_original is not None else self.X
+            y_series = self.y.copy()
+
+            print(f"  Initial shape: X={X_source.shape}, y={y_series.shape}")
+
+            # Apply excluded spectra (from outlier detection)
+            total_samples = len(X_source)
+            excluded_indices = sorted(idx for idx in self.excluded_spectra if 0 <= idx < total_samples)
+
+            if excluded_indices:
+                excluded_set = set(excluded_indices)
+                include_indices = [i for i in range(total_samples) if i not in excluded_set]
+
+                if len(include_indices) < n_folds:
+                    raise ValueError(
+                        f"Only {len(include_indices)} samples remain after exclusions; "
+                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                    )
+
+                print(f"  Applying {len(excluded_indices)} excluded spectra ({len(include_indices)} remain)")
+                X_base_df = X_source.iloc[include_indices]
+                y_series = y_series.iloc[include_indices]
+            else:
+                X_base_df = X_source.copy()
+                y_series = y_series.copy()
+
+            # CRITICAL FIX #1: Exclude validation set (if enabled)
+            if self.validation_enabled.get() and self.validation_indices:
+                initial_samples = len(X_base_df)
+                X_base_df = X_base_df[~X_base_df.index.isin(self.validation_indices)]
+                y_series = y_series[~y_series.index.isin(self.validation_indices)]
+
+                n_val = len(self.validation_indices)
+                n_removed = initial_samples - len(X_base_df)
+                n_cal = len(X_base_df)
+
+                if n_cal < n_folds:
+                    raise ValueError(
+                        f"Only {n_cal} calibration samples remain after validation set exclusion; "
+                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                    )
+
+                print(f"  Excluding {n_removed} validation samples")
+                print(f"  Calibration: {n_cal} samples | Validation: {n_val} samples")
+                print(f"  This matches the data split used in the Results tab")
+
+            # CRITICAL FIX #2: Reset DataFrame index
+            X_base_df = X_base_df.reset_index(drop=True)
+            y_series = y_series.reset_index(drop=True)
+
+            print(f"  Reset index after exclusions")
+            print(f"  Final shape: X={X_base_df.shape}, y={y_series.shape}")
+            print(f"  This ensures CV folds match Results tab (sequential row indexing)")
+
+            # ===================================================================
+            # STEP 3: BUILD PREPROCESSING PIPELINE
+            # ===================================================================
+            print("\n[STEP 3] Building preprocessing pipeline...")
+
+            # Create mapping from float wavelengths to actual column names
+            wavelength_columns = X_base_df.columns
+            wl_to_col = {float(col): col for col in wavelength_columns}
+
+            # Get the actual column names for selected wavelengths
+            selected_cols = [wl_to_col[wl] for wl in selected_wl if wl in wl_to_col]
+
+            if not selected_cols:
+                raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
+
+            # CRITICAL DECISION: Determine preprocessing path
+            is_derivative = preprocess in ['sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'msc_sg1', 'msc_sg2', 'deriv_msc']
+            base_full_vars = len(X_base_df.columns)
+            is_subset = len(selected_wl) < base_full_vars
+            use_full_spectrum_preprocessing = is_derivative and is_subset
+
+            if use_full_spectrum_preprocessing:
+                # PATH A: Derivative + Subset
+                print("  PATH A: Derivative + Subset detected")
+                print("  Will preprocess FULL spectrum first, then subset")
+
+                # Build preprocessing pipeline WITHOUT model
+                prep_steps = build_preprocessing_pipeline(preprocess_name, deriv, window, polyorder)
+                prep_pipeline = Pipeline(prep_steps)
+
+                # Preprocess FULL spectrum
+                X_full = X_base_df.values
+                print(f"  Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
+                X_full_preprocessed = prep_pipeline.fit_transform(X_full)
+
+                # Find indices of selected wavelengths
+                all_wavelengths = X_base_df.columns.astype(float).values
+                wavelength_indices = []
+                for wl in selected_wl:
+                    idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+
+                # Subset the PREPROCESSED data
+                X_work = X_full_preprocessed[:, wavelength_indices]
+                print(f"  Subsetted to {X_work.shape[1]} wavelengths after preprocessing")
+
+                # Extract n_components only for PLS (prevent passing to non-PLS models)
+                if model_name == 'PLS':
+                    n_components = hyperparams.get('n_components', 10)
+                else:
+                    n_components = 10  # Default for get_model() signature (not used by other models)
+
+                # Build pipeline with ONLY the model
+                model = get_model(
+                    model_name,
+                    task_type=task_type,
+                    n_components=n_components,
+                    max_n_components=24,
+                    max_iter=max_iter
+                )
+
+                # Apply model-specific hyperparameters using set_params()
+                params_to_set = {}
+                if model_name in ['Ridge', 'Lasso'] and 'alpha' in hyperparams:
+                    params_to_set['alpha'] = hyperparams['alpha']
+                elif model_name == 'RandomForest':
+                    if 'n_estimators' in hyperparams:
+                        params_to_set['n_estimators'] = hyperparams['n_estimators']
+                    if 'max_depth' in hyperparams:
+                        params_to_set['max_depth'] = hyperparams['max_depth']
+                elif model_name == 'MLP':
+                    if 'learning_rate_init' in hyperparams:
+                        params_to_set['learning_rate_init'] = hyperparams['learning_rate_init']
+                    if 'hidden_layer_sizes' in hyperparams:
+                        params_to_set['hidden_layer_sizes'] = hyperparams['hidden_layer_sizes']
+                elif model_name == 'NeuralBoosted':
+                    if 'n_estimators' in hyperparams:
+                        params_to_set['n_estimators'] = hyperparams['n_estimators']
+                    if 'learning_rate' in hyperparams:
+                        params_to_set['learning_rate'] = hyperparams['learning_rate']
+                    if 'hidden_layer_size' in hyperparams:
+                        params_to_set['hidden_layer_size'] = hyperparams['hidden_layer_size']
+
+                if params_to_set:
+                    model.set_params(**params_to_set)
+                    print(f"  Applied hyperparameters: {params_to_set}")
+
+                pipe_steps = [('model', model)]
+                pipe = Pipeline(pipe_steps)
+
+                print(f"  Pipeline: {[name for name, _ in pipe_steps]} (preprocessing already applied)")
+
+            else:
+                # PATH B: Standard preprocessing
+                print("  PATH B: Standard preprocessing (subset first, then preprocess)")
+
+                # Subset raw data first
+                X_work = X_base_df[selected_cols].values
+
+                # Extract n_components only for PLS (prevent passing to non-PLS models)
+                if model_name == 'PLS':
+                    n_components = hyperparams.get('n_components', 10)
+                else:
+                    n_components = 10  # Default for get_model() signature (not used by other models)
+
+                # Build full pipeline with preprocessing + model
+                pipe_steps = build_preprocessing_pipeline(preprocess_name, deriv, window, polyorder)
+                model = get_model(
+                    model_name,
+                    task_type=task_type,
+                    n_components=n_components,
+                    max_n_components=24,
+                    max_iter=max_iter
+                )
+
+                # Apply model-specific hyperparameters using set_params()
+                params_to_set = {}
+                if model_name in ['Ridge', 'Lasso'] and 'alpha' in hyperparams:
+                    params_to_set['alpha'] = hyperparams['alpha']
+                elif model_name == 'RandomForest':
+                    if 'n_estimators' in hyperparams:
+                        params_to_set['n_estimators'] = hyperparams['n_estimators']
+                    if 'max_depth' in hyperparams:
+                        params_to_set['max_depth'] = hyperparams['max_depth']
+                elif model_name == 'MLP':
+                    if 'learning_rate_init' in hyperparams:
+                        params_to_set['learning_rate_init'] = hyperparams['learning_rate_init']
+                    if 'hidden_layer_sizes' in hyperparams:
+                        params_to_set['hidden_layer_sizes'] = hyperparams['hidden_layer_sizes']
+                elif model_name == 'NeuralBoosted':
+                    if 'n_estimators' in hyperparams:
+                        params_to_set['n_estimators'] = hyperparams['n_estimators']
+                    if 'learning_rate' in hyperparams:
+                        params_to_set['learning_rate'] = hyperparams['learning_rate']
+                    if 'hidden_layer_size' in hyperparams:
+                        params_to_set['hidden_layer_size'] = hyperparams['hidden_layer_size']
+
+                if params_to_set:
+                    model.set_params(**params_to_set)
+                    print(f"  Applied hyperparameters: {params_to_set}")
+
+                pipe_steps.append(('model', model))
+                pipe = Pipeline(pipe_steps)
+
+                print(f"  Pipeline: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
+
+            # ===================================================================
+            # STEP 4: CROSS-VALIDATION
+            # ===================================================================
+            print(f"\n[STEP 4] Running {n_folds}-fold cross-validation...")
+
+            # CRITICAL: Use shuffle=False for determinism
+            y_array = y_series.values
+            if task_type == "regression":
+                cv = KFold(n_splits=n_folds, shuffle=False)
+                print("  Using KFold (shuffle=False) for deterministic splits")
+            else:
+                cv = StratifiedKFold(n_splits=n_folds, shuffle=False)
+                print("  Using StratifiedKFold (shuffle=False) for deterministic splits")
+
+            # Collect metrics for each fold
+            fold_metrics = []
+            all_y_true = []
+            all_y_pred = []
+
+            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_work, y_array)):
+                pipe_fold = clone(pipe)
+                X_train, X_test = X_work[train_idx], X_work[test_idx]
+                y_train, y_test = y_array[train_idx], y_array[test_idx]
+
+                pipe_fold.fit(X_train, y_train)
+                y_pred = pipe_fold.predict(X_test)
+
+                all_y_true.extend(y_test)
+                all_y_pred.extend(y_pred)
+
+                if task_type == "regression":
+                    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                    r2 = r2_score(y_test, y_pred)
+                    mae = mean_absolute_error(y_test, y_pred)
+                    bias = np.mean(y_pred - y_test)
+                    fold_metrics.append({"rmse": rmse, "r2": r2, "mae": mae, "bias": bias})
+                    print(f"  Fold {fold_idx+1}/{n_folds}: R²={r2:.4f}, RMSE={rmse:.4f}, MAE={mae:.4f}")
+                else:
+                    acc = accuracy_score(y_test, y_pred)
+                    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+                    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+                    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+                    fold_metrics.append({"accuracy": acc, "precision": prec, "recall": rec, "f1": f1})
+                    print(f"  Fold {fold_idx+1}/{n_folds}: Acc={acc:.4f}, Prec={prec:.4f}, Rec={rec:.4f}, F1={f1:.4f}")
+
+            # ===================================================================
+            # STEP 5: TRAIN FINAL MODEL
+            # ===================================================================
+            print("\n[STEP 5] Training final model on full dataset...")
+
+            final_pipe = clone(pipe)
+            final_pipe.fit(X_work, y_array)
+
+            final_model = final_pipe.named_steps['model']
+
+            # Build preprocessor from pipeline steps
+            if use_full_spectrum_preprocessing:
+                final_preprocessor = prep_pipeline
+                print("  Using full-spectrum preprocessor (already fitted)")
+            elif len(pipe_steps) > 1:
+                final_preprocessor = Pipeline(pipe_steps[:-1])
+                final_preprocessor.fit(X_work)
+                print("  Fitted preprocessor on subset data")
+            else:
+                final_preprocessor = None
+                print("  No preprocessor (raw data)")
+
+            # Store wavelengths AFTER preprocessing
+            if final_preprocessor is not None:
+                dummy_input = X_work[:1]
+                transformed = final_preprocessor.transform(dummy_input)
+                n_features_after_preprocessing = transformed.shape[1]
+
+                if use_full_spectrum_preprocessing:
+                    refined_wavelengths = list(selected_wl)
+                else:
+                    n_trimmed = len(selected_wl) - n_features_after_preprocessing
+                    if n_trimmed > 0:
+                        trim_per_side = n_trimmed // 2
+                        refined_wavelengths = list(selected_wl[trim_per_side:len(selected_wl)-trim_per_side])
+                        print(f"  Derivative preprocessing trimmed {n_trimmed} edge wavelengths")
+                    else:
+                        refined_wavelengths = list(selected_wl)
+            else:
+                refined_wavelengths = list(selected_wl)
+
+            print(f"  Model trained on {X_work.shape[0]} samples × {len(refined_wavelengths)} features")
+
+            # Store model artifacts
+            self.tab7_trained_model = final_model
+            self.tab7_preprocessing_pipeline = final_preprocessor
+            self.tab7_wavelengths = refined_wavelengths
+            self.tab7_full_wavelengths = list(all_wavelengths) if use_full_spectrum_preprocessing else None
+
+            # ===================================================================
+            # STEP 6: CALCULATE METRICS
+            # ===================================================================
+            print("\n[STEP 6] Computing performance metrics...")
+
+            results = {}
+            if task_type == "regression":
+                results['rmse_mean'] = np.mean([m['rmse'] for m in fold_metrics])
+                results['rmse_std'] = np.std([m['rmse'] for m in fold_metrics])
+                results['r2_mean'] = np.mean([m['r2'] for m in fold_metrics])
+                results['r2_std'] = np.std([m['r2'] for m in fold_metrics])
+                results['mae_mean'] = np.mean([m['mae'] for m in fold_metrics])
+                results['mae_std'] = np.std([m['mae'] for m in fold_metrics])
+                results['bias_mean'] = np.mean([m['bias'] for m in fold_metrics])
+                results['bias_std'] = np.std([m['bias'] for m in fold_metrics])
+
+                print(f"  RMSE: {results['rmse_mean']:.4f} ± {results['rmse_std']:.4f}")
+                print(f"  R²:   {results['r2_mean']:.4f} ± {results['r2_std']:.4f}")
+                print(f"  MAE:  {results['mae_mean']:.4f} ± {results['mae_std']:.4f}")
+                print(f"  Bias: {results['bias_mean']:.4f} ± {results['bias_std']:.4f}")
+            else:
+                results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
+                results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
+                results['precision_mean'] = np.mean([m['precision'] for m in fold_metrics])
+                results['precision_std'] = np.std([m['precision'] for m in fold_metrics])
+                results['recall_mean'] = np.mean([m['recall'] for m in fold_metrics])
+                results['recall_std'] = np.std([m['recall'] for m in fold_metrics])
+                results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
+                results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
+
+                print(f"  Accuracy:  {results['accuracy_mean']:.4f} ± {results['accuracy_std']:.4f}")
+                print(f"  Precision: {results['precision_mean']:.4f} ± {results['precision_std']:.4f}")
+                print(f"  Recall:    {results['recall_mean']:.4f} ± {results['recall_std']:.4f}")
+                print(f"  F1 Score:  {results['f1_mean']:.4f} ± {results['f1_std']:.4f}")
+
+            # Store predictions and configuration
+            self.tab7_y_true = np.array(all_y_true)
+            self.tab7_y_pred = np.array(all_y_pred)
+            self.tab7_config = {
+                'model_name': model_name,
+                'task_type': task_type,
+                'preprocessing': preprocess,
+                'window': window,
+                'n_vars': len(refined_wavelengths),
+                'n_samples': X_work.shape[0],
+                'cv_folds': n_folds,
+                'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing
+            }
+            self.tab7_performance = results
+
+            # ===================================================================
+            # STEP 7: UPDATE GUI (THREAD-SAFE)
+            # ===================================================================
+            print("\n[STEP 7] Updating GUI...")
+
+            wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
+
+            if task_type == "regression":
+                results_text = f"""Model Development Results:
+
+Cross-Validation Performance ({n_folds} folds):
+  RMSE: {results['rmse_mean']:.4f} ± {results['rmse_std']:.4f}
+  R²:   {results['r2_mean']:.4f} ± {results['r2_std']:.4f}
+  MAE:  {results['mae_mean']:.4f} ± {results['mae_std']:.4f}
+  Bias: {results['bias_mean']:.4f} ± {results['bias_std']:.4f}
+
+Configuration:
+  Model:        {model_name}
+  Task Type:    {task_type}
+  Preprocessing: {preprocess}
+  Window Size:  {window}
+  Wavelengths:  {wl_summary}
+  Features:     {len(refined_wavelengths)}
+  Samples:      {X_work.shape[0]}
+  CV Folds:     {n_folds}
+
+Processing Details:
+  Path: {'Full-spectrum preprocessing (derivative+subset)' if use_full_spectrum_preprocessing else 'Standard (subset then preprocess)'}
+  CV Strategy: {'KFold' if task_type == 'regression' else 'StratifiedKFold'} (shuffle=False, deterministic)
+  Validation Set: {'Excluded' if self.validation_enabled.get() else 'Not used'}
+
+The model is ready to be saved. Click 'Save Model' to export as .dasp file.
+"""
+            else:
+                results_text = f"""Model Development Results:
+
+Cross-Validation Performance ({n_folds} folds):
+  Accuracy:  {results['accuracy_mean']:.4f} ± {results['accuracy_std']:.4f}
+  Precision: {results['precision_mean']:.4f} ± {results['precision_std']:.4f}
+  Recall:    {results['recall_mean']:.4f} ± {results['recall_std']:.4f}
+  F1 Score:  {results['f1_mean']:.4f} ± {results['f1_std']:.4f}
+
+Configuration:
+  Model:        {model_name}
+  Task Type:    {task_type}
+  Preprocessing: {preprocess}
+  Window Size:  {window}
+  Wavelengths:  {wl_summary}
+  Features:     {len(refined_wavelengths)}
+  Samples:      {X_work.shape[0]}
+  CV Folds:     {n_folds}
+
+Processing Details:
+  Path: {'Full-spectrum preprocessing (derivative+subset)' if use_full_spectrum_preprocessing else 'Standard (subset then preprocess)'}
+  CV Strategy: {'KFold' if task_type == 'regression' else 'StratifiedKFold'} (shuffle=False, deterministic)
+  Validation Set: {'Excluded' if self.validation_enabled.get() else 'Not used'}
+
+The model is ready to be saved. Click 'Save Model' to export as .dasp file.
+"""
+
+            # Thread-safe GUI update
+            self.root.after(0, lambda: self._tab7_update_results(results_text))
+
+            print("\n" + "="*80)
+            print("TAB 7: MODEL DEVELOPMENT - EXECUTION COMPLETE")
+            print("="*80 + "\n")
+
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            error_text = f"""Error running model:
+
+{str(e)}
+
+Full traceback:
+{error_msg}
+
+Please check:
+1. Data is loaded correctly (Tab 1)
+2. Wavelength specification is valid
+3. All parameters are within valid ranges
+4. Sufficient samples remain after exclusions
+
+If the problem persists, please report this error.
+"""
+            print(f"\nERROR: {error_text}")
+            self.root.after(0, lambda: self._tab7_update_results(error_text, is_error=True))
+
+    def _tab7_update_results(self, results_text, is_error=False):
+        """
+        Update the results display on the main thread (thread-safe).
+
+        Args:
+            results_text (str): Formatted results text to display
+            is_error (bool): Whether this is an error message
+        """
+        # Update results text widget
+        self.tab7_results_text.config(state='normal')
+        self.tab7_results_text.delete('1.0', tk.END)
+        self.tab7_results_text.insert('1.0', results_text)
+        self.tab7_results_text.config(state='disabled')
+
+        # Re-enable run button
+        self.tab7_run_button.config(state='normal')
+
+        if is_error:
+            # Error state
+            self.tab7_status.config(text="✗ Error running model", foreground='red')
+            self.tab7_save_button.config(state='disabled')
+            messagebox.showerror("Error", "Failed to run model. See results area for details.")
+        else:
+            # Success state
+            self.tab7_status.config(text="✓ Model training complete", foreground='green')
+            self.tab7_save_button.config(state='normal')
+
+            # Generate diagnostic plots
+            if hasattr(self, 'tab7_y_true') and hasattr(self, 'tab7_y_pred') and hasattr(self, 'tab7_config'):
+                try:
+                    plot_results = {
+                        'y_true': self.tab7_y_true,
+                        'y_pred': self.tab7_y_pred,
+                        'model_name': self.tab7_config.get('model_name', 'Model'),
+                        'r2': self.tab7_performance.get('r2_mean', 0.0),
+                        'rmse': self.tab7_performance.get('rmse_mean', 0.0)
+                    }
+                    self._tab7_generate_plots(plot_results)
+                except Exception as e:
+                    print(f"Warning: Could not generate diagnostic plots: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # Show success message
+            messagebox.showinfo("Success",
+                f"Model training complete!\n\n"
+                f"R² = {self.tab7_performance.get('r2_mean', 0):.4f}\n\n"
+                f"Click 'Save Model' to export as .dasp file.")
+
+    def _tab7_save_model(self):
+        """
+        Save the trained model to a .dasp file.
+
+        Saves:
+        - Trained model object
+        - Preprocessing pipeline (fitted)
+        - Wavelengths used (after preprocessing)
+        - Full wavelengths (for derivative+subset)
+        - Performance metrics
+        - Configuration metadata
+        - Validation set info
+        """
+        from datetime import datetime
+        from pathlib import Path
+
+        # Check if model has been trained
+        if not hasattr(self, 'tab7_trained_model') or self.tab7_trained_model is None:
+            messagebox.showerror(
+                "No Model Trained",
+                "Please run a model first before saving.\n\n"
+                "Click 'Run Model' to train a model, then you can save it."
+            )
+            return
+
+        try:
+            from spectral_predict.model_io import save_model
+
+            # Ask for save location
+            default_name = f"model_{self.tab7_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dasp"
+
+            # Get initial directory
+            initial_dir = None
+            if hasattr(self, 'spectral_data_path') and self.spectral_data_path.get():
+                data_path = Path(self.spectral_data_path.get())
+                initial_dir = str(data_path.parent if data_path.is_file() else data_path)
+
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".dasp",
+                filetypes=[("DASP Model", "*.dasp"), ("All files", "*.*")],
+                initialfile=default_name,
+                initialdir=initial_dir,
+                title="Save Trained Model"
+            )
+
+            if not filepath:
+                return  # User cancelled
+
+            # Build comprehensive metadata
+            metadata = {
+                'model_name': self.tab7_config['model_name'],
+                'task_type': self.tab7_config['task_type'],
+                'preprocessing': self.tab7_config['preprocessing'],
+                'window': self.tab7_config['window'],
+                'wavelengths': self.tab7_wavelengths,
+                'n_vars': self.tab7_config['n_vars'],
+                'n_samples': self.tab7_config['n_samples'],
+                'cv_folds': self.tab7_config['cv_folds'],
+                'performance': {},
+                'use_full_spectrum_preprocessing': self.tab7_config.get('use_full_spectrum_preprocessing', False),
+                'full_wavelengths': self.tab7_full_wavelengths,
+                'validation_set_enabled': self.validation_enabled.get() if hasattr(self, 'validation_enabled') else False,
+                'validation_indices': list(self.validation_indices) if hasattr(self, 'validation_indices') and self.validation_indices else [],
+                'validation_size': len(self.validation_indices) if hasattr(self, 'validation_indices') and self.validation_indices else 0,
+                'validation_algorithm': self.validation_algorithm.get() if hasattr(self, 'validation_algorithm') and hasattr(self, 'validation_enabled') and self.validation_enabled.get() else None,
+                'created_timestamp': datetime.now().isoformat(),
+                'created_by': 'SpectralPredict GUI - Tab 7 Model Development'
+            }
+
+            # Add performance metrics
+            if self.tab7_config['task_type'] == 'regression':
+                metadata['performance'] = {
+                    'RMSE': self.tab7_performance.get('rmse_mean'),
+                    'RMSE_std': self.tab7_performance.get('rmse_std'),
+                    'R2': self.tab7_performance.get('r2_mean'),
+                    'R2_std': self.tab7_performance.get('r2_std'),
+                    'MAE': self.tab7_performance.get('mae_mean'),
+                    'MAE_std': self.tab7_performance.get('mae_std'),
+                    'Bias': self.tab7_performance.get('bias_mean'),
+                    'Bias_std': self.tab7_performance.get('bias_std')
+                }
+            else:  # classification
+                metadata['performance'] = {
+                    'Accuracy': self.tab7_performance.get('accuracy_mean'),
+                    'Accuracy_std': self.tab7_performance.get('accuracy_std'),
+                    'Precision': self.tab7_performance.get('precision_mean'),
+                    'Precision_std': self.tab7_performance.get('precision_std'),
+                    'Recall': self.tab7_performance.get('recall_mean'),
+                    'Recall_std': self.tab7_performance.get('recall_std'),
+                    'F1': self.tab7_performance.get('f1_mean'),
+                    'F1_std': self.tab7_performance.get('f1_std')
+                }
+
+            # Save the model
+            save_model(
+                model=self.tab7_trained_model,
+                preprocessor=self.tab7_preprocessing_pipeline,
+                metadata=metadata,
+                filepath=filepath
+            )
+
+            # Show success message
+            messagebox.showinfo(
+                "Model Saved",
+                f"Model successfully saved to:\n\n{filepath}\n\n"
+                f"Performance:\n"
+                f"  R² = {metadata['performance'].get('R2', 0):.4f}\n"
+                f"  RMSE = {metadata['performance'].get('RMSE', 0):.4f}\n\n"
+                f"You can now load this model in Tab 8 (Model Prediction) "
+                f"to make predictions on new data."
+            )
+
+            # Update status
+            self.tab7_status.config(text=f"✓ Model saved to {Path(filepath).name}")
+            print(f"\n✓ Model saved successfully to: {filepath}")
+
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            messagebox.showerror(
+                "Save Error",
+                f"Failed to save model:\n\n{str(e)}\n\nSee console for details."
+            )
+            print(f"Error saving model:\n{error_msg}")
+
+    # =============================================================================
+    # TAB 7 DIAGNOSTIC PLOTS (PHASE 5)
+    # =============================================================================
+
+    def _tab7_clear_plots(self):
+        """Clear all Tab 7 diagnostic plots."""
+        if not hasattr(self, 'tab7_plot1_frame'):
+            return
+        for frame in [self.tab7_plot1_frame, self.tab7_plot2_frame, self.tab7_plot3_frame]:
+            if frame is not None:
+                for widget in frame.winfo_children():
+                    widget.destroy()
+
+    def _tab7_show_plot_placeholder(self, frame, message):
+        """Show placeholder message in plot frame."""
+        if frame is None:
+            return
+        label = ttk.Label(frame, text=message, justify='center', anchor='center',
+                         foreground='#999999', font=('Helvetica', 10))
+        label.pack(expand=True)
+
+    def _tab7_plot_predictions(self, y_true, y_pred, model_name="Model"):
+        """Plot observed vs predicted scatter plot for Tab 7."""
+        if not HAS_MATPLOTLIB:
+            self._tab7_show_plot_placeholder(self.tab7_plot1_frame,
+                "Matplotlib not available\nCannot generate plots")
+            return
+
+        # Clear existing widgets
+        for widget in self.tab7_plot1_frame.winfo_children():
+            widget.destroy()
+
+        try:
+            y_true = np.asarray(y_true).flatten()
+            y_pred = np.asarray(y_pred).flatten()
+
+            fig = Figure(figsize=(5, 4), dpi=100)
+            ax = fig.add_subplot(111)
+
+            # Scatter plot
+            ax.scatter(y_true, y_pred, alpha=0.6, s=50, edgecolors='black',
+                      linewidths=0.5, color='steelblue', label='Predictions')
+
+            # 1:1 reference line
+            min_val = min(y_true.min(), y_pred.min())
+            max_val = max(y_true.max(), y_pred.max())
+            margin = (max_val - min_val) * 0.05
+            ax.plot([min_val - margin, max_val + margin],
+                   [min_val - margin, max_val + margin],
+                   'r--', lw=2, label='1:1 Line', zorder=1)
+
+            # Calculate statistics
+            from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+            r2 = r2_score(y_true, y_pred)
+            rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+            mae = mean_absolute_error(y_true, y_pred)
+            bias = np.mean(y_pred - y_true)
+            n = len(y_true)
+
+            # Statistics box
+            stats_text = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}\nBias = {bias:.4f}\nn = {n}'
+            ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
+                   verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9, edgecolor='black'),
+                   fontsize=9, family='monospace')
+
+            ax.set_xlabel('Observed Values', fontsize=10)
+            ax.set_ylabel('Predicted Values', fontsize=10)
+            ax.set_title(f'{model_name}\nModel Development Performance',
+                        fontsize=11, fontweight='bold')
+            ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+            ax.legend(loc='lower right', fontsize=8)
+            ax.set_aspect('equal', adjustable='box')
+            fig.tight_layout()
+
+            canvas = FigureCanvasTkAgg(fig, self.tab7_plot1_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        except Exception as e:
+            print(f"Error creating prediction plot: {e}")
+            import traceback
+            traceback.print_exc()
+            self._tab7_show_plot_placeholder(self.tab7_plot1_frame,
+                                            f"Error creating plot:\n{str(e)}")
+
+    def _tab7_plot_residuals(self, y_true, y_pred):
+        """Plot residual diagnostics (4-panel) for Tab 7."""
+        if not HAS_MATPLOTLIB:
+            self._tab7_show_plot_placeholder(self.tab7_plot2_frame,
+                "Matplotlib not available\nCannot generate plots")
+            return
+
+        # Clear existing widgets
+        for widget in self.tab7_plot2_frame.winfo_children():
+            widget.destroy()
+
+        try:
+            from spectral_predict.diagnostics import compute_residuals, qq_plot_data
+            from scipy.ndimage import uniform_filter1d
+
+            y_true = np.asarray(y_true).flatten()
+            y_pred = np.asarray(y_pred).flatten()
+
+            residuals, std_residuals = compute_residuals(y_true, y_pred)
+
+            fig = Figure(figsize=(5, 4), dpi=100)
+
+            # SUBPLOT 1: Residuals vs Fitted
+            ax1 = fig.add_subplot(221)
+            ax1.scatter(y_pred, residuals, alpha=0.6, edgecolors='black',
+                       linewidths=0.5, s=30, color='steelblue')
+            ax1.axhline(y=0, color='red', linestyle='--', linewidth=1.5, label='Zero')
+
+            # Add trend line
+            try:
+                sorted_idx = np.argsort(y_pred)
+                window_size = max(3, len(y_pred) // 10)
+                smoothed = uniform_filter1d(residuals[sorted_idx], size=window_size, mode='nearest')
+                ax1.plot(y_pred[sorted_idx], smoothed, 'orange', linewidth=2, alpha=0.7, label='Trend')
+            except:
+                pass
+
+            ax1.set_xlabel('Fitted Values', fontsize=8)
+            ax1.set_ylabel('Residuals', fontsize=8)
+            ax1.set_title('Residuals vs Fitted', fontsize=9, fontweight='bold')
+            ax1.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+            ax1.tick_params(labelsize=7)
+            ax1.legend(fontsize=6, loc='best')
+
+            # SUBPLOT 2: Residuals vs Index
+            ax2 = fig.add_subplot(222)
+            indices = np.arange(len(residuals))
+            ax2.scatter(indices, residuals, alpha=0.6, edgecolors='black',
+                       linewidths=0.5, s=30, color='steelblue')
+            ax2.axhline(y=0, color='red', linestyle='--', linewidth=1.5)
+
+            # Highlight outliers
+            large_resid_mask = np.abs(std_residuals) > 2.5
+            if np.any(large_resid_mask):
+                ax2.scatter(indices[large_resid_mask], residuals[large_resid_mask],
+                           color='red', s=50, marker='x', linewidths=2,
+                           label=f'Outliers (>2.5σ)', zorder=5)
+                ax2.legend(fontsize=6, loc='best')
+
+            ax2.set_xlabel('Sample Index', fontsize=8)
+            ax2.set_ylabel('Residuals', fontsize=8)
+            ax2.set_title('Residuals vs Index', fontsize=9, fontweight='bold')
+            ax2.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+            ax2.tick_params(labelsize=7)
+
+            # SUBPLOT 3: Q-Q Plot
+            ax3 = fig.add_subplot(223)
+            theoretical_q, sample_q = qq_plot_data(residuals)
+            ax3.scatter(theoretical_q, sample_q, alpha=0.6, edgecolors='black',
+                       linewidths=0.5, s=30, color='steelblue')
+            min_q = min(theoretical_q.min(), sample_q.min())
+            max_q = max(theoretical_q.max(), sample_q.max())
+            ax3.plot([min_q, max_q], [min_q, max_q], 'r--',
+                    linewidth=1.5, label='Normal line')
+            ax3.set_xlabel('Theoretical Quantiles', fontsize=8)
+            ax3.set_ylabel('Sample Quantiles', fontsize=8)
+            ax3.set_title('Q-Q Plot (Normality)', fontsize=9, fontweight='bold')
+            ax3.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+            ax3.tick_params(labelsize=7)
+            ax3.legend(fontsize=6, loc='best')
+
+            # SUBPLOT 4: Histogram
+            ax4 = fig.add_subplot(224)
+            n_bins = min(20, max(10, len(residuals) // 5))
+            counts, bins, patches = ax4.hist(residuals, bins=n_bins, alpha=0.7,
+                                            edgecolor='black', color='steelblue')
+
+            # Color bars by distance from center
+            bin_centers = (bins[:-1] + bins[1:]) / 2
+            std_resid_value = np.std(residuals)
+            for patch, center in zip(patches, bin_centers):
+                if abs(center) > 2 * std_resid_value:
+                    patch.set_facecolor('coral')
+
+            ax4.axvline(x=0, color='red', linestyle='--', linewidth=1.5, label='Zero')
+            ax4.set_xlabel('Residuals', fontsize=8)
+            ax4.set_ylabel('Frequency', fontsize=8)
+            ax4.set_title('Distribution', fontsize=9, fontweight='bold')
+            ax4.grid(True, alpha=0.3, axis='y', linestyle=':', linewidth=0.5)
+            ax4.tick_params(labelsize=7)
+            ax4.legend(fontsize=6, loc='best')
+
+            fig.tight_layout(pad=1.5)
+
+            canvas = FigureCanvasTkAgg(fig, self.tab7_plot2_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        except Exception as e:
+            print(f"Error creating residual plots: {e}")
+            import traceback
+            traceback.print_exc()
+            self._tab7_show_plot_placeholder(self.tab7_plot2_frame,
+                                            f"Error creating plot:\n{str(e)}")
+
+    def _tab7_plot_model_comparison(self, performance_history):
+        """Plot model comparison bar chart for Tab 7."""
+        if not HAS_MATPLOTLIB:
+            self._tab7_show_plot_placeholder(self.tab7_plot3_frame,
+                "Matplotlib not available\nCannot generate plots")
+            return
+
+        # Clear existing widgets
+        for widget in self.tab7_plot3_frame.winfo_children():
+            widget.destroy()
+
+        # Check if we have enough models
+        if len(performance_history) == 0:
+            self._tab7_show_plot_placeholder(self.tab7_plot3_frame, "No model runs to compare")
+            return
+        if len(performance_history) == 1:
+            self._tab7_show_plot_placeholder(self.tab7_plot3_frame,
+                                            "Run multiple models\nfor comparison")
+            return
+
+        try:
+            labels = [entry['label'] for entry in performance_history]
+            r2_scores = [entry['r2'] for entry in performance_history]
+            rmse_scores = [entry['rmse'] for entry in performance_history]
+
+            # Sort by R²
+            sorted_indices = np.argsort(r2_scores)[::-1]
+            labels = [labels[i] for i in sorted_indices]
+            r2_scores = [r2_scores[i] for i in sorted_indices]
+            rmse_scores = [rmse_scores[i] for i in sorted_indices]
+
+            fig = Figure(figsize=(5, 4), dpi=100)
+            ax = fig.add_subplot(111)
+
+            x_pos = np.arange(len(labels))
+            bars = ax.bar(x_pos, r2_scores, alpha=0.8, edgecolor='black', linewidth=1)
+
+            # Color bars by performance tier
+            max_r2 = max(r2_scores) if r2_scores else 1.0
+            colors = []
+            for r2 in r2_scores:
+                if r2 >= max_r2 * 0.95:
+                    colors.append('#4CAF50')  # Green
+                elif r2 >= max_r2 * 0.85:
+                    colors.append('#FFC107')  # Yellow
+                else:
+                    colors.append('#F44336')  # Red
+
+            for bar, color in zip(bars, colors):
+                bar.set_color(color)
+
+            # Add value labels
+            for i, (r2, rmse) in enumerate(zip(r2_scores, rmse_scores)):
+                ax.text(i, r2 + 0.02, f'{r2:.3f}', ha='center', va='bottom',
+                       fontsize=8, fontweight='bold')
+                if r2 > 0.15:
+                    ax.text(i, r2 / 2, f'RMSE:\n{rmse:.3f}', ha='center', va='center',
+                           fontsize=7, color='white', fontweight='bold',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.6))
+
+            ax.set_xlabel('Model', fontsize=10)
+            ax.set_ylabel('R² Score', fontsize=10)
+            ax.set_title('Model Comparison\n(Training Performance)',
+                        fontsize=11, fontweight='bold')
+
+            # X-axis labels
+            ax.set_xticks(x_pos)
+            display_names = [name[:20] + '...' if len(name) > 20 else name for name in labels]
+            ax.set_xticklabels(display_names, rotation=45, ha='right', fontsize=8)
+
+            # Y-axis limits
+            y_min = min(0, min(r2_scores) - 0.1)
+            y_max = min(1.1, max(r2_scores) * 1.15) if r2_scores else 1.1
+            ax.set_ylim([y_min, y_max])
+
+            ax.grid(True, alpha=0.3, axis='y', linestyle=':', linewidth=0.5)
+
+            # Legend
+            legend_elements = [
+                Patch(facecolor='#4CAF50', edgecolor='black', label='Top tier (≥95% of best)'),
+                Patch(facecolor='#FFC107', edgecolor='black', label='Good (≥85% of best)'),
+                Patch(facecolor='#F44336', edgecolor='black', label='Needs improvement (<85%)')
+            ]
+            ax.legend(handles=legend_elements, loc='lower left', fontsize=7)
+
+            fig.tight_layout()
+
+            canvas = FigureCanvasTkAgg(fig, self.tab7_plot3_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        except Exception as e:
+            print(f"Error creating comparison plot: {e}")
+            import traceback
+            traceback.print_exc()
+            self._tab7_show_plot_placeholder(self.tab7_plot3_frame,
+                                            f"Error creating plot:\n{str(e)}")
+
+    def _tab7_generate_plots(self, results):
+        """Generate all diagnostic plots for Tab 7 Model Development."""
+        try:
+            if not HAS_MATPLOTLIB:
+                self._tab7_clear_plots()
+                for frame in [self.tab7_plot1_frame, self.tab7_plot2_frame, self.tab7_plot3_frame]:
+                    self._tab7_show_plot_placeholder(frame,
+                        "Matplotlib not available\nInstall matplotlib for plots")
+                return
+
+            if 'y_true' not in results or 'y_pred' not in results:
+                self._tab7_clear_plots()
+                for frame in [self.tab7_plot1_frame, self.tab7_plot2_frame, self.tab7_plot3_frame]:
+                    self._tab7_show_plot_placeholder(frame, "No data available\nfor diagnostic plots")
+                return
+
+            y_true = results['y_true']
+            y_pred = results['y_pred']
+            model_name = results.get('model_name', 'Model')
+
+            if len(y_true) == 0 or len(y_pred) == 0 or len(y_true) != len(y_pred):
+                self._tab7_clear_plots()
+                for frame in [self.tab7_plot1_frame, self.tab7_plot2_frame, self.tab7_plot3_frame]:
+                    self._tab7_show_plot_placeholder(frame, "Invalid data\nCannot generate plots")
+                return
+
+            # Generate plots
+            self._tab7_plot_predictions(y_true, y_pred, model_name)
+            self._tab7_plot_residuals(y_true, y_pred)
+
+            # Update performance history
+            if not hasattr(self, 'tab7_performance_history'):
+                self.tab7_performance_history = []
+
+            history_entry = {
+                'label': model_name,
+                'r2': results.get('r2', 0.0),
+                'rmse': results.get('rmse', 0.0)
+            }
+            self.tab7_performance_history.append(history_entry)
+
+            # Keep last 10 runs
+            if len(self.tab7_performance_history) > 10:
+                self.tab7_performance_history = self.tab7_performance_history[-10:]
+
+            self._tab7_plot_model_comparison(self.tab7_performance_history)
+
+            print("✓ Tab 7 diagnostic plots generated successfully")
+
+        except Exception as e:
+            print(f"Error generating Tab 7 plots: {e}")
+            import traceback
+            traceback.print_exc()
+            self._tab7_clear_plots()
+            error_msg = f"Error generating plots:\n{str(e)[:50]}"
+            for frame in [self.tab7_plot1_frame, self.tab7_plot2_frame, self.tab7_plot3_frame]:
+                self._tab7_show_plot_placeholder(frame, error_msg)
+
+    # =============================================================================
+    # TAB 7 LOADING METHODS (PHASE 3)
+    # =============================================================================
+
+    def _load_model_to_NEW_tab7(self, config):
+        """Load a model configuration from Results tab into NEW Tab 7 (Model Development).
+
+        FAIL LOUD wavelength validation - no silent fallbacks!
+        """
+        import ast
+
+        print("\n" + "="*80)
+        print("LOADING MODEL INTO NEW TAB 7 - MODEL DEVELOPMENT")
+        print("="*80)
+
+        # STEP 1: Validate Data
+        print("\n[STEP 1/7] Validating data availability...")
+        if self.X_original is None:
+            raise RuntimeError("X_original is not available. Load data in Tab 1.")
+        if self.y is None:
+            raise RuntimeError("Target variable (y) is not available. Load data in Tab 1.")
+        if len(self.X_original.columns) == 0:
+            raise RuntimeError("No wavelengths found in X_original.")
+
+        print(f"✓ Data validation passed: X={self.X_original.shape}, y={len(self.y)}, wavelengths={len(self.X_original.columns)}")
+
+        # STEP 2: Build Config Info
+        print("\n[STEP 2/7] Building configuration information...")
+        model_name = config.get('Model', 'N/A')
+        rank = config.get('Rank', 'N/A')
+        preprocess = config.get('Preprocess', 'N/A')
+        subset_tag = config.get('SubsetTag', config.get('Subset', 'full'))
+        window = config.get('Window', 'N/A')
+        n_vars = config.get('n_vars', 'N/A')
+        full_vars = config.get('full_vars', 'N/A')
+
+        info_text = f"Model: {model_name} (Rank {rank})\nPreprocessing: {preprocess}\nSubset: {subset_tag}\nWindow Size: {window}\n"
+
+        if 'RMSE' in config and not pd.isna(config.get('RMSE')):
+            rmse, r2 = config.get('RMSE', 'N/A'), config.get('R2', 'N/A')
+            info_text += f"\nPerformance: RMSE={rmse}, R²={r2}\n"
+        elif 'Accuracy' in config and not pd.isna(config.get('Accuracy')):
+            accuracy = config.get('Accuracy', 'N/A')
+            info_text += f"\nPerformance: Accuracy={accuracy}\n"
+
+        info_text += f"\nWavelengths: {n_vars} of {full_vars} used"
+        if subset_tag not in ['full', 'N/A']:
+            info_text += f" ({subset_tag})"
+        info_text += "\n"
+
+        print(f"✓ Configuration text built")
+
+        # STEP 3: CRITICAL - Load Wavelengths with FAIL LOUD
+        print("\n[STEP 3/7] Loading wavelengths with strict validation...")
+        print("⚠️  CRITICAL SECTION: FAIL LOUD validation - no silent fallbacks!")
+
+        all_wavelengths = self.X_original.columns.astype(float).values
+        is_subset_model = (subset_tag not in ['full', 'N/A'])
+
+        if is_subset_model:
+            print(f"  Subset model detected: '{subset_tag}' with {n_vars} variables")
+            if 'all_vars' not in config or not config['all_vars'] or config['all_vars'] == 'N/A':
+                raise ValueError(
+                    f"CRITICAL ERROR: Missing 'all_vars' field for subset model!\n"
+                    f"  Model: {model_name} (Rank {rank})\n"
+                    f"  Subset: {subset_tag}\n\n"
+                    f"SOLUTION: Re-run the analysis to generate complete results.")
+
+            all_vars_str = str(config['all_vars']).strip()
+            wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
+            model_wavelengths = [float(w) for w in wavelength_strings if w]
+
+            expected_count = int(n_vars) if n_vars != 'N/A' else len(model_wavelengths)
+            if len(model_wavelengths) != expected_count:
+                raise ValueError(
+                    f"CRITICAL ERROR: Wavelength count mismatch!\n"
+                    f"  Expected: {expected_count}, Parsed: {len(model_wavelengths)}\n"
+                    f"SOLUTION: Re-run the analysis.")
+
+            available_wl_set = set(all_wavelengths)
+            invalid_wls = [w for w in model_wavelengths if w not in available_wl_set]
+            if invalid_wls:
+                raise ValueError(
+                    f"CRITICAL ERROR: Invalid wavelengths in 'all_vars'!\n"
+                    f"  Found {len(invalid_wls)} wavelengths not in current dataset\n"
+                    f"SOLUTION: Load the original dataset.")
+
+            model_wavelengths = sorted(model_wavelengths)
+            print(f"  ✓ Validation passed: {len(model_wavelengths)} wavelengths valid")
+        else:
+            print(f"  Full model detected - using all {len(all_wavelengths)} wavelengths")
+            model_wavelengths = list(all_wavelengths)
+
+        print(f"✓ Wavelength loading complete: {len(model_wavelengths)} wavelengths")
+
+        # STEP 4: Format Wavelengths
+        print("\n[STEP 4/7] Formatting wavelengths...")
+        wl_display_text = self._format_wavelengths_for_NEW_tab7(model_wavelengths)
+        self.tab7_wl_spec.delete('1.0', 'end')
+        self.tab7_wl_spec.insert('1.0', wl_display_text)
+        print(f"✓ Wavelength widget updated")
+
+        # STEP 5: Load Hyperparameters
+        print("\n[STEP 5/7] Loading hyperparameters...")
+        def _get_config_value(keys):
+            for k in keys:
+                if k in config:
+                    v = config.get(k)
+                    if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v) != 'N/A':
+                        return v
+            return None
+
+        hyper_lines = []
+        if model_name == 'PLS':
+            lv_val = _get_config_value(['LVs', 'n_components', 'n_LVs'])
+            if lv_val: hyper_lines.append(f"  n_components: {lv_val}")
+        elif model_name in ['Ridge', 'Lasso']:
+            alpha_val = _get_config_value(['Alpha', 'alpha'])
+            if alpha_val: hyper_lines.append(f"  alpha: {alpha_val}")
+        elif model_name == 'RandomForest':
+            n_est = _get_config_value(['n_estimators', 'n_trees'])
+            if n_est: hyper_lines.append(f"  n_estimators: {n_est}")
+            max_d = _get_config_value(['max_depth', 'MaxDepth'])
+            if max_d: hyper_lines.append(f"  max_depth: {max_d}")
+        elif model_name == 'MLP':
+            hidden = _get_config_value(['Hidden', 'hidden_layer_sizes'])
+            if hidden: hyper_lines.append(f"  hidden_layer_sizes: {hidden}")
+            lr = _get_config_value(['LR_init', 'learning_rate_init'])
+            if lr: hyper_lines.append(f"  learning_rate_init: {lr}")
+        elif model_name == 'NeuralBoosted':
+            n_est = _get_config_value(['n_estimators'])
+            if n_est: hyper_lines.append(f"  n_estimators: {n_est}")
+            lr = _get_config_value(['LearningRate', 'learning_rate'])
+            if lr: hyper_lines.append(f"  learning_rate: {lr}")
+            hidden_size = _get_config_value(['HiddenSize', 'hidden_layer_size'])
+            if hidden_size: hyper_lines.append(f"  hidden_layer_size: {hidden_size}")
+
+        if hyper_lines:
+            info_text += "\nHyperparameters:\n" + "\n".join(hyper_lines) + "\n"
+            print(f"✓ Loaded {len(hyper_lines)} hyperparameters")
+
+        # STEP 6: Populate GUI Controls
+        print("\n[STEP 6/7] Populating GUI controls...")
+        self.tab7_config_text.config(state='normal')
+        self.tab7_config_text.delete('1.0', tk.END)
+        self.tab7_config_text.insert('1.0', info_text)
+        self.tab7_config_text.config(state='disabled')
+
+        if model_name in ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']:
+            self.tab7_model_type.set(model_name)
+
+            # CRITICAL: Create and populate hyperparameter widgets
+            self._tab7_create_hyperparam_widgets(model_name)
+
+            # Populate widgets with extracted values (use .set() for Var objects)
+            if model_name == 'PLS':
+                lv_val = _get_config_value(['LVs', 'n_components', 'n_LVs'])
+                if lv_val and 'n_components' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['n_components'].set(int(lv_val))
+            elif model_name in ['Ridge', 'Lasso']:
+                alpha_val = _get_config_value(['Alpha', 'alpha'])
+                if alpha_val and 'alpha' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['alpha'].set(str(alpha_val))
+            elif model_name == 'RandomForest':
+                n_est = _get_config_value(['n_estimators', 'n_trees'])
+                if n_est and 'n_estimators' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['n_estimators'].set(int(n_est))
+                max_d = _get_config_value(['max_depth', 'MaxDepth'])
+                if max_d and 'max_depth' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['max_depth'].set(str(max_d))
+            elif model_name == 'MLP':
+                hidden = _get_config_value(['Hidden', 'hidden_layer_sizes'])
+                if hidden and 'hidden_layer_sizes' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['hidden_layer_sizes'].set(str(hidden))
+                lr = _get_config_value(['LR_init', 'learning_rate_init'])
+                if lr and 'learning_rate_init' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['learning_rate_init'].set(str(lr))
+            elif model_name == 'NeuralBoosted':
+                n_est = _get_config_value(['n_estimators'])
+                if n_est and 'n_estimators' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['n_estimators'].set(int(n_est))
+                lr = _get_config_value(['LearningRate', 'learning_rate'])
+                if lr and 'learning_rate' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['learning_rate'].set(str(lr))
+                hidden_size = _get_config_value(['HiddenSize', 'hidden_layer_size'])
+                if hidden_size and 'hidden_layer_size' in self.tab7_hyperparam_widgets:
+                    self.tab7_hyperparam_widgets['hidden_layer_size'].set(int(hidden_size))
+
+            print(f"✓ Hyperparameter widgets populated")
+
+        if self.y is not None:
+            if self.y.nunique() < 10:
+                self.tab7_task_type.set('classification')
+            else:
+                self.tab7_task_type.set('regression')
+
+        # Convert preprocessing names
+        deriv = config.get('Deriv', None)
+        if preprocess == 'deriv' and deriv == 1:
+            gui_preprocess = 'sg1'
+        elif preprocess == 'deriv' and deriv == 2:
+            gui_preprocess = 'sg2'
+        elif preprocess == 'snv_deriv':
+            gui_preprocess = 'snv_sg1' if deriv == 1 else 'snv_sg2'
+        elif preprocess in ['raw', 'snv', 'msc', 'deriv_snv', 'deriv_msc', 'msc_sg1', 'msc_sg2']:
+            gui_preprocess = preprocess
+        else:
+            gui_preprocess = 'raw'
+
+        self.tab7_preprocess.set(gui_preprocess)
+
+        if window != 'N/A' and not pd.isna(window):
+            window_val = int(float(window))
+            if window_val in [7, 11, 17, 19]:
+                self.tab7_window.set(window_val)
+
+        n_folds = config.get('n_folds', 5)
+        if not pd.isna(n_folds) and 3 <= int(n_folds) <= 10:
+            self.tab7_folds.set(int(n_folds))
+
+        print("✓ GUI controls populated")
+
+        # STEP 7: Finalize
+        print("\n[STEP 7/7] Finalizing...")
+        self.tab7_loaded_config = config.copy()
+        self.tab7_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})",
+                                    foreground=self.colors['success'])
+        self._tab7_update_wavelength_count()
+        self.tab7_status.config(text=f"Loaded: {model_name} | {gui_preprocess} | Rank {rank}")
+
+        print(f"\n{'='*80}")
+        print(f"✅ MODEL LOADING COMPLETE: {model_name} (Rank {rank})")
+        print(f"   - {len(model_wavelengths)} wavelengths loaded")
+        print(f"   - Ready for development in Tab 7")
+        print(f"{'='*80}\n")
+
+    def _format_wavelengths_for_NEW_tab7(self, wavelengths_list):
+        """Format wavelength list for display in Tab 7."""
+        if not wavelengths_list:
+            return "# No wavelengths specified"
+
+        wls = sorted(wavelengths_list)
+        n_wls = len(wls)
+
+        if n_wls <= 50:
+            wl_strings = [f"{w:.1f}" for w in wls]
+            return ", ".join(wl_strings)
+        else:
+            first_10 = [f"{w:.1f}" for w in wls[:10]]
+            last_10 = [f"{w:.1f}" for w in wls[-10:]]
+            return (", ".join(first_10) + ", ..., " + ", ".join(last_10) +
+                   f"\n\n# Total: {n_wls} wavelengths\n# Range: {wls[0]:.1f}-{wls[-1]:.1f} nm")
 
     # === Helper Methods ===
 
@@ -3065,35 +5160,69 @@ class SpectralPredictApp:
         self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
 
     def _on_result_double_click(self, event):
-        """Handle double-click on a result row."""
+        """Handle double-click on result row - load into Custom Model Development tab."""
         selection = self.results_tree.selection()
         if not selection:
             return
 
-        # Get the selected row index
-        item_id = selection[0]
-        row_idx = int(item_id)
-
         if self.results_df is None:
             return
 
-        # Get the selected model configuration
-        # CRITICAL: Use .loc (label-based) not .iloc (position-based)
-        # because treeview IID uses the dataframe's original index labels
-        model_config = self.results_df.loc[row_idx].to_dict()
-        self.selected_model_config = model_config
+        try:
+            # Get the selected row index
+            item_id = selection[0]
+            row_idx = int(item_id)
 
-        # Validation logging
-        rank = model_config.get('Rank', 'N/A')
-        r2_or_acc = model_config.get('R2', model_config.get('Accuracy', 'N/A'))
-        model_name = model_config.get('Model', 'N/A')
-        print(f"✓ Loading Rank {rank}: {model_name} (R²/Acc={r2_or_acc}, n_vars={model_config.get('n_vars', 'N/A')})")
+            # Get the selected model configuration
+            # CRITICAL: Use .loc (label-based) not .iloc (position-based)
+            # because treeview IID uses the dataframe's original index labels
+            model_config = self.results_df.loc[row_idx].to_dict()
+            self.selected_model_config = model_config
 
-        # Populate the Custom Model Development tab
-        self._load_model_for_refinement(model_config)
+            # Log validation info
+            rank = model_config.get('Rank', '?')
+            model_name = model_config.get('Model', '?')
+            r2_or_acc = model_config.get('R2', model_config.get('Accuracy', '?'))
+            n_vars = model_config.get('n_vars', '?')
 
-        # Switch to the Custom Model Development tab
-        self.notebook.select(5)  # Tab 6 (index 5)
+            print(f"\n{'='*80}")
+            print(f"USER ACTION: Double-clicked Rank {rank} in Results tab")
+            print(f"{'='*80}")
+            print(f"  Model: {model_name}")
+            print(f"  Performance: {r2_or_acc}")
+            print(f"  Variables: {n_vars}")
+            print(f"  Loading into NEW Tab 7 (Model Development)...")
+
+            # Load into NEW Tab 7 (Model Development) using robust logic with FAIL LOUD
+            self._load_model_to_NEW_tab7(model_config)
+
+            # Switch to NEW Tab 7 (index 6: 0=Import, 1=Quality, 2=Config, 3=Progress, 4=Results, 5=Tab6, 6=Tab7, 7=Tab8)
+            self.notebook.select(6)
+
+            print(f"✅ Successfully loaded and switched to Custom Model Development tab")
+            print(f"{'='*80}\n")
+
+        except ValueError as ve:
+            # Our validation errors - show to user with full details
+            error_msg = str(ve)
+            messagebox.showerror(
+                "Model Loading Failed - Data Validation Error",
+                error_msg
+            )
+            print(f"\n❌ VALIDATION ERROR:\n{error_msg}\n")
+            import traceback
+            traceback.print_exc()
+
+        except Exception as e:
+            # Unexpected errors - show generic message
+            messagebox.showerror(
+                "Model Loading Failed",
+                f"Failed to load model configuration:\n\n{str(e)}\n\n"
+                f"Check the console for detailed error information."
+            )
+            print(f"\n❌ ERROR loading model: {e}\n")
+            import traceback
+            traceback.print_exc()
 
     def _export_results_table(self):
         """Export the current results table to a CSV file."""
@@ -3218,189 +5347,348 @@ class SpectralPredictApp:
         return True
 
     def _load_model_for_refinement(self, config):
-        """Load a model configuration into the Custom Model Development tab."""
-        # Validate data availability
-        if not self._validate_data_for_refinement():
-            return
+        """Legacy wrapper - NOW REDIRECTS TO NEW TAB 7 instead of old Tab 6."""
+        print("⚠️  Legacy call detected - redirecting to NEW Tab 7 (Model Development)")
+        self._load_model_to_NEW_tab7(config)
+        self.notebook.select(6)  # Switch to NEW Tab 7
 
-        # Build configuration text
-        info_text = f"""Model: {config.get('Model', 'N/A')}
-Preprocessing: {config.get('Preprocess', 'N/A')}
-Subset: {config.get('SubsetTag', config.get('Subset', 'N/A'))}
-Window Size: {config.get('Window', 'N/A')}
+    def _load_model_to_tab7(self, config):
+        """
+        OLD Tab 6 loading method - NOW REDIRECTS TO NEW TAB 7.
+
+        This method is DEPRECATED and only kept for backward compatibility.
+        All model loading now goes to Tab 7 (Model Development) via _load_model_to_NEW_tab7().
+
+        Args:
+            config (dict): Model configuration dictionary from results DataFrame
+
+        Raises:
+            ValueError: If critical data is missing or invalid (wavelength mismatch, etc.)
+            RuntimeError: If data validation fails
+        """
+        # REDIRECT TO NEW TAB 7 METHOD
+        print("⚠️  OLD Tab 6 method called - redirecting to NEW Tab 7 (Model Development)")
+        self._load_model_to_NEW_tab7(config)
+        self.notebook.select(6)  # Switch to NEW Tab 7
+        return
+
+        # ====================================================================
+        # OLD CODE BELOW - NO LONGER EXECUTED (kept for reference only)
+        # ====================================================================
+        print("\n" + "="*80)
+        print("LOADING MODEL INTO CUSTOM MODEL DEVELOPMENT TAB")
+        print("="*80)
+
+        # ====================================================================
+        # STEP 1: Validate Data Availability
+        # ====================================================================
+        print("\n[STEP 1/7] Validating data availability...")
+
+        if not self._validate_data_for_refinement():
+            raise RuntimeError(
+                "Data validation failed!\n"
+                "Required data (X, y, wavelengths) is not available.\n"
+                "Please ensure data is loaded in the Data Upload tab."
+            )
+
+        print("✓ Data validation passed: X, y, and wavelengths are available")
+        print(f"  - X shape: {self.X_original.shape}")
+        print(f"  - y length: {len(self.y)}")
+        print(f"  - Available wavelengths: {len(self.X_original.columns)}")
+
+        # ====================================================================
+        # STEP 2: Build Configuration Info Text
+        # ====================================================================
+        print("\n[STEP 2/7] Building configuration information display...")
+
+        # Extract basic info
+        model_name = config.get('Model', 'N/A')
+        rank = config.get('Rank', 'N/A')
+        preprocess = config.get('Preprocess', 'N/A')
+        subset_tag = config.get('SubsetTag', config.get('Subset', 'full'))
+        window = config.get('Window', 'N/A')
+
+        info_text = f"""Model: {model_name} (Rank {rank})
+Preprocessing: {preprocess}
+Subset: {subset_tag}
+Window Size: {window}
 """
 
         # Add performance metrics
         if 'RMSE' in config and not pd.isna(config.get('RMSE')):
-            # Regression
+            # Regression model
+            rmse = config.get('RMSE', 'N/A')
+            r2 = config.get('R2', 'N/A')
             info_text += f"""
 Performance (Regression):
-  RMSE: {config.get('RMSE', 'N/A')}
-  R²: {config.get('R2', 'N/A')}
+  RMSE: {rmse}
+  R²: {r2}
 """
+            print(f"✓ Regression model: RMSE={rmse}, R²={r2}")
         elif 'Accuracy' in config and not pd.isna(config.get('Accuracy')):
-            # Classification
+            # Classification model
+            accuracy = config.get('Accuracy', 'N/A')
             info_text += f"""
 Performance (Classification):
-  Accuracy: {config.get('Accuracy', 'N/A')}
+  Accuracy: {accuracy}
 """
             if 'ROC_AUC' in config and not pd.isna(config['ROC_AUC']):
-                info_text += f"  ROC AUC: {config.get('ROC_AUC', 'N/A')}\n"
+                roc_auc = config.get('ROC_AUC', 'N/A')
+                info_text += f"  ROC AUC: {roc_auc}\n"
+            print(f"✓ Classification model: Accuracy={accuracy}")
 
-        # Add wavelength information
+        # Add wavelength count info
         n_vars = config.get('n_vars', 'N/A')
         full_vars = config.get('full_vars', 'N/A')
-        subset_tag = config.get('SubsetTag', config.get('Subset', 'full'))
-
         info_text += f"\nWavelengths: {n_vars} of {full_vars} used"
-        if subset_tag != 'full' and subset_tag != 'N/A':
+        if subset_tag not in ['full', 'N/A']:
             info_text += f" ({subset_tag})"
         info_text += "\n"
 
-        if 'top_vars' in config and config['top_vars'] != 'N/A':
-            top_vars_list = config['top_vars'].split(',')
-            n_shown = len(top_vars_list)
-            if n_shown < n_vars and n_vars != 'N/A':
-                info_text += f"Most important {n_shown} wavelengths shown below (model used {n_vars} total):\n"
-            else:
-                info_text += f"Wavelengths used:\n"
-            info_text += f"  {config['top_vars']}\n"
+        print(f"✓ Configuration text built: {model_name}, {n_vars} wavelengths")
 
-        # Add hyperparameters if available
-        if 'n_estimators' in config and not pd.isna(config['n_estimators']):
-            info_text += f"\nHyperparameters:\n"
-            info_text += f"  n_estimators: {config.get('n_estimators', 'N/A')}\n"
-            if 'learning_rate' in config:
-                info_text += f"  learning_rate: {config.get('learning_rate', 'N/A')}\n"
+        # ====================================================================
+        # STEP 3: CRITICAL - Load Wavelengths with FAIL LOUD Validation
+        # ====================================================================
+        print("\n[STEP 3/7] Loading wavelengths with strict validation...")
+        print("⚠️  CRITICAL SECTION: FAIL LOUD validation - no silent fallbacks!")
 
-        # Update the info text widget
+        model_wavelengths = None
+        all_wavelengths = self.X_original.columns.astype(float).values
+
+        # Check if this is a subset model or full model
+        is_subset_model = (subset_tag not in ['full', 'N/A'])
+
+        if is_subset_model:
+            print(f"  Subset model detected: '{subset_tag}' with {n_vars} variables")
+
+            # CRITICAL: For subset models, we MUST have all_vars field
+            if 'all_vars' not in config or not config['all_vars'] or config['all_vars'] == 'N/A':
+                raise ValueError(
+                    f"CRITICAL ERROR: Missing 'all_vars' field for subset model!\n"
+                    f"  Model: {model_name} (Rank {rank})\n"
+                    f"  Subset: {subset_tag}\n"
+                    f"  Expected variables: {n_vars}\n\n"
+                    f"The 'all_vars' field is REQUIRED for subset models to identify\n"
+                    f"the exact wavelengths used. Without it, loading this model\n"
+                    f"would cause R² discrepancies.\n\n"
+                    f"SOLUTION: Re-run the analysis to generate complete results."
+                )
+
+            # Parse all_vars field
+            print(f"  Parsing 'all_vars' field...")
+            try:
+                all_vars_str = str(config['all_vars']).strip()
+                wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
+                parsed_wavelengths = [float(w) for w in wavelength_strings if w]
+
+                print(f"  ✓ Parsed {len(parsed_wavelengths)} wavelengths from 'all_vars'")
+
+                # CRITICAL VALIDATION: Count must match n_vars
+                expected_count = int(n_vars) if n_vars != 'N/A' else len(parsed_wavelengths)
+
+                if len(parsed_wavelengths) != expected_count:
+                    raise ValueError(
+                        f"CRITICAL ERROR: Wavelength count mismatch!\n"
+                        f"  Model: {model_name} (Rank {rank})\n"
+                        f"  Expected: {expected_count} wavelengths (from n_vars field)\n"
+                        f"  Parsed: {len(parsed_wavelengths)} wavelengths (from all_vars field)\n"
+                        f"  Subset: {subset_tag}\n\n"
+                        f"This indicates a data integrity issue in the results table.\n"
+                        f"The 'all_vars' field does not match the 'n_vars' count.\n\n"
+                        f"SOLUTION: Re-run the analysis to generate consistent results."
+                    )
+
+                # Validate that all parsed wavelengths exist in available data
+                available_wl_set = set(all_wavelengths)
+                invalid_wls = [w for w in parsed_wavelengths if w not in available_wl_set]
+
+                if invalid_wls:
+                    raise ValueError(
+                        f"CRITICAL ERROR: Invalid wavelengths in 'all_vars'!\n"
+                        f"  Model: {model_name} (Rank {rank})\n"
+                        f"  Found {len(invalid_wls)} wavelengths not in current dataset:\n"
+                        f"  {invalid_wls[:10]}{'...' if len(invalid_wls) > 10 else ''}\n\n"
+                        f"This likely means the current dataset is different from\n"
+                        f"the one used to generate these results.\n\n"
+                        f"SOLUTION: Load the original dataset or re-run the analysis."
+                    )
+
+                model_wavelengths = sorted(parsed_wavelengths)
+                print(f"  ✓ Validation passed: All {len(model_wavelengths)} wavelengths are valid")
+
+            except ValueError as ve:
+                # Re-raise ValueError (our validation errors)
+                raise
+            except Exception as e:
+                raise ValueError(
+                    f"CRITICAL ERROR: Failed to parse 'all_vars' field!\n"
+                    f"  Model: {model_name} (Rank {rank})\n"
+                    f"  Error: {str(e)}\n"
+                    f"  all_vars content: {str(config.get('all_vars', 'MISSING'))[:200]}...\n\n"
+                    f"The wavelength data in the results table is malformed.\n\n"
+                    f"SOLUTION: Re-run the analysis to generate valid results."
+                )
+
+        else:
+            # Full model - use all available wavelengths
+            print(f"  Full model detected - using all {len(all_wavelengths)} wavelengths")
+            model_wavelengths = list(all_wavelengths)
+
+            # Validate count matches (optional check for full models)
+            if n_vars != 'N/A' and int(n_vars) != len(all_wavelengths):
+                print(f"  ⚠️  WARNING: n_vars ({n_vars}) doesn't match available wavelengths ({len(all_wavelengths)})")
+                print(f"      This may indicate the dataset has changed since results were generated")
+
+        # Final validation: ensure we have wavelengths
+        if model_wavelengths is None or len(model_wavelengths) == 0:
+            raise RuntimeError(
+                f"CRITICAL ERROR: No wavelengths loaded!\n"
+                f"  Model: {model_name} (Rank {rank})\n"
+                f"  Subset: {subset_tag}\n"
+                f"  This should never happen - indicates a logic error in loading code."
+            )
+
+        print(f"✓ Wavelength loading complete: {len(model_wavelengths)} wavelengths validated")
+
+        # ====================================================================
+        # STEP 4: Format Wavelengths for Display
+        # ====================================================================
+        print("\n[STEP 4/7] Formatting wavelengths for display...")
+
+        try:
+            # Use the new formatting helper
+            wl_display_text = self._format_wavelengths_for_tab7(model_wavelengths)
+            print(f"✓ Formatted {len(model_wavelengths)} wavelengths ({len(wl_display_text)} characters)")
+
+        except Exception as e:
+            print(f"⚠️  WARNING: Wavelength formatting failed: {e}")
+            # Fallback to simple comma-separated list
+            wl_display_text = ", ".join([f"{w:.1f}" for w in model_wavelengths[:100]])
+            if len(model_wavelengths) > 100:
+                wl_display_text += f", ... ({len(model_wavelengths) - 100} more)"
+
+        # Update wavelength specification widget
+        self.refine_wl_spec.config(state='normal')
+        self.refine_wl_spec.delete('1.0', 'end')
+        self.refine_wl_spec.insert('1.0', wl_display_text)
+
+        # Verify insertion
+        content = self.refine_wl_spec.get('1.0', 'end-1c')
+        if len(content) == 0:
+            raise RuntimeError("ERROR: Wavelength text widget is empty after insertion!")
+
+        print(f"✓ Wavelength widget updated: {len(content)} characters inserted")
+
+        # ====================================================================
+        # STEP 5: Load Hyperparameters from Config
+        # ====================================================================
+        print("\n[STEP 5/7] Loading hyperparameters...")
+
+        # Helper function to get config value with field name variations
+        def _get_config_value(keys):
+            """Get config value, trying multiple possible field names."""
+            for k in keys:
+                if k in config:
+                    v = config.get(k)
+                    if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v) != 'N/A':
+                        return v
+
+            # Fallback: try to parse from Params field (legacy support)
+            params_str = config.get('Params')
+            if params_str:
+                try:
+                    parsed = ast.literal_eval(params_str)
+                    if isinstance(parsed, dict):
+                        for k in keys:
+                            if k in parsed:
+                                return parsed[k]
+                except Exception:
+                    pass
+            return None
+
+        # Build hyperparameters display
+        hyper_lines = []
+
+        if model_name == 'PLS':
+            lv_val = _get_config_value(['LVs', 'n_components', 'n_LVs'])
+            if lv_val is not None:
+                hyper_lines.append(f"  n_components (LVs): {lv_val}")
+
+        elif model_name in ['Ridge', 'Lasso']:
+            alpha_val = _get_config_value(['Alpha', 'alpha'])
+            if alpha_val is not None:
+                hyper_lines.append(f"  alpha: {alpha_val}")
+
+        elif model_name == 'RandomForest':
+            n_est = _get_config_value(['n_estimators', 'n_trees'])
+            if n_est is not None:
+                hyper_lines.append(f"  n_estimators: {n_est}")
+            max_d = _get_config_value(['max_depth', 'MaxDepth'])
+            if max_d is not None:
+                hyper_lines.append(f"  max_depth: {max_d}")
+            max_f = _get_config_value(['max_features'])
+            if max_f is not None:
+                hyper_lines.append(f"  max_features: {max_f}")
+
+        elif model_name == 'MLP':
+            hidden = _get_config_value(['Hidden', 'hidden_layer_sizes'])
+            if hidden is not None:
+                hyper_lines.append(f"  hidden_layer_sizes: {hidden}")
+            lr_init = _get_config_value(['LR_init', 'learning_rate_init', 'learning_rate'])
+            if lr_init is not None:
+                hyper_lines.append(f"  learning_rate_init: {lr_init}")
+
+        elif model_name == 'NeuralBoosted':
+            n_est = _get_config_value(['n_estimators'])
+            if n_est is not None:
+                hyper_lines.append(f"  n_estimators: {n_est}")
+            lr = _get_config_value(['LearningRate', 'learning_rate'])
+            if lr is not None:
+                hyper_lines.append(f"  learning_rate: {lr}")
+            hidden_size = _get_config_value(['HiddenSize', 'hidden_layer_size'])
+            if hidden_size is not None:
+                hyper_lines.append(f"  hidden_layer_size: {hidden_size}")
+            act = _get_config_value(['Activation', 'activation'])
+            if act is not None:
+                hyper_lines.append(f"  activation: {act}")
+
+        if hyper_lines:
+            info_text += "\nHyperparameters:\n" + "\n".join(hyper_lines) + "\n"
+            print(f"✓ Loaded {len(hyper_lines)} hyperparameters")
+        else:
+            print("  (No hyperparameters found in config)")
+
+        # ====================================================================
+        # STEP 6: Populate GUI Controls
+        # ====================================================================
+        print("\n[STEP 6/7] Populating GUI controls...")
+
+        # Update info text display
         self.refine_model_info.config(state='normal')
         self.refine_model_info.delete('1.0', tk.END)
         self.refine_model_info.insert('1.0', info_text)
         self.refine_model_info.config(state='disabled')
-
-        # Populate refinement parameters with current values
-        # Populate wavelength specification - Show ONLY wavelengths used in the selected model
-        print(f"DEBUG: X_original is None? {self.X_original is None}")
-
-        if self.X_original is not None:
-            try:
-                print(f"DEBUG: X_original shape: {self.X_original.shape}")
-
-                # Extract all available wavelengths
-                all_wavelengths = self.X_original.columns.astype(float).values
-                print(f"DEBUG: Total available wavelengths: {len(all_wavelengths)}")
-
-                subset_tag = config.get('SubsetTag', config.get('Subset', 'full'))
-                n_vars = config.get('n_vars', len(all_wavelengths))
-
-                # Determine which wavelengths to show
-                model_wavelengths = None
-
-                # For subset models: Prefer all_vars (complete list) over top_vars (top 30)
-                # This fixes the variable count mismatch for models with >30 variables
-                if 'all_vars' in config and config['all_vars'] != 'N/A' and config['all_vars']:
-                    print(f"DEBUG: Model has all_vars, parsing complete wavelength list")
-                    try:
-                        # Parse wavelengths from all_vars string (e.g., "1520.0, 1540.0, 1560.0, ...")
-                        all_vars_str = str(config['all_vars']).strip()
-                        wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
-                        model_wavelengths = [float(w) for w in wavelength_strings if w]
-                        model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
-                        print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
-                    except Exception as e:
-                        print(f"WARNING: Could not parse all_vars: {e}")
-                        model_wavelengths = None
-
-                # Fallback to top_vars for backward compatibility with old results
-                if model_wavelengths is None and 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
-                    print(f"DEBUG: Falling back to top_vars (may be incomplete for large subsets)")
-                    try:
-                        # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
-                        top_vars_str = str(config['top_vars']).strip()
-                        wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
-                        model_wavelengths = [float(w) for w in wavelength_strings if w]
-                        model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
-                        print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
-                    except Exception as e:
-                        print(f"WARNING: Could not parse top_vars: {e}")
-                        model_wavelengths = None
-
-                # For full models or if parsing failed: Use all wavelengths
-                if model_wavelengths is None:
-                    if subset_tag == 'full' or subset_tag == 'N/A':
-                        print(f"DEBUG: Full model - using all {len(all_wavelengths)} wavelengths")
-                        model_wavelengths = list(all_wavelengths)
-                    else:
-                        # Fallback: use all wavelengths
-                        print(f"WARNING: Subset model but no top_vars, using all wavelengths")
-                        model_wavelengths = list(all_wavelengths)
-
-                # Format the wavelengths (ranges for consecutive, individual otherwise)
-                wl_spec = self._format_wavelengths_as_spec(model_wavelengths)
-                print(f"DEBUG: Formatted {len(model_wavelengths)} wavelengths into {len(wl_spec)} character spec")
-
-                # FALLBACK: If formatter returns empty, use simple range
-                if not wl_spec or len(wl_spec) == 0:
-                    print("WARNING: Formatter returned empty, using fallback")
-                    if len(model_wavelengths) > 0:
-                        wl_spec = f"{model_wavelengths[0]:.1f}-{model_wavelengths[-1]:.1f}"
-                    else:
-                        wl_spec = "# ERROR: No wavelengths available"
-
-                # Ensure widget is in normal state before editing
-                self.refine_wl_spec.config(state='normal')
-                self.refine_wl_spec.delete('1.0', 'end')
-                self.refine_wl_spec.insert('1.0', wl_spec)
-
-                # Verify insertion
-                content = self.refine_wl_spec.get('1.0', 'end-1c')
-                print(f"DEBUG: Text widget content length: {len(content)} characters")
-
-                if len(content) == 0:
-                    print("ERROR: Text widget is empty after insertion!")
-
-            except Exception as e:
-                print(f"ERROR loading wavelengths: {e}")
-                import traceback
-                traceback.print_exc()
-
-                # Show error to user in the text widget
-                self.refine_wl_spec.config(state='normal')
-                self.refine_wl_spec.delete('1.0', 'end')
-                self.refine_wl_spec.insert('1.0', f"# ERROR: Could not load wavelengths\n# {str(e)}\n# Please check console for details")
-
-        else:
-            print("WARNING: X_original is None - data not loaded")
-            self.refine_wl_spec.config(state='normal')
-            self.refine_wl_spec.delete('1.0', 'end')
-            self.refine_wl_spec.insert('1.0', "# ERROR: Data not loaded\n# Please load data in Data Upload tab first")
-
-        # Set window size
-        window = config.get('Window', 17)
-        if not pd.isna(window) and window in [7, 11, 17, 19]:
-            self.refine_window.set(int(window))
-
-        # Set number of CV folds (CRITICAL FIX: Use same folds as Results tab)
-        n_folds = config.get('n_folds', 5)
-        if not pd.isna(n_folds) and n_folds in range(3, 11):
-            self.refine_folds.set(int(n_folds))
-            print(f"DEBUG: Loaded n_folds={n_folds} from config (ensures same CV strategy as Results)")
+        print("  ✓ Model info display updated")
 
         # Set model type
-        model_name = config.get('Model', 'PLS')
         if model_name in ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']:
             self.refine_model_type.set(model_name)
+            print(f"  ✓ Model type: {model_name}")
+        else:
+            print(f"  ⚠️  WARNING: Unknown model type '{model_name}', defaulting to PLS")
+            self.refine_model_type.set('PLS')
 
         # Set task type (auto-detect from data)
         if self.y is not None:
             if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
                 self.refine_task_type.set('classification')
+                print("  ✓ Task type: classification (auto-detected)")
             else:
                 self.refine_task_type.set('regression')
+                print("  ✓ Task type: regression (auto-detected)")
 
-        # Set preprocessing method
-        preprocess = config.get('Preprocess', 'raw')
+        # Set preprocessing method (handle various naming conventions)
         deriv = config.get('Deriv', None)
 
         # Convert from search.py naming to GUI naming
@@ -3409,41 +5697,77 @@ Performance (Classification):
         elif preprocess == 'deriv' and deriv == 2:
             gui_preprocess = 'sg2'
         elif preprocess == 'snv_deriv':
-            # SNV then derivative - NOW PROPERLY SUPPORTED!
             gui_preprocess = 'snv_sg1' if deriv == 1 else 'snv_sg2'
         elif preprocess == 'deriv_snv':
             gui_preprocess = 'deriv_snv'
-        elif preprocess in ['raw', 'snv']:
+        elif preprocess == 'msc_deriv':
+            gui_preprocess = 'msc_sg1' if deriv == 1 else 'msc_sg2'
+        elif preprocess == 'deriv_msc':
+            gui_preprocess = 'deriv_msc'
+        elif preprocess in ['raw', 'snv', 'msc']:
             gui_preprocess = preprocess
         else:
-            gui_preprocess = 'raw'  # Fallback
+            print(f"  ⚠️  WARNING: Unknown preprocessing '{preprocess}', defaulting to 'raw'")
+            gui_preprocess = 'raw'
 
-        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']:
+        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv',
+                              'msc', 'msc_sg1', 'msc_sg2', 'deriv_msc']:
             self.refine_preprocess.set(gui_preprocess)
+            print(f"  ✓ Preprocessing: {gui_preprocess}")
 
-        # CRITICAL FIX: Load Window parameter from config
-        window = config.get('Window', None)
-        if window is not None and not pd.isna(window):
+        # Set window size
+        if window != 'N/A' and not pd.isna(window):
             window_val = int(float(window))
-            if window_val in [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25]:
+            if window_val in [7, 11, 17, 19]:
                 self.refine_window.set(window_val)
-                print(f"DEBUG: Loaded window={window_val} from config")
+                print(f"  ✓ Window size: {window_val}")
             else:
-                print(f"WARNING: Invalid window={window_val} in config, using default")
+                print(f"  ⚠️  WARNING: Invalid window={window_val}, using default (17)")
+                self.refine_window.set(17)
 
-        # Note: Poly parameter is inferred from deriv order in the execution code (lines 3966-3975)
-        # No need to load it separately as it's automatically determined
+        # Set CV folds (CRITICAL: Use same folds as Results tab for reproducibility)
+        n_folds = config.get('n_folds', 5)
+        if not pd.isna(n_folds) and int(n_folds) in range(3, 11):
+            self.refine_folds.set(int(n_folds))
+            print(f"  ✓ CV folds: {n_folds} (ensures same CV strategy as Results)")
+        else:
+            print(f"  ⚠️  WARNING: n_folds not in config or invalid, using default (5)")
+            self.refine_folds.set(5)
 
-        # Enable the run button
+        # ====================================================================
+        # STEP 7: Update Mode Label and Enable Controls
+        # ====================================================================
+        print("\n[STEP 7/7] Finalizing...")
+
+        # Store config for later use
+        self.tab7_loaded_config = config.copy()
+
+        # Update mode label
+        self.refine_mode_label.config(
+            text=f"Mode: Loaded from Results (Rank {rank})",
+            foreground='#2E7D32'  # Green color to indicate loaded state
+        )
+        print(f"✓ Mode label updated: Loaded from Results (Rank {rank})")
+
+        # Enable Run button
         self.refine_run_button.config(state='normal')
-        self.refine_status.config(text=f"Loaded: {config.get('Model', 'N/A')} | {config.get('Preprocess', 'N/A')}")
+        print("✓ Run button enabled")
 
-        # Update mode label to indicate loaded from results
-        rank = config.get('Rank', 'N/A')
-        self.refine_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})")
-
-        # Update the wavelength count display
+        # Update wavelength count display
         self._update_wavelength_count()
+
+        # Update status
+        if hasattr(self, 'refine_status'):
+            self.refine_status.config(
+                text=f"Loaded: {model_name} | {gui_preprocess} | Rank {rank}"
+            )
+
+        print("\n" + "="*80)
+        print(f"✅ MODEL LOADING COMPLETE: {model_name} (Rank {rank})")
+        print(f"   - {len(model_wavelengths)} wavelengths loaded and validated")
+        print(f"   - Preprocessing: {gui_preprocess}")
+        print(f"   - Ready for refinement")
+        print("="*80 + "\n")
 
     def _plot_refined_predictions(self):
         """Plot reference vs predicted values for refined model."""
@@ -4037,59 +6361,115 @@ Performance (Classification):
             )
 
             # CRITICAL FIX: Reapply tuned hyperparameters from the search results
-            # Julia backend stores hyperparameters as individual fields (alpha, n_trees, etc.)
-            # NOT in a 'Params' string field like old Python implementation
+            # Robustly handle naming differences and parse 'Params' as fallback.
             params_from_search = {}
             if self.selected_model_config is not None:
                 print(f"DEBUG: Loading hyperparameters for model_name='{model_name}'")
                 print(f"DEBUG: Config keys available: {list(self.selected_model_config.keys())}")
-                print(f"DEBUG: Config alpha value: {self.selected_model_config.get('alpha', 'NOT_FOUND')}")
+
+                # Helper: get first present, non-missing value across candidate keys or from Params
+                def _get_cfg(keys):
+                    for k in keys:
+                        if k in self.selected_model_config:
+                            v = self.selected_model_config.get(k)
+                            if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v) != 'N/A':
+                                return v
+                    # Fallback: try to parse Params column if available
+                    params_str = self.selected_model_config.get('Params')
+                    if params_str:
+                        try:
+                            parsed = ast.literal_eval(params_str)
+                            if isinstance(parsed, dict):
+                                for k in keys:
+                                    if k in parsed:
+                                        return parsed[k]
+                        except Exception:
+                            pass
+                    return None
 
                 # Extract hyperparameters based on model type
-                if model_name == 'Ridge' or model_name == 'Lasso':
-                    if 'alpha' in self.selected_model_config and not pd.isna(self.selected_model_config.get('alpha')):
-                        params_from_search['alpha'] = float(self.selected_model_config['alpha'])
-                        print(f"DEBUG: ✓ Loaded alpha={params_from_search['alpha']} for {model_name}")
+                if model_name in ['Ridge', 'Lasso']:
+                    alpha_val = _get_cfg(['alpha', 'Alpha'])
+                    if alpha_val is not None:
+                        try:
+                            params_from_search['alpha'] = float(alpha_val)
+                            print(f"DEBUG: ✓ Loaded alpha={params_from_search['alpha']} for {model_name}")
+                        except Exception as e:
+                            print(f"WARNING: Could not parse alpha='{alpha_val}': {e}")
                     else:
-                        print(f"DEBUG: ✗ Alpha not found or is NaN for {model_name}")
+                        print(f"DEBUG: ✗ Alpha not found for {model_name} (will use default)")
 
                 elif model_name == 'RandomForest':
-                    if 'n_trees' in self.selected_model_config and not pd.isna(self.selected_model_config.get('n_trees')):
-                        # Julia uses n_trees, scikit-learn uses n_estimators
-                        params_from_search['n_estimators'] = int(self.selected_model_config['n_trees'])
-                        print(f"DEBUG: Loaded n_estimators={params_from_search['n_estimators']} for RandomForest")
-                    if 'max_features' in self.selected_model_config and not pd.isna(self.selected_model_config.get('max_features')):
-                        params_from_search['max_features'] = str(self.selected_model_config['max_features'])
+                    n_est = _get_cfg(['n_estimators', 'n_trees'])
+                    if n_est is not None:
+                        try:
+                            params_from_search['n_estimators'] = int(n_est)
+                            print(f"DEBUG: Loaded n_estimators={params_from_search['n_estimators']} for RandomForest")
+                        except Exception as e:
+                            print(f"WARNING: Could not parse n_estimators='{n_est}': {e}")
+                    max_f = _get_cfg(['max_features'])
+                    if max_f is not None and str(max_f) not in ['N/A', 'missing']:
+                        params_from_search['max_features'] = str(max_f)
                         print(f"DEBUG: Loaded max_features={params_from_search['max_features']} for RandomForest")
-                    # FIX: Load max_depth if available
-                    if 'max_depth' in self.selected_model_config and not pd.isna(self.selected_model_config.get('max_depth')):
-                        max_depth_val = self.selected_model_config['max_depth']
-                        # Julia uses 'nothing' for unlimited depth, Python uses None
-                        if str(max_depth_val).lower() in ['nothing', 'none', 'null']:
-                            params_from_search['max_depth'] = None
-                            print(f"DEBUG: Set RandomForest max_depth=None (unlimited)")
-                        else:
-                            params_from_search['max_depth'] = int(max_depth_val)
-                            print(f"DEBUG: Loaded max_depth={params_from_search['max_depth']} for RandomForest")
-                    # FIX: Set random_state for reproducibility (Julia uses fixed random state)
+                    max_d = _get_cfg(['max_depth', 'MaxDepth'])
+                    if max_d is not None:
+                        try:
+                            if str(max_d).lower() in ['nothing', 'none', 'null', 'n/a']:
+                                params_from_search['max_depth'] = None
+                                print("DEBUG: Set RandomForest max_depth=None (unlimited)")
+                            else:
+                                params_from_search['max_depth'] = int(max_d)
+                                print(f"DEBUG: Loaded max_depth={params_from_search['max_depth']} for RandomForest")
+                        except Exception as e:
+                            print(f"WARNING: Could not parse max_depth='{max_d}': {e}")
+                    # Set random_state for reproducibility
                     params_from_search['random_state'] = 42
-                    print(f"DEBUG: Set RandomForest random_state=42 for reproducibility")
+                    print("DEBUG: Set RandomForest random_state=42 for reproducibility")
 
                 elif model_name == 'MLP':
-                    if 'learning_rate' in self.selected_model_config and not pd.isna(self.selected_model_config.get('learning_rate')):
-                        params_from_search['learning_rate_init'] = float(self.selected_model_config['learning_rate'])
-                        print(f"DEBUG: Loaded learning_rate_init={params_from_search['learning_rate_init']} for MLP")
-                    # Note: hidden_layers would need special handling as it's a tuple
+                    lr_init = _get_cfg(['learning_rate_init', 'LR_init', 'learning_rate'])
+                    if lr_init is not None:
+                        try:
+                            params_from_search['learning_rate_init'] = float(lr_init)
+                            print(f"DEBUG: Loaded learning_rate_init={params_from_search['learning_rate_init']} for MLP")
+                        except Exception as e:
+                            print(f"WARNING: Could not parse learning_rate_init='{lr_init}': {e}")
+                    hidden = _get_cfg(['hidden_layer_sizes', 'Hidden'])
+                    if hidden is not None:
+                        try:
+                            # Handle Hidden string like "128-64" or "64"
+                            if isinstance(hidden, str):
+                                parts = [p for p in hidden.split('-') if p.strip()]
+                                sizes = tuple(int(p) for p in parts) if len(parts) > 1 else (int(hidden),)
+                                params_from_search['hidden_layer_sizes'] = sizes
+                            else:
+                                params_from_search['hidden_layer_sizes'] = tuple(hidden) if isinstance(hidden, (list, tuple)) else (int(hidden),)
+                            print(f"DEBUG: Loaded hidden_layer_sizes={params_from_search['hidden_layer_sizes']} for MLP")
+                        except Exception as e:
+                            print(f"WARNING: Could not parse hidden_layer_sizes='{hidden}': {e}")
 
                 elif model_name == 'NeuralBoosted':
-                    if 'n_estimators' in self.selected_model_config and not pd.isna(self.selected_model_config.get('n_estimators')):
-                        params_from_search['n_estimators'] = int(self.selected_model_config['n_estimators'])
-                    if 'learning_rate' in self.selected_model_config and not pd.isna(self.selected_model_config.get('learning_rate')):
-                        params_from_search['learning_rate'] = float(self.selected_model_config['learning_rate'])
-                    if 'hidden_layer_size' in self.selected_model_config and not pd.isna(self.selected_model_config.get('hidden_layer_size')):
-                        params_from_search['hidden_layer_size'] = int(self.selected_model_config['hidden_layer_size'])
-                    if 'activation' in self.selected_model_config and not pd.isna(self.selected_model_config.get('activation')):
-                        params_from_search['activation'] = str(self.selected_model_config['activation'])
+                    n_est_nb = _get_cfg(['n_estimators'])
+                    if n_est_nb is not None:
+                        try:
+                            params_from_search['n_estimators'] = int(n_est_nb)
+                        except Exception as e:
+                            print(f"WARNING: Could not parse n_estimators='{n_est_nb}': {e}")
+                    lr_nb = _get_cfg(['learning_rate', 'LearningRate'])
+                    if lr_nb is not None:
+                        try:
+                            params_from_search['learning_rate'] = float(lr_nb)
+                        except Exception as e:
+                            print(f"WARNING: Could not parse learning_rate='{lr_nb}': {e}")
+                    hidden_nb = _get_cfg(['hidden_layer_size', 'HiddenSize'])
+                    if hidden_nb is not None:
+                        try:
+                            params_from_search['hidden_layer_size'] = int(hidden_nb)
+                        except Exception as e:
+                            print(f"WARNING: Could not parse hidden_layer_size='{hidden_nb}': {e}")
+                    act_nb = _get_cfg(['activation', 'Activation'])
+                    if act_nb is not None:
+                        params_from_search['activation'] = str(act_nb)
                     if params_from_search:
                         print(f"DEBUG: Loaded NeuralBoosted params: {params_from_search}")
 
@@ -4640,6 +7020,52 @@ Configuration:
 
         return ", ".join(ranges)
 
+    def _format_wavelengths_for_tab7(self, wavelengths_list):
+        """
+        Format wavelength list for display in Custom Model Development tab.
+
+        For small lists (<= 50), shows all wavelengths as comma-separated values.
+        For large lists (> 50), shows first 10, "...", last 10, with total count.
+
+        Args:
+            wavelengths_list (list): List of wavelength values (floats)
+
+        Returns:
+            str: Formatted wavelength string for display
+
+        Examples:
+            Small list (25 wavelengths):
+            "1520.0, 1540.0, 1560.0, ... (full list)"
+
+            Large list (200 wavelengths):
+            "1520.0, 1540.0, ..., 2480.0, 2500.0 (200 wavelengths total)"
+        """
+        if not wavelengths_list:
+            return "# No wavelengths specified"
+
+        # Sort wavelengths for consistent display
+        wls = sorted(wavelengths_list)
+        n_wls = len(wls)
+
+        if n_wls <= 50:
+            # Show all wavelengths
+            wl_strings = [f"{w:.1f}" for w in wls]
+            formatted = ", ".join(wl_strings)
+            return formatted
+        else:
+            # Show condensed format: first 10 + "..." + last 10
+            first_10 = [f"{w:.1f}" for w in wls[:10]]
+            last_10 = [f"{w:.1f}" for w in wls[-10:]]
+
+            formatted = (
+                ", ".join(first_10) +
+                ", ..., " +
+                ", ".join(last_10) +
+                f"\n\n# Total: {n_wls} wavelengths selected" +
+                f"\n# Range: {wls[0]:.1f} nm to {wls[-1]:.1f} nm"
+            )
+            return formatted
+
     def _parse_wavelength_spec(self, spec_text, available_wavelengths):
         """
         Parse wavelength specification string into list of wavelengths.
@@ -4867,16 +7293,16 @@ Configuration:
         ttk.Button(button_frame, text="Apply", command=apply_range).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side='left', padx=5)
 
-    # === Tab 7: Model Prediction Methods ===
+    # === Tab 8: Model Prediction Methods ===
 
-    def _create_tab7_model_prediction(self):
-        """Create Tab 7: Model Prediction - Load models and make predictions on new data."""
-        self.tab7 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab7, text='  🔮 Model Prediction  ')
+    def _create_tab8_model_prediction(self):
+        """Create Tab 8: Model Prediction - Load models and make predictions on new data."""
+        self.tab8 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab8, text='  🔮 Model Prediction  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab7, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab7, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab8, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab8, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
