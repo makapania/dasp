@@ -327,7 +327,7 @@ function train_weak_learner!(
             LBFGS(),
             Optim.Options(
                 iterations=max_iter,
-                f_tol=5e-4,  # Match sklearn tolerance (relaxed from 1e-4)
+                f_reltol=5e-4,  # Match sklearn tolerance (relaxed from 1e-4)
                 g_tol=1e-5,
                 show_trace=(verbose >= 2),
                 store_trace=false,
