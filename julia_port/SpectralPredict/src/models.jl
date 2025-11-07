@@ -426,9 +426,10 @@ function fit_model!(model::PLSModel, X::Matrix{Float64}, y::Vector{Float64})
     # Convert y to matrix for CCA
     Y_mat = reshape(y_centered, :, 1)
 
-    # For CCA, max components is limited by min dimension of both X and Y
-    # Since Y is univariate (1 feature), we can only extract 1 component
-    n_components = min(model.n_components, n_features, size(X, 1), size(Y_mat, 2))
+    # CRITICAL FIX: For PLS regression with univariate y, we can extract multiple components
+    # from X that explain y. Do NOT limit by size(Y_mat, 2) which is always 1.
+    # Max components is limited by: requested components, number of features, number of samples
+    n_components = min(model.n_components, n_features, size(X, 1))
 
     # Fit using the simpls algorithm equivalent
     model.model = fit(CCA, X_centered', Y_mat'; outdim=n_components)

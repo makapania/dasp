@@ -204,6 +204,11 @@ class SpectralPredictApp:
         self.y_max_bound = tk.StringVar(value="")
         self.outlier_report = None  # Store most recent outlier detection report
 
+        # Backend selection
+        self.backend_choice = tk.StringVar(value="julia")  # Default to Julia
+        self.julia_available = tk.BooleanVar(value=False)
+        self.python_available = tk.BooleanVar(value=True)
+
         # Progress tracking
         self.progress_monitor = None
         self.analysis_thread = None
@@ -213,7 +218,27 @@ class SpectralPredictApp:
         self.plot_frames = {}
         self.plot_canvases = {}
 
+        # Detect available backends
+        self._detect_available_backends()
+
         self._create_ui()
+
+    def _detect_available_backends(self):
+        """Detect which backends are available."""
+        # Check Python backend
+        try:
+            from spectral_predict.search import run_search
+            self.python_available.set(True)
+        except ImportError:
+            self.python_available.set(False)
+
+        # Check Julia backend
+        try:
+            from spectral_predict_julia_bridge import check_julia_installation
+            status = check_julia_installation()
+            self.julia_available.set(status.get('ready', False))
+        except (ImportError, Exception):
+            self.julia_available.set(False)
 
     def _configure_style(self):
         """Configure modern art gallery aesthetic."""
@@ -623,6 +648,25 @@ class SpectralPredictApp:
 
         # Progress monitor
         ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+        # === Backend Selection ===
+        ttk.Label(content_frame, text="Computation Backend", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
+        row += 1
+
+        backend_frame = ttk.Frame(content_frame)
+        backend_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
+
+        ttk.Radiobutton(backend_frame, text="Julia (Fast - 2-5x speedup, Recommended)",
+                        variable=self.backend_choice, value="julia").pack(anchor=tk.W)
+        ttk.Radiobutton(backend_frame, text="Python (Compatible - all features work)",
+                        variable=self.backend_choice, value="python").pack(anchor=tk.W)
+
+        # Status indicator
+        self.backend_status = ttk.Label(backend_frame, text="",
+                                        style='Caption.TLabel')
+        self.backend_status.pack(anchor=tk.W, pady=(5, 0))
+
+        row += 1
 
         # === Preprocessing Methods ===
         ttk.Label(content_frame, text="Preprocessing Methods", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -2455,7 +2499,16 @@ class SpectralPredictApp:
     def _run_analysis_thread(self, selected_models):
         """Run analysis in background thread."""
         try:
-            from spectral_predict_julia_bridge import run_search_julia as run_search
+            # Dynamic backend selection
+            backend = self.backend_choice.get()
+
+            if backend == "julia":
+                from spectral_predict_julia_bridge import run_search_julia as run_search
+                self._log_progress("Using Julia backend (optimized, 2-5x faster)\n")
+            else:  # python
+                from spectral_predict.search import run_search
+                self._log_progress("Using Python backend (compatible, all features work)\n")
+
             from spectral_predict.report import write_markdown_report
 
             # Determine task type
@@ -2735,7 +2788,19 @@ class SpectralPredictApp:
             self.results_df = results_df
 
             # FIX: Check if NeuralBoosted was selected but produced no results
-            selected_models = [model for model, var in self.model_checkboxes.items() if var.get()]
+            selected_models = []
+            if self.use_pls.get():
+                selected_models.append("PLS")
+            if self.use_ridge.get():
+                selected_models.append("Ridge")
+            if self.use_lasso.get():
+                selected_models.append("Lasso")
+            if self.use_randomforest.get():
+                selected_models.append("RandomForest")
+            if self.use_mlp.get():
+                selected_models.append("MLP")
+            if self.use_neuralboosted.get():
+                selected_models.append("NeuralBoosted")
             if (self.results_df is None or len(self.results_df) == 0):
                 if 'NeuralBoosted' in selected_models:
                     warning_msg = (
