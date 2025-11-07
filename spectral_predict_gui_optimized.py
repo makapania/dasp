@@ -2086,12 +2086,20 @@ class SpectralPredictApp:
             n_folds = self.tab7_folds.get()
             max_iter = self.tab7_max_iter.get()
 
+            # Ensure adequate iterations for models that need more to converge
+            if model_name == 'Lasso' and (max_iter is None or int(max_iter) < 1000):
+                print("  ⚠️  Lasso max_iter too low for reliable convergence; increasing to 2000")
+                max_iter = 2000
+            elif model_name == 'MLP' and (max_iter is None or int(max_iter) < 500):
+                print("  ⚠️  MLP max_iter too low; increasing to 500")
+                max_iter = 500
+
             print(f"  Model Type: {model_name}")
             print(f"  Task Type: {task_type}")
             print(f"  Preprocessing: {preprocess}")
             print(f"  Window Size: {window}")
             print(f"  CV Folds: {n_folds}")
-            print(f"  Max Iterations: {max_iter}")
+            print(f"  Max Iterations (effective): {max_iter}")
 
             # Parse wavelength specification
             available_wl = self.X_original.columns.astype(float).values
@@ -2139,6 +2147,21 @@ class SpectralPredictApp:
             preprocess_name = preprocess_name_map.get(preprocess, 'raw')
             deriv = deriv_map.get(preprocess, 0)
             polyorder = polyorder_map.get(preprocess, 2)
+
+            # If a model was loaded from Results, honor its Deriv setting for deriv-first pipelines.
+            # This ensures Tab 7 applies preprocessing identically to the original model.
+            if getattr(self, 'tab7_loaded_config', None) is not None:
+                config_deriv = self.tab7_loaded_config.get('Deriv', None)
+                if config_deriv is not None and not (isinstance(config_deriv, (float, np.floating)) and pd.isna(config_deriv)):
+                    try:
+                        # Only override when the GUI selection represents a derivative-based pipeline
+                        # so raw/SNV/MSC-only selections remain user-driven.
+                        if preprocess in ['deriv', 'deriv_snv', 'deriv_msc', 'snv_deriv', 'msc_deriv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'msc_sg1', 'msc_sg2']:
+                            deriv = int(config_deriv)
+                            polyorder = 3 if deriv == 2 else 2
+                            print(f"  ✓ Overriding deriv from loaded config: deriv={deriv}, polyorder={polyorder}")
+                    except Exception as e:
+                        print(f"  Warning: Could not parse Deriv from loaded config ('{config_deriv}'): {e}")
 
             print(f"  Preprocessing Config: {preprocess_name} (deriv={deriv}, polyorder={polyorder})")
 
@@ -2339,7 +2362,11 @@ class SpectralPredictApp:
 
                 if params_to_set:
                     model.set_params(**params_to_set)
-                    print(f"  Applied hyperparameters: {params_to_set}")
+                    # DIAGNOSTIC: Confirm core parameters applied
+                    if model_name in ['Ridge', 'Lasso']:
+                        print(f"  Applied hyperparameters: alpha={params_to_set.get('alpha', 'DEFAULT')} | max_iter={getattr(model, 'max_iter', 'n/a')}")
+                    else:
+                        print(f"  Applied hyperparameters: {params_to_set}")
 
                 pipe_steps = [('model', model)]
                 pipe = Pipeline(pipe_steps)
@@ -2393,7 +2420,11 @@ class SpectralPredictApp:
 
                 if params_to_set:
                     model.set_params(**params_to_set)
-                    print(f"  Applied hyperparameters: {params_to_set}")
+                    # DIAGNOSTIC: Confirm core parameters applied
+                    if model_name in ['Ridge', 'Lasso']:
+                        print(f"  Applied hyperparameters: alpha={params_to_set.get('alpha', 'DEFAULT')} | max_iter={getattr(model, 'max_iter', 'n/a')}")
+                    else:
+                        print(f"  Applied hyperparameters: {params_to_set}")
 
                 pipe_steps.append(('model', model))
                 pipe = Pipeline(pipe_steps)
@@ -3272,9 +3303,12 @@ If the problem persists, please report this error.
                     f"CRITICAL ERROR: Wavelength count mismatch!\n"
                     f"  Expected: {expected_count}, Parsed: {len(model_wavelengths)}\n"
                     f"SOLUTION: Re-run the analysis.")
-
-            available_wl_set = set(all_wavelengths)
-            invalid_wls = [w for w in model_wavelengths if w not in available_wl_set]
+            # Use tolerant membership check to handle serialization rounding
+            tol = 0.01
+            invalid_wls = [
+                w for w in model_wavelengths
+                if np.all(np.abs(all_wavelengths - w) >= tol)
+            ]
             if invalid_wls:
                 raise ValueError(
                     f"CRITICAL ERROR: Invalid wavelengths in 'all_vars'!\n"
@@ -3422,11 +3456,16 @@ If the problem persists, please report this error.
 
             print(f"✓ Hyperparameter widgets populated")
 
-        if self.y is not None:
-            if self.y.nunique() < 10:
-                self.tab7_task_type.set('classification')
-            else:
-                self.tab7_task_type.set('regression')
+        # Prefer explicit task from Results config; fallback to heuristic
+        task_field = config.get('Task', None)
+        if isinstance(task_field, str) and task_field in ['regression', 'classification']:
+            print(f"✓ Task type loaded from config: {task_field}")
+            self.tab7_task_type.set(task_field)
+        else:
+            if self.y is not None:
+                inferred = 'classification' if self.y.nunique() < 10 else 'regression'
+                print(f"⚠️  Task type not in config; inferring from y.nunique(): {inferred}")
+                self.tab7_task_type.set(inferred)
 
         # Convert preprocessing names
         deriv = config.get('Deriv', None)
