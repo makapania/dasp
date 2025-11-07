@@ -2400,14 +2400,15 @@ class SpectralPredictApp:
             # ===================================================================
             print(f"\n[STEP 4] Running {n_folds}-fold cross-validation...")
 
-            # CRITICAL: Use shuffle=False for determinism
+            # CRITICAL: Use shuffle=True to match Results tab behavior
+            # Fixed: shuffle=False was causing catastrophic R² differences (issue #DASP-001)
             y_array = y_series.values
             if task_type == "regression":
-                cv = KFold(n_splits=n_folds, shuffle=False)
-                print("  Using KFold (shuffle=False) for deterministic splits")
+                cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+                print("  Using KFold (shuffle=True, random_state=42) to match Results tab")
             else:
-                cv = StratifiedKFold(n_splits=n_folds, shuffle=False)
-                print("  Using StratifiedKFold (shuffle=False) for deterministic splits")
+                cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+                print("  Using StratifiedKFold (shuffle=True, random_state=42) to match Results tab")
 
             # Collect metrics for each fold
             fold_metrics = []
