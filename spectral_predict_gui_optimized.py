@@ -153,14 +153,14 @@ class SpectralPredictApp:
 
         # Model selection
         self.use_pls = tk.BooleanVar(value=True)
-        self.use_ridge = tk.BooleanVar(value=False)  # Default off (baseline model)
-        self.use_lasso = tk.BooleanVar(value=False)  # Default off (baseline model)
+        self.use_ridge = tk.BooleanVar(value=True)  # User requested default
+        self.use_lasso = tk.BooleanVar(value=True)  # User requested default
         self.use_randomforest = tk.BooleanVar(value=True)
-        self.use_mlp = tk.BooleanVar(value=True)
-        self.use_neuralboosted = tk.BooleanVar(value=True)
+        self.use_mlp = tk.BooleanVar(value=False)  # Off by default per user request
+        self.use_neuralboosted = tk.BooleanVar(value=False)  # Off by default per user request
 
         # Preprocessing method selection
-        self.use_raw = tk.BooleanVar(value=True)
+        self.use_raw = tk.BooleanVar(value=False)  # Off by default per user request
         self.use_snv = tk.BooleanVar(value=True)
         self.use_msc = tk.BooleanVar(value=False)  # MSC (Multiplicative Scatter Correction)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
@@ -2221,7 +2221,9 @@ class SpectralPredictApp:
                 y_series = y_series.copy()
 
             # CRITICAL FIX #1: Exclude validation set (if enabled)
-            if self.validation_enabled.get() and self.validation_indices:
+            # BUT: If this model was loaded from Results tab, DON'T exclude validation set
+            # because Results tab trains on ALL data (no validation exclusion)
+            if self.validation_enabled.get() and self.validation_indices and self.tab7_loaded_config is None:
                 initial_samples = len(X_base_df)
                 X_base_df = X_base_df[~X_base_df.index.isin(self.validation_indices)]
                 y_series = y_series[~y_series.index.isin(self.validation_indices)]
@@ -2238,7 +2240,10 @@ class SpectralPredictApp:
 
                 print(f"  Excluding {n_removed} validation samples")
                 print(f"  Calibration: {n_cal} samples | Validation: {n_val} samples")
-                print(f"  This matches the data split used in the Results tab")
+                print(f"  This matches the data split used for NEW model development")
+            elif self.tab7_loaded_config is not None:
+                print(f"  Model loaded from Results tab - using ALL data (no validation exclusion)")
+                print(f"  This matches how Results tab trained the original model")
 
             # CRITICAL FIX #2: Reset DataFrame index
             X_base_df = X_base_df.reset_index(drop=True)
@@ -2583,7 +2588,7 @@ Configuration:
 
 Processing Details:
   Path: {'Full-spectrum preprocessing (derivative+subset)' if use_full_spectrum_preprocessing else 'Standard (subset then preprocess)'}
-  CV Strategy: {'KFold' if task_type == 'regression' else 'StratifiedKFold'} (shuffle=False, deterministic)
+  CV Strategy: {'KFold' if task_type == 'regression' else 'StratifiedKFold'} (shuffle=True, random_state=42)
   Validation Set: {'Excluded' if self.validation_enabled.get() else 'Not used'}
 
 The model is ready to be saved. Click 'Save Model' to export as .dasp file.
@@ -2609,7 +2614,7 @@ Configuration:
 
 Processing Details:
   Path: {'Full-spectrum preprocessing (derivative+subset)' if use_full_spectrum_preprocessing else 'Standard (subset then preprocess)'}
-  CV Strategy: {'KFold' if task_type == 'regression' else 'StratifiedKFold'} (shuffle=False, deterministic)
+  CV Strategy: {'KFold' if task_type == 'regression' else 'StratifiedKFold'} (shuffle=True, random_state=42)
   Validation Set: {'Excluded' if self.validation_enabled.get() else 'Not used'}
 
 The model is ready to be saved. Click 'Save Model' to export as .dasp file.
@@ -6617,15 +6622,14 @@ Performance (Classification):
             from sklearn.pipeline import Pipeline
 
             # Prepare cross-validation
-            # CRITICAL FIX: Use shuffle=False to ensure identical fold splits as Julia backend
-            # Julia and Python use different RNG algorithms, so even with same seed (42),
-            # they create different splits when shuffle=True. Using shuffle=False ensures
-            # deterministic, data-order-based folds that match between backends.
+            # CRITICAL: Use shuffle=True to match Results tab behavior
+            # Fixed: shuffle=False was causing catastrophic R² differences (issue #DASP-001)
+            # Results tab uses shuffle=True, so Tab 7 must match to get consistent results
             y_array = y_series.values
             if task_type == "regression":
-                cv = KFold(n_splits=n_folds, shuffle=False)  # No shuffle for consistency
+                cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
             else:
-                cv = StratifiedKFold(n_splits=n_folds, shuffle=False)  # No shuffle for consistency
+                cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
             if use_full_spectrum_preprocessing:
                 # === PATH A: Derivative + Subset (matches search.py lines 434-449) ===
