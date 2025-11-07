@@ -166,7 +166,7 @@ class SpectralPredictApp:
         self.use_msc = tk.BooleanVar(value=False)  # MSC (Multiplicative Scatter Correction)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
-        self.use_deriv_snv = tk.BooleanVar(value=False)  # deriv_snv (less common combo)
+        self.use_deriv_snv = tk.BooleanVar(value=True)  # deriv_snv (derivative first, then SNV)
 
         # Subset Analysis options
         self.enable_variable_subsets = tk.BooleanVar(value=True)  # Top-N variable analysis
