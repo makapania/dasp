@@ -2312,6 +2312,9 @@ class SpectralPredictApp:
                 print(f"  Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
                 X_full_preprocessed = prep_pipeline.fit_transform(X_full)
 
+                # Get all wavelengths (needed for both paths and later storage)
+                all_wavelengths = X_base_df.columns.astype(float).values
+
                 # CRITICAL: Use VarSelectionIndices if available (importance-based selection)
                 # Otherwise fall back to wavelength-based lookup
                 var_selection_indices = self.tab7_loaded_config.get('_var_selection_indices') if self.tab7_loaded_config else None
@@ -2326,7 +2329,6 @@ class SpectralPredictApp:
                     # PATH A2: Region-based or sequential selection
                     # Find indices of selected wavelengths in original data
                     print(f"  Using wavelength-based subsetting (region/sequential selection)")
-                    all_wavelengths = X_base_df.columns.astype(float).values
                     wavelength_indices = []
                     for wl in selected_wl:
                         idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
