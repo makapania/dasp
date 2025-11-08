@@ -3346,10 +3346,13 @@ If the problem persists, please report this error.
             try:
                 indices_str = str(config['VarSelectionIndices']).strip()
                 # Parse list of integers from string representation
-                var_selection_indices = ast.literal_eval(indices_str)
-                if isinstance(var_selection_indices, list) and len(var_selection_indices) == len(model_wavelengths):
-                    print(f"✓ VarSelectionIndices loaded: {len(var_selection_indices)} indices")
-                    print(f"  Indices: {var_selection_indices[:10]}{'...' if len(var_selection_indices) > 10 else ''}")
+                var_selection_indices_julia = ast.literal_eval(indices_str)
+                if isinstance(var_selection_indices_julia, list) and len(var_selection_indices_julia) == len(model_wavelengths):
+                    # CRITICAL: Convert Julia 1-based indices to Python 0-based indices
+                    var_selection_indices = [idx - 1 for idx in var_selection_indices_julia]
+                    print(f"✓ VarSelectionIndices loaded: {len(var_selection_indices)} indices (Julia 1-based → Python 0-based)")
+                    print(f"  Julia indices: {var_selection_indices_julia[:10]}{'...' if len(var_selection_indices_julia) > 10 else ''}")
+                    print(f"  Python indices: {var_selection_indices[:10]}{'...' if len(var_selection_indices) > 10 else ''}")
                 else:
                     print(f"⚠️  VarSelectionIndices invalid (length mismatch or wrong type), ignoring")
                     var_selection_indices = None
