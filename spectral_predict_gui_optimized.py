@@ -5392,7 +5392,10 @@ Configuration:
         self.inst_summary_text.config(state='normal')
         self.inst_summary_text.delete('1.0', 'end')
 
-        summary = f"""Instrument ID: {profile.instrument_id}
+        # Check if data is interpolated
+        interp_flag = " [INTERPOLATED]" if profile.is_interpolated else ""
+
+        summary = f"""Instrument ID: {profile.instrument_id}{interp_flag}
 Vendor: {profile.vendor or 'N/A'}
 Model: {profile.model or 'N/A'}
 Description: {profile.description or 'N/A'}
@@ -5405,7 +5408,13 @@ Data-Driven Metrics:
   Roughness (R): {profile.roughness_R:.6f}
   Detail Score (R/Δλ): {profile.detail_score:.4f}
 
+Peak-Based Resolution Metrics:
+  Average Peak Count: {profile.peak_count if profile.peak_count is not None else 'N/A'}
+  Average Peak FWHM: {f'{profile.avg_peak_fwhm:.4f} nm' if profile.avg_peak_fwhm else 'N/A'}
+  Average Peak Sharpness: {f'{profile.avg_peak_sharpness:.4f}' if profile.avg_peak_sharpness else 'N/A'}
+
 Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else "Lower detail/resolution"}
+Note: {"Uniform wavelength spacing detected - data appears interpolated" if profile.is_interpolated else "Non-uniform spacing - likely native measurements"}
 """
         self.inst_summary_text.insert('1.0', summary)
         self.inst_summary_text.config(state='disabled')
@@ -5552,28 +5561,35 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
 
         messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
 
-    def _browse_ct_spectra_dir(self):
-        """Browse for standardization spectra directory."""
-        directory = filedialog.askdirectory(title="Select Standardization Spectra Directory")
+    def _browse_ct_master_spectra_dir(self):
+        """Browse for master instrument standardization spectra directory."""
+        directory = filedialog.askdirectory(title="Select Master Instrument Spectra Directory")
         if directory:
-            self.ct_spectra_dir_var.set(directory)
+            self.ct_master_spectra_dir_var.set(directory)
+
+    def _browse_ct_slave_spectra_dir(self):
+        """Browse for slave instrument standardization spectra directory."""
+        directory = filedialog.askdirectory(title="Select Slave Instrument Spectra Directory")
+        if directory:
+            self.ct_slave_spectra_dir_var.set(directory)
 
     def _load_ct_paired_spectra(self):
-        """Load paired standardization spectra for master and slave instruments."""
+        """Load paired standardization spectra for master and slave instruments from separate directories."""
         if not HAS_CALIBRATION_TRANSFER:
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
         master_id = self.ct_master_instrument_id.get()
         slave_id = self.ct_slave_instrument_id.get()
-        spectra_dir = self.ct_spectra_dir_var.get()
+        master_dir = self.ct_master_spectra_dir_var.get()
+        slave_dir = self.ct_slave_spectra_dir_var.get()
 
         if not master_id or not slave_id:
             messagebox.showwarning("Warning", "Please select both master and slave instruments")
             return
 
-        if not spectra_dir:
-            messagebox.showwarning("Warning", "Please browse and select spectra directory")
+        if not master_dir or not slave_dir:
+            messagebox.showwarning("Warning", "Please browse and select both master and slave spectra directories")
             return
 
         if master_id not in self.instrument_profiles or slave_id not in self.instrument_profiles:
@@ -5591,9 +5607,9 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             return
 
         try:
-            # Load spectra using the helper from Tab 1
-            wavelengths_master, X_master = self._load_spectra_from_directory(spectra_dir)
-            wavelengths_slave, X_slave = self._load_spectra_from_directory(spectra_dir)
+            # Load spectra from SEPARATE directories
+            wavelengths_master, X_master = self._load_spectra_from_directory(master_dir)
+            wavelengths_slave, X_slave = self._load_spectra_from_directory(slave_dir)
 
             # VALIDATION 1: Same Sample Count Check
             if X_master.shape[0] != X_slave.shape[0]:
@@ -5683,7 +5699,10 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             self.ct_spectra_info_text.insert('1.0', info_text)
             self.ct_spectra_info_text.config(state='disabled')
 
-            messagebox.showinfo("Success", "Paired spectra loaded and resampled to common grid")
+            # Show preview plots immediately after loading
+            self._plot_paired_spectra_preview(master_id, slave_id)
+
+            messagebox.showinfo("Success", "Paired spectra loaded and resampled to common grid.\n\nPreview plots displayed.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load spectra:\n{str(e)}")
 
@@ -6248,6 +6267,79 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
 
+    def _plot_paired_spectra_preview(self, master_id, slave_id):
+        """
+        Plot preview comparison of master and slave spectra immediately after loading.
+
+        Shows:
+        1. Master spectra overlay (mean ± std)
+        2. Slave spectra overlay (mean ± std)
+        3. Side-by-side wavelength range comparison
+        """
+        if not HAS_MATPLOTLIB:
+            return
+
+        import matplotlib.pyplot as plt
+
+        # Get data
+        wl = self.ct_wavelengths_common
+        X_master = self.ct_X_master_common
+        X_slave = self.ct_X_slave_common
+
+        # Compute statistics
+        master_mean = np.mean(X_master, axis=0)
+        master_std = np.std(X_master, axis=0)
+        slave_mean = np.mean(X_slave, axis=0)
+        slave_std = np.std(X_slave, axis=0)
+
+        # Create figure with 2 subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        # Plot 1: Master spectra
+        ax1.plot(wl, master_mean, 'b-', linewidth=2, label='Mean')
+        ax1.fill_between(wl, master_mean - master_std, master_mean + master_std,
+                        alpha=0.3, color='b', label='±1 Std')
+        ax1.set_xlabel('Wavelength (nm)', fontsize=11)
+        ax1.set_ylabel('Reflectance', fontsize=11)
+        ax1.set_title(f'Master: {master_id}\n({X_master.shape[0]} spectra)', fontsize=12, fontweight='bold')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Slave spectra
+        ax2.plot(wl, slave_mean, 'r-', linewidth=2, label='Mean')
+        ax2.fill_between(wl, slave_mean - slave_std, slave_mean + slave_std,
+                        alpha=0.3, color='r', label='±1 Std')
+        ax2.set_xlabel('Wavelength (nm)', fontsize=11)
+        ax2.set_ylabel('Reflectance', fontsize=11)
+        ax2.set_title(f'Slave: {slave_id}\n({X_slave.shape[0]} spectra)', fontsize=12, fontweight='bold')
+        ax2.legend(loc='best')
+        ax2.grid(True, alpha=0.3)
+
+        fig.suptitle('Paired Spectra Preview - Before Calibration Transfer', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+
+        # Create a second figure for wavelength range comparison
+        fig2, ax = plt.subplots(figsize=(10, 4))
+
+        # Show overlaid comparison
+        for i in range(min(10, X_master.shape[0])):  # Plot first 10 samples
+            ax.plot(wl, X_master[i, :], 'b-', alpha=0.3, linewidth=0.5)
+            ax.plot(wl, X_slave[i, :], 'r-', alpha=0.3, linewidth=0.5)
+
+        # Add means on top
+        ax.plot(wl, master_mean, 'b-', linewidth=2, label=f'Master ({master_id})')
+        ax.plot(wl, slave_mean, 'r-', linewidth=2, label=f'Slave ({slave_id})')
+
+        ax.set_xlabel('Wavelength (nm)', fontsize=11)
+        ax.set_ylabel('Reflectance', fontsize=11)
+        ax.set_title('Master vs. Slave Spectra Overlay (First 10 Samples + Means)', fontsize=12, fontweight='bold')
+        ax.legend(loc='best')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
     def _plot_transfer_quality(self, method):
         """Plot transfer quality diagnostics for Section C.
 
@@ -6706,25 +6798,40 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
         ttk.Button(inst_grid, text="Refresh from Registry",
                   command=self._refresh_ct_instrument_combos).grid(row=0, column=4, padx=(20, 0))
 
-        # Load paired spectra
+        # Load paired spectra from TWO separate directories
         load_spectra_frame = ttk.Frame(section_b, style='TFrame')
         load_spectra_frame.pack(fill='x', pady=(10, 0))
 
-        ttk.Label(load_spectra_frame, text="Standardization Spectra Directory:",
+        ttk.Label(load_spectra_frame, text="Standardization Spectra Directories (one per instrument):",
                  style='TLabel').pack(anchor='w', pady=(0, 5))
 
-        spectra_entry_frame = ttk.Frame(load_spectra_frame, style='TFrame')
-        spectra_entry_frame.pack(fill='x')
+        # Master spectra directory
+        master_dir_frame = ttk.Frame(load_spectra_frame, style='TFrame')
+        master_dir_frame.pack(fill='x', pady=(0, 5))
 
-        self.ct_spectra_dir_var = tk.StringVar()
-        spectra_entry = ttk.Entry(spectra_entry_frame, textvariable=self.ct_spectra_dir_var,
-                                 width=60, state='readonly')
-        spectra_entry.pack(side='left', padx=(0, 10))
+        ttk.Label(master_dir_frame, text="Master Spectra:", style='TLabel', width=15).pack(side='left')
+        self.ct_master_spectra_dir_var = tk.StringVar()
+        master_entry = ttk.Entry(master_dir_frame, textvariable=self.ct_master_spectra_dir_var,
+                                width=50, state='readonly')
+        master_entry.pack(side='left', padx=(0, 10))
+        ttk.Button(master_dir_frame, text="Browse...",
+                  command=self._browse_ct_master_spectra_dir).pack(side='left')
 
-        ttk.Button(spectra_entry_frame, text="Browse Directory...",
-                  command=self._browse_ct_spectra_dir).pack(side='left', padx=(0, 10))
-        ttk.Button(spectra_entry_frame, text="Load Paired Spectra",
-                  command=self._load_ct_paired_spectra, style='Accent.TButton').pack(side='left')
+        # Slave spectra directory
+        slave_dir_frame = ttk.Frame(load_spectra_frame, style='TFrame')
+        slave_dir_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(slave_dir_frame, text="Slave Spectra:", style='TLabel', width=15).pack(side='left')
+        self.ct_slave_spectra_dir_var = tk.StringVar()
+        slave_entry = ttk.Entry(slave_dir_frame, textvariable=self.ct_slave_spectra_dir_var,
+                               width=50, state='readonly')
+        slave_entry.pack(side='left', padx=(0, 10))
+        ttk.Button(slave_dir_frame, text="Browse...",
+                  command=self._browse_ct_slave_spectra_dir).pack(side='left')
+
+        # Load button
+        ttk.Button(load_spectra_frame, text="Load Paired Spectra",
+                  command=self._load_ct_paired_spectra, style='Accent.TButton').pack(pady=(5, 0))
 
         # Spectra info
         self.ct_spectra_info_text = tk.Text(section_b, height=3, width=80, state='disabled',

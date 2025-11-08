@@ -25,7 +25,8 @@
       "Bash(/tmp/recent_gui.py)",
       "Bash(recent_gui_temp.py)",
       "Bash(diagnostics_temp.py)",
-      "Bash(git worktree:*)"
+      "Bash(git worktree:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []
