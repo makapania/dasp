@@ -225,6 +225,11 @@ class SpectralPredictApp:
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
 
+        # Random Forest options
+        self.rf_n_trees_200 = tk.BooleanVar(value=True)  # Default
+        self.rf_n_trees_500 = tk.BooleanVar(value=True)  # Default
+        self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
+
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
         self.varsel_spa = tk.BooleanVar(value=False)
@@ -254,6 +259,9 @@ class SpectralPredictApp:
         # Plotting
         self.plot_frames = {}
         self.plot_canvases = {}
+
+        # Configure event debouncing (prevent slowdown on tab switches)
+        self._configure_timers = {}
 
         self._create_ui()
 
@@ -318,7 +326,7 @@ class SpectralPredictApp:
         scrollbar = ttk.Scrollbar(self.tab1, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab1", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -461,7 +469,7 @@ class SpectralPredictApp:
         scrollbar = ttk.Scrollbar(self.tab2, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab2", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -621,7 +629,7 @@ class SpectralPredictApp:
         scrollbar = ttk.Scrollbar(self.tab3, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab3", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -867,6 +875,26 @@ class SpectralPredictApp:
         ttk.Label(advanced_frame, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
+        # Random Forest Hyperparameters
+        rf_frame = ttk.LabelFrame(content_frame, text="Random Forest Hyperparameters", padding="20")
+        rf_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # n_estimators (number of trees) options
+        ttk.Label(rf_frame, text="Number of Trees (n_estimators):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
+        rf_trees_frame = ttk.Frame(rf_frame)
+        rf_trees_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(rf_trees_frame, text="200 ⭐", variable=self.rf_n_trees_200).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="500 ⭐", variable=self.rf_n_trees_500).grid(row=0, column=1, padx=5)
+        ttk.Label(rf_trees_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(rf_trees_frame, textvariable=self.rf_n_trees_custom, width=8).grid(row=0, column=3, padx=5)
+        ttk.Label(rf_trees_frame, text="(default: 200, 500)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # Info label
+        ttk.Label(rf_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
                        variable=self.export_preprocessed_csv).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
@@ -1053,7 +1081,7 @@ class SpectralPredictApp:
         scrollbar = ttk.Scrollbar(self.tab6, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab6", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -1496,8 +1524,16 @@ class SpectralPredictApp:
 
             ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-            # Align data
-            X_aligned, y_aligned = align_xy(X, ref, self.spectral_file_column.get(), self.target_column.get())
+            # Align data and get alignment info
+            X_aligned, y_aligned, alignment_info = align_xy(
+                X, ref,
+                self.spectral_file_column.get(),
+                self.target_column.get(),
+                return_alignment_info=True
+            )
+
+            # Show alignment report to user
+            self._show_alignment_report(alignment_info)
 
             # Store original unfiltered data
             self.X_original = X_aligned
@@ -1528,6 +1564,83 @@ class SpectralPredictApp:
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to load data:\n{e}")
             self.tab1_status.config(text="✗ Error loading data")
+
+    def _show_alignment_report(self, alignment_info):
+        """Display a report showing which files were matched and which were excluded."""
+        matched = alignment_info['matched_ids']
+        unmatched_spectra = alignment_info['unmatched_spectra']
+        unmatched_ref = alignment_info['unmatched_reference']
+        n_nan = alignment_info['n_nan_dropped']
+        fuzzy = alignment_info['used_fuzzy_matching']
+
+        # Build report message
+        report_lines = [
+            "=== DATA ALIGNMENT REPORT ===\n",
+            f"✓ Successfully matched: {len(matched)} samples",
+        ]
+
+        if fuzzy:
+            report_lines.append("  (Used fuzzy filename matching)")
+
+        if n_nan > 0:
+            report_lines.append(f"\n⚠️ Dropped {n_nan} samples with missing target values")
+
+        if unmatched_spectra:
+            report_lines.append(f"\n❌ Spectral files WITHOUT reference data ({len(unmatched_spectra)}):")
+            # Show first 10, then indicate if there are more
+            show_count = min(10, len(unmatched_spectra))
+            for i in range(show_count):
+                report_lines.append(f"   • {unmatched_spectra[i]}")
+            if len(unmatched_spectra) > show_count:
+                report_lines.append(f"   ... and {len(unmatched_spectra) - show_count} more")
+
+        if unmatched_ref:
+            report_lines.append(f"\n⚠️ Reference entries WITHOUT spectral data ({len(unmatched_ref)}):")
+            show_count = min(10, len(unmatched_ref))
+            for i in range(show_count):
+                report_lines.append(f"   • {unmatched_ref[i]}")
+            if len(unmatched_ref) > show_count:
+                report_lines.append(f"   ... and {len(unmatched_ref) - show_count} more")
+
+        report_lines.append(f"\n{'='*50}")
+        report_lines.append(f"\nFinal dataset: {len(matched)} samples ready for analysis")
+
+        report_text = "\n".join(report_lines)
+
+        # Print to console for reference
+        print("\n" + report_text)
+
+        # Show dialog only if there are mismatches (to avoid annoying popups for perfect matches)
+        if unmatched_spectra or unmatched_ref or n_nan > 0:
+            # Create a custom dialog with scrollable text
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Data Alignment Report")
+            dialog.geometry("600x500")
+
+            # Add text widget with scrollbar
+            frame = ttk.Frame(dialog, padding=10)
+            frame.pack(fill='both', expand=True)
+
+            text_widget = tk.Text(frame, wrap='word', font=('Courier', 10))
+            scrollbar = ttk.Scrollbar(frame, command=text_widget.yview)
+            text_widget.config(yscrollcommand=scrollbar.set)
+
+            text_widget.pack(side='left', fill='both', expand=True)
+            scrollbar.pack(side='right', fill='y')
+
+            # Insert report text
+            text_widget.insert('1.0', report_text)
+            text_widget.config(state='disabled')  # Read-only
+
+            # Add OK button
+            button_frame = ttk.Frame(dialog, padding=10)
+            button_frame.pack(fill='x')
+            ok_button = ttk.Button(button_frame, text="OK", command=dialog.destroy)
+            ok_button.pack()
+
+            # Center dialog on parent
+            dialog.transient(self.root)
+            dialog.grab_set()
 
     def _apply_wavelength_filter(self):
         """Apply wavelength filtering to X_original and store in self.X."""
@@ -1666,13 +1779,23 @@ class SpectralPredictApp:
             list of indices to include in validation set
         """
         from scipy.spatial.distance import pdist, squareform
+        from sklearn.preprocessing import LabelEncoder
 
         X_array = X.values
-        y_array = y.values.reshape(-1, 1)
+        y_values = y.values
         n_total = len(X_array)
 
         if n_samples >= n_total:
             raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+
+        # Handle categorical y values by encoding them
+        if y_values.dtype == object or not np.issubdtype(y_values.dtype, np.number):
+            # Categorical data - encode to numeric
+            le = LabelEncoder()
+            y_array = le.fit_transform(y_values).reshape(-1, 1).astype(float)
+        else:
+            # Numeric data - use as is
+            y_array = y_values.reshape(-1, 1).astype(float)
 
         # Normalize X and y to [0, 1]
         X_norm = (X_array - X_array.min(axis=0)) / (X_array.max(axis=0) - X_array.min(axis=0) + 1e-10)
@@ -2448,8 +2571,13 @@ class SpectralPredictApp:
 
             # Add response variable as first column
             target_name = self.target_column.get()
-            df_export = pd.DataFrame({target_name: self.y})
-            df_export = pd.concat([df_export, df_preprocessed], axis=1)
+            # Include sample ID column so user knows which samples are in the export
+            sample_id_col = self.spectral_file_column.get()
+            df_export = pd.DataFrame({
+                sample_id_col: self.y.index,
+                target_name: self.y.values
+            })
+            df_export = pd.concat([df_export, df_preprocessed.reset_index(drop=True)], axis=1)
 
             # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2458,7 +2586,7 @@ class SpectralPredictApp:
 
             csv_path = output_dir / f"preprocessed_data_{target_name}_w{window_size}_{timestamp}.csv"
 
-            # Save to CSV
+            # Save to CSV (index=False since we already included sample IDs as a column)
             df_export.to_csv(csv_path, index=False)
 
             # Log success
@@ -2632,6 +2760,30 @@ class SpectralPredictApp:
             if not learning_rates:
                 learning_rates = [0.1, 0.2]
 
+            # Collect Random Forest n_estimators (number of trees)
+            rf_n_trees_list = []
+            if self.rf_n_trees_200.get():
+                rf_n_trees_list.append(200)
+            if self.rf_n_trees_500.get():
+                rf_n_trees_list.append(500)
+
+            # Add custom value if provided
+            custom_trees = self.rf_n_trees_custom.get().strip()
+            if custom_trees:
+                try:
+                    custom_val = int(custom_trees)
+                    if custom_val > 0 and custom_val not in rf_n_trees_list:
+                        rf_n_trees_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom RF n_trees value '{custom_trees}', ignoring")
+
+            # Default to [200, 500] if none selected
+            if not rf_n_trees_list:
+                rf_n_trees_list = [200, 500]
+
+            # Sort for consistent ordering
+            rf_n_trees_list = sorted(rf_n_trees_list)
+
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
@@ -2639,8 +2791,9 @@ class SpectralPredictApp:
             self._log_progress(f"Models: {', '.join(selected_models)}")
             self._log_progress(f"Preprocessing: {', '.join([k for k, v in preprocessing_methods.items() if v])}")
             self._log_progress(f"Window sizes: {window_sizes}")
-            self._log_progress(f"n_estimators: {n_estimators_list}")
-            self._log_progress(f"Learning rates: {learning_rates}")
+            self._log_progress(f"NeuralBoosted n_estimators: {n_estimators_list}")
+            self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
+            self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
             self._log_progress(f"\n** SUBSET ANALYSIS SETTINGS **")
             self._log_progress(f"Variable subsets: {'ENABLED' if enable_variable_subsets else 'DISABLED'}")
             self._log_progress(f"  enable_variable_subsets value: {enable_variable_subsets}")
@@ -2723,6 +2876,28 @@ class SpectralPredictApp:
                 selected_varsel_methods = ['importance']
                 self._log_progress("⚠️ No variable selection method selected, defaulting to 'importance'")
 
+            # SAFETY CHECK: Ensure X and y are properly aligned
+            if len(X_filtered) != len(y_filtered):
+                error_msg = (
+                    f"Data alignment error: X has {len(X_filtered)} samples but y has {len(y_filtered)} samples.\n\n"
+                    f"This usually happens when:\n"
+                    f"1. The spectral files and CSV reference data don't match properly\n"
+                    f"2. Some samples have missing target values\n\n"
+                    f"Try reloading the data or check that the ID column in your CSV matches the spectral file names."
+                )
+                self._log_progress(f"\n❌ ERROR: {error_msg}")
+                messagebox.showerror("Alignment Error", error_msg)
+                raise ValueError(error_msg)
+
+            # Ensure indices match
+            if not X_filtered.index.equals(y_filtered.index):
+                self._log_progress("⚠️ Warning: Realigning X and y indices to ensure consistency...")
+                # Realign by taking only common indices
+                common_idx = X_filtered.index.intersection(y_filtered.index)
+                X_filtered = X_filtered.loc[common_idx]
+                y_filtered = y_filtered.loc[common_idx]
+                self._log_progress(f"✓ Realigned to {len(common_idx)} common samples")
+
             results_df = run_search(
                 X_filtered,
                 y_filtered,
@@ -2736,6 +2911,7 @@ class SpectralPredictApp:
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,
                 learning_rates=learning_rates,
+                rf_n_trees_list=rf_n_trees_list,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
@@ -2779,9 +2955,10 @@ class SpectralPredictApp:
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
+            error_str = str(e)
             self._log_progress(f"\n✗ Error: {e}\n{error_msg}")
             self.root.after(0, lambda: self.progress_status.config(text="✗ Analysis failed"))
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{e}"))
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{error_str}"))
 
     def _progress_callback(self, info):
         """Handle progress updates."""
@@ -2854,9 +3031,56 @@ class SpectralPredictApp:
         self.progress_text.insert(tk.END, message + "\n")
         self.progress_text.see(tk.END)
 
+        # Limit text widget to last 2000 lines to prevent performance degradation
+        # This keeps memory usage low and tab switching fast
+        line_count = int(self.progress_text.index('end-1c').split('.')[0])
+        if line_count > 2000:
+            # Delete oldest lines, keeping only the last 2000
+            self.progress_text.delete('1.0', f'{line_count - 2000}.0')
+
+    def _debounced_configure_scrollregion(self, canvas_id, canvas):
+        """
+        Debounced handler for canvas Configure events to prevent slowdowns during tab switches.
+        Only updates scrollregion after configure events have stopped firing for 100ms.
+        """
+        # Cancel any pending timer for this canvas
+        if canvas_id in self._configure_timers:
+            self.root.after_cancel(self._configure_timers[canvas_id])
+
+        # Schedule new update after 100ms delay
+        def update_scrollregion():
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except:
+                pass  # Canvas may have been destroyed
+            finally:
+                if canvas_id in self._configure_timers:
+                    del self._configure_timers[canvas_id]
+
+        self._configure_timers[canvas_id] = self.root.after(100, update_scrollregion)
+
     def _on_tab_changed(self, event):
         """Handle tab change events."""
-        pass  # Placeholder for future enhancements
+        # Cancel all pending scroll region updates for non-visible tabs
+        # This prevents unnecessary recalculations when switching tabs
+        current_tab = self.notebook.index(self.notebook.select())
+
+        # Only keep timers for the current tab, cancel others
+        tabs_to_cancel = []
+        for canvas_id in list(self._configure_timers.keys()):
+            # Extract tab number from canvas_id (e.g., "tab1" -> 0)
+            if canvas_id.startswith("tab"):
+                try:
+                    tab_num = int(canvas_id.replace("tab", "")) - 1
+                    if tab_num != current_tab:
+                        self.root.after_cancel(self._configure_timers[canvas_id])
+                        tabs_to_cancel.append(canvas_id)
+                except (ValueError, AttributeError):
+                    pass
+
+        # Remove cancelled timers
+        for canvas_id in tabs_to_cancel:
+            del self._configure_timers[canvas_id]
 
     def _show_help(self):
         """Show help dialog."""
@@ -2931,11 +3155,25 @@ class SpectralPredictApp:
         for item in self.results_tree.get_children():
             self.results_tree.delete(item)
 
-        # Set up columns
         columns = list(results_df.columns)
-        self.results_tree['columns'] = columns
 
-        # Configure column headings with sort indicators
+        # Only configure columns on first load (not during sorting) to prevent jumping
+        if not is_sorted:
+            # Set up columns
+            self.results_tree['columns'] = columns
+
+            # Configure column widths and anchors
+            for col in columns:
+                # Set column width based on content
+                if col in ['Model', 'Preprocess', 'Subset']:
+                    width = 120
+                elif col in ['top_vars']:
+                    width = 200
+                else:
+                    width = 80
+                self.results_tree.column(col, width=width, anchor='center')
+
+        # Always update column headings (for sort indicators and click bindings)
         for col in columns:
             # Add sort indicator if this column is currently sorted
             header_text = col
@@ -2948,15 +3186,6 @@ class SpectralPredictApp:
             # Bind click event to sort by this column
             self.results_tree.heading(col, text=header_text,
                                      command=lambda c=col: self._sort_results_by_column(c))
-
-            # Set column width based on content
-            if col in ['Model', 'Preprocess', 'Subset']:
-                width = 120
-            elif col in ['top_vars']:
-                width = 200
-            else:
-                width = 80
-            self.results_tree.column(col, width=width, anchor='center')
 
         # Insert data rows
         for idx, row in results_df.iterrows():
@@ -4566,7 +4795,7 @@ Configuration:
         scrollbar = ttk.Scrollbar(self.tab7, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab7", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -5233,7 +5462,7 @@ Configuration:
 
         scrollable_frame.bind(
             "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            lambda e: self._debounced_configure_scrollregion("tab8", canvas)
         )
 
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
@@ -6722,7 +6951,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
 
         scrollable_frame.bind(
             "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            lambda e: self._debounced_configure_scrollregion("tab9", canvas)
         )
 
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")

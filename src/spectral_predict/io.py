@@ -106,6 +106,20 @@ def read_reference_csv(path, id_column):
     if id_column not in df.columns:
         raise ValueError(f"Column '{id_column}' not found in {path}. Available: {list(df.columns)}")
 
+    # Check for duplicate IDs BEFORE setting index
+    duplicates = df[id_column].duplicated()
+    if duplicates.any():
+        dup_ids = df.loc[duplicates, id_column].unique()
+        n_dups = duplicates.sum()
+        print(f"\n⚠️ WARNING: Found {n_dups} duplicate sample IDs in reference CSV!")
+        print(f"Duplicate IDs: {list(dup_ids[:10])}")
+        if len(dup_ids) > 10:
+            print(f"... and {len(dup_ids) - 10} more")
+        print("\nKeeping FIRST occurrence of each duplicate. Please check your CSV file.\n")
+
+        # Keep only first occurrence of each ID
+        df = df[~duplicates]
+
     df = df.set_index(id_column)
     return df
 
@@ -141,7 +155,7 @@ def _normalize_filename_for_matching(filename):
     return filename
 
 
-def align_xy(X, ref, id_column, target):
+def align_xy(X, ref, id_column, target, return_alignment_info=False):
     """
     Align spectral data with reference target variable.
 
@@ -160,6 +174,8 @@ def align_xy(X, ref, id_column, target):
         The id column name (for error messages)
     target : str
         Target variable name
+    return_alignment_info : bool, optional
+        If True, also return a dict with detailed alignment info
 
     Returns
     -------
@@ -167,17 +183,33 @@ def align_xy(X, ref, id_column, target):
         Aligned spectral data
     y : pd.Series
         Target values, same order as X_aligned
+    alignment_info : dict (only if return_alignment_info=True)
+        Dictionary containing:
+        - 'matched_ids': List of IDs that were successfully matched
+        - 'unmatched_spectra': List of spectral IDs with no reference
+        - 'unmatched_reference': List of reference IDs with no spectra
+        - 'n_nan_dropped': Number of samples dropped due to NaN targets
+        - 'used_fuzzy_matching': Whether fuzzy matching was used
     """
     if target not in ref.columns:
         raise ValueError(
             f"Target '{target}' not found in reference. Available: {list(ref.columns)}"
         )
 
+    # Track alignment info
+    used_fuzzy_matching = False
+    original_X_ids = set(X.index)
+    original_ref_ids = set(ref.index)
+
     # Try exact match first
     common_ids = X.index.intersection(ref.index)
 
+    print(f"DEBUG: Initial alignment - X has {len(X)} samples, ref has {len(ref)} samples")
+    print(f"DEBUG: Found {len(common_ids)} common IDs (exact match)")
+
     # If no exact matches, try normalized matching
     if len(common_ids) == 0:
+        used_fuzzy_matching = True
         print("No exact ID matches found. Trying flexible filename matching...")
 
         # Create mapping of normalized names to original names
@@ -232,19 +264,63 @@ def align_xy(X, ref, id_column, target):
                 f"Warning: {len(ref) - len(common_ids)} samples from reference have no spectral data"
             )
 
+        print(f"DEBUG: common_ids has {len(common_ids)} elements")
+        print(f"DEBUG: common_ids type: {type(common_ids)}")
+        print(f"DEBUG: First 5 common_ids: {list(common_ids[:5]) if len(common_ids) > 0 else []}")
+
+        # Check for duplicates in indices
+        if len(X.index) != len(X.index.unique()):
+            print(f"WARNING: X has duplicate indices! Total: {len(X.index)}, Unique: {len(X.index.unique())}")
+        if len(ref.index) != len(ref.index.unique()):
+            print(f"WARNING: ref has duplicate indices! Total: {len(ref.index)}, Unique: {len(ref.index.unique())}")
+
         X_aligned = X.loc[common_ids]
         y = ref.loc[common_ids, target]
 
+        print(f"DEBUG: After subsetting - X_aligned: {len(X_aligned)}, y: {len(y)}")
+
     # Drop any NaN targets
     valid_mask = ~y.isna()
+    print(f"DEBUG: Before NaN filtering - X_aligned: {len(X_aligned)}, y: {len(y)}")
+    n_nan_dropped = 0
     if not valid_mask.all():
-        n_dropped = (~valid_mask).sum()
-        print(f"Warning: Dropping {n_dropped} samples with missing target values")
+        n_nan_dropped = (~valid_mask).sum()
+        print(f"Warning: Dropping {n_nan_dropped} samples with missing target values")
         X_aligned = X_aligned[valid_mask]
         y = y[valid_mask]
+        print(f"DEBUG: After NaN filtering - X_aligned: {len(X_aligned)}, y: {len(y)}")
 
     if len(y) == 0:
         raise ValueError("No valid samples after alignment and NaN removal")
+
+    # SAFETY CHECK: Ensure perfect alignment before returning
+    print(f"DEBUG: Final check before return - X_aligned: {len(X_aligned)}, y: {len(y)}")
+    if len(X_aligned) != len(y):
+        raise ValueError(
+            f"Alignment error: X has {len(X_aligned)} samples but y has {len(y)} samples. "
+            f"This should never happen - please report this bug."
+        )
+
+    if not X_aligned.index.equals(y.index):
+        print(f"Warning: X and y have different indices after alignment. Realigning...")
+        # Force alignment by ensuring same index
+        X_aligned.index = y.index
+
+    # Prepare alignment info if requested
+    if return_alignment_info:
+        matched_ids = list(X_aligned.index)
+        unmatched_spectra = sorted(list(original_X_ids - set(matched_ids)))
+        unmatched_reference = sorted(list(original_ref_ids - set(matched_ids)))
+
+        alignment_info = {
+            'matched_ids': matched_ids,
+            'unmatched_spectra': unmatched_spectra,
+            'unmatched_reference': unmatched_reference,
+            'n_nan_dropped': n_nan_dropped,
+            'used_fuzzy_matching': used_fuzzy_matching
+        }
+
+        return X_aligned, y, alignment_info
 
     return X_aligned, y
 
@@ -286,17 +362,32 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
 
     # Read each file
     spectra = {}
+    duplicate_stems = []
     for asd_file in sorted(asd_files):
+        stem = asd_file.stem
+
+        # Check for duplicate filenames (without extension)
+        if stem in spectra:
+            duplicate_stems.append(stem)
+            print(f"⚠️ WARNING: Duplicate filename '{stem}' - later file will overwrite earlier one")
+
         try:
             spectrum = _read_single_asd_ascii(asd_file, reader_mode)
-            spectra[asd_file.stem] = spectrum
+            spectra[stem] = spectrum
         except UnicodeDecodeError:
             # Binary ASD file detected - try to read with SpecDAL
             spectrum = _handle_binary_asd(asd_file, reader_mode)
             if spectrum is not None:
-                spectra[asd_file.stem] = spectrum
+                spectra[stem] = spectrum
         except Exception as e:
             print(f"Warning: Could not read {asd_file.name}: {e}")
+
+    if duplicate_stems:
+        print(f"\n⚠️ Found {len(duplicate_stems)} duplicate ASD filenames (ignoring extensions)")
+        print(f"Duplicates: {duplicate_stems[:10]}")
+        if len(duplicate_stems) > 10:
+            print(f"... and {len(duplicate_stems) - 10} more")
+        print("Keeping LAST occurrence of each duplicate.\n")
 
     if len(spectra) == 0:
         raise ValueError("No valid spectra could be read")

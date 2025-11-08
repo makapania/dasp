@@ -108,7 +108,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
 
 def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
-                    n_estimators_list=None, learning_rates=None):
+                    n_estimators_list=None, learning_rates=None, rf_n_trees_list=None):
     """
     Get model grids for hyperparameter search.
 
@@ -137,6 +137,11 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
         n_estimators_list = [100]
     if learning_rates is None:
         learning_rates = [0.1, 0.2]
+
+    # Set defaults for RandomForest hyperparameters
+    if rf_n_trees_list is None:
+        rf_n_trees_list = [200, 500]
+
     grids = {}
 
     # PLS components grid (clip to n_features and max_n_components)
@@ -174,7 +179,7 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
 
         # Random Forest
         rf_configs = []
-        for n_est in [200, 500]:
+        for n_est in rf_n_trees_list:
             for max_d in [None, 15, 30]:
                 rf_configs.append(
                     (
@@ -266,7 +271,7 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
 
         # Random Forest
         rf_configs = []
-        for n_est in [200, 500]:
+        for n_est in rf_n_trees_list:
             for max_d in [None, 15, 30]:
                 rf_configs.append(
                     (
