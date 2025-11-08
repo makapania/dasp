@@ -1365,6 +1365,54 @@ class SpectralPredictApp:
         except Exception as e:
             messagebox.showerror("Error", f"Could not read reference file:\n{e}")
 
+    def _add_plot_export_button(self, parent_frame, figure, default_filename="plot"):
+        """Add a small export button to save a matplotlib figure as an image.
+
+        Parameters
+        ----------
+        parent_frame : tk.Frame
+            Frame to add the export button to
+        figure : matplotlib.figure.Figure
+            The figure to export
+        default_filename : str
+            Default filename (without extension) for the saved image
+        """
+        def export_plot():
+            from tkinter import filedialog
+            import os
+
+            # Ask user where to save
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[
+                    ("PNG Image", "*.png"),
+                    ("PDF Document", "*.pdf"),
+                    ("SVG Vector", "*.svg"),
+                    ("JPEG Image", "*.jpg"),
+                    ("All Files", "*.*")
+                ],
+                initialfile=f"{default_filename}.png",
+                title="Export Plot"
+            )
+
+            if filepath:
+                try:
+                    # Save the figure
+                    figure.savefig(filepath, dpi=300, bbox_inches='tight')
+                    messagebox.showinfo("Export Successful",
+                        f"Plot exported to:\n{filepath}")
+                except Exception as e:
+                    messagebox.showerror("Export Error",
+                        f"Failed to export plot:\n{str(e)}")
+
+        # Create a small button frame
+        button_frame = ttk.Frame(parent_frame)
+        button_frame.pack(fill='x', padx=10, pady=(5, 10))
+
+        export_btn = ttk.Button(button_frame, text="💾 Export Plot",
+                               command=export_plot, style='Modern.TButton')
+        export_btn.pack(side='right')
+
     def _load_and_plot_data(self):
         """Load data and generate spectral plots."""
         try:
@@ -1901,6 +1949,10 @@ class SpectralPredictApp:
         # Pack canvas below toolbar
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        # Add export button
+        filename = title.lower().replace(' ', '_').replace('(', '').replace(')', '')
+        self._add_plot_export_button(frame, fig, filename)
+
     # ========== OUTLIER DETECTION METHODS (Phase 3) ==========
 
     def _run_outlier_detection(self):
@@ -2000,6 +2052,9 @@ class SpectralPredictApp:
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add export button
+        self._add_plot_export_button(self.pca_plot_frame, fig, "pca_scores")
+
     def _plot_hotelling_t2(self):
         """Plot Hotelling T² statistics with threshold."""
         if not HAS_MATPLOTLIB or self.outlier_report is None:
@@ -2031,6 +2086,9 @@ class SpectralPredictApp:
         canvas = FigureCanvasTkAgg(fig, self.t2_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.t2_plot_frame, fig, "hotelling_t2")
 
     def _plot_q_residuals(self):
         """Plot Q-residuals with threshold."""
@@ -2064,6 +2122,9 @@ class SpectralPredictApp:
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add export button
+        self._add_plot_export_button(self.q_plot_frame, fig, "q_residuals")
+
     def _plot_mahalanobis(self):
         """Plot Mahalanobis distances with threshold."""
         if not HAS_MATPLOTLIB or self.outlier_report is None:
@@ -2096,6 +2157,9 @@ class SpectralPredictApp:
         canvas = FigureCanvasTkAgg(fig, self.maha_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.maha_plot_frame, fig, "mahalanobis_distance")
 
     def _plot_y_distribution(self):
         """Plot Y value distribution with outliers highlighted."""
@@ -2144,6 +2208,9 @@ class SpectralPredictApp:
         canvas = FigureCanvasTkAgg(fig, self.y_dist_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.y_dist_plot_frame, fig, "y_distribution")
 
     def _populate_outlier_table(self):
         """Populate the outlier summary table."""
@@ -3278,6 +3345,9 @@ Performance (Classification):
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add export button
+        self._add_plot_export_button(self.refine_plot_frame, fig, "cv_predictions")
+
     def _plot_residual_diagnostics(self):
         """Plot three residual diagnostic plots in Tab 6."""
         if not HAS_MATPLOTLIB:
@@ -3303,7 +3373,7 @@ Performance (Classification):
         residuals, std_residuals = compute_residuals(y_true, y_pred)
 
         # Create 1x3 subplot figure
-        fig = Figure(figsize=(18, 5))
+        fig = Figure(figsize=(12, 4))
 
         # Plot 1: Residuals vs Fitted
         ax1 = fig.add_subplot(131)
@@ -3345,6 +3415,9 @@ Performance (Classification):
         canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.residual_diagnostics_frame, fig, "residual_diagnostics")
 
         # Add dynamic model assessment below the plots
         self._add_residual_assessment(residuals, std_residuals)
@@ -3523,7 +3596,7 @@ Performance (Classification):
         threshold_3p = 3.0 * n_params / n_samples
 
         # Create figure
-        fig = Figure(figsize=(12, 6))
+        fig = Figure(figsize=(10, 5))
         ax = fig.add_subplot(111)
 
         # Determine colors based on leverage thresholds
@@ -3570,6 +3643,9 @@ Performance (Classification):
         canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.leverage_plot_frame, fig, "leverage_analysis")
 
         # Add dynamic leverage assessment below the plot
         self._add_leverage_assessment(leverage, threshold_2p, threshold_3p, n_samples)
@@ -4339,6 +4415,9 @@ Configuration:
             canvas = FigureCanvasTkAgg(fig, master=preview_window)
             canvas.draw()
             canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=10)
+
+            # Add export button to preview window
+            self._add_plot_export_button(preview_window, fig, "wavelength_selection")
 
         # Show wavelength list in text box
         list_frame = ttk.LabelFrame(preview_window, text="Selected Wavelengths", padding="10")
