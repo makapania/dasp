@@ -23,7 +23,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
@@ -57,6 +59,76 @@ try:
 except ImportError:
     HAS_OUTLIER_DETECTION = False
     generate_outlier_report = None
+
+
+TAB7_TRACE_ENABLED = os.environ.get("TAB7_TRACE", "").strip().lower() in {"1", "true", "yes", "on", "debug"}
+
+
+def tab7_trace(event: str, **details: Any) -> None:
+    """Lightweight stdout tracing for Tab 7 state transitions."""
+    if not TAB7_TRACE_ENABLED:
+        return
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    print(f"[TAB7_TRACE {timestamp}] {event}")
+    for key, value in details.items():
+        if isinstance(value, list):
+            preview = value[:5]
+            suffix = "..." if len(value) > 5 else ""
+            print(f"    - {key}: {preview}{suffix} (len={len(value)})")
+        else:
+            print(f"    - {key}: {value}")
+
+
+@dataclass
+class Tab7ModelState:
+    """Snapshot of the model configuration loaded from the Results tab."""
+
+    raw_config: Dict[str, Any]
+    model_wavelengths: List[float]
+    var_selection_indices: Optional[List[int]] = None
+    preprocess: Optional[str] = None
+    deriv: Optional[int] = None
+    window: Optional[int] = None
+    n_folds: Optional[int] = None
+    backend: Optional[str] = None
+    expected_r2: Optional[float] = None
+    expected_accuracy: Optional[float] = None
+    subset_tag: Optional[str] = None
+    results_rank: Optional[int] = None
+    mode: str = "results_load"
+    cv_random_state: Optional[int] = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def require_wavelengths(self) -> List[float]:
+        if not self.model_wavelengths:
+            raise RuntimeError("Tab 7 state exists but does not contain model wavelengths.")
+        return list(self.model_wavelengths)
+
+
+def resolve_tab7_wavelengths(
+    state: Optional[Tab7ModelState],
+    mode_label_text: str,
+    wl_spec_text: str,
+    available_wl: np.ndarray,
+    parser: Callable[[str, np.ndarray], List[float]],
+) -> List[float]:
+    """Return wavelength list for Tab 7, enforcing preserved state when required."""
+    require_state = isinstance(mode_label_text, str) and "Loaded from Results" in mode_label_text
+    state_has_wls = bool(state and state.model_wavelengths)
+    tab7_trace(
+        "resolve_wavelengths",
+        require_state=require_state,
+        state_has_wavelengths=state_has_wls,
+        mode_label=mode_label_text,
+    )
+    if state_has_wls:
+        return state.require_wavelengths()
+    if require_state:
+        raise RuntimeError(
+            "Tab 7 expected a loaded model configuration, but no preserved state is available. "
+            "Please reload the model from the Results tab."
+        )
+    return parser(wl_spec_text, available_wl)
 
 
 class SpectralPredictApp:
@@ -115,7 +187,8 @@ class SpectralPredictApp:
         self.tab7_performance = None  # Performance metrics dict
         self.tab7_y_true = None  # True values (for plotting)
         self.tab7_y_pred = None  # Predicted values (for plotting)
-        self.tab7_loaded_config = None  # Config loaded from Results tab
+        self.tab7_model_state: Optional[Tab7ModelState] = None  # Preserved Results-tab model state
+        self.tab7_loaded_config = None  # Legacy compatibility for older Tab 6 flows
         self.tab7_source_backend = None  # Backend used for original analysis
         self.tab7_run_history = []  # History of model runs
         self.tab7_performance_history = []  # Performance tracking for comparison plot
@@ -1943,6 +2016,9 @@ class SpectralPredictApp:
         # Reset mode label
         self.tab7_mode_label.config(text="Mode: Fresh Development",
                                     foreground=self.colors['success'])
+        self.tab7_model_state = None
+        self.tab7_loaded_config = None
+        tab7_trace("tab7_state_cleared", reason="reset_to_fresh")
 
         # Reset config text
         self.tab7_config_text.config(state='normal')
@@ -2102,10 +2178,32 @@ class SpectralPredictApp:
             print(f"  CV Folds: {n_folds}")
             print(f"  Max Iterations (effective): {max_iter}")
 
-            # Parse wavelength specification
+            # Parse wavelength specification (prefer preserved state when required)
             available_wl = self.X_original.columns.astype(float).values
             wl_spec_text = self.tab7_wl_spec.get('1.0', 'end')
-            selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+
+            state = getattr(self, 'tab7_model_state', None)
+            mode_label_text = ""
+            if hasattr(self, 'tab7_mode_label'):
+                try:
+                    mode_label_text = self.tab7_mode_label.cget('text')
+                except Exception:
+                    mode_label_text = ""
+
+            tab7_trace(
+                "run_tab7:start",
+                state_exists=bool(state),
+                mode_label=mode_label_text,
+                expected_r2=getattr(self, 'tab7_expected_r2', None),
+            )
+
+            selected_wl = resolve_tab7_wavelengths(
+                state,
+                mode_label_text,
+                wl_spec_text,
+                available_wl,
+                self._parse_wavelength_spec,
+            )
 
             if not selected_wl:
                 raise ValueError("No valid wavelengths selected. Please check your wavelength specification.")
@@ -2151,8 +2249,8 @@ class SpectralPredictApp:
 
             # If a model was loaded from Results, honor its Deriv setting for deriv-first pipelines.
             # This ensures Tab 7 applies preprocessing identically to the original model.
-            if getattr(self, 'tab7_loaded_config', None) is not None:
-                config_deriv = self.tab7_loaded_config.get('Deriv', None)
+            if state is not None:
+                config_deriv = state.deriv if state.deriv is not None else state.raw_config.get('Deriv') if state.raw_config else None
                 if config_deriv is not None and not (isinstance(config_deriv, (float, np.floating)) and pd.isna(config_deriv)):
                     try:
                         # Only override when the GUI selection represents a derivative-based pipeline
@@ -2247,7 +2345,7 @@ class SpectralPredictApp:
             # CRITICAL FIX #1: Exclude validation set (if enabled)
             # BUT: If this model was loaded from Results tab, DON'T exclude validation set
             # because Results tab trains on ALL data (no validation exclusion)
-            if self.validation_enabled.get() and self.validation_indices and self.tab7_loaded_config is None:
+            if self.validation_enabled.get() and self.validation_indices and state is None:
                 initial_samples = len(X_base_df)
                 X_base_df = X_base_df[~X_base_df.index.isin(self.validation_indices)]
                 y_series = y_series[~y_series.index.isin(self.validation_indices)]
@@ -2265,7 +2363,7 @@ class SpectralPredictApp:
                 print(f"  Excluding {n_removed} validation samples")
                 print(f"  Calibration: {n_cal} samples | Validation: {n_val} samples")
                 print(f"  This matches the data split used for NEW model development")
-            elif self.tab7_loaded_config is not None:
+            elif state is not None:
                 print(f"  Model loaded from Results tab - using ALL data (no validation exclusion)")
                 print(f"  This matches how Results tab trained the original model")
 
@@ -2317,7 +2415,7 @@ class SpectralPredictApp:
 
                 # CRITICAL: Use VarSelectionIndices if available (importance-based selection)
                 # Otherwise fall back to wavelength-based lookup
-                var_selection_indices = self.tab7_loaded_config.get('_var_selection_indices') if self.tab7_loaded_config else None
+                var_selection_indices = state.var_selection_indices if state else None
 
                 if var_selection_indices:
                     # PATH A1: Importance-based variable selection
@@ -3519,39 +3617,86 @@ If the problem persists, please report this error.
 
         self.tab7_preprocess.set(gui_preprocess)
 
+        window_val = None
         if window != 'N/A' and not pd.isna(window):
             window_val = int(float(window))
             if window_val in [7, 11, 17, 19]:
                 self.tab7_window.set(window_val)
 
         n_folds = config.get('n_folds', 5)
-        if not pd.isna(n_folds) and 3 <= int(n_folds) <= 10:
-            self.tab7_folds.set(int(n_folds))
+        n_folds_int = None
+        if not pd.isna(n_folds):
+            try:
+                n_folds_int = int(n_folds)
+            except (TypeError, ValueError):
+                n_folds_int = None
+        if n_folds_int and 3 <= n_folds_int <= 10:
+            self.tab7_folds.set(n_folds_int)
 
         print("✓ GUI controls populated")
 
         # STEP 7: Finalize
         print("\n[STEP 7/7] Finalizing...")
-        self.tab7_loaded_config = config.copy()
+        config_copy = config.copy()
+        deriv_value = None
+        if deriv is not None and not (isinstance(deriv, (float, np.floating)) and pd.isna(deriv)):
+            try:
+                deriv_value = int(deriv)
+            except (TypeError, ValueError):
+                deriv_value = None
 
-        # Store VarSelectionIndices for importance-based variable selection
-        self.tab7_loaded_config['_var_selection_indices'] = var_selection_indices
-        self.tab7_loaded_config['_model_wavelengths'] = model_wavelengths  # Preserve order!
+        results_rank = None
+        if isinstance(rank, (int, float)) and not pd.isna(rank):
+            results_rank = int(rank)
+        elif isinstance(rank, str) and rank.isdigit():
+            results_rank = int(rank)
+
+        expected_r2 = config.get('R2', None)
+        expected_accuracy = config.get('Accuracy', None)
+        expected_r2_f = float(expected_r2) if expected_r2 is not None and not pd.isna(expected_r2) else None
+        expected_acc_f = float(expected_accuracy) if expected_accuracy is not None and not pd.isna(expected_accuracy) else None
+
+        backend_choice = getattr(self, "backend_choice", None)
+        backend_name = backend_choice.get() if backend_choice else None
+
+        self.tab7_model_state = Tab7ModelState(
+            raw_config=config_copy,
+            model_wavelengths=list(model_wavelengths),
+            var_selection_indices=list(var_selection_indices) if var_selection_indices else None,
+            preprocess=preprocess,
+            deriv=deriv_value,
+            window=window_val,
+            n_folds=n_folds_int,
+            backend=backend_name,
+            expected_r2=expected_r2_f,
+            expected_accuracy=expected_acc_f,
+            subset_tag=subset_tag,
+            results_rank=results_rank,
+            cv_random_state=config_copy.get('cv_random_state'),
+        )
+        self.tab7_loaded_config = config_copy.copy()
+        if var_selection_indices:
+            self.tab7_loaded_config['_var_selection_indices'] = list(var_selection_indices)
+        self.tab7_loaded_config['_model_wavelengths'] = list(model_wavelengths)
+        tab7_trace(
+            "load_to_tab7:state_saved",
+            wavelength_count=len(self.tab7_model_state.model_wavelengths),
+            subset=subset_tag,
+            rank=results_rank,
+        )
         if var_selection_indices:
             print(f"  💾 Stored VarSelectionIndices ({len(var_selection_indices)} indices) for PATH A subsetting")
 
         # Store which backend was used for the original analysis
-        self.tab7_source_backend = self.backend_choice.get()
+        self.tab7_source_backend = backend_name
         print(f"  🔧 Backend used for original analysis: {self.tab7_source_backend}")
 
         # Store expected R² for comparison after execution
-        expected_r2 = config.get('R2', None)
-        expected_accuracy = config.get('Accuracy', None)
-        if expected_r2 is not None and not pd.isna(expected_r2):
-            self.tab7_expected_r2 = float(expected_r2)
+        if expected_r2_f is not None:
+            self.tab7_expected_r2 = expected_r2_f
             print(f"  📊 Expected R² from Results tab: {self.tab7_expected_r2:.4f}")
-        elif expected_accuracy is not None and not pd.isna(expected_accuracy):
-            self.tab7_expected_accuracy = float(expected_accuracy)
+        elif expected_acc_f is not None:
+            self.tab7_expected_accuracy = expected_acc_f
             print(f"  📊 Expected Accuracy from Results tab: {self.tab7_expected_accuracy:.4f}")
         else:
             self.tab7_expected_r2 = None
