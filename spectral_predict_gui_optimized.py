@@ -2312,13 +2312,26 @@ class SpectralPredictApp:
                 print(f"  Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
                 X_full_preprocessed = prep_pipeline.fit_transform(X_full)
 
-                # Find indices of selected wavelengths
-                all_wavelengths = X_base_df.columns.astype(float).values
-                wavelength_indices = []
-                for wl in selected_wl:
-                    idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
+                # CRITICAL: Use VarSelectionIndices if available (importance-based selection)
+                # Otherwise fall back to wavelength-based lookup
+                var_selection_indices = self.tab7_loaded_config.get('_var_selection_indices') if self.tab7_loaded_config else None
+
+                if var_selection_indices:
+                    # PATH A1: Importance-based variable selection
+                    # Use indices directly from Results (column indices in preprocessed matrix)
+                    print(f"  Using VarSelectionIndices for importance-based subsetting")
+                    print(f"  Indices: {var_selection_indices[:10]}{'...' if len(var_selection_indices) > 10 else ''}")
+                    wavelength_indices = var_selection_indices
+                else:
+                    # PATH A2: Region-based or sequential selection
+                    # Find indices of selected wavelengths in original data
+                    print(f"  Using wavelength-based subsetting (region/sequential selection)")
+                    all_wavelengths = X_base_df.columns.astype(float).values
+                    wavelength_indices = []
+                    for wl in selected_wl:
+                        idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
+                        if len(idx) > 0:
+                            wavelength_indices.append(idx[0])
 
                 # Subset the PREPROCESSED data
                 X_work = X_full_preprocessed[:, wavelength_indices]
@@ -3325,6 +3338,23 @@ If the problem persists, please report this error.
 
         print(f"✓ Wavelength loading complete: {len(model_wavelengths)} wavelengths")
 
+        # Load VarSelectionIndices for importance-based variable selection
+        var_selection_indices = None
+        if is_subset_model and 'VarSelectionIndices' in config and config['VarSelectionIndices']:
+            try:
+                indices_str = str(config['VarSelectionIndices']).strip()
+                # Parse list of integers from string representation
+                var_selection_indices = ast.literal_eval(indices_str)
+                if isinstance(var_selection_indices, list) and len(var_selection_indices) == len(model_wavelengths):
+                    print(f"✓ VarSelectionIndices loaded: {len(var_selection_indices)} indices")
+                    print(f"  Indices: {var_selection_indices[:10]}{'...' if len(var_selection_indices) > 10 else ''}")
+                else:
+                    print(f"⚠️  VarSelectionIndices invalid (length mismatch or wrong type), ignoring")
+                    var_selection_indices = None
+            except Exception as e:
+                print(f"⚠️  Failed to parse VarSelectionIndices: {e}")
+                var_selection_indices = None
+
         # STEP 4: Format Wavelengths
         print("\n[STEP 4/7] Formatting wavelengths...")
         wl_display_text = self._format_wavelengths_for_NEW_tab7(model_wavelengths)
@@ -3498,6 +3528,12 @@ If the problem persists, please report this error.
         # STEP 7: Finalize
         print("\n[STEP 7/7] Finalizing...")
         self.tab7_loaded_config = config.copy()
+
+        # Store VarSelectionIndices for importance-based variable selection
+        self.tab7_loaded_config['_var_selection_indices'] = var_selection_indices
+        self.tab7_loaded_config['_model_wavelengths'] = model_wavelengths  # Preserve order!
+        if var_selection_indices:
+            print(f"  💾 Stored VarSelectionIndices ({len(var_selection_indices)} indices) for PATH A subsetting")
 
         # Store which backend was used for the original analysis
         self.tab7_source_backend = self.backend_choice.get()
