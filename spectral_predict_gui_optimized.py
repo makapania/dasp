@@ -146,6 +146,10 @@ class SpectralPredictApp:
         self.ct_pred_transfer_model = None  # Transfer model loaded for prediction
         self.ct_pred_y_pred = None  # Predictions from transferred spectra
         self.ct_pred_sample_ids = None  # Sample IDs for predictions
+        self.ct_multiinstrument_data = None  # Multi-instrument dataset for equalization
+        self.ct_equalized_wavelengths = None  # Wavelengths after equalization
+        self.ct_equalized_X = None  # Equalized spectra
+        self.ct_equalized_sample_ids = None  # Sample IDs with instrument prefixes
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -5576,10 +5580,82 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             messagebox.showerror("Error", "Selected instruments not found in registry")
             return
 
+        # VALIDATION: Check that master and slave are different instruments
+        if master_id == slave_id:
+            messagebox.showerror(
+                "Same Instrument Selected",
+                "Master and slave instruments must be different for calibration transfer.\n\n"
+                f"You selected: {master_id} for both master and slave.\n\n"
+                "Please select different instruments."
+            )
+            return
+
         try:
             # Load spectra using the helper from Tab 1
             wavelengths_master, X_master = self._load_spectra_from_directory(spectra_dir)
             wavelengths_slave, X_slave = self._load_spectra_from_directory(spectra_dir)
+
+            # VALIDATION 1: Same Sample Count Check
+            if X_master.shape[0] != X_slave.shape[0]:
+                messagebox.showerror(
+                    "Sample Count Mismatch",
+                    f"Master has {X_master.shape[0]} samples, Slave has {X_slave.shape[0]} samples.\n\n"
+                    "Paired spectra must have the same number of samples (same sample set measured on both instruments).\n\n"
+                    "Please ensure both instruments measured the exact same samples."
+                )
+                return
+
+            # VALIDATION 2: Minimum Sample Check
+            if X_master.shape[0] < 20:
+                response = messagebox.askokcancel(
+                    "Few Samples",
+                    f"Only {X_master.shape[0]} paired samples loaded.\n\n"
+                    "At least 30 samples recommended for robust calibration transfer.\n"
+                    "Results may be unreliable with fewer samples.\n\n"
+                    "Do you want to continue anyway?"
+                )
+                if not response:
+                    return
+
+            # VALIDATION 3: Wavelength Overlap Check
+            master_range = (wavelengths_master[0], wavelengths_master[-1])
+            slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
+
+            overlap_start = max(master_range[0], slave_range[0])
+            overlap_end = min(master_range[1], slave_range[1])
+
+            if overlap_start >= overlap_end:
+                messagebox.showerror(
+                    "No Wavelength Overlap",
+                    f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
+                    f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n\n"
+                    "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
+                    "Please select instruments with compatible wavelength coverage."
+                )
+                return
+
+            # Check overlap percentage
+            master_span = master_range[1] - master_range[0]
+            slave_span = slave_range[1] - slave_range[0]
+            overlap_span = overlap_end - overlap_start
+
+            master_overlap_pct = (overlap_span / master_span) * 100
+            slave_overlap_pct = (overlap_span / slave_span) * 100
+            min_overlap_pct = min(master_overlap_pct, slave_overlap_pct)
+
+            if min_overlap_pct < 80:
+                response = messagebox.askokcancel(
+                    "Limited Wavelength Overlap",
+                    f"Wavelength overlap is {min_overlap_pct:.1f}% of instrument range.\n\n"
+                    f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
+                    f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n"
+                    f"Overlap region: {overlap_start:.1f}-{overlap_end:.1f} nm\n\n"
+                    "Transfer quality may be reduced with limited overlap.\n"
+                    "Consider using instruments with better wavelength coverage overlap.\n\n"
+                    "Do you want to continue anyway?"
+                )
+                if not response:
+                    return
 
             # Get instrument profiles
             master_prof = self.instrument_profiles[master_id]
@@ -5599,7 +5675,8 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             # Display info
             info_text = (f"Loaded {X_master.shape[0]} paired spectra\n"
                         f"Common wavelength grid: {common_wl.shape[0]} points\n"
-                        f"Range: {common_wl.min():.1f} - {common_wl.max():.1f} nm")
+                        f"Range: {common_wl.min():.1f} - {common_wl.max():.1f} nm\n"
+                        f"Wavelength overlap: {min_overlap_pct:.1f}%")
 
             self.ct_spectra_info_text.config(state='normal')
             self.ct_spectra_info_text.delete('1.0', tk.END)
@@ -5616,18 +5693,48 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
+        # VALIDATION: Data Loaded Check
+        if not hasattr(self, 'ct_X_master_common') or not hasattr(self, 'ct_X_slave_common'):
+            messagebox.showerror(
+                "No Paired Spectra Loaded",
+                "Please load paired standardization spectra in Section B first."
+            )
+            return
+
         if self.ct_X_master_common is None or self.ct_X_slave_common is None:
-            messagebox.showwarning("Warning", "Please load paired spectra first")
+            messagebox.showerror(
+                "No Paired Spectra Loaded",
+                "Please load paired standardization spectra in Section B first."
+            )
             return
 
         method = self.ct_method_var.get()
         master_id = self.ct_master_instrument_id.get()
         slave_id = self.ct_slave_instrument_id.get()
 
+        # VALIDATION: Different Instruments Check
+        if master_id == slave_id:
+            messagebox.showerror(
+                "Same Instrument Selected",
+                "Master and slave instruments must be different for calibration transfer."
+            )
+            return
+
         try:
             if method == 'ds':
                 # Build DS transfer model
-                lam = float(self.ct_ds_lambda_var.get())
+                # VALIDATION: DS Ridge Lambda parameter
+                try:
+                    lam = float(self.ct_ds_lambda_var.get())
+                    if lam <= 0 or lam > 100:
+                        messagebox.showerror(
+                            "Invalid Parameter",
+                            f"DS Ridge Lambda must be between 0 and 100.\nYou entered: {lam}"
+                        )
+                        return
+                except ValueError:
+                    messagebox.showerror("Invalid Parameter", "DS Ridge Lambda must be a number.")
+                    return
                 A = estimate_ds(self.ct_X_master_common, self.ct_X_slave_common, lam=lam)
 
                 # Create TransferModel object
@@ -5648,7 +5755,24 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
 
             elif method == 'pds':
                 # Build PDS transfer model
-                window = int(self.ct_pds_window_var.get())
+                # VALIDATION: PDS Window parameter
+                try:
+                    window = int(self.ct_pds_window_var.get())
+                    if window < 5 or window > 101:
+                        messagebox.showerror(
+                            "Invalid Parameter",
+                            f"PDS Window must be between 5 and 101.\nYou entered: {window}"
+                        )
+                        return
+                    if window % 2 == 0:
+                        messagebox.showerror(
+                            "Invalid Parameter",
+                            f"PDS Window must be an odd number.\nYou entered: {window} (even)"
+                        )
+                        return
+                except ValueError:
+                    messagebox.showerror("Invalid Parameter", "PDS Window must be an integer.")
+                    return
                 B = estimate_pds(self.ct_X_master_common, self.ct_X_slave_common, window=window)
 
                 from spectral_predict.calibration_transfer import TransferModel
@@ -5671,6 +5795,9 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             self.ct_transfer_info_text.delete('1.0', tk.END)
             self.ct_transfer_info_text.insert('1.0', info_text)
             self.ct_transfer_info_text.config(state='disabled')
+
+            # Generate transfer quality plots
+            self._plot_transfer_quality(method)
 
             messagebox.showinfo("Success", f"{method.upper()} transfer model built successfully")
         except Exception as e:
@@ -5703,13 +5830,88 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
 
     def _load_multiinstrument_dataset(self):
         """Load multi-instrument dataset for equalization."""
-        messagebox.showinfo("Info",
-            "Multi-instrument equalization:\n\n"
-            "This feature requires organizing spectra from multiple instruments.\n"
-            "Expected structure:\n"
-            "  - Each subdirectory named by instrument_id\n"
-            "  - Spectra files within each subdirectory\n\n"
-            "This is a placeholder for future implementation.")
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        # Browse for base directory containing instrument subdirectories
+        base_directory = filedialog.askdirectory(
+            title="Select Base Directory (containing instrument subdirectories)"
+        )
+        if not base_directory:
+            return
+
+        try:
+            import glob
+
+            # Find subdirectories (each represents an instrument)
+            subdirs = [d for d in os.listdir(base_directory)
+                      if os.path.isdir(os.path.join(base_directory, d))]
+
+            if len(subdirs) == 0:
+                messagebox.showerror("Error",
+                    "No subdirectories found in selected directory.\n\n"
+                    "Expected structure:\n"
+                    "  base_directory/\n"
+                    "    instrument1/\n"
+                    "      *.asd files\n"
+                    "    instrument2/\n"
+                    "      *.asd files\n")
+                return
+
+            # Load spectra from each subdirectory
+            self.ct_multiinstrument_data = {}
+            summary_lines = []
+
+            for subdir in sorted(subdirs):
+                instrument_id = subdir
+                subdir_path = os.path.join(base_directory, subdir)
+
+                try:
+                    # Load spectra from this instrument's directory
+                    wavelengths, X_data = self._load_spectra_from_directory(subdir_path)
+
+                    # Store in dictionary
+                    self.ct_multiinstrument_data[instrument_id] = (wavelengths, X_data)
+
+                    # Add to summary
+                    summary_lines.append(
+                        f"{instrument_id}: {X_data.shape[0]} samples, "
+                        f"{wavelengths.shape[0]} wavelengths "
+                        f"({wavelengths.min():.1f}-{wavelengths.max():.1f} nm)"
+                    )
+
+                except Exception as e:
+                    messagebox.showwarning("Warning",
+                        f"Failed to load spectra from {instrument_id}:\n{str(e)}\n\n"
+                        f"Skipping this instrument.")
+                    continue
+
+            if len(self.ct_multiinstrument_data) < 2:
+                messagebox.showerror("Error",
+                    f"Need at least 2 instruments for equalization. "
+                    f"Only loaded {len(self.ct_multiinstrument_data)}.")
+                self.ct_multiinstrument_data = None
+                return
+
+            # Display summary
+            summary_text = (
+                f"Loaded {len(self.ct_multiinstrument_data)} instruments:\n\n" +
+                "\n".join(summary_lines)
+            )
+
+            self.ct_equalize_summary_text.config(state='normal')
+            self.ct_equalize_summary_text.delete('1.0', tk.END)
+            self.ct_equalize_summary_text.insert('1.0', summary_text)
+            self.ct_equalize_summary_text.config(state='disabled')
+
+            messagebox.showinfo("Success",
+                f"Successfully loaded {len(self.ct_multiinstrument_data)} instruments.\n"
+                f"Ready for equalization.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load multi-instrument dataset:\n{str(e)}")
+            self.ct_multiinstrument_data = None
 
     def _equalize_and_export(self):
         """Equalize multi-instrument dataset and export."""
@@ -5717,11 +5919,158 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
-        messagebox.showinfo("Info",
-            "Equalization export:\n\n"
-            "This will use equalize_dataset() to merge spectra from multiple\n"
-            "instruments onto a common grid.\n\n"
-            "This is a placeholder for future implementation.")
+        # Check that multi-instrument data has been loaded
+        if self.ct_multiinstrument_data is None:
+            messagebox.showwarning("Warning",
+                "Please load multi-instrument dataset first using 'Load Multi-Instrument Dataset' button.")
+            return
+
+        if len(self.ct_multiinstrument_data) < 2:
+            messagebox.showerror("Error",
+                f"Need at least 2 instruments for equalization. "
+                f"Currently loaded: {len(self.ct_multiinstrument_data)}")
+            return
+
+        try:
+            # Update summary text to show processing status
+            self.ct_equalize_summary_text.config(state='normal')
+            self.ct_equalize_summary_text.insert(tk.END, "\n\nProcessing equalization...")
+            self.ct_equalize_summary_text.config(state='disabled')
+            self.ct_equalize_summary_text.update()
+
+            # Check if we have instrument profiles for all instruments
+            # If not, we'll use a simplified version without profiles
+            instrument_ids = list(self.ct_multiinstrument_data.keys())
+            has_all_profiles = all(inst_id in self.instrument_profiles
+                                  for inst_id in instrument_ids)
+
+            if has_all_profiles:
+                # Use full equalization with profiles
+                from spectral_predict.equalization import equalize_dataset
+
+                wavelengths_common, X_equalized = equalize_dataset(
+                    spectra_by_instrument=self.ct_multiinstrument_data,
+                    profiles=self.instrument_profiles
+                )
+            else:
+                # Use simplified equalization without profiles
+                # Just find common wavelength grid and resample
+                from spectral_predict.calibration_transfer import resample_to_grid
+
+                # Find overlapping wavelength range across all instruments
+                min_wl = max(wl.min() for wl, _ in self.ct_multiinstrument_data.values())
+                max_wl = min(wl.max() for wl, _ in self.ct_multiinstrument_data.values())
+
+                # Use the coarsest spacing to avoid over-sampling
+                coarsest_spacing = max(
+                    np.median(np.diff(wl))
+                    for wl, _ in self.ct_multiinstrument_data.values()
+                )
+
+                # Generate common wavelength grid
+                wavelengths_common = np.arange(min_wl, max_wl + coarsest_spacing, coarsest_spacing)
+
+                # Resample all instruments to common grid
+                equalized_spectra = []
+                for inst_id, (wavelengths, X) in self.ct_multiinstrument_data.items():
+                    X_resampled = resample_to_grid(X, wavelengths, wavelengths_common)
+                    equalized_spectra.append(X_resampled)
+
+                # Stack all equalized spectra
+                X_equalized = np.vstack(equalized_spectra)
+
+            # Create sample IDs with instrument prefixes
+            sample_ids = []
+            for inst_id, (_, X) in self.ct_multiinstrument_data.items():
+                n_samples = X.shape[0]
+                for i in range(n_samples):
+                    sample_ids.append(f"{inst_id}_sample{i+1:03d}")
+
+            # Store results
+            self.ct_equalized_wavelengths = wavelengths_common
+            self.ct_equalized_X = X_equalized
+            self.ct_equalized_sample_ids = sample_ids
+
+            # Prompt for export file
+            export_path = filedialog.asksaveasfilename(
+                title="Save Equalized Dataset",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialdir=os.getcwd()
+            )
+
+            if not export_path:
+                # User cancelled, but still show summary
+                summary_text = (
+                    f"Equalization complete (not exported):\n\n"
+                    f"Common wavelength grid: {len(wavelengths_common)} points\n"
+                    f"Range: {wavelengths_common.min():.1f} - {wavelengths_common.max():.1f} nm\n"
+                    f"Total samples: {len(sample_ids)}\n"
+                    f"Data shape: {X_equalized.shape}"
+                )
+
+                self.ct_equalize_summary_text.config(state='normal')
+                self.ct_equalize_summary_text.delete('1.0', tk.END)
+                self.ct_equalize_summary_text.insert('1.0', summary_text)
+                self.ct_equalize_summary_text.config(state='disabled')
+                return
+
+            # Export to CSV
+            # First row: wavelengths (with empty first cell for sample ID column)
+            # Subsequent rows: sample_id, spectrum values
+            with open(export_path, 'w', newline='') as f:
+                import csv
+                writer = csv.writer(f)
+
+                # Write header row (wavelengths)
+                header = ['sample_id'] + [f"{wl:.2f}" for wl in wavelengths_common]
+                writer.writerow(header)
+
+                # Write data rows
+                for sample_id, spectrum in zip(sample_ids, X_equalized):
+                    row = [sample_id] + list(spectrum)
+                    writer.writerow(row)
+
+            # Display summary
+            summary_text = (
+                f"Equalization complete and exported!\n\n"
+                f"Common wavelength grid: {len(wavelengths_common)} points\n"
+                f"Range: {wavelengths_common.min():.1f} - {wavelengths_common.max():.1f} nm\n"
+                f"Total samples: {len(sample_ids)}\n"
+                f"Data shape: {X_equalized.shape}\n\n"
+                f"Exported to:\n{export_path}"
+            )
+
+            self.ct_equalize_summary_text.config(state='normal')
+            self.ct_equalize_summary_text.delete('1.0', tk.END)
+            self.ct_equalize_summary_text.insert('1.0', summary_text)
+            self.ct_equalize_summary_text.config(state='disabled')
+
+            # Generate equalization quality plots
+            # Prepare data for plotting: need to split X_equalized back by instrument
+            equalized_by_instrument = {}
+            start_idx = 0
+            for inst_id, (_, X) in self.ct_multiinstrument_data.items():
+                n_samples = X.shape[0]
+                equalized_by_instrument[inst_id] = X_equalized[start_idx:start_idx + n_samples, :]
+                start_idx += n_samples
+
+            self._plot_equalization_quality(
+                self.ct_multiinstrument_data,
+                equalized_by_instrument,
+                wavelengths_common
+            )
+
+            messagebox.showinfo("Success",
+                f"Equalized dataset exported successfully!\n\n"
+                f"Samples: {len(sample_ids)}\n"
+                f"Wavelengths: {len(wavelengths_common)}\n"
+                f"File: {os.path.basename(export_path)}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to equalize and export:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def _browse_ct_pred_transfer_model(self):
         """Browse for transfer model to use for prediction."""
@@ -5769,12 +6118,19 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
-        if self.ct_pred_transfer_model is None:
-            messagebox.showwarning("Warning", "Please load a transfer model first")
+        # VALIDATION: Models Loaded Check
+        if self.ct_master_model_dict is None:
+            messagebox.showerror(
+                "Master Model Not Loaded",
+                "Please load the master model in Section A first."
+            )
             return
 
-        if self.ct_master_model_dict is None:
-            messagebox.showwarning("Warning", "Please load master model first (Section A)")
+        if self.ct_pred_transfer_model is None:
+            messagebox.showerror(
+                "Transfer Model Not Loaded",
+                "Please load or build a transfer model in Section C first."
+            )
             return
 
         new_slave_dir = self.ct_new_slave_dir_var.get()
@@ -5785,6 +6141,23 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
         try:
             # Load new slave spectra
             wavelengths_slave, X_slave_new = self._load_spectra_from_directory(new_slave_dir)
+
+            # VALIDATION: Wavelength Compatibility Check
+            transfer_slave_range = (
+                self.ct_pred_transfer_model.wavelengths_common[0],
+                self.ct_pred_transfer_model.wavelengths_common[-1]
+            )
+            new_slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
+
+            # Check if new slave data can be resampled to transfer model wavelengths
+            if new_slave_range[0] > transfer_slave_range[0] or new_slave_range[1] < transfer_slave_range[1]:
+                messagebox.showwarning(
+                    "Wavelength Range Mismatch",
+                    f"Transfer model expects wavelengths: {transfer_slave_range[0]:.1f}-{transfer_slave_range[1]:.1f} nm\n"
+                    f"New slave data has wavelengths: {new_slave_range[0]:.1f}-{new_slave_range[1]:.1f} nm\n\n"
+                    "New slave data has narrower wavelength coverage than the transfer model expects.\n"
+                    "Predictions may require extrapolation and could be unreliable."
+                )
 
             # Resample to common grid
             common_wl = self.ct_pred_transfer_model.wavelengths_common
@@ -5802,6 +6175,17 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             # Resample transferred spectra to master model's wavelength grid
             wl_model = self.ct_master_model_dict['wavelengths']
             X_for_prediction = resample_to_grid(X_transferred, common_wl, wl_model)
+
+            # VALIDATION: Extrapolation Warning
+            if 'wavelength_range' in self.ct_master_model_dict:
+                model_wl_range = self.ct_master_model_dict['wavelength_range']
+                if wl_model[0] < model_wl_range[0] or wl_model[-1] > model_wl_range[1]:
+                    messagebox.showwarning(
+                        "Extrapolation Warning",
+                        f"Transferred data wavelengths ({wl_model[0]:.1f}-{wl_model[-1]:.1f} nm)\n"
+                        f"exceed master model training range ({model_wl_range[0]:.1f}-{model_wl_range[1]:.1f} nm).\n\n"
+                        "Predictions may be unreliable in extrapolated regions."
+                    )
 
             # Apply preprocessing if present
             if 'preprocessing' in self.ct_master_model_dict:
@@ -5832,6 +6216,9 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             self.ct_prediction_text.insert('1.0', pred_text)
             self.ct_prediction_text.config(state='disabled')
 
+            # Generate prediction plots
+            self._plot_ct_predictions(y_pred)
+
             messagebox.showinfo("Success", f"Predictions generated for {len(y_pred)} samples")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to predict:\n{str(e)}")
@@ -5860,6 +6247,343 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
             messagebox.showinfo("Success", f"Predictions exported to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
+
+    def _plot_transfer_quality(self, method):
+        """Plot transfer quality diagnostics for Section C.
+
+        Shows:
+        1. Transfer Quality Plot (3 subplots): Master, Slave before, Slave after
+        2. Transfer Scatter Plot: Master vs Transferred with R²
+        """
+        if not HAS_MATPLOTLIB:
+            return
+
+        try:
+            # Clear previous plots
+            for widget in self.ct_transfer_plot_frame.winfo_children():
+                widget.destroy()
+
+            # Apply transfer to get transferred spectra
+            if method == 'ds':
+                A = self.ct_transfer_model.params['A']
+                X_transferred = apply_ds(self.ct_X_slave_common, A)
+            elif method == 'pds':
+                B = self.ct_transfer_model.params['B']
+                window = self.ct_transfer_model.params['window']
+                X_transferred = apply_pds(self.ct_X_slave_common, B, window)
+
+            # === Plot 1: Transfer Quality Plot (3 subplots) ===
+            fig1 = Figure(figsize=(12, 4))
+
+            # Subplot 1: Master spectra
+            ax1 = fig1.add_subplot(131)
+            master_mean = np.mean(self.ct_X_master_common, axis=0)
+            master_std = np.std(self.ct_X_master_common, axis=0)
+            ax1.plot(self.ct_wavelengths_common, master_mean, 'b-', linewidth=2, label='Mean')
+            ax1.fill_between(self.ct_wavelengths_common,
+                           master_mean - master_std,
+                           master_mean + master_std,
+                           alpha=0.3, color='b', label='±1 Std')
+            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_ylabel('Reflectance', fontsize=10)
+            ax1.set_title('Master Spectra', fontsize=11, fontweight='bold')
+            ax1.legend(fontsize=8)
+            ax1.grid(True, alpha=0.3)
+
+            # Subplot 2: Slave before transfer
+            ax2 = fig1.add_subplot(132)
+            slave_mean = np.mean(self.ct_X_slave_common, axis=0)
+            slave_std = np.std(self.ct_X_slave_common, axis=0)
+            ax2.plot(self.ct_wavelengths_common, slave_mean, 'r-', linewidth=2, label='Mean')
+            ax2.fill_between(self.ct_wavelengths_common,
+                           slave_mean - slave_std,
+                           slave_mean + slave_std,
+                           alpha=0.3, color='r', label='±1 Std')
+            ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax2.set_ylabel('Reflectance', fontsize=10)
+            ax2.set_title('Slave Before Transfer', fontsize=11, fontweight='bold')
+            ax2.legend(fontsize=8)
+            ax2.grid(True, alpha=0.3)
+
+            # Subplot 3: Slave after transfer
+            ax3 = fig1.add_subplot(133)
+            trans_mean = np.mean(X_transferred, axis=0)
+            trans_std = np.std(X_transferred, axis=0)
+            ax3.plot(self.ct_wavelengths_common, trans_mean, 'g-', linewidth=2, label='Mean')
+            ax3.fill_between(self.ct_wavelengths_common,
+                           trans_mean - trans_std,
+                           trans_mean + trans_std,
+                           alpha=0.3, color='g', label='±1 Std')
+            ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax3.set_ylabel('Reflectance', fontsize=10)
+            ax3.set_title('Slave After Transfer', fontsize=11, fontweight='bold')
+            ax3.legend(fontsize=8)
+            ax3.grid(True, alpha=0.3)
+
+            fig1.tight_layout()
+
+            # Embed plot 1
+            canvas1 = FigureCanvasTkAgg(fig1, self.ct_transfer_plot_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+            # Add export button for plot 1
+            self._add_plot_export_button(self.ct_transfer_plot_frame, fig1, "transfer_quality")
+
+            # === Plot 2: Transfer Scatter Plot ===
+            fig2 = Figure(figsize=(7, 6))
+            ax = fig2.add_subplot(111)
+
+            # Flatten arrays for scatter plot
+            master_flat = self.ct_X_master_common.ravel()
+            transferred_flat = X_transferred.ravel()
+
+            # Calculate R²
+            from sklearn.metrics import r2_score
+            r2 = r2_score(master_flat, transferred_flat)
+
+            # Scatter plot with alpha for density
+            ax.scatter(master_flat, transferred_flat, alpha=0.3, s=10, edgecolors='none')
+
+            # Add 1:1 line
+            min_val = min(master_flat.min(), transferred_flat.min())
+            max_val = max(master_flat.max(), transferred_flat.max())
+            ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='1:1 Line')
+
+            ax.set_xlabel('Master Spectra Values', fontsize=11)
+            ax.set_ylabel('Transferred Slave Values', fontsize=11)
+            ax.set_title(f'Transfer Quality Scatter Plot (R² = {r2:.4f})',
+                        fontsize=12, fontweight='bold')
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3)
+
+            fig2.tight_layout()
+
+            # Embed plot 2
+            canvas2 = FigureCanvasTkAgg(fig2, self.ct_transfer_plot_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+            # Add export button for plot 2
+            self._add_plot_export_button(self.ct_transfer_plot_frame, fig2, "transfer_scatter")
+
+        except Exception as e:
+            print(f"Error creating transfer quality plots: {str(e)}")
+
+    def _plot_equalization_quality(self, instruments_data, equalized_data, common_grid):
+        """Plot equalization quality diagnostics for Section D.
+
+        Shows:
+        1. Multi-Instrument Overlay Plot (2 subplots): Before and After
+        2. Wavelength Grid Comparison
+
+        Parameters
+        ----------
+        instruments_data : dict
+            Dictionary of {instrument_id: (wavelengths, X)} before equalization
+        equalized_data : dict
+            Dictionary of {instrument_id: X_equalized} after equalization
+        common_grid : array
+            Common wavelength grid
+        """
+        if not HAS_MATPLOTLIB:
+            return
+
+        try:
+            # Clear previous plots
+            for widget in self.ct_equalize_plot_frame.winfo_children():
+                widget.destroy()
+
+            # === Plot 1: Multi-Instrument Overlay (2 subplots) ===
+            fig1 = Figure(figsize=(12, 5))
+
+            # Subplot 1: Before equalization
+            ax1 = fig1.add_subplot(121)
+            colors = plt.cm.tab10(np.linspace(0, 1, len(instruments_data)))
+            for idx, (inst_id, (wl, X)) in enumerate(instruments_data.items()):
+                # Plot mean spectrum for each instrument
+                mean_spectrum = np.mean(X, axis=0)
+                ax1.plot(wl, mean_spectrum, linewidth=2, label=inst_id, color=colors[idx])
+
+            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_ylabel('Reflectance', fontsize=10)
+            ax1.set_title('Before Equalization\n(Different Wavelength Grids)',
+                         fontsize=11, fontweight='bold')
+            ax1.legend(fontsize=8, loc='best')
+            ax1.grid(True, alpha=0.3)
+
+            # Subplot 2: After equalization
+            ax2 = fig1.add_subplot(122)
+            for idx, (inst_id, X_eq) in enumerate(equalized_data.items()):
+                mean_spectrum = np.mean(X_eq, axis=0)
+                ax2.plot(common_grid, mean_spectrum, linewidth=2, label=inst_id, color=colors[idx])
+
+            ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax2.set_ylabel('Reflectance', fontsize=10)
+            ax2.set_title('After Equalization\n(Common Wavelength Grid)',
+                         fontsize=11, fontweight='bold')
+            ax2.legend(fontsize=8, loc='best')
+            ax2.grid(True, alpha=0.3)
+
+            fig1.tight_layout()
+
+            # Embed plot 1
+            canvas1 = FigureCanvasTkAgg(fig1, self.ct_equalize_plot_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+            # Add export button
+            self._add_plot_export_button(self.ct_equalize_plot_frame, fig1, "equalization_overlay")
+
+            # === Plot 2: Wavelength Grid Comparison ===
+            fig2 = Figure(figsize=(10, 4))
+            ax = fig2.add_subplot(111)
+
+            # Prepare data for bar chart
+            labels = []
+            min_wls = []
+            max_wls = []
+
+            for inst_id, (wl, _) in instruments_data.items():
+                labels.append(inst_id)
+                min_wls.append(wl.min())
+                max_wls.append(wl.max())
+
+            # Add common grid
+            labels.append('Common Grid')
+            min_wls.append(common_grid.min())
+            max_wls.append(common_grid.max())
+
+            # Create bar chart
+            y_pos = np.arange(len(labels))
+            widths = np.array(max_wls) - np.array(min_wls)
+
+            bars = ax.barh(y_pos, widths, left=min_wls, height=0.6)
+
+            # Highlight common grid
+            bars[-1].set_color('red')
+            bars[-1].set_alpha(0.7)
+
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(labels, fontsize=10)
+            ax.set_xlabel('Wavelength (nm)', fontsize=11)
+            ax.set_title('Wavelength Range Comparison', fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='x')
+
+            # Add wavelength range annotations
+            for i, (label, min_wl, max_wl) in enumerate(zip(labels, min_wls, max_wls)):
+                ax.text(min_wl + (max_wl - min_wl)/2, i,
+                       f'{min_wl:.0f}-{max_wl:.0f} nm',
+                       ha='center', va='center', fontsize=8, fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+
+            fig2.tight_layout()
+
+            # Embed plot 2
+            canvas2 = FigureCanvasTkAgg(fig2, self.ct_equalize_plot_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+            # Add export button
+            self._add_plot_export_button(self.ct_equalize_plot_frame, fig2, "wavelength_grid_comparison")
+
+        except Exception as e:
+            print(f"Error creating equalization plots: {str(e)}")
+
+    def _plot_ct_predictions(self, y_pred):
+        """Plot prediction results for Section E.
+
+        Shows:
+        1. Prediction Distribution Histogram
+        2. Prediction Results Plot (scatter with line)
+
+        Parameters
+        ----------
+        y_pred : array
+            Predicted values
+        """
+        if not HAS_MATPLOTLIB:
+            return
+
+        try:
+            # Clear previous plots
+            for widget in self.ct_prediction_plot_frame.winfo_children():
+                widget.destroy()
+
+            # Calculate statistics
+            mean_pred = np.mean(y_pred)
+            std_pred = np.std(y_pred)
+
+            # === Plot 1: Prediction Distribution Histogram ===
+            fig1 = Figure(figsize=(8, 5))
+            ax = fig1.add_subplot(111)
+
+            # Histogram
+            n, bins, patches = ax.hist(y_pred, bins=20, alpha=0.7, color='steelblue',
+                                      edgecolor='black', linewidth=1.2)
+
+            # Add mean line
+            ax.axvline(mean_pred, color='red', linestyle='--', linewidth=2,
+                      label=f'Mean = {mean_pred:.3f}')
+
+            # Add ±1 std lines
+            ax.axvline(mean_pred - std_pred, color='orange', linestyle=':', linewidth=2,
+                      label=f'Mean ± Std')
+            ax.axvline(mean_pred + std_pred, color='orange', linestyle=':', linewidth=2)
+
+            ax.set_xlabel('Predicted Value', fontsize=11)
+            ax.set_ylabel('Frequency', fontsize=11)
+            ax.set_title(f'Prediction Distribution\n(Mean={mean_pred:.3f}, Std={std_pred:.3f})',
+                        fontsize=12, fontweight='bold')
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3, axis='y')
+
+            fig1.tight_layout()
+
+            # Embed plot 1
+            canvas1 = FigureCanvasTkAgg(fig1, self.ct_prediction_plot_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+            # Add export button
+            self._add_plot_export_button(self.ct_prediction_plot_frame, fig1, "prediction_distribution")
+
+            # === Plot 2: Prediction Results Plot ===
+            fig2 = Figure(figsize=(10, 5))
+            ax = fig2.add_subplot(111)
+
+            # Sample indices
+            sample_indices = np.arange(len(y_pred))
+
+            # Scatter plot
+            ax.scatter(sample_indices, y_pred, alpha=0.6, s=50,
+                      edgecolors='black', linewidths=0.5, c='steelblue', label='Predictions')
+
+            # Connecting line
+            ax.plot(sample_indices, y_pred, 'b-', alpha=0.3, linewidth=1)
+
+            # Mean line
+            ax.axhline(mean_pred, color='red', linestyle='--', linewidth=2,
+                      label=f'Mean = {mean_pred:.3f}')
+
+            ax.set_xlabel('Sample Index', fontsize=11)
+            ax.set_ylabel('Predicted Value', fontsize=11)
+            ax.set_title('Calibration Transfer Predictions', fontsize=12, fontweight='bold')
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3)
+
+            fig2.tight_layout()
+
+            # Embed plot 2
+            canvas2 = FigureCanvasTkAgg(fig2, self.ct_prediction_plot_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+            # Add export button
+            self._add_plot_export_button(self.ct_prediction_plot_frame, fig2, "prediction_results")
+
+        except Exception as e:
+            print(f"Error creating prediction plots: {str(e)}")
 
     def _load_spectra_from_directory(self, directory):
         """Helper method to load spectra from a directory. Returns (wavelengths, X)."""
@@ -6049,6 +6773,10 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
                                             wrap='word', relief='flat', bg='#f0f0f0')
         self.ct_transfer_info_text.pack(fill='x')
 
+        # Plot frame for transfer quality visualization
+        self.ct_transfer_plot_frame = ttk.Frame(section_c, style='TFrame')
+        self.ct_transfer_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
+
         # Save transfer model
         save_tm_frame = ttk.Frame(section_c, style='TFrame')
         save_tm_frame.pack(fill='x', pady=(10, 0))
@@ -6074,6 +6802,15 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
                   command=self._load_multiinstrument_dataset).pack(side='left', padx=(0, 10))
         ttk.Button(eq_button_frame, text="Equalize & Export...",
                   command=self._equalize_and_export, style='Accent.TButton').pack(side='left')
+
+        # Equalization summary text
+        self.ct_equalize_summary_text = tk.Text(section_d, height=6, width=80, state='disabled',
+                                               wrap='word', relief='flat', bg='#f0f0f0')
+        self.ct_equalize_summary_text.pack(fill='x', pady=(10, 0))
+
+        # Plot frame for equalization visualization
+        self.ct_equalize_plot_frame = ttk.Frame(section_d, style='TFrame')
+        self.ct_equalize_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
 
         # ===================================================================
         # SECTION E: Predict with Transfer Model
@@ -6123,6 +6860,10 @@ Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else 
         self.ct_prediction_text = tk.Text(section_e, height=6, width=80, state='disabled',
                                          wrap='word', relief='flat', bg='#f0f0f0')
         self.ct_prediction_text.pack(fill='x', pady=(10, 0))
+
+        # Plot frame for prediction visualization
+        self.ct_prediction_plot_frame = ttk.Frame(section_e, style='TFrame')
+        self.ct_prediction_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
 
         # Export predictions
         ttk.Button(section_e, text="Export Predictions...",

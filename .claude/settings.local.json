@@ -21,7 +21,11 @@
       "Bash(else echo \"venv not found\")",
       "Bash(fi)",
       "Bash(julia --version:*)",
-      "Bash(julia --project=. -e:*)"
+      "Bash(julia --project=. -e:*)",
+      "Bash(/tmp/recent_gui.py)",
+      "Bash(recent_gui_temp.py)",
+      "Bash(diagnostics_temp.py)",
+      "Bash(git worktree:*)"
     ],
     "deny": [],
     "ask": []
