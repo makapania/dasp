@@ -1399,8 +1399,7 @@ class SpectralPredictApp:
                 try:
                     # Save the figure
                     figure.savefig(filepath, dpi=300, bbox_inches='tight')
-                    messagebox.showinfo("Export Successful",
-                        f"Plot exported to:\n{filepath}")
+                    # Success - file saved (no popup needed)
                 except Exception as e:
                     messagebox.showerror("Export Error",
                         f"Failed to export plot:\n{str(e)}")
@@ -1791,11 +1790,7 @@ class SpectralPredictApp:
                     text=f"✓ {n_val} validation samples selected ({algorithm})\n"
                          f"Calibration: {n_cal} samples | Validation: {n_val} samples"
                 )
-
-            messagebox.showinfo("Success",
-                              f"Created validation set with {n_val} samples using {algorithm} algorithm\n"
-                              f"Calibration: {n_cal} samples\n"
-                              f"Validation: {n_val} samples")
+            # Success - status label already updated
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to create validation set:\n{e}")
@@ -1811,8 +1806,7 @@ class SpectralPredictApp:
 
         if hasattr(self, 'validation_status_label'):
             self.validation_status_label.config(text="No validation set created")
-
-        messagebox.showinfo("Validation Set Reset", "Validation set has been cleared")
+        # Validation set cleared - status label updated
 
     # ==================== End Validation Set Methods ====================
 
@@ -2002,11 +1996,7 @@ class SpectralPredictApp:
                 text=f"Detection complete: {n_high} high confidence, {n_moderate} moderate, {n_low} low confidence outliers"
             )
 
-            messagebox.showinfo("Success",
-                f"Outlier detection complete!\n\n"
-                f"High confidence (3+ flags): {n_high}\n"
-                f"Moderate confidence (2 flags): {n_moderate}\n"
-                f"Low confidence (1 flag): {n_low}")
+            # Outlier detection complete - results shown in UI
 
         except Exception as e:
             messagebox.showerror("Error", f"Outlier detection failed:\n{str(e)}")
@@ -2343,11 +2333,7 @@ class SpectralPredictApp:
         # Update plots in Tab 1 if data is loaded
         if self.X is not None:
             self._generate_plots()
-
-        messagebox.showinfo("Success",
-            f"Added {added_count} new samples to exclusion list.\n"
-            f"Total excluded: {len(self.excluded_spectra)}\n\n"
-            f"These samples will be excluded from analysis.")
+        # Samples excluded - plots updated
 
     def _export_outlier_report(self):
         """Export outlier detection report to CSV."""
@@ -2366,7 +2352,7 @@ class SpectralPredictApp:
             if filepath:
                 summary = self.outlier_report['outlier_summary']
                 summary.to_csv(filepath, index=False)
-                messagebox.showinfo("Success", f"Report exported to:\n{filepath}")
+                # Report exported successfully
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
 
@@ -2740,7 +2726,7 @@ class SpectralPredictApp:
 
             self.root.after(0, lambda: self.progress_status.config(text="✓ Analysis complete!"))
             self.root.after(0, lambda: self.progress_info.config(text="Analysis Complete"))
-            self.root.after(0, lambda: messagebox.showinfo("Success", f"Analysis complete!\n\nResults: {results_path}\n\nView results in the 'Results' tab."))
+            # Analysis complete - status updated
 
         except Exception as e:
             import traceback
@@ -2994,11 +2980,7 @@ class SpectralPredictApp:
             # Export the dataframe
             self.results_df.to_csv(filepath, index=False)
 
-            messagebox.showinfo(
-                "Export Successful",
-                f"Results exported successfully to:\n\n{filepath}"
-            )
-
+            # Export successful - status updated
             self.results_status.config(text=f"✓ Results exported to {Path(filepath).name}")
 
         except Exception as e:
@@ -4138,7 +4120,7 @@ Configuration:
             # Plot diagnostic plots
             self._plot_residual_diagnostics()
             self._plot_leverage_diagnostics()
-            messagebox.showinfo("Success", "Refined model analysis complete!")
+            # Refined model complete - plots displayed
 
     def _save_refined_model(self):
         """Save the current refined model to a .dasp file."""
@@ -4226,15 +4208,7 @@ Configuration:
                 filepath=filepath
             )
 
-            # Show success message
-            messagebox.showinfo(
-                "Model Saved",
-                f"Model successfully saved to:\n\n{filepath}\n\n"
-                f"You can now load this model in the Model Prediction tab "
-                f"to make predictions on new data."
-            )
-
-            # Update status
+            # Model saved successfully - update status
             self.refine_status.config(text=f"✓ Model saved to {Path(filepath).name}")
 
         except Exception as e:
@@ -4461,7 +4435,7 @@ Configuration:
     def _apply_wl_preset(self, preset_type):
         """Apply wavelength preset."""
         if self.X_original is None:
-            messagebox.showinfo("No Data", "Please load data first")
+            # No data loaded - preset cannot be applied
             return
 
         wavelengths = self.X_original.columns.astype(float).values
@@ -4476,7 +4450,7 @@ Configuration:
             return
 
         if len(selected) == 0:
-            messagebox.showinfo("No Wavelengths", f"No wavelengths found for {preset_type} preset in your data")
+            # No wavelengths in this range - preset not applied
             return
 
         wl_spec = self._format_wavelengths_as_spec(list(selected))
@@ -4750,8 +4724,8 @@ Configuration:
 
             # Show appropriate message
             if loaded_count > 0 and not failed_models:
-                messagebox.showinfo("Success",
-                    f"Successfully loaded {loaded_count} model(s).")
+                # Models loaded successfully - display updated
+                pass
             elif loaded_count > 0 and failed_models:
                 error_msg = f"Successfully loaded {loaded_count} model(s), but {len(failed_models)} failed:\n\n"
                 for name, error in failed_models[:3]:  # Show first 3 failures
@@ -4824,9 +4798,8 @@ Configuration:
             if response:
                 self.loaded_models = []
                 self._update_loaded_models_display()
-                messagebox.showinfo("Cleared", "All models have been cleared.")
-        else:
-            messagebox.showinfo("No Models", "No models are currently loaded.")
+                # Models cleared - display updated
+        # else: No models to clear
 
     def _browse_prediction_data(self):
         """Browse for spectral data directory or CSV file."""
@@ -4881,13 +4854,7 @@ Configuration:
                 self.pred_data_status.config(
                     text=f"✓ Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths"
                 )
-
-                messagebox.showinfo("Success",
-                    f"Validation set loaded successfully:\n"
-                    f"{n_samples} spectra\n"
-                    f"{n_wavelengths} wavelengths\n"
-                    f"Algorithm: {self.validation_algorithm.get()}")
-
+                # Validation set loaded - status updated
                 return
 
             except Exception as e:
@@ -4941,9 +4908,7 @@ Configuration:
             self.pred_data_status.config(
                 text=f"✓ Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
             )
-
-            messagebox.showinfo("Success",
-                f"Data loaded successfully:\n{n_samples} spectra\n{n_wavelengths} wavelengths")
+            # Data loaded - status updated
 
         except Exception as e:
             messagebox.showerror("Load Error",
@@ -5037,10 +5002,7 @@ Configuration:
                 self.pred_status.config(
                     text=f"⚠ Complete with warnings: {successful_models} succeeded, {failed} failed."
                 )
-
-            messagebox.showinfo("Predictions Complete",
-                f"Successfully applied {successful_models} of {len(self.loaded_models)} models.\n"
-                f"Results are displayed below.")
+            # Predictions complete - status updated
 
         except Exception as e:
             messagebox.showerror("Prediction Error",
@@ -5205,10 +5167,7 @@ Configuration:
         try:
             # Export to CSV
             self.predictions_df.to_csv(filepath, index=False)
-
-            messagebox.showinfo("Export Successful",
-                f"Predictions exported to:\n{filepath}\n\n"
-                f"{len(self.predictions_df)} samples exported.")
+            # Predictions exported successfully
 
         except Exception as e:
             messagebox.showerror("Export Error",
