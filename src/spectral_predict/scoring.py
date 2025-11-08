@@ -108,7 +108,99 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
     new_col_order = ['Rank'] + cols + ['top_vars']
     df = df[new_col_order]
 
+    # Add unified complexity score (0-100 scale, higher = more complex)
+    # This is a new column for user convenience, doesn't affect ranking
+    try:
+        df["ComplexityScore"] = df.apply(_compute_unified_complexity, axis=1)
+    except Exception as e:
+        # If complexity calculation fails, set to NaN (don't break pipeline)
+        print(f"Warning: Unified complexity calculation failed: {e}")
+        df["ComplexityScore"] = np.nan
+
     return df
+
+
+def _compute_unified_complexity(row):
+    """
+    Compute unified complexity score (0-100 scale, higher = more complex).
+
+    Formula: ComplexityScore = 0.25×Model + 0.30×Variables + 0.25×LVs + 0.20×Preprocessing
+
+    Components:
+    - Model Type (25%): Intrinsic model complexity
+    - Variables (30%): Number of wavelengths selected (nonlinear penalty)
+    - Latent Variables (25%): For PLS models, number of components
+    - Preprocessing (20%): Derivative order and SNV
+
+    Returns
+    -------
+    score : float
+        Complexity score in range [0, 100]
+    """
+    # 1. Model Type Complexity (25% weight) - based on model complexity
+    model = row.get("Model", "")
+    model_scores = {
+        "PLS": 20,
+        "Ridge": 25,
+        "Lasso": 30,
+        "RandomForest": 60,
+        "MLP": 80,
+        "NeuralBoosted": 85
+    }
+    model_complexity = model_scores.get(model, 50)  # Default to 50 if unknown
+
+    # 2. Variable Complexity (30% weight) - nonlinear penalty for many variables
+    # Use sqrt-based nonlinear penalty: few vars = low penalty, many vars = high penalty
+    n_vars = row.get("n_vars", 0)
+    # Normalize: 10 vars ≈ 2.0, 100 vars ≈ 20, 500 vars ≈ 100
+    var_complexity = min(100, np.sqrt(n_vars) * 4.5)
+
+    # 3. Latent Variable Complexity (25% weight) - for PLS models
+    lvs = row.get("LVs", np.nan)
+    if pd.isna(lvs) or lvs == 0:
+        # Non-PLS models: use median complexity (50)
+        lv_complexity = 50
+    else:
+        # Normalize LVs: 2 LVs = 0, 25 LVs = 100
+        lv_complexity = min(100, (lvs - 2) * 100 / 23)
+
+    # 4. Preprocessing Complexity (20% weight)
+    preprocess = row.get("Preprocess", "raw")
+    deriv = row.get("Deriv", 0)
+
+    # Base preprocessing scores
+    if preprocess == "raw":
+        prep_base = 0
+    elif preprocess == "snv":
+        prep_base = 20
+    elif preprocess == "deriv":
+        if deriv == 1:
+            prep_base = 50
+        elif deriv == 2:
+            prep_base = 70
+        else:
+            prep_base = 40  # Unknown derivative order
+    elif preprocess == "deriv_snv":
+        if deriv == 1:
+            prep_base = 60
+        elif deriv == 2:
+            prep_base = 80
+        else:
+            prep_base = 50
+    else:
+        prep_base = 30  # Unknown preprocessing
+
+    prep_complexity = min(100, prep_base)
+
+    # Weighted sum (0-100 scale)
+    complexity_score = (
+        0.25 * model_complexity +
+        0.30 * var_complexity +
+        0.25 * lv_complexity +
+        0.20 * prep_complexity
+    )
+
+    return round(complexity_score, 1)
 
 
 def create_results_dataframe(task_type):

@@ -230,6 +230,12 @@ class SpectralPredictApp:
         self.rf_n_trees_500 = tk.BooleanVar(value=True)  # Default
         self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
 
+        # Random Forest advanced options (defaults OFF for safety)
+        self.rf_enable_advanced = tk.BooleanVar(value=False)  # ✅ OFF by default
+        self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth
+        self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
+        self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
+
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
         self.varsel_spa = tk.BooleanVar(value=False)
@@ -894,6 +900,46 @@ class SpectralPredictApp:
         # Info label
         ttk.Label(rf_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # Advanced RF hyperparameters (max_depth) - defaults to OFF for safety
+        ttk.Separator(rf_frame, orient='horizontal').grid(row=3, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(15, 10))
+
+        advanced_toggle = ttk.Checkbutton(rf_frame, text="⚙️ Enable Advanced Hyperparameter Search (max_depth)",
+                                         variable=self.rf_enable_advanced)
+        advanced_toggle.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(5, 10))
+
+        # Advanced options frame (shown when toggle is ON)
+        self.rf_advanced_frame = ttk.Frame(rf_frame)
+        self.rf_advanced_frame.grid(row=5, column=0, columnspan=4, sticky=(tk.W, tk.E), padx=(20, 0))
+
+        # Maximum Tree Depth (max_depth) options
+        ttk.Label(self.rf_advanced_frame, text="Maximum Tree Depth (max_depth):", style='TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
+        rf_depth_frame = ttk.Frame(self.rf_advanced_frame)
+        rf_depth_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(rf_depth_frame, text="None (unlimited) ⭐", variable=self.rf_max_depth_none).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_depth_frame, text="30 ⭐", variable=self.rf_max_depth_30).grid(row=0, column=1, padx=5)
+        ttk.Label(rf_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(rf_depth_frame, textvariable=self.rf_max_depth_custom, width=8).grid(row=0, column=3, padx=5)
+        ttk.Label(rf_depth_frame, text="(default: None, 30)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # Info label for advanced options
+        ttk.Label(self.rf_advanced_frame, text="💡 Shallower trees (lower max_depth) prevent overfitting but may underfit. None = unlimited depth.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        ttk.Label(self.rf_advanced_frame, text="⚠️  Advanced search tests all combinations - may significantly increase runtime.",
+                 style='Caption.TLabel', foreground='#ff6600').grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+
+        # Initially hide advanced frame (will be shown/hidden by toggle)
+        self.rf_advanced_frame.grid_remove()
+
+        # Bind toggle to show/hide advanced frame
+        def toggle_rf_advanced():
+            if self.rf_enable_advanced.get():
+                self.rf_advanced_frame.grid()
+            else:
+                self.rf_advanced_frame.grid_remove()
+
+        self.rf_enable_advanced.trace_add('write', lambda *args: toggle_rf_advanced())
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -2573,6 +2619,13 @@ class SpectralPredictApp:
             target_name = self.target_column.get()
             # Include sample ID column so user knows which samples are in the export
             sample_id_col = self.spectral_file_column.get()
+
+            # Safety check: Avoid column name collision with wavelength columns
+            if sample_id_col in df_preprocessed.columns:
+                original_col = sample_id_col
+                sample_id_col = f"{sample_id_col}_ID"
+                self._log_progress(f"⚠️  Warning: Sample ID column renamed to '{sample_id_col}' to avoid collision with wavelength column '{original_col}'")
+
             df_export = pd.DataFrame({
                 sample_id_col: self.y.index,
                 target_name: self.y.values
@@ -2784,6 +2837,43 @@ class SpectralPredictApp:
             # Sort for consistent ordering
             rf_n_trees_list = sorted(rf_n_trees_list)
 
+            # Collect Random Forest max_depth (only if advanced is enabled)
+            # Safety: Default to [None, 30] when advanced is OFF (faster than old [None, 15, 30])
+            if self.rf_enable_advanced.get():
+                rf_max_depth_list = []
+
+                # Collect from checkboxes
+                if self.rf_max_depth_none.get():
+                    rf_max_depth_list.append(None)
+                if self.rf_max_depth_30.get():
+                    rf_max_depth_list.append(30)
+
+                # Add custom value if provided
+                custom_depth = self.rf_max_depth_custom.get().strip()
+                if custom_depth:
+                    if custom_depth.lower() == 'none':
+                        if None not in rf_max_depth_list:
+                            rf_max_depth_list.append(None)
+                    else:
+                        try:
+                            custom_val = int(custom_depth)
+                            if custom_val > 0 and custom_val not in rf_max_depth_list:
+                                rf_max_depth_list.append(custom_val)
+                            elif custom_val <= 0:
+                                print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}' (must be > 0), ignoring")
+                        except ValueError:
+                            print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}', ignoring")
+
+                # Default to [None, 30] if none selected (same as when advanced is OFF)
+                if not rf_max_depth_list:
+                    rf_max_depth_list = [None, 30]
+
+                # Sort for consistent ordering (None sorts first)
+                rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
+            else:
+                # Advanced OFF: Use safe default [None, 30] (faster than old [None, 15, 30])
+                rf_max_depth_list = [None, 30]
+
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
@@ -2794,6 +2884,7 @@ class SpectralPredictApp:
             self._log_progress(f"NeuralBoosted n_estimators: {n_estimators_list}")
             self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
             self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
+            self._log_progress(f"RandomForest max_depth: {rf_max_depth_list} {'(ADVANCED ENABLED)' if self.rf_enable_advanced.get() else '(default)'}")
             self._log_progress(f"\n** SUBSET ANALYSIS SETTINGS **")
             self._log_progress(f"Variable subsets: {'ENABLED' if enable_variable_subsets else 'DISABLED'}")
             self._log_progress(f"  enable_variable_subsets value: {enable_variable_subsets}")
@@ -2912,6 +3003,7 @@ class SpectralPredictApp:
                 n_estimators_list=n_estimators_list,
                 learning_rates=learning_rates,
                 rf_n_trees_list=rf_n_trees_list,
+                rf_max_depth_list=rf_max_depth_list,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,

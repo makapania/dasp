@@ -20,7 +20,7 @@ from .variable_selection import spa_selection, uve_selection, uve_spa_selection,
 def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
                max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
-               rf_n_trees_list=None,
+               rf_n_trees_list=None, rf_max_depth_list=None,
                enable_variable_subsets=True, variable_counts=None,
                enable_region_subsets=True, n_top_regions=5, progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
@@ -134,10 +134,11 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
               f"due to dataset size (n_samples={n_samples}, min_fold_size~{min_fold_samples})")
 
-    # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted, rf_n_trees_list for RandomForest)
+    # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
+    # rf_n_trees_list and rf_max_depth_list for RandomForest)
     model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
                                    n_estimators_list=n_estimators_list, learning_rates=learning_rates,
-                                   rf_n_trees_list=rf_n_trees_list)
+                                   rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
