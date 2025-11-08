@@ -5338,20 +5338,20 @@ Configuration:
 
         try:
             # Load spectral data from directory (reuse existing loader logic)
-            from spectral_predict.io import read_asd_directory, read_spectral_csv
+            from spectral_predict.io import read_asd_dir, read_csv_spectra
 
             data_path_obj = Path(data_path)
 
             # Try ASD first, then CSV
             try:
-                data = read_asd_directory(str(data_path_obj))
-                wavelengths = data['wavelengths']
-                X = data['spectra']
+                data = read_asd_dir(str(data_path_obj))
+                wavelengths = data.columns.astype(float).values
+                X = data.values
             except:
                 # Try CSV format
-                data = read_spectral_csv(str(data_path_obj))
-                wavelengths = data['wavelengths']
-                X = data['spectra']
+                data = read_csv_spectra(str(data_path_obj))
+                wavelengths = data.columns.astype(float).values
+                X = data.values
 
             # Characterize instrument
             profile = characterize_instrument(
