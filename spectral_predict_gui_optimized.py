@@ -1181,6 +1181,62 @@ class SpectralPredictApp:
         self.refine_plot_frame = ttk.Frame(plot_frame)
         self.refine_plot_frame.pack(fill='both', expand=True)
 
+        # Residual Diagnostics (regression only)
+        ttk.Label(content_frame, text="Residual Diagnostics", style='Heading.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        residual_diagnostics_frame = ttk.LabelFrame(content_frame, text="Residual Analysis", padding="20")
+        residual_diagnostics_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Add explanatory text for residual diagnostics
+        residual_help_frame = ttk.Frame(residual_diagnostics_frame)
+        residual_help_frame.pack(fill='x', padx=10, pady=(5, 15))
+
+        residual_help_text = (
+            "Residuals Analysis: Good models show randomly scattered residuals around zero with no patterns.\n\n"
+            "• Residuals vs Fitted: Look for random scatter. Patterns (curves, funnels) indicate model issues.\n"
+            "• Residuals vs Index: Check for systematic trends across samples.\n"
+            "• Q-Q Plot: Points should follow the red diagonal line. Deviations suggest non-normal residuals.\n\n"
+            "✓ Good: Random scatter, points on diagonal | ⚠ Warning: Patterns, curved Q-Q plot"
+        )
+
+        residual_help_label = ttk.Label(residual_help_frame, text=residual_help_text,
+                                        style='Caption.TLabel', justify='left', wraplength=1200)
+        residual_help_label.pack(anchor='w')
+
+        self.residual_diagnostics_frame = ttk.Frame(residual_diagnostics_frame)
+        self.residual_diagnostics_frame.pack(fill='both', expand=True)
+
+        # Leverage Diagnostics (linear models only)
+        ttk.Label(content_frame, text="Leverage Analysis", style='Heading.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        leverage_frame = ttk.LabelFrame(content_frame, text="Influential Samples (Hat Values)", padding="20")
+        leverage_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Add explanatory text for leverage diagnostics
+        leverage_help_frame = ttk.Frame(leverage_frame)
+        leverage_help_frame.pack(fill='x', padx=10, pady=(5, 15))
+
+        leverage_help_text = (
+            "Leverage Analysis: Identifies influential samples that strongly affect the model.\n\n"
+            "• Interpretation: High-leverage points (red, above threshold) have unusual feature values.\n"
+            "• Orange line (2p/n): Moderate influence | Red line (3p/n): High influence\n"
+            "  where p = number of model parameters, n = number of samples\n\n"
+            "✓ Good: Most points below orange line | ⚠ Warning: Many red points may indicate data quality issues"
+        )
+
+        leverage_help_label = ttk.Label(leverage_help_frame, text=leverage_help_text,
+                                        style='Caption.TLabel', justify='left', wraplength=1200)
+        leverage_help_label.pack(anchor='w')
+
+        self.leverage_plot_frame = ttk.Frame(leverage_frame)
+        self.leverage_plot_frame.pack(fill='both', expand=True)
+
         # Status
         self.refine_status = ttk.Label(content_frame, text="No model loaded", style='Caption.TLabel')
         self.refine_status.grid(row=row, column=0, columnspan=2)
@@ -3222,6 +3278,302 @@ Performance (Classification):
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+    def _plot_residual_diagnostics(self):
+        """Plot three residual diagnostic plots in Tab 6."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Only for regression
+        if not hasattr(self, 'refined_config') or self.refined_config.get('task_type') != 'regression':
+            return
+
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            return
+
+        from spectral_predict.diagnostics import compute_residuals, qq_plot_data
+
+        # Clear existing plot
+        for widget in self.residual_diagnostics_frame.winfo_children():
+            widget.destroy()
+
+        y_true = self.refined_y_true
+        y_pred = self.refined_y_pred
+
+        # Compute residuals
+        residuals, std_residuals = compute_residuals(y_true, y_pred)
+
+        # Create 1x3 subplot figure
+        fig = Figure(figsize=(18, 5))
+
+        # Plot 1: Residuals vs Fitted
+        ax1 = fig.add_subplot(131)
+        ax1.scatter(y_pred, residuals, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+        ax1.axhline(y=0, color='r', linestyle='--', linewidth=2)
+        ax1.set_xlabel('Fitted Values', fontsize=10)
+        ax1.set_ylabel('Residuals', fontsize=10)
+        ax1.set_title('Residuals vs Fitted', fontsize=11, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Residuals vs Index
+        ax2 = fig.add_subplot(132)
+        indices = np.arange(len(residuals))
+        ax2.scatter(indices, residuals, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+        ax2.axhline(y=0, color='r', linestyle='--', linewidth=2)
+        ax2.set_xlabel('Sample Index', fontsize=10)
+        ax2.set_ylabel('Residuals', fontsize=10)
+        ax2.set_title('Residuals vs Index', fontsize=11, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+
+        # Plot 3: Q-Q Plot
+        ax3 = fig.add_subplot(133)
+        theoretical_q, sample_q = qq_plot_data(residuals)
+        ax3.scatter(theoretical_q, sample_q, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+
+        # Add reference line
+        min_q = min(theoretical_q.min(), sample_q.min())
+        max_q = max(theoretical_q.max(), sample_q.max())
+        ax3.plot([min_q, max_q], [min_q, max_q], 'r--', linewidth=2)
+
+        ax3.set_xlabel('Theoretical Quantiles', fontsize=10)
+        ax3.set_ylabel('Sample Quantiles', fontsize=10)
+        ax3.set_title('Q-Q Plot (Normality)', fontsize=11, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add dynamic model assessment below the plots
+        self._add_residual_assessment(residuals, std_residuals)
+
+    def _add_residual_assessment(self, residuals, std_residuals):
+        """Add a dynamic assessment box that evaluates residual quality."""
+        # Create assessment frame
+        assessment_frame = ttk.Frame(self.residual_diagnostics_frame)
+        assessment_frame.pack(fill='x', padx=10, pady=(10, 5))
+
+        # Analyze residuals
+        assessment_lines = ["Model Assessment:"]
+        issues = []
+
+        # Check for outliers (residuals > 3 standard deviations)
+        outlier_threshold = 3.0
+        outlier_count = np.sum(np.abs(std_residuals) > outlier_threshold)
+        if outlier_count > 0:
+            issues.append(f"⚠ {outlier_count} potential outlier(s) detected (|residual| > 3σ)")
+        else:
+            assessment_lines.append("✓ No significant outliers detected")
+
+        # Check for normality using Q-Q plot deviation
+        # Simple check: compare quantiles at extremes
+        from spectral_predict.diagnostics import qq_plot_data
+        theoretical_q, sample_q = qq_plot_data(residuals)
+
+        # Calculate deviation from diagonal at extremes (first and last 10%)
+        n_check = max(1, len(theoretical_q) // 10)
+        lower_dev = np.mean(np.abs(sample_q[:n_check] - theoretical_q[:n_check]))
+        upper_dev = np.mean(np.abs(sample_q[-n_check:] - theoretical_q[-n_check:]))
+        residual_std = np.std(residuals)
+
+        # If deviation is more than 50% of std, flag it
+        if lower_dev > 0.5 * residual_std or upper_dev > 0.5 * residual_std:
+            issues.append("⚠ Q-Q plot shows deviation from normality at extremes")
+        else:
+            assessment_lines.append("✓ Residuals appear normally distributed")
+
+        # Check for heteroscedasticity (changing variance)
+        # Split residuals into lower and upper half by fitted values
+        if hasattr(self, 'refined_y_pred'):
+            y_pred = self.refined_y_pred
+            sorted_indices = np.argsort(y_pred)
+            n_half = len(residuals) // 2
+            lower_half_var = np.var(residuals[sorted_indices[:n_half]])
+            upper_half_var = np.var(residuals[sorted_indices[n_half:]])
+
+            # If variance ratio is > 2, flag it
+            var_ratio = max(lower_half_var, upper_half_var) / (min(lower_half_var, upper_half_var) + 1e-10)
+            if var_ratio > 2.0:
+                issues.append("⚠ Possible heteroscedasticity (non-constant variance)")
+            else:
+                assessment_lines.append("✓ Residual variance appears constant")
+
+        # Add issues to assessment
+        if issues:
+            assessment_lines.extend(issues)
+
+        # Create assessment text
+        assessment_text = "\n".join(assessment_lines)
+
+        # Choose background color based on issues
+        if len(issues) == 0:
+            bg_color = '#d4edda'  # Light green
+        elif len(issues) <= 2:
+            bg_color = '#fff3cd'  # Light yellow
+        else:
+            bg_color = '#f8d7da'  # Light red
+
+        # Create label with colored background
+        assessment_label = tk.Label(assessment_frame, text=assessment_text,
+                                    bg=bg_color, fg='#000000',
+                                    font=('TkDefaultFont', 9, 'bold'),
+                                    justify='left', anchor='w',
+                                    padx=15, pady=10, relief='solid', borderwidth=1)
+        assessment_label.pack(fill='x')
+
+    def _add_leverage_assessment(self, leverage, threshold_2p, threshold_3p, n_samples):
+        """Add a dynamic assessment box that evaluates leverage distribution."""
+        # Create assessment frame
+        assessment_frame = ttk.Frame(self.leverage_plot_frame)
+        assessment_frame.pack(fill='x', padx=10, pady=(10, 5))
+
+        # Analyze leverage
+        assessment_lines = ["Leverage Assessment:"]
+        issues = []
+
+        # Count high and moderate leverage points
+        n_high = np.sum(leverage > threshold_3p)
+        n_moderate = np.sum((leverage > threshold_2p) & (leverage <= threshold_3p))
+        n_normal = n_samples - n_high - n_moderate
+
+        # Calculate percentages
+        pct_high = (n_high / n_samples) * 100
+        pct_moderate = (n_moderate / n_samples) * 100
+        pct_normal = (n_normal / n_samples) * 100
+
+        # Check for concerning patterns
+        if pct_high > 10:
+            issues.append(f"⚠ {n_high} high-leverage points ({pct_high:.1f}%) - Consider investigating data quality")
+        elif pct_high > 5:
+            issues.append(f"⚠ {n_high} high-leverage points ({pct_high:.1f}%) - Some influential samples detected")
+        elif n_high > 0:
+            assessment_lines.append(f"✓ {n_high} high-leverage point(s) ({pct_high:.1f}%) - Within acceptable range")
+        else:
+            assessment_lines.append("✓ No high-leverage points detected")
+
+        # Check moderate leverage
+        if pct_moderate > 20:
+            issues.append(f"⚠ {n_moderate} moderate-leverage points ({pct_moderate:.1f}%) - Higher than expected")
+        elif n_moderate > 0:
+            assessment_lines.append(f"✓ {n_moderate} moderate-leverage point(s) ({pct_moderate:.1f}%) - Normal distribution")
+
+        # Overall assessment
+        if pct_normal >= 80:
+            assessment_lines.append(f"✓ {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Good data distribution")
+        elif pct_normal >= 70:
+            assessment_lines.append(f"✓ {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Acceptable")
+
+        # Add issues to assessment
+        if issues:
+            assessment_lines.extend(issues)
+
+        # Create assessment text
+        assessment_text = "\n".join(assessment_lines)
+
+        # Choose background color based on issues
+        if len(issues) == 0:
+            bg_color = '#d4edda'  # Light green
+        elif pct_high <= 10:
+            bg_color = '#fff3cd'  # Light yellow
+        else:
+            bg_color = '#f8d7da'  # Light red
+
+        # Create label with colored background
+        assessment_label = tk.Label(assessment_frame, text=assessment_text,
+                                    bg=bg_color, fg='#000000',
+                                    font=('TkDefaultFont', 9, 'bold'),
+                                    justify='left', anchor='w',
+                                    padx=15, pady=10, relief='solid', borderwidth=1)
+        assessment_label.pack(fill='x')
+
+    def _plot_leverage_diagnostics(self):
+        """Plot leverage (hat values) to identify influential samples."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Only for regression with linear/PLS models
+        if not hasattr(self, 'refined_config'):
+            return
+
+        task_type = self.refined_config.get('task_type')
+        model_name = self.refined_config.get('model_name')
+
+        # Leverage only meaningful for linear models (PLS, Ridge, Lasso)
+        if task_type != 'regression' or model_name not in ['PLS', 'Ridge', 'Lasso']:
+            return
+
+        if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
+            return  # Need X data for leverage calculation
+
+        from spectral_predict.diagnostics import compute_leverage
+
+        # Clear existing plot
+        for widget in self.leverage_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Compute leverage on the CV data
+        X_data = self.refined_X_cv
+        leverage, threshold_2p = compute_leverage(X_data)
+
+        # Calculate 3p/n threshold manually
+        n_samples, n_features = X_data.shape
+        n_params = n_features + 1  # Include intercept
+        threshold_3p = 3.0 * n_params / n_samples
+
+        # Create figure
+        fig = Figure(figsize=(12, 6))
+        ax = fig.add_subplot(111)
+
+        # Determine colors based on leverage thresholds
+        colors = []
+        for h in leverage:
+            if h > threshold_3p:
+                colors.append('red')  # High leverage
+            elif h > threshold_2p:
+                colors.append('orange')  # Moderate leverage
+            else:
+                colors.append('steelblue')  # Normal
+
+        indices = np.arange(len(leverage))
+        ax.scatter(indices, leverage, c=colors, alpha=0.7, edgecolors='black', linewidths=0.5, s=60)
+
+        # Add threshold lines
+        ax.axhline(y=threshold_2p, color='orange', linestyle='--', linewidth=2,
+                   label=f'Moderate Leverage (2p/n = {threshold_2p:.3f})')
+        ax.axhline(y=threshold_3p, color='red', linestyle='--', linewidth=2,
+                   label=f'High Leverage (3p/n = {threshold_3p:.3f})')
+
+        # Label high-leverage points
+        high_leverage_indices = np.where(leverage > threshold_3p)[0]
+        for idx in high_leverage_indices:
+            ax.annotate(f'{idx}', (idx, leverage[idx]),
+                       xytext=(5, 5), textcoords='offset points', fontsize=8)
+
+        ax.set_xlabel('Sample Index', fontsize=11)
+        ax.set_ylabel('Leverage (Hat Values)', fontsize=11)
+        ax.set_title('Leverage Plot - Influential Samples', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right')
+
+        # Add info text
+        n_high = np.sum(leverage > threshold_3p)
+        n_moderate = np.sum((leverage > threshold_2p) & (leverage <= threshold_3p))
+        info_text = f'High leverage: {n_high} samples\nModerate leverage: {n_moderate} samples'
+        ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+                fontsize=9, family='monospace')
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add dynamic leverage assessment below the plot
+        self._add_leverage_assessment(leverage, threshold_2p, threshold_3p, n_samples)
+
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
         if self.X is None or self.y is None:
@@ -3669,6 +4021,9 @@ Configuration:
             self.refined_y_true = np.array(all_y_true)
             self.refined_y_pred = np.array(all_y_pred)
 
+            # Store X data for leverage diagnostics
+            self.refined_X_cv = X_raw
+
             # Store full wavelengths for derivative + subset case
             if use_full_spectrum_preprocessing:
                 self.refined_full_wavelengths = list(all_wavelengths)
@@ -3704,6 +4059,9 @@ Configuration:
             self.refine_save_button.config(state='normal')
             # Plot the predictions
             self._plot_refined_predictions()
+            # Plot diagnostic plots
+            self._plot_residual_diagnostics()
+            self._plot_leverage_diagnostics()
             messagebox.showinfo("Success", "Refined model analysis complete!")
 
     def _save_refined_model(self):
