@@ -181,14 +181,14 @@ class SpectralPredictApp:
 
         # Model selection
         self.use_pls = tk.BooleanVar(value=True)
-        self.use_ridge = tk.BooleanVar(value=False)  # Default off (baseline model)
-        self.use_lasso = tk.BooleanVar(value=False)  # Default off (baseline model)
+        self.use_ridge = tk.BooleanVar(value=True)
+        self.use_lasso = tk.BooleanVar(value=True)
         self.use_randomforest = tk.BooleanVar(value=True)
         self.use_mlp = tk.BooleanVar(value=True)
         self.use_neuralboosted = tk.BooleanVar(value=True)
 
         # Preprocessing method selection
-        self.use_raw = tk.BooleanVar(value=True)
+        self.use_raw = tk.BooleanVar(value=False)
         self.use_snv = tk.BooleanVar(value=True)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
