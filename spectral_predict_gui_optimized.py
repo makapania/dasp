@@ -57,6 +57,32 @@ except ImportError:
     HAS_OUTLIER_DETECTION = False
     generate_outlier_report = None
 
+# Import calibration transfer and instrument profile modules
+try:
+    from spectral_predict.instrument_profiles import (
+        characterize_instrument,
+        save_instrument_profiles,
+        load_instrument_profiles,
+        rank_instruments_by_detail,
+        estimate_smoothing_between_instruments,
+    )
+    from spectral_predict.calibration_transfer import (
+        resample_to_grid,
+        estimate_ds,
+        estimate_pds,
+        apply_ds,
+        apply_pds,
+        save_transfer_model,
+        load_transfer_model,
+    )
+    from spectral_predict.equalization import (
+        choose_common_grid,
+        equalize_dataset,
+    )
+    HAS_CALIBRATION_TRANSFER = True
+except ImportError:
+    HAS_CALIBRATION_TRANSFER = False
+
 
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
@@ -104,6 +130,22 @@ class SpectralPredictApp:
         self.prediction_data = None  # DataFrame with new spectral data
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
+
+        # Instrument Lab Tab (Tab 8) variables
+        self.instrument_profiles = {}  # Dict of instrument_id -> InstrumentProfile
+        self.current_instrument_data = None  # (wavelengths, spectra) for current instrument
+
+        # Calibration Transfer Tab (Tab 9) variables
+        self.ct_master_model_dict = None  # Loaded master model for predictions
+        self.ct_X_master_common = None  # Master spectra on common grid
+        self.ct_X_slave_common = None  # Slave spectra on common grid
+        self.ct_wavelengths_common = None  # Common wavelength grid
+        self.ct_transfer_model = None  # TransferModel object (DS or PDS)
+        self.ct_master_instrument_id = tk.StringVar()  # Selected master instrument
+        self.ct_slave_instrument_id = tk.StringVar()  # Selected slave instrument
+        self.ct_pred_transfer_model = None  # Transfer model loaded for prediction
+        self.ct_pred_y_pred = None  # Predictions from transferred spectra
+        self.ct_pred_sample_ids = None  # Sample IDs for predictions
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -255,6 +297,8 @@ class SpectralPredictApp:
         self._create_tab5_results()
         self._create_tab6_refine_model()
         self._create_tab7_model_prediction()
+        self._create_tab8_instrument_lab()
+        self._create_tab9_calibration_transfer()
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -5134,6 +5178,917 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Export Error",
                 f"Failed to export predictions:\n{str(e)}")
+
+    def _create_tab8_instrument_lab(self):
+        """Tab 8: Instrument Lab - Instrument characterization and registry."""
+        self.tab8 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab8, text='  🔬 Instrument Lab  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(self.tab8, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab8, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        main_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="30")
+        main_frame.pack(fill='both', expand=True)
+
+        # Title
+        title_label = ttk.Label(main_frame, text="Instrument Lab",
+                               style='Title.TLabel')
+        title_label.pack(pady=(0, 10))
+
+        desc_label = ttk.Label(main_frame,
+                              text="Characterize instruments and manage instrument registry",
+                              style='Caption.TLabel')
+        desc_label.pack(pady=(0, 20))
+
+        # === SECTION A: Load & Characterize Instrument ===
+        section_a = ttk.LabelFrame(main_frame, text="Load & Characterize Instrument",
+                                   padding="15", style='Card.TFrame')
+        section_a.pack(fill='x', pady=(0, 15))
+
+        # Instrument ID
+        id_frame = ttk.Frame(section_a, style='TFrame')
+        id_frame.pack(fill='x', pady=5)
+        ttk.Label(id_frame, text="Instrument ID:", style='TLabel').pack(side='left', padx=(0, 10))
+        self.inst_id_entry = ttk.Entry(id_frame, width=30)
+        self.inst_id_entry.pack(side='left')
+
+        # Data directory
+        dir_frame = ttk.Frame(section_a, style='TFrame')
+        dir_frame.pack(fill='x', pady=5)
+        ttk.Label(dir_frame, text="Data Directory:", style='TLabel').pack(side='left', padx=(0, 10))
+        self.inst_data_path = tk.StringVar()
+        ttk.Entry(dir_frame, textvariable=self.inst_data_path, width=50).pack(side='left', padx=(0, 10))
+        ttk.Button(dir_frame, text="Browse", command=self._browse_instrument_data).pack(side='left')
+
+        # Load & Characterize button
+        ttk.Button(section_a, text="Load & Characterize",
+                  command=self._load_and_characterize_instrument,
+                  style='Accent.TButton').pack(pady=10)
+
+        # === SECTION B: Instrument Summary ===
+        section_b = ttk.LabelFrame(main_frame, text="Instrument Summary",
+                                   padding="15", style='Card.TFrame')
+        section_b.pack(fill='x', pady=(0, 15))
+
+        self.inst_summary_text = tk.Text(section_b, height=8, width=80, wrap='word')
+        self.inst_summary_text.pack(fill='x')
+        self.inst_summary_text.insert('1.0', "No instrument loaded")
+        self.inst_summary_text.config(state='disabled')
+
+        # === SECTION C: Instrument Registry ===
+        section_c = ttk.LabelFrame(main_frame, text="Instrument Registry",
+                                   padding="15", style='Card.TFrame')
+        section_c.pack(fill='both', expand=True, pady=(0, 15))
+
+        # Registry table
+        columns = ('ID', 'Vendor', 'Model', 'Δλ_med', 'Roughness', 'Detail Score')
+        self.inst_registry_tree = ttk.Treeview(section_c, columns=columns, show='headings', height=10)
+
+        for col in columns:
+            self.inst_registry_tree.heading(col, text=col)
+            self.inst_registry_tree.column(col, width=120)
+
+        self.inst_registry_tree.pack(fill='both', expand=True)
+
+        # Registry buttons
+        reg_btn_frame = ttk.Frame(section_c, style='TFrame')
+        reg_btn_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Button(reg_btn_frame, text="Save Registry",
+                  command=self._save_instrument_registry).pack(side='left', padx=5)
+        ttk.Button(reg_btn_frame, text="Load Registry",
+                  command=self._load_instrument_registry).pack(side='left', padx=5)
+        ttk.Button(reg_btn_frame, text="Delete Selected",
+                  command=self._delete_selected_instrument).pack(side='left', padx=5)
+
+    def _browse_instrument_data(self):
+        """Browse for instrument data directory."""
+        directory = filedialog.askdirectory(title="Select Instrument Data Directory")
+        if directory:
+            self.inst_data_path.set(directory)
+
+    def _load_and_characterize_instrument(self):
+        """Load instrument data and compute characteristics."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Module Not Available",
+                "Calibration transfer modules are not available.")
+            return
+
+        inst_id = self.inst_id_entry.get().strip()
+        data_path = self.inst_data_path.get()
+
+        if not inst_id:
+            messagebox.showerror("Error", "Please enter an Instrument ID")
+            return
+
+        if not data_path:
+            messagebox.showerror("Error", "Please select a data directory")
+            return
+
+        try:
+            # Load spectral data from directory (reuse existing loader logic)
+            from spectral_predict.io import read_asd_directory, read_spectral_csv
+
+            data_path_obj = Path(data_path)
+
+            # Try ASD first, then CSV
+            try:
+                data = read_asd_directory(str(data_path_obj))
+                wavelengths = data['wavelengths']
+                X = data['spectra']
+            except:
+                # Try CSV format
+                data = read_spectral_csv(str(data_path_obj))
+                wavelengths = data['wavelengths']
+                X = data['spectra']
+
+            # Characterize instrument
+            profile = characterize_instrument(
+                instrument_id=inst_id,
+                wavelengths=wavelengths,
+                spectra=X,
+                vendor="",
+                model="",
+                description=f"Loaded from {data_path}"
+            )
+
+            # Store in registry
+            self.instrument_profiles[inst_id] = profile
+            self.current_instrument_data = (wavelengths, X)
+
+            # Update summary
+            self._update_instrument_summary(profile)
+
+            # Update registry table
+            self._update_registry_table()
+
+            messagebox.showinfo("Success",
+                f"Instrument '{inst_id}' characterized successfully!\n\n"
+                f"Wavelength range: {wavelengths.min():.1f} - {wavelengths.max():.1f} nm\n"
+                f"Channels: {len(wavelengths)}\n"
+                f"Detail score: {profile.detail_score:.4f}")
+
+        except Exception as e:
+            messagebox.showerror("Error",
+                f"Failed to load and characterize instrument:\n{str(e)}")
+
+    def _update_instrument_summary(self, profile):
+        """Update the instrument summary text widget."""
+        self.inst_summary_text.config(state='normal')
+        self.inst_summary_text.delete('1.0', 'end')
+
+        summary = f"""Instrument ID: {profile.instrument_id}
+Vendor: {profile.vendor or 'N/A'}
+Model: {profile.model or 'N/A'}
+Description: {profile.description or 'N/A'}
+
+Wavelength Range: {profile.wavelengths.min():.1f} - {profile.wavelengths.max():.1f} nm
+Number of Channels: {len(profile.wavelengths)}
+
+Data-Driven Metrics:
+  Median Wavelength Spacing (Δλ_med): {profile.delta_lambda_med:.4f} nm
+  Roughness (R): {profile.roughness_R:.6f}
+  Detail Score (R/Δλ): {profile.detail_score:.4f}
+
+Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else "Lower detail/resolution"}
+"""
+        self.inst_summary_text.insert('1.0', summary)
+        self.inst_summary_text.config(state='disabled')
+
+    def _update_registry_table(self):
+        """Update the instrument registry table."""
+        # Clear existing items
+        for item in self.inst_registry_tree.get_children():
+            self.inst_registry_tree.delete(item)
+
+        # Add instruments sorted by detail score
+        if self.instrument_profiles:
+            ranked = rank_instruments_by_detail(self.instrument_profiles)
+            for inst_id in ranked:
+                profile = self.instrument_profiles[inst_id]
+                self.inst_registry_tree.insert('', 'end', values=(
+                    profile.instrument_id,
+                    profile.vendor or 'N/A',
+                    profile.model or 'N/A',
+                    f"{profile.delta_lambda_med:.4f}",
+                    f"{profile.roughness_R:.6f}",
+                    f"{profile.detail_score:.4f}"
+                ))
+
+    def _save_instrument_registry(self):
+        """Save instrument registry to JSON file."""
+        if not self.instrument_profiles:
+            messagebox.showwarning("Warning", "No instruments to save")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Save Instrument Registry",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile="instrument_registry.json"
+        )
+
+        if not filepath:
+            return
+
+        try:
+            save_instrument_profiles(self.instrument_profiles, filepath)
+            messagebox.showinfo("Success",
+                f"Saved {len(self.instrument_profiles)} instruments to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Error",
+                f"Failed to save registry:\n{str(e)}")
+
+    def _load_instrument_registry(self):
+        """Load instrument registry from JSON file."""
+        filepath = filedialog.askopenfilename(
+            title="Load Instrument Registry",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            profiles = load_instrument_profiles(filepath)
+            self.instrument_profiles = profiles
+            self._update_registry_table()
+            messagebox.showinfo("Success",
+                f"Loaded {len(profiles)} instruments from:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Error",
+                f"Failed to load registry:\n{str(e)}")
+
+    def _delete_selected_instrument(self):
+        """Delete selected instrument from registry."""
+        selection = self.inst_registry_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select an instrument to delete")
+            return
+
+        # Get instrument ID from selection
+        item = selection[0]
+        values = self.inst_registry_tree.item(item, 'values')
+        inst_id = values[0]
+
+        # Confirm deletion
+        if messagebox.askyesno("Confirm Deletion",
+                              f"Delete instrument '{inst_id}' from registry?"):
+            del self.instrument_profiles[inst_id]
+            self._update_registry_table()
+
+    # ======================================================================
+    # TAB 9 HELPER METHODS: Calibration Transfer
+    # ======================================================================
+
+    def _browse_ct_master_model(self):
+        """Browse for master model .pkl file."""
+        filepath = filedialog.askopenfilename(
+            title="Select Master Model",
+            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_master_model_path_var.set(filepath)
+
+    def _load_ct_master_model(self):
+        """Load master model from selected .pkl file."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        filepath = self.ct_master_model_path_var.get()
+        if not filepath:
+            messagebox.showwarning("Warning", "Please browse and select a master model file")
+            return
+
+        try:
+            import pickle
+            with open(filepath, 'rb') as f:
+                self.ct_master_model_dict = pickle.load(f)
+
+            # Display model info
+            model_type = self.ct_master_model_dict.get('model_type', 'Unknown')
+            n_components = self.ct_master_model_dict.get('n_components', 'N/A')
+            wl_model = self.ct_master_model_dict.get('wavelengths', np.array([]))
+
+            info_text = (f"Model Type: {model_type}\n"
+                        f"Components: {n_components}\n"
+                        f"Wavelength Range: {wl_model.min():.1f} - {wl_model.max():.1f} nm\n"
+                        f"Number of Wavelengths: {len(wl_model)}")
+
+            self.ct_model_info_text.config(state='normal')
+            self.ct_model_info_text.delete('1.0', tk.END)
+            self.ct_model_info_text.insert('1.0', info_text)
+            self.ct_model_info_text.config(state='disabled')
+
+            messagebox.showinfo("Success", "Master model loaded successfully")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
+
+    def _refresh_ct_instrument_combos(self):
+        """Refresh instrument comboboxes from registry."""
+        if not self.instrument_profiles:
+            messagebox.showinfo("Info", "No instruments in registry. Please use Tab 8 to add instruments.")
+            return
+
+        inst_ids = list(self.instrument_profiles.keys())
+        self.ct_master_instrument_combo['values'] = inst_ids
+        self.ct_slave_instrument_combo['values'] = inst_ids
+
+        messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
+
+    def _browse_ct_spectra_dir(self):
+        """Browse for standardization spectra directory."""
+        directory = filedialog.askdirectory(title="Select Standardization Spectra Directory")
+        if directory:
+            self.ct_spectra_dir_var.set(directory)
+
+    def _load_ct_paired_spectra(self):
+        """Load paired standardization spectra for master and slave instruments."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        master_id = self.ct_master_instrument_id.get()
+        slave_id = self.ct_slave_instrument_id.get()
+        spectra_dir = self.ct_spectra_dir_var.get()
+
+        if not master_id or not slave_id:
+            messagebox.showwarning("Warning", "Please select both master and slave instruments")
+            return
+
+        if not spectra_dir:
+            messagebox.showwarning("Warning", "Please browse and select spectra directory")
+            return
+
+        if master_id not in self.instrument_profiles or slave_id not in self.instrument_profiles:
+            messagebox.showerror("Error", "Selected instruments not found in registry")
+            return
+
+        try:
+            # Load spectra using the helper from Tab 1
+            wavelengths_master, X_master = self._load_spectra_from_directory(spectra_dir)
+            wavelengths_slave, X_slave = self._load_spectra_from_directory(spectra_dir)
+
+            # Get instrument profiles
+            master_prof = self.instrument_profiles[master_id]
+            slave_prof = self.instrument_profiles[slave_id]
+
+            # Choose common grid
+            common_wl = choose_common_grid(
+                {master_id: master_prof, slave_id: slave_prof},
+                [master_id, slave_id]
+            )
+
+            # Resample both to common grid
+            self.ct_X_master_common = resample_to_grid(X_master, wavelengths_master, common_wl)
+            self.ct_X_slave_common = resample_to_grid(X_slave, wavelengths_slave, common_wl)
+            self.ct_wavelengths_common = common_wl
+
+            # Display info
+            info_text = (f"Loaded {X_master.shape[0]} paired spectra\n"
+                        f"Common wavelength grid: {common_wl.shape[0]} points\n"
+                        f"Range: {common_wl.min():.1f} - {common_wl.max():.1f} nm")
+
+            self.ct_spectra_info_text.config(state='normal')
+            self.ct_spectra_info_text.delete('1.0', tk.END)
+            self.ct_spectra_info_text.insert('1.0', info_text)
+            self.ct_spectra_info_text.config(state='disabled')
+
+            messagebox.showinfo("Success", "Paired spectra loaded and resampled to common grid")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load spectra:\n{str(e)}")
+
+    def _build_ct_transfer_model(self):
+        """Build calibration transfer model (DS or PDS)."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        if self.ct_X_master_common is None or self.ct_X_slave_common is None:
+            messagebox.showwarning("Warning", "Please load paired spectra first")
+            return
+
+        method = self.ct_method_var.get()
+        master_id = self.ct_master_instrument_id.get()
+        slave_id = self.ct_slave_instrument_id.get()
+
+        try:
+            if method == 'ds':
+                # Build DS transfer model
+                lam = float(self.ct_ds_lambda_var.get())
+                A = estimate_ds(self.ct_X_master_common, self.ct_X_slave_common, lam=lam)
+
+                # Create TransferModel object
+                from spectral_predict.calibration_transfer import TransferModel
+                self.ct_transfer_model = TransferModel(
+                    master_id=master_id,
+                    slave_id=slave_id,
+                    method='ds',
+                    wavelengths_common=self.ct_wavelengths_common,
+                    params={'A': A},
+                    meta={'lambda': lam, 'note': 'DS transfer built in GUI'}
+                )
+
+                info_text = (f"Transfer Method: Direct Standardization (DS)\n"
+                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Ridge Lambda: {lam}\n"
+                            f"Matrix Shape: {A.shape}")
+
+            elif method == 'pds':
+                # Build PDS transfer model
+                window = int(self.ct_pds_window_var.get())
+                B = estimate_pds(self.ct_X_master_common, self.ct_X_slave_common, window=window)
+
+                from spectral_predict.calibration_transfer import TransferModel
+                self.ct_transfer_model = TransferModel(
+                    master_id=master_id,
+                    slave_id=slave_id,
+                    method='pds',
+                    wavelengths_common=self.ct_wavelengths_common,
+                    params={'B': B, 'window': window},
+                    meta={'note': 'PDS transfer built in GUI'}
+                )
+
+                info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
+                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Window Size: {window}\n"
+                            f"Coefficient Matrix Shape: {B.shape}")
+
+            # Display transfer model info
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.insert('1.0', info_text)
+            self.ct_transfer_info_text.config(state='disabled')
+
+            messagebox.showinfo("Success", f"{method.upper()} transfer model built successfully")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to build transfer model:\n{str(e)}")
+
+    def _save_ct_transfer_model(self):
+        """Save current transfer model to disk."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        if self.ct_transfer_model is None:
+            messagebox.showwarning("Warning", "No transfer model to save. Please build one first.")
+            return
+
+        directory = filedialog.askdirectory(title="Select Directory to Save Transfer Model")
+        if not directory:
+            return
+
+        try:
+            path_prefix = save_transfer_model(
+                self.ct_transfer_model,
+                directory=directory,
+                name=None  # Auto-generate name
+            )
+            messagebox.showinfo("Success",
+                f"Transfer model saved to:\n{path_prefix}.json\n{path_prefix}.npz")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save transfer model:\n{str(e)}")
+
+    def _load_multiinstrument_dataset(self):
+        """Load multi-instrument dataset for equalization."""
+        messagebox.showinfo("Info",
+            "Multi-instrument equalization:\n\n"
+            "This feature requires organizing spectra from multiple instruments.\n"
+            "Expected structure:\n"
+            "  - Each subdirectory named by instrument_id\n"
+            "  - Spectra files within each subdirectory\n\n"
+            "This is a placeholder for future implementation.")
+
+    def _equalize_and_export(self):
+        """Equalize multi-instrument dataset and export."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        messagebox.showinfo("Info",
+            "Equalization export:\n\n"
+            "This will use equalize_dataset() to merge spectra from multiple\n"
+            "instruments onto a common grid.\n\n"
+            "This is a placeholder for future implementation.")
+
+    def _browse_ct_pred_transfer_model(self):
+        """Browse for transfer model to use for prediction."""
+        filepath = filedialog.askopenfilename(
+            title="Select Transfer Model (JSON)",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir=os.getcwd()
+        )
+        if filepath:
+            # Remove .json extension to get prefix
+            if filepath.endswith('.json'):
+                filepath = filepath[:-5]
+            self.ct_pred_tm_path_var.set(filepath)
+
+    def _load_ct_pred_transfer_model(self):
+        """Load transfer model for prediction."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        path_prefix = self.ct_pred_tm_path_var.get()
+        if not path_prefix:
+            messagebox.showwarning("Warning", "Please browse and select a transfer model")
+            return
+
+        try:
+            self.ct_pred_transfer_model = load_transfer_model(path_prefix)
+            messagebox.showinfo("Success",
+                f"Transfer model loaded:\n"
+                f"Method: {self.ct_pred_transfer_model.method.upper()}\n"
+                f"Master: {self.ct_pred_transfer_model.master_id}\n"
+                f"Slave: {self.ct_pred_transfer_model.slave_id}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
+
+    def _browse_ct_new_slave_dir(self):
+        """Browse for new slave spectra directory."""
+        directory = filedialog.askdirectory(title="Select New Slave Spectra Directory")
+        if directory:
+            self.ct_new_slave_dir_var.set(directory)
+
+    def _load_and_predict_ct(self):
+        """Load new slave spectra, apply transfer, and predict."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        if self.ct_pred_transfer_model is None:
+            messagebox.showwarning("Warning", "Please load a transfer model first")
+            return
+
+        if self.ct_master_model_dict is None:
+            messagebox.showwarning("Warning", "Please load master model first (Section A)")
+            return
+
+        new_slave_dir = self.ct_new_slave_dir_var.get()
+        if not new_slave_dir:
+            messagebox.showwarning("Warning", "Please browse and select new slave spectra directory")
+            return
+
+        try:
+            # Load new slave spectra
+            wavelengths_slave, X_slave_new = self._load_spectra_from_directory(new_slave_dir)
+
+            # Resample to common grid
+            common_wl = self.ct_pred_transfer_model.wavelengths_common
+            X_slave_common = resample_to_grid(X_slave_new, wavelengths_slave, common_wl)
+
+            # Apply transfer model
+            if self.ct_pred_transfer_model.method == 'ds':
+                A = self.ct_pred_transfer_model.params['A']
+                X_transferred = apply_ds(X_slave_common, A)
+            elif self.ct_pred_transfer_model.method == 'pds':
+                B = self.ct_pred_transfer_model.params['B']
+                window = self.ct_pred_transfer_model.params['window']
+                X_transferred = apply_pds(X_slave_common, B, window)
+
+            # Resample transferred spectra to master model's wavelength grid
+            wl_model = self.ct_master_model_dict['wavelengths']
+            X_for_prediction = resample_to_grid(X_transferred, common_wl, wl_model)
+
+            # Apply preprocessing if present
+            if 'preprocessing' in self.ct_master_model_dict:
+                prep = self.ct_master_model_dict['preprocessing']
+                X_for_prediction = prep.transform(X_for_prediction)
+
+            # Predict
+            model = self.ct_master_model_dict['model']
+            y_pred = model.predict(X_for_prediction).ravel()
+
+            # Store predictions
+            self.ct_pred_y_pred = y_pred
+            self.ct_pred_sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
+
+            # Display results
+            pred_text = f"Transferred {len(y_pred)} spectra using {self.ct_pred_transfer_model.method.upper()}\n"
+            pred_text += f"Predictions (first 10):\n"
+            for i in range(min(10, len(y_pred))):
+                pred_text += f"  {self.ct_pred_sample_ids[i]}: {y_pred[i]:.3f}\n"
+
+            if len(y_pred) > 10:
+                pred_text += f"  ... and {len(y_pred) - 10} more\n"
+
+            pred_text += f"\nMean: {y_pred.mean():.3f}, Std: {y_pred.std():.3f}"
+
+            self.ct_prediction_text.config(state='normal')
+            self.ct_prediction_text.delete('1.0', tk.END)
+            self.ct_prediction_text.insert('1.0', pred_text)
+            self.ct_prediction_text.config(state='disabled')
+
+            messagebox.showinfo("Success", f"Predictions generated for {len(y_pred)} samples")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to predict:\n{str(e)}")
+
+    def _export_ct_predictions(self):
+        """Export calibration transfer predictions to CSV."""
+        if self.ct_pred_y_pred is None:
+            messagebox.showwarning("Warning", "No predictions to export. Please run prediction first.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Save Predictions",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            df = pd.DataFrame({
+                'Sample_ID': self.ct_pred_sample_ids,
+                'Prediction': self.ct_pred_y_pred
+            })
+            df.to_csv(filepath, index=False)
+            messagebox.showinfo("Success", f"Predictions exported to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
+
+    def _load_spectra_from_directory(self, directory):
+        """Helper method to load spectra from a directory. Returns (wavelengths, X)."""
+        import glob
+
+        # Try to detect file type
+        asd_files = glob.glob(os.path.join(directory, "*.asd"))
+        csv_files = glob.glob(os.path.join(directory, "*.csv"))
+        spc_files = glob.glob(os.path.join(directory, "*.spc"))
+
+        if asd_files:
+            # Load ASD files
+            from spectral_predict.data_io import load_asd_directory
+            return load_asd_directory(directory)
+        elif csv_files:
+            # Load CSV files (assume first row is wavelengths, each subsequent row is a spectrum)
+            all_spectra = []
+            wavelengths = None
+            for csv_file in sorted(csv_files):
+                df = pd.read_csv(csv_file, header=None)
+                if wavelengths is None:
+                    wavelengths = df.iloc[0, :].values.astype(float)
+                spectrum = df.iloc[1, :].values.astype(float)
+                all_spectra.append(spectrum)
+            X = np.array(all_spectra)
+            return wavelengths, X
+        elif spc_files:
+            # Load SPC files
+            from spectral_predict.data_io import load_spc_directory
+            return load_spc_directory(directory)
+        else:
+            raise ValueError("No supported spectral files found in directory (ASD, CSV, or SPC)")
+
+    def _create_tab9_calibration_transfer(self):
+        """Tab 9: Calibration Transfer & Equalized Prediction."""
+        # This will be a large implementation - to be continued
+        self.tab9 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab9, text='  🔄 Calibration Transfer  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(self.tab9, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        main_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="30")
+        main_frame.pack(fill='both', expand=True)
+
+        # Title
+        title_label = ttk.Label(main_frame, text="Calibration Transfer & Equalized Prediction",
+                               style='Title.TLabel')
+        title_label.pack(pady=(0, 10))
+
+        desc_label = ttk.Label(main_frame,
+                              text="Build transfer models between instruments and make equalized predictions",
+                              style='Caption.TLabel')
+        desc_label.pack(pady=(0, 20))
+
+        # ===================================================================
+        # SECTION A: Load Master Model
+        # ===================================================================
+        section_a = ttk.LabelFrame(main_frame, text="A) Load Master Model", style='Card.TFrame', padding=15)
+        section_a.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(section_a, text="Load a trained PLS/PCR model (the 'master' instrument) for calibration transfer:",
+                 style='TLabel').pack(anchor='w', pady=(0, 10))
+
+        load_model_frame = ttk.Frame(section_a, style='TFrame')
+        load_model_frame.pack(fill='x')
+
+        self.ct_master_model_path_var = tk.StringVar()
+        model_entry = ttk.Entry(load_model_frame, textvariable=self.ct_master_model_path_var, width=60, state='readonly')
+        model_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(load_model_frame, text="Browse Model...",
+                  command=self._browse_ct_master_model).pack(side='left', padx=(0, 10))
+        ttk.Button(load_model_frame, text="Load Model",
+                  command=self._load_ct_master_model, style='Accent.TButton').pack(side='left')
+
+        # Model info display
+        self.ct_model_info_text = tk.Text(section_a, height=4, width=80, state='disabled',
+                                          wrap='word', relief='flat', bg='#f0f0f0')
+        self.ct_model_info_text.pack(fill='x', pady=(10, 0))
+
+        # ===================================================================
+        # SECTION B: Select Instruments & Load Paired Spectra
+        # ===================================================================
+        section_b = ttk.LabelFrame(main_frame, text="B) Select Instruments & Load Paired Spectra",
+                                  style='Card.TFrame', padding=15)
+        section_b.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(section_b,
+                 text="Select master and slave instruments, then load paired standardization spectra:",
+                 style='TLabel').pack(anchor='w', pady=(0, 10))
+
+        # Instrument selection grid
+        inst_grid = ttk.Frame(section_b, style='TFrame')
+        inst_grid.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(inst_grid, text="Master Instrument:", style='TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10))
+        self.ct_master_instrument_combo = ttk.Combobox(inst_grid, textvariable=self.ct_master_instrument_id,
+                                                       state='readonly', width=30)
+        self.ct_master_instrument_combo.grid(row=0, column=1, sticky='w', padx=(0, 20))
+
+        ttk.Label(inst_grid, text="Slave Instrument:", style='TLabel').grid(row=0, column=2, sticky='w', padx=(0, 10))
+        self.ct_slave_instrument_combo = ttk.Combobox(inst_grid, textvariable=self.ct_slave_instrument_id,
+                                                      state='readonly', width=30)
+        self.ct_slave_instrument_combo.grid(row=0, column=3, sticky='w')
+
+        ttk.Button(inst_grid, text="Refresh from Registry",
+                  command=self._refresh_ct_instrument_combos).grid(row=0, column=4, padx=(20, 0))
+
+        # Load paired spectra
+        load_spectra_frame = ttk.Frame(section_b, style='TFrame')
+        load_spectra_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Label(load_spectra_frame, text="Standardization Spectra Directory:",
+                 style='TLabel').pack(anchor='w', pady=(0, 5))
+
+        spectra_entry_frame = ttk.Frame(load_spectra_frame, style='TFrame')
+        spectra_entry_frame.pack(fill='x')
+
+        self.ct_spectra_dir_var = tk.StringVar()
+        spectra_entry = ttk.Entry(spectra_entry_frame, textvariable=self.ct_spectra_dir_var,
+                                 width=60, state='readonly')
+        spectra_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(spectra_entry_frame, text="Browse Directory...",
+                  command=self._browse_ct_spectra_dir).pack(side='left', padx=(0, 10))
+        ttk.Button(spectra_entry_frame, text="Load Paired Spectra",
+                  command=self._load_ct_paired_spectra, style='Accent.TButton').pack(side='left')
+
+        # Spectra info
+        self.ct_spectra_info_text = tk.Text(section_b, height=3, width=80, state='disabled',
+                                           wrap='word', relief='flat', bg='#f0f0f0')
+        self.ct_spectra_info_text.pack(fill='x', pady=(10, 0))
+
+        # ===================================================================
+        # SECTION C: Build Transfer Mapping (DS/PDS)
+        # ===================================================================
+        section_c = ttk.LabelFrame(main_frame, text="C) Build Transfer Mapping",
+                                  style='Card.TFrame', padding=15)
+        section_c.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(section_c, text="Configure and build calibration transfer model (DS or PDS):",
+                 style='TLabel').pack(anchor='w', pady=(0, 10))
+
+        # Method selection and parameters
+        method_frame = ttk.Frame(section_c, style='TFrame')
+        method_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(method_frame, text="Transfer Method:", style='TLabel').pack(side='left', padx=(0, 10))
+        self.ct_method_var = tk.StringVar(value='ds')
+        ttk.Radiobutton(method_frame, text="Direct Standardization (DS)",
+                       variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 20))
+        ttk.Radiobutton(method_frame, text="Piecewise DS (PDS)",
+                       variable=self.ct_method_var, value='pds').pack(side='left')
+
+        # Parameters
+        params_frame = ttk.Frame(section_c, style='TFrame')
+        params_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(params_frame, text="DS Ridge Lambda:", style='TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10))
+        self.ct_ds_lambda_var = tk.StringVar(value='0.001')
+        ttk.Entry(params_frame, textvariable=self.ct_ds_lambda_var, width=15).grid(row=0, column=1, sticky='w', padx=(0, 30))
+
+        ttk.Label(params_frame, text="PDS Window:", style='TLabel').grid(row=0, column=2, sticky='w', padx=(0, 10))
+        self.ct_pds_window_var = tk.StringVar(value='11')
+        ttk.Entry(params_frame, textvariable=self.ct_pds_window_var, width=15).grid(row=0, column=3, sticky='w')
+
+        # Build button
+        ttk.Button(section_c, text="Build Transfer Model",
+                  command=self._build_ct_transfer_model, style='Accent.TButton').pack(pady=(0, 10))
+
+        # Transfer model info
+        self.ct_transfer_info_text = tk.Text(section_c, height=4, width=80, state='disabled',
+                                            wrap='word', relief='flat', bg='#f0f0f0')
+        self.ct_transfer_info_text.pack(fill='x')
+
+        # Save transfer model
+        save_tm_frame = ttk.Frame(section_c, style='TFrame')
+        save_tm_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Button(save_tm_frame, text="Save Transfer Model...",
+                  command=self._save_ct_transfer_model).pack(side='left')
+
+        # ===================================================================
+        # SECTION D: Export Equalized Spectra (Optional)
+        # ===================================================================
+        section_d = ttk.LabelFrame(main_frame, text="D) Export Equalized Spectra (Optional)",
+                                  style='Card.TFrame', padding=15)
+        section_d.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(section_d,
+                 text="Use equalization to combine multi-instrument datasets into a common domain:",
+                 style='TLabel').pack(anchor='w', pady=(0, 10))
+
+        eq_button_frame = ttk.Frame(section_d, style='TFrame')
+        eq_button_frame.pack(fill='x')
+
+        ttk.Button(eq_button_frame, text="Load Multi-Instrument Dataset...",
+                  command=self._load_multiinstrument_dataset).pack(side='left', padx=(0, 10))
+        ttk.Button(eq_button_frame, text="Equalize & Export...",
+                  command=self._equalize_and_export, style='Accent.TButton').pack(side='left')
+
+        # ===================================================================
+        # SECTION E: Predict with Transfer Model
+        # ===================================================================
+        section_e = ttk.LabelFrame(main_frame, text="E) Predict with Transfer Model",
+                                  style='Card.TFrame', padding=15)
+        section_e.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(section_e,
+                 text="Load new slave spectra, apply calibration transfer, and predict using master model:",
+                 style='TLabel').pack(anchor='w', pady=(0, 10))
+
+        # Load transfer model for prediction
+        load_tm_frame = ttk.Frame(section_e, style='TFrame')
+        load_tm_frame.pack(fill='x', pady=(0, 10))
+
+        self.ct_pred_tm_path_var = tk.StringVar()
+        tm_entry = ttk.Entry(load_tm_frame, textvariable=self.ct_pred_tm_path_var, width=60, state='readonly')
+        tm_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(load_tm_frame, text="Browse Transfer Model...",
+                  command=self._browse_ct_pred_transfer_model).pack(side='left', padx=(0, 10))
+        ttk.Button(load_tm_frame, text="Load TM",
+                  command=self._load_ct_pred_transfer_model).pack(side='left')
+
+        # Load new slave spectra
+        load_new_spectra_frame = ttk.Frame(section_e, style='TFrame')
+        load_new_spectra_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Label(load_new_spectra_frame, text="New Slave Spectra Directory:",
+                 style='TLabel').pack(anchor='w', pady=(0, 5))
+
+        new_spectra_entry_frame = ttk.Frame(load_new_spectra_frame, style='TFrame')
+        new_spectra_entry_frame.pack(fill='x')
+
+        self.ct_new_slave_dir_var = tk.StringVar()
+        new_slave_entry = ttk.Entry(new_spectra_entry_frame, textvariable=self.ct_new_slave_dir_var,
+                                   width=60, state='readonly')
+        new_slave_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(new_spectra_entry_frame, text="Browse Directory...",
+                  command=self._browse_ct_new_slave_dir).pack(side='left', padx=(0, 10))
+        ttk.Button(new_spectra_entry_frame, text="Load & Predict",
+                  command=self._load_and_predict_ct, style='Accent.TButton').pack(side='left')
+
+        # Prediction results
+        self.ct_prediction_text = tk.Text(section_e, height=6, width=80, state='disabled',
+                                         wrap='word', relief='flat', bg='#f0f0f0')
+        self.ct_prediction_text.pack(fill='x', pady=(10, 0))
+
+        # Export predictions
+        ttk.Button(section_e, text="Export Predictions...",
+                  command=self._export_ct_predictions).pack(pady=(10, 0), anchor='w')
 
 
 def main():
