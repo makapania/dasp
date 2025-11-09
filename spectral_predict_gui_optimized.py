@@ -164,7 +164,12 @@ class SpectralPredictApp:
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
-        self.lambda_penalty = tk.DoubleVar(value=0.15)
+
+        # NEW: User-friendly penalty system (0-10 scale)
+        # 0 = only performance (R²) matters, 10 = strong penalty
+        self.variable_penalty = tk.IntVar(value=3)     # Penalty for using many variables
+        self.complexity_penalty = tk.IntVar(value=5)   # Penalty for model complexity (LVs, etc.)
+
         self.max_n_components = tk.IntVar(value=24)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
         self.show_progress = tk.BooleanVar(value=True)
@@ -229,9 +234,6 @@ class SpectralPredictApp:
         self.rf_n_trees_200 = tk.BooleanVar(value=True)  # Default
         self.rf_n_trees_500 = tk.BooleanVar(value=True)  # Default
         self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
-
-        # Random Forest advanced options (defaults OFF for safety)
-        self.rf_enable_advanced = tk.BooleanVar(value=False)  # ✅ OFF by default
         self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth
         self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
         self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
@@ -660,27 +662,66 @@ class SpectralPredictApp:
         ttk.Label(options_frame, text="CV Folds:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 10))
         ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=0, column=1, sticky=tk.W)
 
-        # Lambda penalty
-        ttk.Label(options_frame, text="Complexity Penalty:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.lambda_penalty, width=12).grid(row=1, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(higher = prefer simpler models)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=10)
+        # NEW: Variable Count Penalty (0-10 scale)
+        ttk.Label(options_frame, text="Variable Count Penalty:", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        ttk.Scale(options_frame, from_=0, to=10, variable=self.variable_penalty, orient='horizontal', length=200).grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(0, 10))
+        var_penalty_label = ttk.Label(options_frame, text="", style='Caption.TLabel')
+        var_penalty_label.grid(row=2, column=2, sticky=tk.W, padx=10)
+
+        def update_var_penalty_label(*args):
+            val = self.variable_penalty.get()
+            if val == 0:
+                var_penalty_label.config(text="0 = Ignore variable count (only R² matters)")
+            elif val <= 3:
+                var_penalty_label.config(text=f"{val} = Small penalty for many variables")
+            elif val <= 7:
+                var_penalty_label.config(text=f"{val} = Moderate penalty for many variables")
+            else:
+                var_penalty_label.config(text=f"{val} = Strong penalty for many variables")
+
+        self.variable_penalty.trace_add('write', update_var_penalty_label)
+        update_var_penalty_label()
+
+        # NEW: Model Complexity Penalty (0-10 scale)
+        ttk.Label(options_frame, text="Model Complexity Penalty:", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        ttk.Scale(options_frame, from_=0, to=10, variable=self.complexity_penalty, orient='horizontal', length=200).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(0, 10))
+        comp_penalty_label = ttk.Label(options_frame, text="", style='Caption.TLabel')
+        comp_penalty_label.grid(row=4, column=2, sticky=tk.W, padx=10)
+
+        def update_comp_penalty_label(*args):
+            val = self.complexity_penalty.get()
+            if val == 0:
+                comp_penalty_label.config(text="0 = Ignore complexity (only R² matters)")
+            elif val <= 3:
+                comp_penalty_label.config(text=f"{val} = Small penalty for complexity (LVs, etc.)")
+            elif val <= 7:
+                comp_penalty_label.config(text=f"{val} = Moderate penalty for complexity")
+            else:
+                comp_penalty_label.config(text=f"{val} = Strong penalty for complexity")
+
+        self.complexity_penalty.trace_add('write', update_comp_penalty_label)
+        update_comp_penalty_label()
+
+        # Info label explaining the penalty system
+        ttk.Label(options_frame, text="💡 These penalties affect model ranking. 0 = rank only by R², 10 = strongly prefer simpler models",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # Max PLS components
-        ttk.Label(options_frame, text="Max Latent Variables:").grid(row=2, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=2, to=100, textvariable=self.max_n_components, width=12).grid(row=2, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(PLS components)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=10)
+        ttk.Label(options_frame, text="Max Latent Variables:").grid(row=6, column=0, sticky=tk.W, pady=(15, 8), padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=2, to=100, textvariable=self.max_n_components, width=12).grid(row=6, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="(PLS components)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
 
         # Max iterations
-        ttk.Label(options_frame, text="Max Iterations:").grid(row=3, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=12).grid(row=3, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(for MLP/Neural Boosted)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
+        ttk.Label(options_frame, text="Max Iterations:").grid(row=7, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=12).grid(row=7, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="(for MLP/Neural Boosted)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
 
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=4, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=4, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=8, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=8, column=1, sticky=tk.W)
 
         # Progress monitor
-        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
         ttk.Label(content_frame, text="Preprocessing Methods", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -901,21 +942,10 @@ class SpectralPredictApp:
         ttk.Label(rf_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
-        # Advanced RF hyperparameters (max_depth) - defaults to OFF for safety
-        ttk.Separator(rf_frame, orient='horizontal').grid(row=3, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(15, 10))
-
-        advanced_toggle = ttk.Checkbutton(rf_frame, text="⚙️ Enable Advanced Hyperparameter Search (max_depth)",
-                                         variable=self.rf_enable_advanced)
-        advanced_toggle.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(5, 10))
-
-        # Advanced options frame (shown when toggle is ON)
-        self.rf_advanced_frame = ttk.Frame(rf_frame)
-        self.rf_advanced_frame.grid(row=5, column=0, columnspan=4, sticky=(tk.W, tk.E), padx=(20, 0))
-
         # Maximum Tree Depth (max_depth) options
-        ttk.Label(self.rf_advanced_frame, text="Maximum Tree Depth (max_depth):", style='TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
-        rf_depth_frame = ttk.Frame(self.rf_advanced_frame)
-        rf_depth_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Label(rf_frame, text="Maximum Tree Depth (max_depth):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        rf_depth_frame = ttk.Frame(rf_frame)
+        rf_depth_frame.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(rf_depth_frame, text="None (unlimited) ⭐", variable=self.rf_max_depth_none).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(rf_depth_frame, text="30 ⭐", variable=self.rf_max_depth_30).grid(row=0, column=1, padx=5)
@@ -923,23 +953,9 @@ class SpectralPredictApp:
         ttk.Entry(rf_depth_frame, textvariable=self.rf_max_depth_custom, width=8).grid(row=0, column=3, padx=5)
         ttk.Label(rf_depth_frame, text="(default: None, 30)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
-        # Info label for advanced options
-        ttk.Label(self.rf_advanced_frame, text="💡 Shallower trees (lower max_depth) prevent overfitting but may underfit. None = unlimited depth.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
-        ttk.Label(self.rf_advanced_frame, text="⚠️  Advanced search tests all combinations - may significantly increase runtime.",
-                 style='Caption.TLabel', foreground='#ff6600').grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
-
-        # Initially hide advanced frame (will be shown/hidden by toggle)
-        self.rf_advanced_frame.grid_remove()
-
-        # Bind toggle to show/hide advanced frame
-        def toggle_rf_advanced():
-            if self.rf_enable_advanced.get():
-                self.rf_advanced_frame.grid()
-            else:
-                self.rf_advanced_frame.grid_remove()
-
-        self.rf_enable_advanced.trace_add('write', lambda *args: toggle_rf_advanced())
+        # Info label for max_depth
+        ttk.Label(rf_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -2837,42 +2853,37 @@ class SpectralPredictApp:
             # Sort for consistent ordering
             rf_n_trees_list = sorted(rf_n_trees_list)
 
-            # Collect Random Forest max_depth (only if advanced is enabled)
-            # Safety: Default to [None, 30] when advanced is OFF (faster than old [None, 15, 30])
-            if self.rf_enable_advanced.get():
-                rf_max_depth_list = []
+            # Collect Random Forest max_depth
+            rf_max_depth_list = []
 
-                # Collect from checkboxes
-                if self.rf_max_depth_none.get():
-                    rf_max_depth_list.append(None)
-                if self.rf_max_depth_30.get():
-                    rf_max_depth_list.append(30)
+            # Collect from checkboxes
+            if self.rf_max_depth_none.get():
+                rf_max_depth_list.append(None)
+            if self.rf_max_depth_30.get():
+                rf_max_depth_list.append(30)
 
-                # Add custom value if provided
-                custom_depth = self.rf_max_depth_custom.get().strip()
-                if custom_depth:
-                    if custom_depth.lower() == 'none':
-                        if None not in rf_max_depth_list:
-                            rf_max_depth_list.append(None)
-                    else:
-                        try:
-                            custom_val = int(custom_depth)
-                            if custom_val > 0 and custom_val not in rf_max_depth_list:
-                                rf_max_depth_list.append(custom_val)
-                            elif custom_val <= 0:
-                                print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}' (must be > 0), ignoring")
-                        except ValueError:
-                            print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}', ignoring")
+            # Add custom value if provided
+            custom_depth = self.rf_max_depth_custom.get().strip()
+            if custom_depth:
+                if custom_depth.lower() == 'none':
+                    if None not in rf_max_depth_list:
+                        rf_max_depth_list.append(None)
+                else:
+                    try:
+                        custom_val = int(custom_depth)
+                        if custom_val > 0 and custom_val not in rf_max_depth_list:
+                            rf_max_depth_list.append(custom_val)
+                        elif custom_val <= 0:
+                            print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}' (must be > 0), ignoring")
+                    except ValueError:
+                        print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}', ignoring")
 
-                # Default to [None, 30] if none selected (same as when advanced is OFF)
-                if not rf_max_depth_list:
-                    rf_max_depth_list = [None, 30]
-
-                # Sort for consistent ordering (None sorts first)
-                rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
-            else:
-                # Advanced OFF: Use safe default [None, 30] (faster than old [None, 15, 30])
+            # Default to [None, 30] if none selected
+            if not rf_max_depth_list:
                 rf_max_depth_list = [None, 30]
+
+            # Sort for consistent ordering (None sorts first)
+            rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
 
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
@@ -2884,7 +2895,7 @@ class SpectralPredictApp:
             self._log_progress(f"NeuralBoosted n_estimators: {n_estimators_list}")
             self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
             self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
-            self._log_progress(f"RandomForest max_depth: {rf_max_depth_list} {'(ADVANCED ENABLED)' if self.rf_enable_advanced.get() else '(default)'}")
+            self._log_progress(f"RandomForest max_depth: {rf_max_depth_list}")
             self._log_progress(f"\n** SUBSET ANALYSIS SETTINGS **")
             self._log_progress(f"Variable subsets: {'ENABLED' if enable_variable_subsets else 'DISABLED'}")
             self._log_progress(f"  enable_variable_subsets value: {enable_variable_subsets}")
@@ -2994,7 +3005,8 @@ class SpectralPredictApp:
                 y_filtered,
                 task_type=task_type,
                 folds=self.folds.get(),
-                lambda_penalty=self.lambda_penalty.get(),
+                variable_penalty=self.variable_penalty.get(),
+                complexity_penalty=self.complexity_penalty.get(),
                 max_n_components=self.max_n_components.get(),
                 max_iter=self.max_iter.get(),
                 models_to_test=selected_models,

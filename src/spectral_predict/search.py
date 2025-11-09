@@ -17,8 +17,8 @@ from .regions import create_region_subsets, format_region_report
 from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection
 
 
-def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
-               max_iter=500, models_to_test=None, preprocessing_methods=None,
+def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=5,
+               max_n_components=24, max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                rf_n_trees_list=None, rf_max_depth_list=None,
                enable_variable_subsets=True, variable_counts=None,
@@ -39,8 +39,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         'regression' or 'classification'
     folds : int
         Number of CV folds
-    lambda_penalty : float
-        Complexity penalty weight
+    variable_penalty : int (0-10), default=3
+        Penalty for using many variables (0=ignore, 10=strong penalty)
+    complexity_penalty : int (0-10), default=5
+        Penalty for model complexity (0=ignore, 10=strong penalty)
     max_n_components : int, default=24
         Maximum number of PLS components to test
     max_iter : int, default=500
@@ -554,7 +556,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
     # Compute composite scores and rank
     from .scoring import compute_composite_score
 
-    df_ranked = compute_composite_score(df_results, task_type, lambda_penalty)
+    df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
 
     return df_ranked
 
