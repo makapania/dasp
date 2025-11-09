@@ -311,8 +311,22 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                 if preprocess_cfg["deriv"]:
                     prep_name += f"_d{preprocess_cfg['deriv']}"
 
-                progress_msg = f"Testing {model_name} with {prep_name} preprocessing"
-                print(f"[{current_config}/{total_configs}] {progress_msg}")
+                # Show parameters being tested (more informative)
+                param_str = ", ".join([f"{k}={v}" for k, v in list(params.items())[:2]])  # Show first 2 params
+                if len(params) > 2:
+                    param_str += "..."
+
+                progress_msg = f"Testing {model_name} ({param_str}) + {prep_name}"
+
+                # Add best model so far to progress
+                best_info = ""
+                if best_model_so_far is not None:
+                    if task_type == "regression":
+                        best_info = f" | Best: R²={best_model_so_far['R2']:.3f}, RMSE={best_model_so_far['RMSE']:.3f}"
+                    else:
+                        best_info = f" | Best: AUC={best_model_so_far.get('ROC_AUC', 0):.3f}"
+
+                print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
 
                 if progress_callback:
                     progress_callback({
@@ -339,6 +353,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                     subset_tag="full",
                 )
                 df_results = add_result(df_results, result)
+
+                # Show full model result
+                if task_type == "regression":
+                    print(f"     Full model: R²={result['R2']:.3f}, RMSE={result['RMSE']:.3f}")
+                else:
+                    print(f"     Full model: AUC={result.get('ROC_AUC', 0):.3f}, Acc={result.get('Accuracy', 0):.3f}")
 
                 # Update best model tracker
                 if best_model_so_far is None:
@@ -465,7 +485,7 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
 
                                 # Run subsets with user-selected counts
                                 for n_top in valid_variable_counts:
-                                    print(f"  -> Testing top-{n_top} variable subset (method: {varsel_method})...")
+                                    print(f"  -> Testing top-{n_top} vars ({varsel_method})...", end=" ")
                                     # Select top N most important features based on preprocessed importances
                                     top_indices = np.argsort(importances)[-n_top:][::-1]
 
@@ -508,6 +528,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                         )
                                     df_results = add_result(df_results, subset_result)
 
+                                    # Show result immediately
+                                    if task_type == "regression":
+                                        print(f"R²={subset_result['R2']:.3f}, RMSE={subset_result['RMSE']:.3f}")
+                                    else:
+                                        print(f"AUC={subset_result.get('ROC_AUC', 0):.3f}, Acc={subset_result.get('Accuracy', 0):.3f}")
+
                             except Exception as e:
                                 print(f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}")
 
@@ -515,8 +541,9 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                 # For derivatives: use preprocessed data to avoid reapplying preprocessing
                 # For raw/SNV: use raw data and reapply preprocessing
                 if enable_region_subsets and len(region_subsets) > 0:
-                    print(f"  -> Testing {len(region_subsets)} region-based subsets...")
-                    for region_subset in region_subsets:
+                    print(f"  -> Testing {len(region_subsets)} spectral regions:")
+                    for i, region_subset in enumerate(region_subsets, 1):
+                        print(f"     Region {i}/{len(region_subsets)} ({region_subset['tag']})...", end=" ")
                         if preprocess_cfg["deriv"] is not None:
                             # For derivatives: use preprocessed data, skip reprocessing
                             # Keep original preprocess_cfg for correct labeling
@@ -552,6 +579,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                 subset_tag=region_subset['tag'],
                             )
                         df_results = add_result(df_results, region_result)
+
+                        # Show result immediately
+                        if task_type == "regression":
+                            print(f"R²={region_result['R2']:.3f}, RMSE={region_result['RMSE']:.3f}")
+                        else:
+                            print(f"AUC={region_result.get('ROC_AUC', 0):.3f}, Acc={region_result.get('Accuracy', 0):.3f}")
 
     # Compute composite scores and rank
     from .scoring import compute_composite_score
