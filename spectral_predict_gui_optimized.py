@@ -5440,10 +5440,21 @@ Configuration:
                     model_quartiles[col] = metadata['y_quartiles']
 
         # Filter out models that are much worse than the best
-        # (relative filtering instead of absolute threshold)
-        if len(model_r2) > 0:
-            best_r2 = max(model_r2.values())
-            threshold = best_r2 - 0.1  # Keep models within 0.1 R² of the best
+        # Use the median R² and filter models that are outliers below it
+        if len(model_r2) > 1:
+            r2_values = sorted(model_r2.values(), reverse=True)
+            best_r2 = r2_values[0]
+            median_r2 = np.median(r2_values)
+
+            # Strategy: Keep models within 0.05 of the median (or best if there are only 2-3 models)
+            # This way if you have [0.92, 0.92, 0.92, 0.87], median=0.92, threshold=0.87
+            # So the 0.87 model gets excluded
+            if len(r2_values) <= 3:
+                # For small sets, use tight threshold from best
+                threshold = best_r2 - 0.05
+            else:
+                # For larger sets, use median-based threshold
+                threshold = median_r2 - 0.05
 
             # Filter out poor performers
             filtered_model_r2 = {col: r2 for col, r2 in model_r2.items() if r2 >= threshold}
@@ -5451,8 +5462,11 @@ Configuration:
             # Print filtering info
             if len(filtered_model_r2) < len(model_r2):
                 excluded = set(model_r2.keys()) - set(filtered_model_r2.keys())
-                print(f"\nConsensus filtering: Best R²={best_r2:.3f}, threshold={threshold:.3f}")
-                print(f"Excluded {len(excluded)} poor model(s) from consensus: {', '.join(excluded)}")
+                excluded_r2 = {col: model_r2[col] for col in excluded}
+                print(f"\nConsensus filtering: Best R²={best_r2:.3f}, Median R²={median_r2:.3f}, threshold={threshold:.3f}")
+                print(f"Excluded {len(excluded)} poor model(s):")
+                for col, r2 in excluded_r2.items():
+                    print(f"  - {col}: R²={r2:.3f}")
 
             model_r2 = filtered_model_r2
 
