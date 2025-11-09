@@ -26,7 +26,19 @@
       "Bash(recent_gui_temp.py)",
       "Bash(diagnostics_temp.py)",
       "Bash(git worktree:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(if [ -d \".venv\" ])",
+      "Bash(then echo \"Virtual environment exists\")",
+      "Bash(else echo \"No virtual environment found\")",
+      "Bash(.venvScriptspython.exe -m pip install --upgrade pip)",
+      "Bash(.venv/Scripts/python.exe -m pip:*)",
+      "Bash(.venv/Scripts/spectral-predict:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest --version)",
+      "Bash(run_gui.bat)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(C:Python314python.exe -c \"import numpy; import pandas; import matplotlib; print(''Python + packages working!'')\")",
+      "Bash(\"/c/Python314/python.exe\" -c \"import numpy; import pandas; import matplotlib; print(''Python + packages working!'')\")",
+      "Bash(/c/Python314/python.exe:*)"
     ],
     "deny": [],
     "ask": []

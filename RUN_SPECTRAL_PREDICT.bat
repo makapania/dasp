@@ -18,24 +18,16 @@ echo.
 REM Set working directory to script location
 cd /d "%~dp0"
 
-REM Launch Python GUI (which will use Julia backend)
-python "spectral_predict_gui_optimized.py"
+REM Launch Python GUI with full path to Python installation
+C:\Python314\python.exe "spectral_predict_gui_optimized.py"
 
-REM If python command doesn't work, try python3 or py
+REM Check if execution succeeded
 if errorlevel 1 (
     echo.
-    echo Python not found in PATH. Trying alternative commands...
-    python3 "spectral_predict_gui_optimized.py"
-    if errorlevel 1 (
-        py "spectral_predict_gui_optimized.py"
-        if errorlevel 1 (
-            echo.
-            echo ERROR: Could not find Python interpreter.
-            echo Please install Python 3.8+ from python.org
-            pause
-            exit /b 1
-        )
-    )
+    echo ERROR: Failed to launch GUI
+    echo Check that all dependencies are installed
+    pause
+    exit /b 1
 )
 
 pause

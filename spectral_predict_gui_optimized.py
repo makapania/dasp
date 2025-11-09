@@ -232,12 +232,28 @@ class SpectralPredictApp:
         self.lr_03 = tk.BooleanVar(value=True)  # Default - OPTIMAL per empirical analysis
 
         # Random Forest options
-        self.rf_n_trees_200 = tk.BooleanVar(value=True)  # Default
-        self.rf_n_trees_500 = tk.BooleanVar(value=True)  # Default
+        self.rf_n_trees_100 = tk.BooleanVar(value=True)  # Default
+        self.rf_n_trees_200 = tk.BooleanVar(value=False)
+        self.rf_n_trees_500 = tk.BooleanVar(value=False)
         self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
         self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth
         self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
         self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
+
+        # Ridge Regression alpha options (default: all checked per models.py)
+        self.ridge_alpha_0001 = tk.BooleanVar(value=True)   # 0.001
+        self.ridge_alpha_001 = tk.BooleanVar(value=True)    # 0.01
+        self.ridge_alpha_01 = tk.BooleanVar(value=True)     # 0.1
+        self.ridge_alpha_1 = tk.BooleanVar(value=True)      # 1.0
+        self.ridge_alpha_10 = tk.BooleanVar(value=True)     # 10.0
+        self.ridge_alpha_custom = tk.StringVar(value="")    # Custom value
+
+        # Lasso Regression alpha options (default: all checked per models.py)
+        self.lasso_alpha_0001 = tk.BooleanVar(value=True)   # 0.001
+        self.lasso_alpha_001 = tk.BooleanVar(value=True)    # 0.01
+        self.lasso_alpha_01 = tk.BooleanVar(value=True)     # 0.1
+        self.lasso_alpha_1 = tk.BooleanVar(value=True)      # 1.0
+        self.lasso_alpha_custom = tk.StringVar(value="")    # Custom value
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -902,11 +918,12 @@ class SpectralPredictApp:
         rf_trees_frame = ttk.Frame(rf_frame)
         rf_trees_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
 
-        ttk.Checkbutton(rf_trees_frame, text="200 ⭐", variable=self.rf_n_trees_200).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(rf_trees_frame, text="500 ⭐", variable=self.rf_n_trees_500).grid(row=0, column=1, padx=5)
-        ttk.Label(rf_trees_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
-        ttk.Entry(rf_trees_frame, textvariable=self.rf_n_trees_custom, width=8).grid(row=0, column=3, padx=5)
-        ttk.Label(rf_trees_frame, text="(default: 200, 500)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        ttk.Checkbutton(rf_trees_frame, text="100 ⭐", variable=self.rf_n_trees_100).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="200", variable=self.rf_n_trees_200).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="500", variable=self.rf_n_trees_500).grid(row=0, column=2, padx=5)
+        ttk.Label(rf_trees_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(rf_trees_frame, textvariable=self.rf_n_trees_custom, width=8).grid(row=0, column=4, padx=5)
+        ttk.Label(rf_trees_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # Info label
         ttk.Label(rf_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
@@ -926,6 +943,51 @@ class SpectralPredictApp:
         # Info label for max_depth
         ttk.Label(rf_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # Ridge Regression Hyperparameters
+        ridge_frame = ttk.LabelFrame(content_frame, text="Ridge Regression Hyperparameters", padding="20")
+        ridge_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Alpha (regularization strength) options
+        ttk.Label(ridge_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ridge_alpha_frame = ttk.Frame(ridge_frame)
+        ridge_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(ridge_alpha_frame, text="0.001 ⭐", variable=self.ridge_alpha_0001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ridge_alpha_frame, text="0.01 ⭐", variable=self.ridge_alpha_001).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ridge_alpha_frame, text="0.1 ⭐", variable=self.ridge_alpha_01).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(ridge_alpha_frame, text="1.0 ⭐", variable=self.ridge_alpha_1).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(ridge_alpha_frame, text="10.0 ⭐", variable=self.ridge_alpha_10).grid(row=0, column=4, padx=5)
+        ttk.Label(ridge_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(ridge_alpha_frame, textvariable=self.ridge_alpha_custom, width=10).grid(row=0, column=6, padx=5)
+        ttk.Label(ridge_alpha_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
+
+        # Info label
+        ttk.Label(ridge_frame, text="💡 Lower alpha = less regularization (closer to OLS). Higher alpha = more shrinkage.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+
+        # Lasso Regression Hyperparameters
+        lasso_frame = ttk.LabelFrame(content_frame, text="Lasso Regression Hyperparameters", padding="20")
+        lasso_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Alpha (regularization strength) options
+        ttk.Label(lasso_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        lasso_alpha_frame = ttk.Frame(lasso_frame)
+        lasso_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lasso_alpha_frame, text="0.001 ⭐", variable=self.lasso_alpha_0001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lasso_alpha_frame, text="0.01 ⭐", variable=self.lasso_alpha_001).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lasso_alpha_frame, text="0.1 ⭐", variable=self.lasso_alpha_01).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lasso_alpha_frame, text="1.0 ⭐", variable=self.lasso_alpha_1).grid(row=0, column=3, padx=5)
+        ttk.Label(lasso_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lasso_alpha_frame, textvariable=self.lasso_alpha_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(lasso_alpha_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        # Info label
+        ttk.Label(lasso_frame, text="💡 Lasso encourages sparse solutions (sets weak coefficients to zero). Higher alpha = more sparsity.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -1644,7 +1706,8 @@ class SpectralPredictApp:
 
         # Show dialog only if there are actual alignment issues (mismatches)
         # Don't show for fuzzy matching (that's helpful, not a problem) or NaN drops (just data cleaning)
-        if unmatched_spectra or unmatched_ref:
+        # Only show if spectral files are missing reference data (unmatched_ref is common/harmless)
+        if unmatched_spectra:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
@@ -2804,6 +2867,8 @@ class SpectralPredictApp:
 
             # Collect Random Forest n_estimators (number of trees)
             rf_n_trees_list = []
+            if self.rf_n_trees_100.get():
+                rf_n_trees_list.append(100)
             if self.rf_n_trees_200.get():
                 rf_n_trees_list.append(200)
             if self.rf_n_trees_500.get():
@@ -2819,9 +2884,9 @@ class SpectralPredictApp:
                 except ValueError:
                     print(f"WARNING: Invalid custom RF n_trees value '{custom_trees}', ignoring")
 
-            # Default to [200, 500] if none selected
+            # Default to [100] if none selected
             if not rf_n_trees_list:
-                rf_n_trees_list = [200, 500]
+                rf_n_trees_list = [100]
 
             # Sort for consistent ordering
             rf_n_trees_list = sorted(rf_n_trees_list)
@@ -2858,6 +2923,68 @@ class SpectralPredictApp:
             # Sort for consistent ordering (None sorts first)
             rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
 
+            # Collect Ridge alpha values
+            ridge_alphas_list = []
+            if self.ridge_alpha_0001.get():
+                ridge_alphas_list.append(0.001)
+            if self.ridge_alpha_001.get():
+                ridge_alphas_list.append(0.01)
+            if self.ridge_alpha_01.get():
+                ridge_alphas_list.append(0.1)
+            if self.ridge_alpha_1.get():
+                ridge_alphas_list.append(1.0)
+            if self.ridge_alpha_10.get():
+                ridge_alphas_list.append(10.0)
+
+            # Add custom alpha if provided
+            custom_ridge_alpha = self.ridge_alpha_custom.get().strip()
+            if custom_ridge_alpha:
+                try:
+                    custom_val = float(custom_ridge_alpha)
+                    if custom_val > 0 and custom_val not in ridge_alphas_list:
+                        ridge_alphas_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom Ridge alpha '{custom_ridge_alpha}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom Ridge alpha '{custom_ridge_alpha}', ignoring")
+
+            # Default to [0.001, 0.01, 0.1, 1.0, 10.0] if none selected
+            if not ridge_alphas_list:
+                ridge_alphas_list = [0.001, 0.01, 0.1, 1.0, 10.0]
+
+            # Sort for consistent ordering
+            ridge_alphas_list = sorted(ridge_alphas_list)
+
+            # Collect Lasso alpha values
+            lasso_alphas_list = []
+            if self.lasso_alpha_0001.get():
+                lasso_alphas_list.append(0.001)
+            if self.lasso_alpha_001.get():
+                lasso_alphas_list.append(0.01)
+            if self.lasso_alpha_01.get():
+                lasso_alphas_list.append(0.1)
+            if self.lasso_alpha_1.get():
+                lasso_alphas_list.append(1.0)
+
+            # Add custom alpha if provided
+            custom_lasso_alpha = self.lasso_alpha_custom.get().strip()
+            if custom_lasso_alpha:
+                try:
+                    custom_val = float(custom_lasso_alpha)
+                    if custom_val > 0 and custom_val not in lasso_alphas_list:
+                        lasso_alphas_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom Lasso alpha '{custom_lasso_alpha}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom Lasso alpha '{custom_lasso_alpha}', ignoring")
+
+            # Default to [0.001, 0.01, 0.1, 1.0] if none selected
+            if not lasso_alphas_list:
+                lasso_alphas_list = [0.001, 0.01, 0.1, 1.0]
+
+            # Sort for consistent ordering
+            lasso_alphas_list = sorted(lasso_alphas_list)
+
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
@@ -2869,6 +2996,8 @@ class SpectralPredictApp:
             self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
             self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
             self._log_progress(f"RandomForest max_depth: {rf_max_depth_list}")
+            self._log_progress(f"Ridge alphas: {ridge_alphas_list}")
+            self._log_progress(f"Lasso alphas: {lasso_alphas_list}")
             self._log_progress(f"\n** SUBSET ANALYSIS SETTINGS **")
             self._log_progress(f"Variable subsets: {'ENABLED' if enable_variable_subsets else 'DISABLED'}")
             self._log_progress(f"  enable_variable_subsets value: {enable_variable_subsets}")
@@ -2989,6 +3118,8 @@ class SpectralPredictApp:
                 learning_rates=learning_rates,
                 rf_n_trees_list=rf_n_trees_list,
                 rf_max_depth_list=rf_max_depth_list,
+                ridge_alphas_list=ridge_alphas_list,
+                lasso_alphas_list=lasso_alphas_list,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,

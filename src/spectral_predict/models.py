@@ -109,7 +109,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
 def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                     n_estimators_list=None, learning_rates=None, rf_n_trees_list=None,
-                    rf_max_depth_list=None):
+                    rf_max_depth_list=None, ridge_alphas_list=None, lasso_alphas_list=None):
     """
     Get model grids for hyperparameter search.
 
@@ -152,6 +152,14 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
         # This reduces RF grid configs from 6 to 4 per preprocessing method
         rf_max_depth_list = [None, 30]
 
+    # Set defaults for Ridge hyperparameters
+    if ridge_alphas_list is None:
+        ridge_alphas_list = [0.001, 0.01, 0.1, 1.0, 10.0]
+
+    # Set defaults for Lasso hyperparameters
+    if lasso_alphas_list is None:
+        lasso_alphas_list = [0.001, 0.01, 0.1, 1.0]
+
     grids = {}
 
     # PLS components grid (clip to n_features and max_n_components)
@@ -165,9 +173,9 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
             for nc in pls_components
         ]
 
-        # Ridge Regression
+        # Ridge Regression - uses configurable alpha from GUI or defaults
         ridge_configs = []
-        for alpha in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]:
+        for alpha in ridge_alphas_list:
             ridge_configs.append(
                 (
                     Ridge(alpha=alpha, random_state=42),
@@ -176,9 +184,9 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
             )
         grids["Ridge"] = ridge_configs
 
-        # Lasso Regression
+        # Lasso Regression - uses configurable alpha from GUI or defaults
         lasso_configs = []
-        for alpha in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]:
+        for alpha in lasso_alphas_list:
             lasso_configs.append(
                 (
                     Lasso(alpha=alpha, random_state=42, max_iter=max_iter),

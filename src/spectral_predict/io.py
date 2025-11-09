@@ -249,6 +249,9 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
         X_aligned = X.loc[aligned_X_ids]
         y = ref.loc[aligned_ref_ids, target]
 
+        # Track matched SPECTRAL IDs before index replacement (for fuzzy matching)
+        matched_spectral_ids = list(aligned_X_ids)
+
         # Ensure same order and index
         X_aligned.index = aligned_ref_ids
         y.index = aligned_ref_ids
@@ -278,7 +281,15 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
         X_aligned = X.loc[common_ids]
         y = ref.loc[common_ids, target]
 
+        # Track matched SPECTRAL IDs (for exact matching, these are just common_ids)
+        matched_spectral_ids = list(common_ids)
+
         print(f"DEBUG: After subsetting - X_aligned: {len(X_aligned)}, y: {len(y)}")
+
+    # Track truly unmatched samples BEFORE NaN filtering
+    # (so NaN-dropped samples aren't counted as "unmatched")
+    # Use matched_spectral_ids which contains the original spectral file IDs
+    matched_before_nan_filter = matched_spectral_ids
 
     # Drop any NaN targets
     valid_mask = ~y.isna()
@@ -310,8 +321,9 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
     # Prepare alignment info if requested
     if return_alignment_info:
         matched_ids = list(X_aligned.index)
-        unmatched_spectra = sorted(list(original_X_ids - set(matched_ids)))
-        unmatched_reference = sorted(list(original_ref_ids - set(matched_ids)))
+        # Use matched_before_nan_filter to exclude NaN-dropped samples from "unmatched" count
+        unmatched_spectra = sorted(list(original_X_ids - set(matched_before_nan_filter)))
+        unmatched_reference = sorted(list(original_ref_ids - set(matched_before_nan_filter)))
 
         alignment_info = {
             'matched_ids': matched_ids,
