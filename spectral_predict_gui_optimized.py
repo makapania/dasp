@@ -5431,14 +5431,30 @@ Configuration:
                 # Get R² for quality weighting
                 if 'performance' in metadata and 'R2' in metadata['performance']:
                     r2 = metadata['performance']['R2']
-                    # Filter out poor models (R² < 0.3)
-                    if r2 is not None and r2 >= 0.3:
+                    if r2 is not None:
                         model_r2[col] = r2
 
                 # Get regional performance for regional consensus
                 if 'regional_rmse' in metadata and 'y_quartiles' in metadata:
                     model_regional_rmse[col] = metadata['regional_rmse']
                     model_quartiles[col] = metadata['y_quartiles']
+
+        # Filter out models that are much worse than the best
+        # (relative filtering instead of absolute threshold)
+        if len(model_r2) > 0:
+            best_r2 = max(model_r2.values())
+            threshold = best_r2 - 0.1  # Keep models within 0.1 R² of the best
+
+            # Filter out poor performers
+            filtered_model_r2 = {col: r2 for col, r2 in model_r2.items() if r2 >= threshold}
+
+            # Print filtering info
+            if len(filtered_model_r2) < len(model_r2):
+                excluded = set(model_r2.keys()) - set(filtered_model_r2.keys())
+                print(f"\nConsensus filtering: Best R²={best_r2:.3f}, threshold={threshold:.3f}")
+                print(f"Excluded {len(excluded)} poor model(s) from consensus: {', '.join(excluded)}")
+
+            model_r2 = filtered_model_r2
 
         # Compute simple quality-weighted consensus
         if len(model_r2) > 0:
