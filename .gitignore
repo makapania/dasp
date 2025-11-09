@@ -53,3 +53,8 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+
+# Archive folder (local documentation and temporary files)
+_archive/
+profile.stats
+*.log
