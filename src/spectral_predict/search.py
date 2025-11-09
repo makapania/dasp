@@ -681,8 +681,7 @@ def _run_single_config(
     pipe = Pipeline(pipe_steps) if pipe_steps else model
 
     # Run CV in parallel (use n_jobs=-1 to use all available cores)
-    # batch_size='auto' reduces multiprocessing overhead by batching small tasks
-    cv_metrics = Parallel(n_jobs=-1, backend='loky', batch_size='auto')(
+    cv_metrics = Parallel(n_jobs=-1, backend='loky')(
         delayed(_run_single_fold)(
             pipe, X, y, train_idx, test_idx, task_type, is_binary_classification
         )
