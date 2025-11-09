@@ -1640,9 +1640,9 @@ class SpectralPredictApp:
         # Print to console for reference
         print("\n" + report_text)
 
-        # Show dialog only if there are actual alignment issues (mismatches or fuzzy matching)
-        # Don't show for simple NaN drops - that's just data cleaning, not alignment issues
-        if unmatched_spectra or unmatched_ref or fuzzy:
+        # Show dialog only if there are actual alignment issues (mismatches)
+        # Don't show for fuzzy matching (that's helpful, not a problem) or NaN drops (just data cleaning)
+        if unmatched_spectra or unmatched_ref:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
@@ -5317,6 +5317,11 @@ Configuration:
             results = pd.DataFrame()
             results['Sample'] = self.prediction_data.index
 
+            # Add actual values column if using validation set
+            if self.pred_data_source.get() == 'validation' and self.validation_y is not None:
+                # Align actual values with prediction samples
+                results['Actual'] = self.validation_y.loc[results['Sample']].values
+
             # Clear and initialize model map
             self.predictions_model_map = {}
 
@@ -5413,8 +5418,8 @@ Configuration:
         pd.DataFrame
             DataFrame with added consensus columns
         """
-        # Get prediction columns (all except 'Sample')
-        pred_cols = [col for col in results_df.columns if col != 'Sample']
+        # Get prediction columns (all except 'Sample' and 'Actual')
+        pred_cols = [col for col in results_df.columns if col not in ['Sample', 'Actual']]
 
         if len(pred_cols) < 2:
             return results_df  # Need at least 2 models for consensus
@@ -5585,8 +5590,8 @@ Configuration:
             stats_text = "Prediction Statistics:\n"
             stats_text += "=" * 60 + "\n\n"
 
-        # Calculate stats for each prediction column (skip 'Sample' column)
-        prediction_cols = [col for col in self.predictions_df.columns if col != 'Sample']
+        # Calculate stats for each prediction column (skip 'Sample' and 'Actual' columns)
+        prediction_cols = [col for col in self.predictions_df.columns if col not in ['Sample', 'Actual']]
 
         if not prediction_cols:
             stats_text += "No prediction columns found.\n"
