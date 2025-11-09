@@ -229,6 +229,7 @@ class SpectralPredictApp:
         self.lr_005 = tk.BooleanVar(value=False)
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
+        self.lr_03 = tk.BooleanVar(value=True)  # Default - OPTIMAL per empirical analysis
 
         # Random Forest options
         self.rf_n_trees_200 = tk.BooleanVar(value=True)  # Default
@@ -884,7 +885,8 @@ class SpectralPredictApp:
         ttk.Checkbutton(lr_frame, text="0.05", variable=self.lr_005).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(lr_frame, text="0.1 ⭐", variable=self.lr_01).grid(row=0, column=1, padx=5)
         ttk.Checkbutton(lr_frame, text="0.2 ⭐", variable=self.lr_02).grid(row=0, column=2, padx=5)
-        ttk.Label(lr_frame, text="(default: 0.1, 0.2)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        ttk.Checkbutton(lr_frame, text="0.3 ⭐", variable=self.lr_03).grid(row=0, column=3, padx=5)
+        ttk.Label(lr_frame, text="(default: 0.1, 0.2, 0.3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # Info label
         ttk.Label(advanced_frame, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
@@ -2793,10 +2795,12 @@ class SpectralPredictApp:
                 learning_rates.append(0.1)
             if self.lr_02.get():
                 learning_rates.append(0.2)
+            if self.lr_03.get():
+                learning_rates.append(0.3)
 
-            # Default to [0.1, 0.2] if none selected
+            # Default to [0.1, 0.2, 0.3] if none selected (0.3 is empirically optimal)
             if not learning_rates:
-                learning_rates = [0.1, 0.2]
+                learning_rates = [0.1, 0.2, 0.3]
 
             # Collect Random Forest n_estimators (number of trees)
             rf_n_trees_list = []
