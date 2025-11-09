@@ -350,14 +350,13 @@ def compute_vip(pls_model, X, y):
     # Total SSY
     ssy_total = np.sum(ssy_comp)
 
-    # VIP calculation
+    # VIP calculation (vectorized for performance)
     n_features = W.shape[0]
     n_components = W.shape[1]
 
-    vip_scores = np.zeros(n_features)
-    for i in range(n_features):
-        weight = np.sum((W[i, :] ** 2) * ssy_comp)
-        vip_scores[i] = np.sqrt(n_features * weight / ssy_total)
+    # Vectorized version: same math, but uses broadcasting instead of loop
+    weight = np.sum((W ** 2) * ssy_comp, axis=1)  # Sum over components for each feature
+    vip_scores = np.sqrt(n_features * weight / ssy_total)
 
     return vip_scores
 

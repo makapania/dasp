@@ -47,10 +47,11 @@ def read_csv_spectra(path):
         df_wide = df[[wl_col, val_col]].copy()
         df_wide = df_wide.dropna()
 
-        # Convert to wide: single row with wavelengths as columns
-        result = pd.DataFrame(
-            {float(row[wl_col]): [row[val_col]] for _, row in df_wide.iterrows()}, index=[sample_id]
-        )
+        # Convert to wide: single row with wavelengths as columns (vectorized)
+        # Create dict from wavelength -> value without iterrows() for better performance
+        wavelengths = df_wide[wl_col].astype(float).values
+        values = df_wide[val_col].values
+        result = pd.DataFrame([values], columns=wavelengths, index=[sample_id])
 
         # Sort columns by wavelength
         result = result[sorted(result.columns)]

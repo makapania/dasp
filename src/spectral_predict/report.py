@@ -44,31 +44,32 @@ def write_markdown_report(target, df_ranked, out_dir):
         "",
     ]
 
-    for idx, row in top5.iterrows():
-        lines.append(f"### Rank {row['Rank']}: {row['Model']} ({row['SubsetTag']})")
+    # Use itertuples() instead of iterrows() for better performance
+    for row in top5.itertuples(index=False):
+        lines.append(f"### Rank {row.Rank}: {row.Model} ({row.SubsetTag})")
         lines.append("")
-        lines.append(f"- **Composite Score:** {row['CompositeScore']:.4f}")
-        lines.append(f"- **Model:** {row['Model']}")
-        lines.append(f"- **Preprocess:** {row['Preprocess']}")
+        lines.append(f"- **Composite Score:** {row.CompositeScore:.4f}")
+        lines.append(f"- **Model:** {row.Model}")
+        lines.append(f"- **Preprocess:** {row.Preprocess}")
 
-        if pd.notna(row["Deriv"]):
+        if pd.notna(row.Deriv):
             lines.append(
-                f"- **Derivative:** {int(row['Deriv'])} (window={int(row['Window'])}, poly={int(row['Poly'])})"
+                f"- **Derivative:** {int(row.Deriv)} (window={int(row.Window)}, poly={int(row.Poly)})"
             )
 
-        if pd.notna(row["LVs"]):
-            lines.append(f"- **Latent Variables:** {int(row['LVs'])}")
+        if pd.notna(row.LVs):
+            lines.append(f"- **Latent Variables:** {int(row.LVs)}")
 
-        lines.append(f"- **Variables:** {int(row['n_vars'])} / {int(row['full_vars'])}")
+        lines.append(f"- **Variables:** {int(row.n_vars)} / {int(row.full_vars)}")
 
         # Add metrics
         if task_type == "regression":
-            lines.append(f"- **RMSE:** {row['RMSE']:.4f}")
-            lines.append(f"- **R²:** {row['R2']:.4f}")
+            lines.append(f"- **RMSE:** {row.RMSE:.4f}")
+            lines.append(f"- **R²:** {row.R2:.4f}")
         else:
-            lines.append(f"- **Accuracy:** {row['Accuracy']:.4f}")
-            if pd.notna(row["ROC_AUC"]):
-                lines.append(f"- **ROC AUC:** {row['ROC_AUC']:.4f}")
+            lines.append(f"- **Accuracy:** {row.Accuracy:.4f}")
+            if pd.notna(row.ROC_AUC):
+                lines.append(f"- **ROC AUC:** {row.ROC_AUC:.4f}")
 
         lines.append("")
 
