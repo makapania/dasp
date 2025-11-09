@@ -585,7 +585,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     Returns
     -------
     metrics : dict
-        Dictionary with fold metrics
+        Dictionary with fold metrics (includes y_test and y_pred for regional analysis)
     """
     # Clone pipeline to avoid thread-safety issues
     pipe_clone = clone(pipe)
@@ -601,7 +601,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         y_pred = pipe_clone.predict(X_test)
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
-        return {"RMSE": rmse, "R2": r2}
+        return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}
     else:  # classification
         y_pred = pipe_clone.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
@@ -692,9 +692,34 @@ def _run_single_config(
     if task_type == "regression":
         mean_rmse = np.mean([m["RMSE"] for m in cv_metrics])
         mean_r2 = np.mean([m["R2"] for m in cv_metrics])
+
+        # Compute regional performance (quartile-based) for consensus predictions
+        # Collect all CV predictions and true values
+        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+
+        # Compute quartiles based on true values
+        quartiles = np.percentile(all_y_test, [25, 50, 75])
+
+        # Compute RMSE for each quartile region
+        regional_rmse = {}
+        for i, (lower, upper) in enumerate([
+            (-np.inf, quartiles[0]),  # Q1
+            (quartiles[0], quartiles[1]),  # Q2
+            (quartiles[1], quartiles[2]),  # Q3
+            (quartiles[2], np.inf)  # Q4
+        ]):
+            mask = (all_y_test >= lower) & (all_y_test < upper if i < 3 else all_y_test >= lower)
+            if mask.sum() > 0:
+                regional_rmse[f'Q{i+1}'] = np.sqrt(mean_squared_error(
+                    all_y_test[mask], all_y_pred[mask]
+                ))
+            else:
+                regional_rmse[f'Q{i+1}'] = np.nan
     else:
         mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
         mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
+        regional_rmse = None  # Not applicable for classification
 
     # Extract LVs (for PLS models)
     lvs = params.get("n_components", np.nan)
@@ -717,6 +742,9 @@ def _run_single_config(
     if task_type == "regression":
         result["RMSE"] = mean_rmse
         result["R2"] = mean_r2
+        # Add regional performance for consensus predictions
+        result["regional_rmse"] = regional_rmse
+        result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds
     else:
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc

@@ -4312,6 +4312,33 @@ Performance (Classification):
                 results['r2_std'] = np.std([m['r2'] for m in fold_metrics])
                 results['mae_mean'] = np.mean([m['mae'] for m in fold_metrics])
                 results['mae_std'] = np.std([m['mae'] for m in fold_metrics])
+
+                # Compute regional performance (quartile-based) for consensus predictions
+                all_y_true_arr = np.array(all_y_true)
+                all_y_pred_arr = np.array(all_y_pred)
+
+                # Compute quartiles based on true values
+                quartiles = np.percentile(all_y_true_arr, [25, 50, 75])
+
+                # Compute RMSE for each quartile region
+                regional_rmse = {}
+                for i, (lower, upper) in enumerate([
+                    (-np.inf, quartiles[0]),  # Q1
+                    (quartiles[0], quartiles[1]),  # Q2
+                    (quartiles[1], quartiles[2]),  # Q3
+                    (quartiles[2], np.inf)  # Q4
+                ]):
+                    mask = (all_y_true_arr >= lower) & (all_y_true_arr < upper if i < 3 else all_y_true_arr >= lower)
+                    if mask.sum() > 0:
+                        regional_rmse[f'Q{i+1}'] = np.sqrt(mean_squared_error(
+                            all_y_true_arr[mask], all_y_pred_arr[mask]
+                        ))
+                    else:
+                        regional_rmse[f'Q{i+1}'] = np.nan
+
+                # Store regional performance for model saving
+                results['regional_rmse'] = regional_rmse
+                results['y_quartiles'] = quartiles.tolist()
             else:
                 results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
                 results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
@@ -4538,6 +4565,11 @@ Configuration:
                     'MAE': self.refined_performance.get('mae_mean'),
                     'MAE_std': self.refined_performance.get('mae_std')
                 }
+                # Add regional performance for consensus predictions
+                if 'regional_rmse' in self.refined_performance:
+                    metadata['regional_rmse'] = self.refined_performance['regional_rmse']
+                if 'y_quartiles' in self.refined_performance:
+                    metadata['y_quartiles'] = self.refined_performance['y_quartiles']
             else:  # classification
                 metadata['performance'] = {
                     'Accuracy': self.refined_performance.get('accuracy_mean'),
@@ -5338,6 +5370,10 @@ Configuration:
                 self.pred_progress['value'] = i + 1
                 self.root.update()
 
+            # Compute consensus predictions if we have multiple models
+            if successful_models > 1:
+                results = self._add_consensus_predictions(results)
+
             # Store results
             self.predictions_df = results
 
@@ -5358,6 +5394,107 @@ Configuration:
             messagebox.showerror("Prediction Error",
                 f"An error occurred during predictions:\n{str(e)}")
             self.pred_status.config(text="Error occurred")
+
+    def _add_consensus_predictions(self, results_df):
+        """
+        Add consensus prediction columns to the results dataframe.
+
+        Computes two types of consensus:
+        1. Simple quality-weighted: Average weighted by model R²
+        2. Regional quartile-based: Weights vary by prediction range
+
+        Parameters
+        ----------
+        results_df : pd.DataFrame
+            DataFrame with 'Sample' column and prediction columns
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with added consensus columns
+        """
+        # Get prediction columns (all except 'Sample')
+        pred_cols = [col for col in results_df.columns if col != 'Sample']
+
+        if len(pred_cols) < 2:
+            return results_df  # Need at least 2 models for consensus
+
+        # Extract model performance metadata
+        model_r2 = {}
+        model_regional_rmse = {}
+        model_quartiles = {}
+
+        for col in pred_cols:
+            if col in self.predictions_model_map:
+                metadata = self.predictions_model_map[col]
+
+                # Get R² for quality weighting
+                if 'performance' in metadata and 'R2' in metadata['performance']:
+                    r2 = metadata['performance']['R2']
+                    # Filter out poor models (R² < 0.3)
+                    if r2 is not None and r2 >= 0.3:
+                        model_r2[col] = r2
+
+                # Get regional performance for regional consensus
+                if 'regional_rmse' in metadata and 'y_quartiles' in metadata:
+                    model_regional_rmse[col] = metadata['regional_rmse']
+                    model_quartiles[col] = metadata['y_quartiles']
+
+        # Compute simple quality-weighted consensus
+        if len(model_r2) > 0:
+            consensus_simple = np.zeros(len(results_df))
+            total_weight = sum(model_r2.values())
+
+            for col, r2 in model_r2.items():
+                weight = r2 / total_weight
+                consensus_simple += results_df[col].values * weight
+
+            results_df['Consensus_Quality_Weighted'] = consensus_simple
+
+        # Compute regional quartile-based consensus
+        if len(model_regional_rmse) > 0 and len(model_quartiles) > 0:
+            consensus_regional = np.zeros(len(results_df))
+
+            # For each sample, determine which quartile it's in and weight accordingly
+            for idx in range(len(results_df)):
+                # Get all predictions for this sample
+                sample_preds = {col: results_df.loc[idx, col] for col in model_regional_rmse.keys()}
+
+                # Use median of predictions to estimate which region we're in
+                median_pred = np.median(list(sample_preds.values()))
+
+                # Determine quartile based on available quartile data
+                # Use first model's quartiles as reference (they should be similar across models)
+                ref_quartiles = list(model_quartiles.values())[0]
+
+                # Determine which quartile this prediction falls into
+                if median_pred < ref_quartiles[0]:
+                    quartile_key = 'Q1'
+                elif median_pred < ref_quartiles[1]:
+                    quartile_key = 'Q2'
+                elif median_pred < ref_quartiles[2]:
+                    quartile_key = 'Q3'
+                else:
+                    quartile_key = 'Q4'
+
+                # Weight models by inverse of their RMSE in this quartile
+                weights = {}
+                for col, regional_rmse in model_regional_rmse.items():
+                    if quartile_key in regional_rmse and not np.isnan(regional_rmse[quartile_key]):
+                        # Inverse RMSE weighting: lower RMSE = higher weight
+                        weights[col] = 1.0 / (regional_rmse[quartile_key] ** 2 + 1e-10)
+
+                # If no valid weights, fall back to simple average
+                if len(weights) == 0:
+                    consensus_regional[idx] = median_pred
+                else:
+                    total_weight = sum(weights.values())
+                    weighted_sum = sum(sample_preds[col] * weights[col] for col in weights.keys())
+                    consensus_regional[idx] = weighted_sum / total_weight
+
+            results_df['Consensus_Regional'] = consensus_regional
+
+        return results_df
 
     def _display_predictions(self):
         """Display predictions in treeview table."""
