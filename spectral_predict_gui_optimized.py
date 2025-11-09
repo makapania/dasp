@@ -167,8 +167,8 @@ class SpectralPredictApp:
 
         # NEW: User-friendly penalty system (0-10 scale)
         # 0 = only performance (R²) matters, 10 = strong penalty
-        self.variable_penalty = tk.IntVar(value=3)     # Penalty for using many variables
-        self.complexity_penalty = tk.IntVar(value=5)   # Penalty for model complexity (LVs, etc.)
+        self.variable_penalty = tk.IntVar(value=2)     # Penalty for using many variables
+        self.complexity_penalty = tk.IntVar(value=2)   # Penalty for model complexity (LVs, etc.)
 
         self.max_n_components = tk.IntVar(value=24)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
@@ -193,15 +193,15 @@ class SpectralPredictApp:
         self.use_ridge = tk.BooleanVar(value=True)
         self.use_lasso = tk.BooleanVar(value=True)
         self.use_randomforest = tk.BooleanVar(value=True)
-        self.use_mlp = tk.BooleanVar(value=True)
-        self.use_neuralboosted = tk.BooleanVar(value=True)
+        self.use_mlp = tk.BooleanVar(value=False)
+        self.use_neuralboosted = tk.BooleanVar(value=False)
 
         # Preprocessing method selection
         self.use_raw = tk.BooleanVar(value=False)
         self.use_snv = tk.BooleanVar(value=True)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
-        self.use_deriv_snv = tk.BooleanVar(value=False)  # deriv_snv (less common combo)
+        self.use_deriv_snv = tk.BooleanVar(value=True)  # deriv_snv (derivative then SNV)
 
         # Subset Analysis options
         self.enable_variable_subsets = tk.BooleanVar(value=True)  # Top-N variable analysis
@@ -663,44 +663,12 @@ class SpectralPredictApp:
         ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=0, column=1, sticky=tk.W)
 
         # NEW: Variable Count Penalty (0-10 scale)
-        ttk.Label(options_frame, text="Variable Count Penalty:", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
-        ttk.Scale(options_frame, from_=0, to=10, variable=self.variable_penalty, orient='horizontal', length=200).grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=(0, 10))
-        var_penalty_label = ttk.Label(options_frame, text="", style='Caption.TLabel')
-        var_penalty_label.grid(row=2, column=2, sticky=tk.W, padx=10)
-
-        def update_var_penalty_label(*args):
-            val = self.variable_penalty.get()
-            if val == 0:
-                var_penalty_label.config(text="0 = Ignore variable count (only R² matters)")
-            elif val <= 3:
-                var_penalty_label.config(text=f"{val} = Small penalty for many variables")
-            elif val <= 7:
-                var_penalty_label.config(text=f"{val} = Moderate penalty for many variables")
-            else:
-                var_penalty_label.config(text=f"{val} = Strong penalty for many variables")
-
-        self.variable_penalty.trace_add('write', update_var_penalty_label)
-        update_var_penalty_label()
+        ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10).grid(row=2, column=0, sticky=tk.W, padx=(0, 10))
 
         # NEW: Model Complexity Penalty (0-10 scale)
-        ttk.Label(options_frame, text="Model Complexity Penalty:", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
-        ttk.Scale(options_frame, from_=0, to=10, variable=self.complexity_penalty, orient='horizontal', length=200).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(0, 10))
-        comp_penalty_label = ttk.Label(options_frame, text="", style='Caption.TLabel')
-        comp_penalty_label.grid(row=4, column=2, sticky=tk.W, padx=10)
-
-        def update_comp_penalty_label(*args):
-            val = self.complexity_penalty.get()
-            if val == 0:
-                comp_penalty_label.config(text="0 = Ignore complexity (only R² matters)")
-            elif val <= 3:
-                comp_penalty_label.config(text=f"{val} = Small penalty for complexity (LVs, etc.)")
-            elif val <= 7:
-                comp_penalty_label.config(text=f"{val} = Moderate penalty for complexity")
-            else:
-                comp_penalty_label.config(text=f"{val} = Strong penalty for complexity")
-
-        self.complexity_penalty.trace_add('write', update_comp_penalty_label)
-        update_comp_penalty_label()
+        ttk.Label(options_frame, text="Model Complexity Penalty (0-10):", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10).grid(row=4, column=0, sticky=tk.W, padx=(0, 10))
 
         # Info label explaining the penalty system
         ttk.Label(options_frame, text="💡 These penalties affect model ranking. 0 = rank only by R², 10 = strongly prefer simpler models",
@@ -1672,8 +1640,9 @@ class SpectralPredictApp:
         # Print to console for reference
         print("\n" + report_text)
 
-        # Show dialog only if there are mismatches (to avoid annoying popups for perfect matches)
-        if unmatched_spectra or unmatched_ref or n_nan > 0:
+        # Show dialog only if there are actual alignment issues (mismatches or fuzzy matching)
+        # Don't show for simple NaN drops - that's just data cleaning, not alignment issues
+        if unmatched_spectra or unmatched_ref or fuzzy:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
