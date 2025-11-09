@@ -50,15 +50,23 @@ def compute_region_correlations(X, y, wavelengths, region_size=50, overlap=25):
             start_wl += (region_size - overlap)
             continue
 
-        # Compute correlations for this region
-        correlations = []
-        for idx in region_indices:
-            try:
-                corr, _ = pearsonr(X[:, idx], y)
-                if not np.isnan(corr):
-                    correlations.append(abs(corr))
-            except:
-                pass
+        # Compute correlations for this region (vectorized for performance)
+        # This computes all correlations at once instead of looping
+        try:
+            region_data = X[:, region_indices]
+
+            # Stack region features with y and compute correlation matrix
+            combined = np.column_stack([region_data, y.ravel()])
+            corr_matrix = np.corrcoef(combined, rowvar=False)
+
+            # Extract correlations between each feature and y (last row, excluding y vs y)
+            feature_y_corrs = corr_matrix[:-1, -1]
+
+            # Take absolute value and filter out NaNs
+            correlations = np.abs(feature_y_corrs)
+            correlations = correlations[~np.isnan(correlations)].tolist()
+        except:
+            correlations = []
 
         if len(correlations) > 0:
             regions.append({

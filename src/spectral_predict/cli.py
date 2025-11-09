@@ -185,23 +185,25 @@ Examples:
         top3 = df_ranked.head(3)
 
         if task_type == "regression":
-            for idx, row in top3.iterrows():
-                print(f"\nRank {row['Rank']}: {row['Model']} ({row['SubsetTag']})")
-                print(f"  Preprocess: {row['Preprocess']}")
-                print(f"  RMSE: {row['RMSE']:.4f}, R²: {row['R2']:.4f}")
-                print(f"  Variables: {int(row['n_vars'])}/{int(row['full_vars'])}")
-                print(f"  Score: {row['CompositeScore']:.4f}")
+            # Use itertuples() instead of iterrows() for better performance
+            for row in top3.itertuples(index=False):
+                print(f"\nRank {row.Rank}: {row.Model} ({row.SubsetTag})")
+                print(f"  Preprocess: {row.Preprocess}")
+                print(f"  RMSE: {row.RMSE:.4f}, R²: {row.R2:.4f}")
+                print(f"  Variables: {int(row.n_vars)}/{int(row.full_vars)}")
+                print(f"  Score: {row.CompositeScore:.4f}")
         else:
-            for idx, row in top3.iterrows():
-                print(f"\nRank {row['Rank']}: {row['Model']} ({row['SubsetTag']})")
-                print(f"  Preprocess: {row['Preprocess']}")
-                print(f"  Accuracy: {row['Accuracy']:.4f}", end="")
-                if pd.notna(row["ROC_AUC"]):
-                    print(f", ROC AUC: {row['ROC_AUC']:.4f}")
+            # Use itertuples() instead of iterrows() for better performance
+            for row in top3.itertuples(index=False):
+                print(f"\nRank {row.Rank}: {row.Model} ({row.SubsetTag})")
+                print(f"  Preprocess: {row.Preprocess}")
+                print(f"  Accuracy: {row.Accuracy:.4f}", end="")
+                if pd.notna(row.ROC_AUC):
+                    print(f", ROC AUC: {row.ROC_AUC:.4f}")
                 else:
                     print()
-                print(f"  Variables: {int(row['n_vars'])}/{int(row['full_vars'])}")
-                print(f"  Score: {row['CompositeScore']:.4f}")
+                print(f"  Variables: {int(row.n_vars)}/{int(row.full_vars)}")
+                print(f"  Score: {row.CompositeScore:.4f}")
 
         print()
         print("Done!")

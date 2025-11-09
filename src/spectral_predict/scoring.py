@@ -4,24 +4,23 @@ import numpy as np
 import pandas as pd
 
 
-def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
+def compute_composite_score(df_results, task_type, variable_penalty=3, complexity_penalty=5):
     """
-    Compute composite score with performance-dominant ranking.
+    Compute composite score with user-friendly penalty system.
 
-    Formula: ~90% performance, ~10% complexity
-    Score = performance_score + complexity_penalty
+    NEW: User-friendly 0-10 penalty system
+    - variable_penalty (0-10): Penalty for using many variables
+    - complexity_penalty (0-10): Penalty for model complexity (LVs, etc.)
+    - 0 = only performance (R²) matters
+    - 10 = strong penalty for variables/complexity
+
+    Formula: Score = performance_score + variable_penalty_term + complexity_penalty_term
 
     Performance score (lower is better):
     - Regression: 0.5*z(RMSE) - 0.5*z(R2)  [combine both metrics]
     - Classification: -z(ROC_AUC) - 0.3*z(Accuracy)
 
-    Complexity penalty (linear, no harsh sparsity penalties):
-    - LV penalty: Small penalty for more latent variables
-    - Variable penalty: Small penalty for more variables
-    - Both weighted equally, scaled to ~10% of total score
-
-    This ensures models with similar R² stay close in ranking,
-    with complexity only as a tiebreaker.
+    Penalty terms scale linearly with user settings (0-10).
 
     Lower composite score is better.
 
@@ -31,9 +30,12 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
         Results dataframe with metrics and complexity measures
     task_type : str
         'regression' or 'classification'
-    lambda_penalty : float
-        Penalty weight for model complexity (default: 0.15)
-        This is scaled down internally to keep complexity at ~10% influence.
+    variable_penalty : int (0-10)
+        Penalty for using many variables (default: 3)
+        0 = ignore variable count, 10 = strongly penalize many variables
+    complexity_penalty : int (0-10)
+        Penalty for model complexity (default: 5)
+        0 = ignore complexity, 10 = strongly penalize complex models
 
     Returns
     -------
@@ -68,32 +70,44 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
         # Combined performance score (lower is better, so negate)
         performance_score = -z_auc - 0.3 * z_acc
 
-    # Compute complexity penalty (simple linear penalties, no harsh sparsity penalties)
-    # Scale complexity to be ~10% of performance (performance z-scores typically range ±3)
-    # To make complexity ~10% of total: use small penalty weight
+    # NEW: User-friendly penalty system (0-10 scale)
+    # Performance z-scores typically range ±3, so we scale penalties to be meaningful but not overwhelming
 
-    # 1. LV penalty (for PLS models) - normalized to [0, 1]
-    # Fewer LVs is better, so higher LVs = higher penalty
-    lvs_penalty = df["LVs"].fillna(0).astype(np.float64) / 25.0
+    # 1. Variable Count Penalty (0-10 scale)
+    # Normalize: fraction of variables used, scaled by user preference
+    if variable_penalty > 0:
+        n_vars_array = np.asarray(df["n_vars"], dtype=np.float64)
+        full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
+        var_fraction = n_vars_array / full_vars_array  # 0-1 scale
 
-    # 2. Variable fraction penalty - normalized to [0, 1]
-    # Fewer variables is better, so more variables = higher penalty
-    n_vars_array = np.asarray(df["n_vars"], dtype=np.float64)
-    full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
-    vars_penalty = n_vars_array / full_vars_array
+        # Scale by user penalty (0-10) and make it affect ranking reasonably
+        # At penalty=10, using all variables adds ~1 unit (comparable to ~0.3 std deviations in performance)
+        var_penalty_term = (variable_penalty / 10.0) * var_fraction
+    else:
+        var_penalty_term = 0
 
-    # Scale complexity to ~10% of performance contribution
-    # Performance z-scores range ~[-3, +3], so range is ~6
-    # We want complexity to contribute ~0.6 units (10% of 6)
-    # lvs_penalty + vars_penalty ranges [0, 2], so multiply by 0.3 to get ~0.6
-    # Additionally, use user's lambda_penalty as a tuning factor
-    complexity_scale = 0.3 * lambda_penalty / 0.15  # Normalize around default 0.15
+    # 2. Model Complexity Penalty (0-10 scale)
+    # For PLS: penalize latent variables. For others: use median baseline
+    if complexity_penalty > 0:
+        lvs = df["LVs"].fillna(0).astype(np.float64)
 
-    # Total complexity penalty
-    complexity_penalty = complexity_scale * (lvs_penalty + vars_penalty)
+        # Normalize LVs to [0, 1] scale (assume max useful LVs is ~25)
+        lv_fraction = lvs / 25.0
+        lv_fraction = np.minimum(lv_fraction, 1.0)  # Cap at 1.0
+
+        # For non-PLS models (LVs=0), use a median penalty to avoid favoring them unfairly
+        # This makes all model types comparable
+        median_lv_fraction = 0.4  # Equivalent to ~10 LVs
+        lv_fraction_adjusted = np.where(lvs == 0, median_lv_fraction, lv_fraction)
+
+        # Scale by user penalty (0-10)
+        comp_penalty_term = (complexity_penalty / 10.0) * lv_fraction_adjusted
+    else:
+        comp_penalty_term = 0
 
     # Composite score (lower is better)
-    df["CompositeScore"] = performance_score + complexity_penalty
+    # Performance score dominates, but penalties can affect ranking meaningfully
+    df["CompositeScore"] = performance_score + var_penalty_term + comp_penalty_term
 
     # Rank (1 = best)
     df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
@@ -108,7 +122,99 @@ def compute_composite_score(df_results, task_type, lambda_penalty=0.15):
     new_col_order = ['Rank'] + cols + ['top_vars']
     df = df[new_col_order]
 
+    # Add unified complexity score (0-100 scale, higher = more complex)
+    # This is a new column for user convenience, doesn't affect ranking
+    try:
+        df["ComplexityScore"] = df.apply(_compute_unified_complexity, axis=1)
+    except Exception as e:
+        # If complexity calculation fails, set to NaN (don't break pipeline)
+        print(f"Warning: Unified complexity calculation failed: {e}")
+        df["ComplexityScore"] = np.nan
+
     return df
+
+
+def _compute_unified_complexity(row):
+    """
+    Compute unified complexity score (0-100 scale, higher = more complex).
+
+    Formula: ComplexityScore = 0.25×Model + 0.30×Variables + 0.25×LVs + 0.20×Preprocessing
+
+    Components:
+    - Model Type (25%): Intrinsic model complexity
+    - Variables (30%): Number of wavelengths selected (nonlinear penalty)
+    - Latent Variables (25%): For PLS models, number of components
+    - Preprocessing (20%): Derivative order and SNV
+
+    Returns
+    -------
+    score : float
+        Complexity score in range [0, 100]
+    """
+    # 1. Model Type Complexity (25% weight) - based on model complexity
+    model = row.get("Model", "")
+    model_scores = {
+        "PLS": 20,
+        "Ridge": 25,
+        "Lasso": 30,
+        "RandomForest": 60,
+        "MLP": 80,
+        "NeuralBoosted": 85
+    }
+    model_complexity = model_scores.get(model, 50)  # Default to 50 if unknown
+
+    # 2. Variable Complexity (30% weight) - nonlinear penalty for many variables
+    # Use sqrt-based nonlinear penalty: few vars = low penalty, many vars = high penalty
+    n_vars = row.get("n_vars", 0)
+    # Normalize: 10 vars ≈ 2.0, 100 vars ≈ 20, 500 vars ≈ 100
+    var_complexity = min(100, np.sqrt(n_vars) * 4.5)
+
+    # 3. Latent Variable Complexity (25% weight) - for PLS models
+    lvs = row.get("LVs", np.nan)
+    if pd.isna(lvs) or lvs == 0:
+        # Non-PLS models: use median complexity (50)
+        lv_complexity = 50
+    else:
+        # Normalize LVs: 2 LVs = 0, 25 LVs = 100
+        lv_complexity = min(100, (lvs - 2) * 100 / 23)
+
+    # 4. Preprocessing Complexity (20% weight)
+    preprocess = row.get("Preprocess", "raw")
+    deriv = row.get("Deriv", 0)
+
+    # Base preprocessing scores
+    if preprocess == "raw":
+        prep_base = 0
+    elif preprocess == "snv":
+        prep_base = 20
+    elif preprocess == "deriv":
+        if deriv == 1:
+            prep_base = 50
+        elif deriv == 2:
+            prep_base = 70
+        else:
+            prep_base = 40  # Unknown derivative order
+    elif preprocess == "deriv_snv":
+        if deriv == 1:
+            prep_base = 60
+        elif deriv == 2:
+            prep_base = 80
+        else:
+            prep_base = 50
+    else:
+        prep_base = 30  # Unknown preprocessing
+
+    prep_complexity = min(100, prep_base)
+
+    # Weighted sum (0-100 scale)
+    complexity_score = (
+        0.25 * model_complexity +
+        0.30 * var_complexity +
+        0.25 * lv_complexity +
+        0.20 * prep_complexity
+    )
+
+    return round(complexity_score, 1)
 
 
 def create_results_dataframe(task_type):

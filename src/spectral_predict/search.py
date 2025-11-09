@@ -17,10 +17,10 @@ from .regions import create_region_subsets, format_region_report
 from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection
 
 
-def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=24,
-               max_iter=500, models_to_test=None, preprocessing_methods=None,
+def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=5,
+               max_n_components=24, max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
-               rf_n_trees_list=None,
+               rf_n_trees_list=None, rf_max_depth_list=None,
                enable_variable_subsets=True, variable_counts=None,
                enable_region_subsets=True, n_top_regions=5, progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
@@ -39,8 +39,10 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         'regression' or 'classification'
     folds : int
         Number of CV folds
-    lambda_penalty : float
-        Complexity penalty weight
+    variable_penalty : int (0-10), default=3
+        Penalty for using many variables (0=ignore, 10=strong penalty)
+    complexity_penalty : int (0-10), default=5
+        Penalty for model complexity (0=ignore, 10=strong penalty)
     max_n_components : int, default=24
         Maximum number of PLS components to test
     max_iter : int, default=500
@@ -134,10 +136,11 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
         print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
               f"due to dataset size (n_samples={n_samples}, min_fold_size~{min_fold_samples})")
 
-    # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted, rf_n_trees_list for RandomForest)
+    # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
+    # rf_n_trees_list and rf_max_depth_list for RandomForest)
     model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
                                    n_estimators_list=n_estimators_list, learning_rates=learning_rates,
-                                   rf_n_trees_list=rf_n_trees_list)
+                                   rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
@@ -308,8 +311,22 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                 if preprocess_cfg["deriv"]:
                     prep_name += f"_d{preprocess_cfg['deriv']}"
 
-                progress_msg = f"Testing {model_name} with {prep_name} preprocessing"
-                print(f"[{current_config}/{total_configs}] {progress_msg}")
+                # Show parameters being tested (more informative)
+                param_str = ", ".join([f"{k}={v}" for k, v in list(params.items())[:2]])  # Show first 2 params
+                if len(params) > 2:
+                    param_str += "..."
+
+                progress_msg = f"Testing {model_name} ({param_str}) + {prep_name}"
+
+                # Add best model so far to progress
+                best_info = ""
+                if best_model_so_far is not None:
+                    if task_type == "regression":
+                        best_info = f" | Best: R²={best_model_so_far['R2']:.3f}, RMSE={best_model_so_far['RMSE']:.3f}"
+                    else:
+                        best_info = f" | Best: AUC={best_model_so_far.get('ROC_AUC', 0):.3f}"
+
+                print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
 
                 if progress_callback:
                     progress_callback({
@@ -336,6 +353,12 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                     subset_tag="full",
                 )
                 df_results = add_result(df_results, result)
+
+                # Show full model result
+                if task_type == "regression":
+                    print(f"     Full model: R²={result['R2']:.3f}, RMSE={result['RMSE']:.3f}")
+                else:
+                    print(f"     Full model: AUC={result.get('ROC_AUC', 0):.3f}, Acc={result.get('Accuracy', 0):.3f}")
 
                 # Update best model tracker
                 if best_model_so_far is None:
@@ -462,7 +485,7 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
 
                                 # Run subsets with user-selected counts
                                 for n_top in valid_variable_counts:
-                                    print(f"  -> Testing top-{n_top} variable subset (method: {varsel_method})...")
+                                    print(f"  -> Testing top-{n_top} vars ({varsel_method})...", end=" ")
                                     # Select top N most important features based on preprocessed importances
                                     top_indices = np.argsort(importances)[-n_top:][::-1]
 
@@ -505,6 +528,12 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                                         )
                                     df_results = add_result(df_results, subset_result)
 
+                                    # Show result immediately
+                                    if task_type == "regression":
+                                        print(f"R²={subset_result['R2']:.3f}, RMSE={subset_result['RMSE']:.3f}")
+                                    else:
+                                        print(f"AUC={subset_result.get('ROC_AUC', 0):.3f}, Acc={subset_result.get('Accuracy', 0):.3f}")
+
                             except Exception as e:
                                 print(f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}")
 
@@ -512,8 +541,9 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                 # For derivatives: use preprocessed data to avoid reapplying preprocessing
                 # For raw/SNV: use raw data and reapply preprocessing
                 if enable_region_subsets and len(region_subsets) > 0:
-                    print(f"  -> Testing {len(region_subsets)} region-based subsets...")
-                    for region_subset in region_subsets:
+                    print(f"  -> Testing {len(region_subsets)} spectral regions:")
+                    for i, region_subset in enumerate(region_subsets, 1):
+                        print(f"     Region {i}/{len(region_subsets)} ({region_subset['tag']})...", end=" ")
                         if preprocess_cfg["deriv"] is not None:
                             # For derivatives: use preprocessed data, skip reprocessing
                             # Keep original preprocess_cfg for correct labeling
@@ -550,10 +580,16 @@ def run_search(X, y, task_type, folds=5, lambda_penalty=0.15, max_n_components=2
                             )
                         df_results = add_result(df_results, region_result)
 
+                        # Show result immediately
+                        if task_type == "regression":
+                            print(f"R²={region_result['R2']:.3f}, RMSE={region_result['RMSE']:.3f}")
+                        else:
+                            print(f"AUC={region_result.get('ROC_AUC', 0):.3f}, Acc={region_result.get('Accuracy', 0):.3f}")
+
     # Compute composite scores and rank
     from .scoring import compute_composite_score
 
-    df_ranked = compute_composite_score(df_results, task_type, lambda_penalty)
+    df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
 
     return df_ranked
 
@@ -582,7 +618,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     Returns
     -------
     metrics : dict
-        Dictionary with fold metrics
+        Dictionary with fold metrics (includes y_test and y_pred for regional analysis)
     """
     # Clone pipeline to avoid thread-safety issues
     pipe_clone = clone(pipe)
@@ -598,7 +634,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         y_pred = pipe_clone.predict(X_test)
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
-        return {"RMSE": rmse, "R2": r2}
+        return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}
     else:  # classification
         y_pred = pipe_clone.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
@@ -689,9 +725,34 @@ def _run_single_config(
     if task_type == "regression":
         mean_rmse = np.mean([m["RMSE"] for m in cv_metrics])
         mean_r2 = np.mean([m["R2"] for m in cv_metrics])
+
+        # Compute regional performance (quartile-based) for consensus predictions
+        # Collect all CV predictions and true values
+        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+
+        # Compute quartiles based on true values
+        quartiles = np.percentile(all_y_test, [25, 50, 75])
+
+        # Compute RMSE for each quartile region
+        regional_rmse = {}
+        for i, (lower, upper) in enumerate([
+            (-np.inf, quartiles[0]),  # Q1
+            (quartiles[0], quartiles[1]),  # Q2
+            (quartiles[1], quartiles[2]),  # Q3
+            (quartiles[2], np.inf)  # Q4
+        ]):
+            mask = (all_y_test >= lower) & (all_y_test < upper if i < 3 else all_y_test >= lower)
+            if mask.sum() > 0:
+                regional_rmse[f'Q{i+1}'] = np.sqrt(mean_squared_error(
+                    all_y_test[mask], all_y_pred[mask]
+                ))
+            else:
+                regional_rmse[f'Q{i+1}'] = np.nan
     else:
         mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
         mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
+        regional_rmse = None  # Not applicable for classification
 
     # Extract LVs (for PLS models)
     lvs = params.get("n_components", np.nan)
@@ -714,6 +775,9 @@ def _run_single_config(
     if task_type == "regression":
         result["RMSE"] = mean_rmse
         result["R2"] = mean_r2
+        # Add regional performance for consensus predictions
+        result["regional_rmse"] = regional_rmse
+        result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds
     else:
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc

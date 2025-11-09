@@ -164,7 +164,12 @@ class SpectralPredictApp:
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
-        self.lambda_penalty = tk.DoubleVar(value=0.15)
+
+        # NEW: User-friendly penalty system (0-10 scale)
+        # 0 = only performance (R²) matters, 10 = strong penalty
+        self.variable_penalty = tk.IntVar(value=2)     # Penalty for using many variables
+        self.complexity_penalty = tk.IntVar(value=2)   # Penalty for model complexity (LVs, etc.)
+
         self.max_n_components = tk.IntVar(value=24)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
         self.show_progress = tk.BooleanVar(value=True)
@@ -188,15 +193,15 @@ class SpectralPredictApp:
         self.use_ridge = tk.BooleanVar(value=True)
         self.use_lasso = tk.BooleanVar(value=True)
         self.use_randomforest = tk.BooleanVar(value=True)
-        self.use_mlp = tk.BooleanVar(value=True)
-        self.use_neuralboosted = tk.BooleanVar(value=True)
+        self.use_mlp = tk.BooleanVar(value=False)
+        self.use_neuralboosted = tk.BooleanVar(value=False)
 
         # Preprocessing method selection
         self.use_raw = tk.BooleanVar(value=False)
         self.use_snv = tk.BooleanVar(value=True)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
-        self.use_deriv_snv = tk.BooleanVar(value=False)  # deriv_snv (less common combo)
+        self.use_deriv_snv = tk.BooleanVar(value=True)  # deriv_snv (derivative then SNV)
 
         # Subset Analysis options
         self.enable_variable_subsets = tk.BooleanVar(value=True)  # Top-N variable analysis
@@ -229,6 +234,9 @@ class SpectralPredictApp:
         self.rf_n_trees_200 = tk.BooleanVar(value=True)  # Default
         self.rf_n_trees_500 = tk.BooleanVar(value=True)  # Default
         self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
+        self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth
+        self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
+        self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -654,27 +662,34 @@ class SpectralPredictApp:
         ttk.Label(options_frame, text="CV Folds:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 10))
         ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=0, column=1, sticky=tk.W)
 
-        # Lambda penalty
-        ttk.Label(options_frame, text="Complexity Penalty:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.lambda_penalty, width=12).grid(row=1, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(higher = prefer simpler models)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=10)
+        # NEW: Variable Count Penalty (0-10 scale)
+        ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10).grid(row=2, column=0, sticky=tk.W, padx=(0, 10))
+
+        # NEW: Model Complexity Penalty (0-10 scale)
+        ttk.Label(options_frame, text="Model Complexity Penalty (0-10):", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10).grid(row=4, column=0, sticky=tk.W, padx=(0, 10))
+
+        # Info label explaining the penalty system
+        ttk.Label(options_frame, text="💡 These penalties affect model ranking. 0 = rank only by R², 10 = strongly prefer simpler models",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # Max PLS components
-        ttk.Label(options_frame, text="Max Latent Variables:").grid(row=2, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=2, to=100, textvariable=self.max_n_components, width=12).grid(row=2, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(PLS components)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=10)
+        ttk.Label(options_frame, text="Max Latent Variables:").grid(row=6, column=0, sticky=tk.W, pady=(15, 8), padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=2, to=100, textvariable=self.max_n_components, width=12).grid(row=6, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="(PLS components)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
 
         # Max iterations
-        ttk.Label(options_frame, text="Max Iterations:").grid(row=3, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=12).grid(row=3, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(for MLP/Neural Boosted)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
+        ttk.Label(options_frame, text="Max Iterations:").grid(row=7, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=12).grid(row=7, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="(for MLP/Neural Boosted)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
 
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=4, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=4, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=8, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=8, column=1, sticky=tk.W)
 
         # Progress monitor
-        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
         ttk.Label(content_frame, text="Preprocessing Methods", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -894,6 +909,21 @@ class SpectralPredictApp:
         # Info label
         ttk.Label(rf_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # Maximum Tree Depth (max_depth) options
+        ttk.Label(rf_frame, text="Maximum Tree Depth (max_depth):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        rf_depth_frame = ttk.Frame(rf_frame)
+        rf_depth_frame.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(rf_depth_frame, text="None (unlimited) ⭐", variable=self.rf_max_depth_none).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_depth_frame, text="30 ⭐", variable=self.rf_max_depth_30).grid(row=0, column=1, padx=5)
+        ttk.Label(rf_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(rf_depth_frame, textvariable=self.rf_max_depth_custom, width=8).grid(row=0, column=3, padx=5)
+        ttk.Label(rf_depth_frame, text="(default: None, 30)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # Info label for max_depth
+        ttk.Label(rf_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -1610,8 +1640,9 @@ class SpectralPredictApp:
         # Print to console for reference
         print("\n" + report_text)
 
-        # Show dialog only if there are mismatches (to avoid annoying popups for perfect matches)
-        if unmatched_spectra or unmatched_ref or n_nan > 0:
+        # Show dialog only if there are actual alignment issues (mismatches or fuzzy matching)
+        # Don't show for simple NaN drops - that's just data cleaning, not alignment issues
+        if unmatched_spectra or unmatched_ref or fuzzy:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
@@ -2573,6 +2604,13 @@ class SpectralPredictApp:
             target_name = self.target_column.get()
             # Include sample ID column so user knows which samples are in the export
             sample_id_col = self.spectral_file_column.get()
+
+            # Safety check: Avoid column name collision with wavelength columns
+            if sample_id_col in df_preprocessed.columns:
+                original_col = sample_id_col
+                sample_id_col = f"{sample_id_col}_ID"
+                self._log_progress(f"⚠️  Warning: Sample ID column renamed to '{sample_id_col}' to avoid collision with wavelength column '{original_col}'")
+
             df_export = pd.DataFrame({
                 sample_id_col: self.y.index,
                 target_name: self.y.values
@@ -2784,6 +2822,38 @@ class SpectralPredictApp:
             # Sort for consistent ordering
             rf_n_trees_list = sorted(rf_n_trees_list)
 
+            # Collect Random Forest max_depth
+            rf_max_depth_list = []
+
+            # Collect from checkboxes
+            if self.rf_max_depth_none.get():
+                rf_max_depth_list.append(None)
+            if self.rf_max_depth_30.get():
+                rf_max_depth_list.append(30)
+
+            # Add custom value if provided
+            custom_depth = self.rf_max_depth_custom.get().strip()
+            if custom_depth:
+                if custom_depth.lower() == 'none':
+                    if None not in rf_max_depth_list:
+                        rf_max_depth_list.append(None)
+                else:
+                    try:
+                        custom_val = int(custom_depth)
+                        if custom_val > 0 and custom_val not in rf_max_depth_list:
+                            rf_max_depth_list.append(custom_val)
+                        elif custom_val <= 0:
+                            print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}' (must be > 0), ignoring")
+                    except ValueError:
+                        print(f"WARNING: Invalid custom RF max_depth value '{custom_depth}', ignoring")
+
+            # Default to [None, 30] if none selected
+            if not rf_max_depth_list:
+                rf_max_depth_list = [None, 30]
+
+            # Sort for consistent ordering (None sorts first)
+            rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
+
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
@@ -2794,6 +2864,7 @@ class SpectralPredictApp:
             self._log_progress(f"NeuralBoosted n_estimators: {n_estimators_list}")
             self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
             self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
+            self._log_progress(f"RandomForest max_depth: {rf_max_depth_list}")
             self._log_progress(f"\n** SUBSET ANALYSIS SETTINGS **")
             self._log_progress(f"Variable subsets: {'ENABLED' if enable_variable_subsets else 'DISABLED'}")
             self._log_progress(f"  enable_variable_subsets value: {enable_variable_subsets}")
@@ -2903,7 +2974,8 @@ class SpectralPredictApp:
                 y_filtered,
                 task_type=task_type,
                 folds=self.folds.get(),
-                lambda_penalty=self.lambda_penalty.get(),
+                variable_penalty=self.variable_penalty.get(),
+                complexity_penalty=self.complexity_penalty.get(),
                 max_n_components=self.max_n_components.get(),
                 max_iter=self.max_iter.get(),
                 models_to_test=selected_models,
@@ -2912,6 +2984,7 @@ class SpectralPredictApp:
                 n_estimators_list=n_estimators_list,
                 learning_rates=learning_rates,
                 rf_n_trees_list=rf_n_trees_list,
+                rf_max_depth_list=rf_max_depth_list,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
@@ -4239,6 +4312,33 @@ Performance (Classification):
                 results['r2_std'] = np.std([m['r2'] for m in fold_metrics])
                 results['mae_mean'] = np.mean([m['mae'] for m in fold_metrics])
                 results['mae_std'] = np.std([m['mae'] for m in fold_metrics])
+
+                # Compute regional performance (quartile-based) for consensus predictions
+                all_y_true_arr = np.array(all_y_true)
+                all_y_pred_arr = np.array(all_y_pred)
+
+                # Compute quartiles based on true values
+                quartiles = np.percentile(all_y_true_arr, [25, 50, 75])
+
+                # Compute RMSE for each quartile region
+                regional_rmse = {}
+                for i, (lower, upper) in enumerate([
+                    (-np.inf, quartiles[0]),  # Q1
+                    (quartiles[0], quartiles[1]),  # Q2
+                    (quartiles[1], quartiles[2]),  # Q3
+                    (quartiles[2], np.inf)  # Q4
+                ]):
+                    mask = (all_y_true_arr >= lower) & (all_y_true_arr < upper if i < 3 else all_y_true_arr >= lower)
+                    if mask.sum() > 0:
+                        regional_rmse[f'Q{i+1}'] = np.sqrt(mean_squared_error(
+                            all_y_true_arr[mask], all_y_pred_arr[mask]
+                        ))
+                    else:
+                        regional_rmse[f'Q{i+1}'] = np.nan
+
+                # Store regional performance for model saving
+                results['regional_rmse'] = regional_rmse
+                results['y_quartiles'] = quartiles.tolist()
             else:
                 results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
                 results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
@@ -4465,6 +4565,11 @@ Configuration:
                     'MAE': self.refined_performance.get('mae_mean'),
                     'MAE_std': self.refined_performance.get('mae_std')
                 }
+                # Add regional performance for consensus predictions
+                if 'regional_rmse' in self.refined_performance:
+                    metadata['regional_rmse'] = self.refined_performance['regional_rmse']
+                if 'y_quartiles' in self.refined_performance:
+                    metadata['y_quartiles'] = self.refined_performance['y_quartiles']
             else:  # classification
                 metadata['performance'] = {
                     'Accuracy': self.refined_performance.get('accuracy_mean'),
@@ -5265,6 +5370,10 @@ Configuration:
                 self.pred_progress['value'] = i + 1
                 self.root.update()
 
+            # Compute consensus predictions if we have multiple models
+            if successful_models > 1:
+                results = self._add_consensus_predictions(results)
+
             # Store results
             self.predictions_df = results
 
@@ -5285,6 +5394,137 @@ Configuration:
             messagebox.showerror("Prediction Error",
                 f"An error occurred during predictions:\n{str(e)}")
             self.pred_status.config(text="Error occurred")
+
+    def _add_consensus_predictions(self, results_df):
+        """
+        Add consensus prediction columns to the results dataframe.
+
+        Computes two types of consensus:
+        1. Simple quality-weighted: Average weighted by model R²
+        2. Regional quartile-based: Weights vary by prediction range
+
+        Parameters
+        ----------
+        results_df : pd.DataFrame
+            DataFrame with 'Sample' column and prediction columns
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with added consensus columns
+        """
+        # Get prediction columns (all except 'Sample')
+        pred_cols = [col for col in results_df.columns if col != 'Sample']
+
+        if len(pred_cols) < 2:
+            return results_df  # Need at least 2 models for consensus
+
+        # Extract model performance metadata
+        model_r2 = {}
+        model_regional_rmse = {}
+        model_quartiles = {}
+
+        for col in pred_cols:
+            if col in self.predictions_model_map:
+                metadata = self.predictions_model_map[col]
+
+                # Get R² for quality weighting
+                if 'performance' in metadata and 'R2' in metadata['performance']:
+                    r2 = metadata['performance']['R2']
+                    if r2 is not None:
+                        model_r2[col] = r2
+
+                # Get regional performance for regional consensus
+                if 'regional_rmse' in metadata and 'y_quartiles' in metadata:
+                    model_regional_rmse[col] = metadata['regional_rmse']
+                    model_quartiles[col] = metadata['y_quartiles']
+
+        # Filter out models that are much worse than the best
+        # Use the median R² and filter models that are outliers below it
+        if len(model_r2) > 1:
+            r2_values = sorted(model_r2.values(), reverse=True)
+            best_r2 = r2_values[0]
+            median_r2 = np.median(r2_values)
+
+            # Strategy: Keep models within 0.05 of the median (or best if there are only 2-3 models)
+            # This way if you have [0.92, 0.92, 0.92, 0.87], median=0.92, threshold=0.87
+            # So the 0.87 model gets excluded
+            if len(r2_values) <= 3:
+                # For small sets, use tight threshold from best
+                threshold = best_r2 - 0.05
+            else:
+                # For larger sets, use median-based threshold
+                threshold = median_r2 - 0.05
+
+            # Filter out poor performers
+            filtered_model_r2 = {col: r2 for col, r2 in model_r2.items() if r2 >= threshold}
+
+            # Print filtering info
+            if len(filtered_model_r2) < len(model_r2):
+                excluded = set(model_r2.keys()) - set(filtered_model_r2.keys())
+                excluded_r2 = {col: model_r2[col] for col in excluded}
+                print(f"\nConsensus filtering: Best R²={best_r2:.3f}, Median R²={median_r2:.3f}, threshold={threshold:.3f}")
+                print(f"Excluded {len(excluded)} poor model(s):")
+                for col, r2 in excluded_r2.items():
+                    print(f"  - {col}: R²={r2:.3f}")
+
+            model_r2 = filtered_model_r2
+
+        # Compute simple quality-weighted consensus
+        if len(model_r2) > 0:
+            consensus_simple = np.zeros(len(results_df))
+            total_weight = sum(model_r2.values())
+
+            for col, r2 in model_r2.items():
+                weight = r2 / total_weight
+                consensus_simple += results_df[col].values * weight
+
+            results_df['Consensus_Quality_Weighted'] = consensus_simple
+
+        # Compute regional quartile-based consensus
+        if len(model_regional_rmse) > 0 and len(model_quartiles) > 0:
+            consensus_regional = np.zeros(len(results_df))
+
+            # For each sample, determine which quartile it's in and weight accordingly
+            for idx in range(len(results_df)):
+                # Get all predictions for this sample
+                sample_preds = {col: results_df.loc[idx, col] for col in model_regional_rmse.keys()}
+
+                # Use median of predictions to estimate which region we're in
+                median_pred = np.median(list(sample_preds.values()))
+
+                # Determine quartile based on available quartile data
+                # Use first model's quartiles as reference (they should be similar across models)
+                ref_quartiles = list(model_quartiles.values())[0]
+
+                # Determine which quartile this prediction falls into
+                if median_pred < ref_quartiles[0]:
+                    quartile_key = 'Q1'
+                elif median_pred < ref_quartiles[1]:
+                    quartile_key = 'Q2'
+                elif median_pred < ref_quartiles[2]:
+                    quartile_key = 'Q3'
+                else:
+                    quartile_key = 'Q4'
+
+                # Weight models by inverse of their RMSE in this quartile
+                weights = {}
+                for col, regional_rmse in model_regional_rmse.items():
+                    if quartile_key in regional_rmse and not np.isnan(regional_rmse[quartile_key]):
+                        # Inverse RMSE weighting: lower RMSE = higher weight
+                        weights[col] = 1.0 / (regional_rmse[quartile_key] ** 2 + 1e-10)
+
+                # If no valid weights, fall back to simple average
+                if len(weights) == 0:
+                    consensus_regional[idx] = median_pred
+                else:
+                    total_weight = sum(weights.values())
+                    weighted_sum = sum(sample_preds[col] * weights[col] for col in weights.keys())
+                    consensus_regional[idx] = weighted_sum / total_weight
+
+            results_df['Consensus_Regional'] = consensus_regional
+
+        return results_df
 
     def _display_predictions(self):
         """Display predictions in treeview table."""

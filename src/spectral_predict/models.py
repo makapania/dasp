@@ -108,7 +108,8 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
 
 def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
-                    n_estimators_list=None, learning_rates=None, rf_n_trees_list=None):
+                    n_estimators_list=None, learning_rates=None, rf_n_trees_list=None,
+                    rf_max_depth_list=None):
     """
     Get model grids for hyperparameter search.
 
@@ -126,6 +127,11 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
         List of n_estimators values for NeuralBoosted. If None, uses [100]
     learning_rates : list of float, optional
         List of learning rates for NeuralBoosted. If None, uses [0.1, 0.2]
+    rf_n_trees_list : list of int, optional
+        List of n_estimators values for RandomForest. If None, uses [200, 500]
+    rf_max_depth_list : list of int or None, optional
+        List of max_depth values for RandomForest. If None, uses [None, 30]
+        (safer and faster than previous default of [None, 15, 30])
 
     Returns
     -------
@@ -141,6 +147,10 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
     # Set defaults for RandomForest hyperparameters
     if rf_n_trees_list is None:
         rf_n_trees_list = [200, 500]
+    if rf_max_depth_list is None:
+        # UPDATED: Changed from [None, 15, 30] to [None, 30] for safety and speed
+        # This reduces RF grid configs from 6 to 4 per preprocessing method
+        rf_max_depth_list = [None, 30]
 
     grids = {}
 
@@ -177,10 +187,10 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
             )
         grids["Lasso"] = lasso_configs
 
-        # Random Forest
+        # Random Forest - uses configurable max_depth from GUI or defaults
         rf_configs = []
         for n_est in rf_n_trees_list:
-            for max_d in [None, 15, 30]:
+            for max_d in rf_max_depth_list:  # ✅ Now configurable!
                 rf_configs.append(
                     (
                         RandomForestRegressor(
@@ -269,10 +279,10 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
             for nc in pls_components
         ]
 
-        # Random Forest
+        # Random Forest - uses configurable max_depth from GUI or defaults
         rf_configs = []
         for n_est in rf_n_trees_list:
-            for max_d in [None, 15, 30]:
+            for max_d in rf_max_depth_list:  # ✅ Now configurable!
                 rf_configs.append(
                     (
                         RandomForestClassifier(
@@ -340,14 +350,13 @@ def compute_vip(pls_model, X, y):
     # Total SSY
     ssy_total = np.sum(ssy_comp)
 
-    # VIP calculation
+    # VIP calculation (vectorized for performance)
     n_features = W.shape[0]
     n_components = W.shape[1]
 
-    vip_scores = np.zeros(n_features)
-    for i in range(n_features):
-        weight = np.sum((W[i, :] ** 2) * ssy_comp)
-        vip_scores[i] = np.sqrt(n_features * weight / ssy_total)
+    # Vectorized version: same math, but uses broadcasting instead of loop
+    weight = np.sum((W ** 2) * ssy_comp, axis=1)  # Sum over components for each feature
+    vip_scores = np.sqrt(n_features * weight / ssy_total)
 
     return vip_scores
 
