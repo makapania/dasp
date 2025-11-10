@@ -3797,8 +3797,15 @@ class SpectralPredictApp:
             errors.append("Wavelength specification is empty")
 
         # Validate model type
-        if self.refine_model_type.get() not in ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']:
-            errors.append("Invalid model type selected")
+        model_type = self.refine_model_type.get()
+        if is_valid_model is not None:
+            # Use registry validation
+            if not is_valid_model(model_type, 'regression'):
+                errors.append(f"Invalid model type selected: '{model_type}'")
+        else:
+            # Fallback validation
+            if model_type not in ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']:
+                errors.append(f"Invalid model type selected: '{model_type}'")
 
         # Validate CV folds
         if self.refine_folds.get() < 3:
@@ -4323,8 +4330,8 @@ Performance (Classification):
         task_type = self.refined_config.get('task_type')
         model_name = self.refined_config.get('model_name')
 
-        # Leverage only meaningful for linear models (PLS, Ridge, Lasso)
-        if task_type != 'regression' or model_name not in ['PLS', 'Ridge', 'Lasso']:
+        # Leverage only meaningful for linear models (PLS, Ridge, Lasso, ElasticNet)
+        if task_type != 'regression' or model_name not in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
             return
 
         if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
