@@ -18,8 +18,8 @@ echo.
 REM Set working directory to script location
 cd /d "%~dp0"
 
-REM Launch Python GUI with full path to Python installation
-C:\Python314\python.exe "spectral_predict_gui_optimized.py"
+REM Launch Python GUI with virtual environment Python
+.venv\Scripts\python.exe "spectral_predict_gui_optimized.py"
 
 REM Check if execution succeeded
 if errorlevel 1 (
