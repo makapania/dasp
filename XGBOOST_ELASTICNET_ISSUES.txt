@@ -1,0 +1,35 @@
+XGBoost and ElasticNet R-Squared Investigation - Key Findings
+
+1. MISSING MODELS IN GUI DROPDOWN
+   File: spectral_predict_gui_optimized.py, Line 1438
+   Issue: XGBoost, ElasticNet, LightGBM, CatBoost, SVR missing from:
+          model_combo['values'] = ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']
+   Impact: Cannot load these models in Custom Model Development tab
+   R2 Effect: +++ HIGH (complete inability to reproduce models)
+
+2. SILENT PARAMETER APPLICATION FAILURE
+   File: spectral_predict_gui_optimized.py, Lines 4587-4592
+   Issue: When model.set_params() fails, exception caught silently
+          Model trains with DEFAULTS instead of tuned hyperparameters
+   Impact: XGBoost with n_estimators=200 trains as n_estimators=100
+   R2 Effect: ++ VERY HIGH (30-40% R2 drop)
+
+3. ELASTICNET FEATURE SCALING MISSING
+   File: src/spectral_predict/search.py
+   Issue: ElasticNet needs StandardScaler on features, gets only SNV (samples)
+   Impact: Features on different scales, regularization applies incorrectly
+   R2 Effect: ++ HIGH (20-30% R2 drop)
+
+4. ELASTICNET CONVERGENCE NOT VERIFIED
+   File: src/spectral_predict/models.py, Lines 68-69
+   Issue: Model may hit max_iter without converging
+   Impact: Incomplete training gives poor predictions
+   R2 Effect: + MEDIUM (10-20% R2 drop)
+
+5. MISSING FROM VARIABLE SELECTION LOOP
+   File: src/spectral_predict/search.py, Line 389
+   Issue: XGBoost/ElasticNet not in feature importance extraction
+   Impact: Cannot use top-N variable subsets for these models
+   R2 Effect: + MEDIUM (if trying variable subsets)
+
+

@@ -20,8 +20,10 @@ def read_csv_spectra(path):
 
     Returns
     -------
-    pd.DataFrame
-        Wide matrix with rows = id, columns = float wavelengths (nm), sorted ascending
+    tuple
+        (df, metadata) where:
+        - df: pd.DataFrame - Wide matrix with rows = id, columns = float wavelengths (nm)
+        - metadata: dict - Contains data_type, type_confidence, detection_method, etc.
     """
     path = Path(path)
     df = pd.read_csv(path)
@@ -82,7 +84,23 @@ def read_csv_spectra(path):
     if not np.all(wls[1:] > wls[:-1]):
         raise ValueError("Wavelengths must be strictly increasing")
 
-    return result
+    # Detect data type (reflectance vs absorbance)
+    data_type, type_confidence, detection_method = detect_spectral_data_type(result)
+    print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
+    if type_confidence < 70:
+        print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+
+    # Compile metadata
+    metadata = {
+        'n_spectra': len(result),
+        'wavelength_range': (result.columns.min(), result.columns.max()),
+        'file_format': 'csv',
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method
+    }
+
+    return result, metadata
 
 
 def read_reference_csv(path, id_column):
@@ -354,8 +372,10 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
 
     Returns
     -------
-    pd.DataFrame
-        Wide matrix with rows = filename, columns = wavelengths (nm)
+    tuple
+        (df, metadata) where:
+        - df: pd.DataFrame - Wide matrix with rows = filename, columns = wavelengths (nm)
+        - metadata: dict - Contains data_type, type_confidence, detection_method, etc.
     """
     asd_dir = Path(asd_dir)
 
@@ -420,7 +440,23 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
     if not np.all(wls[1:] > wls[:-1]):
         raise ValueError("Wavelengths must be strictly increasing")
 
-    return df
+    # Detect data type (reflectance vs absorbance)
+    data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
+    if type_confidence < 70:
+        print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+
+    # Compile metadata
+    metadata = {
+        'n_spectra': len(df),
+        'wavelength_range': (df.columns.min(), df.columns.max()),
+        'file_format': 'asd',
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method
+    }
+
+    return df, metadata
 
 
 def _read_single_asd_ascii(asd_file, reader_mode):
@@ -982,6 +1018,9 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
     X = df[wavelength_cols].copy()
     X.index = specimen_ids
 
+    # Convert spectral data values to numeric (handle any string values from CSV)
+    X = X.apply(pd.to_numeric, errors='coerce')
+
     # Convert wavelength column names to float and sort
     X.columns = X.columns.astype(float)
     X = X.sort_index(axis=1)  # Sort by wavelength
@@ -989,6 +1028,27 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
     # Extract target data
     y = df[y_col].copy()
     y.index = specimen_ids
+
+    # Convert target values to numeric
+    y = pd.to_numeric(y, errors='coerce')
+
+    # Check for missing values (NaN) and remove affected specimens
+    has_nan_X = X.isna().any(axis=1)
+    has_nan_y = y.isna()
+    has_nan = has_nan_X | has_nan_y
+
+    if has_nan.any():
+        n_missing = has_nan.sum()
+        missing_specimens = X.index[has_nan].tolist()
+
+        print(f"Warning: Found {n_missing} specimen(s) with missing values. Removing them.")
+        print(f"  Removed specimens: {missing_specimens[:10]}")  # Show first 10
+        if n_missing > 10:
+            print(f"  ... and {n_missing - 10} more")
+
+        # Remove rows with missing values
+        X = X[~has_nan]
+        y = y[~has_nan]
 
     # Step 7: Validation
     # Check for duplicate specimen IDs (only if not generated)
@@ -1009,7 +1069,13 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
               for i in range(len(wavelength_values)-1)):
         print("Warning: Wavelengths were not strictly increasing. Sorted automatically.")
 
-    # Step 8: Compile metadata
+    # Step 8: Detect data type (reflectance vs absorbance)
+    data_type, type_confidence, detection_method = detect_spectral_data_type(X)
+    print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
+    if type_confidence < 70:
+        print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+
+    # Step 9: Compile metadata
     metadata = {
         'specimen_id_col': specimen_id_col,
         'y_col': y_col,
@@ -1017,7 +1083,200 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         'n_spectra': len(X),
         'wavelength_range': (X.columns.min(), X.columns.max()),
         'file_format': 'combined',
-        'generated_ids': generated_ids
+        'generated_ids': generated_ids,
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method
     }
 
     return X, y, metadata
+
+
+def detect_spectral_data_type(X, metadata=None):
+    """
+    Intelligently detect whether spectral data is reflectance or absorbance.
+
+    Uses multiple criteria including value ranges, peak directions, and metadata
+    to determine the data type with a confidence score.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame or numpy.ndarray
+        Spectral data matrix (rows=specimens, columns=wavelengths)
+    metadata : dict, optional
+        Metadata dictionary that may contain column names or other hints
+
+    Returns
+    -------
+    tuple
+        (data_type, confidence, method) where:
+        - data_type: str, either "reflectance" or "absorbance"
+        - confidence: float, 0-100 confidence score
+        - method: str, detection method used
+    """
+    import numpy as np
+    import pandas as pd
+
+    # Convert to numpy if needed
+    if isinstance(X, pd.DataFrame):
+        data = X.values
+        col_names = [str(c).lower() for c in X.columns]
+    else:
+        data = np.array(X)
+        col_names = []
+
+    # Initialize confidence scores for each type
+    reflectance_score = 0
+    absorbance_score = 0
+    detection_methods = []
+
+    # Flatten data for statistics
+    flat_data = data.flatten()
+
+    # Ensure data is numeric (handle case where conversion hasn't happened yet)
+    try:
+        flat_data = flat_data.astype(float)
+    except (ValueError, TypeError):
+        # If conversion fails, return default with low confidence
+        return ("reflectance", 50.0, "non_numeric_data")
+
+    # Remove NaN values
+    flat_data = flat_data[~np.isnan(flat_data)]
+
+    if len(flat_data) == 0:
+        return ("reflectance", 50.0, "no_valid_data")
+
+    # Calculate statistics
+    min_val = np.min(flat_data)
+    max_val = np.max(flat_data)
+    mean_val = np.mean(flat_data)
+
+    # Criterion 1: Absolute bounds check (weight: 40%)
+    if max_val > 1.5:
+        # Definitely absorbance - reflectance can't exceed 1.0
+        absorbance_score += 40
+        detection_methods.append("bounds_check(max>1.5)")
+    elif max_val <= 1.0 and min_val >= 0.0:
+        # All values in [0, 1] - likely reflectance
+        if mean_val > 0.3:
+            # High mean in [0,1] range strongly suggests reflectance
+            reflectance_score += 40
+            detection_methods.append("bounds_check(0-1_range)")
+        else:
+            # Low mean could be dark sample reflectance or low absorbance
+            reflectance_score += 25
+            absorbance_score += 15
+            detection_methods.append("bounds_check(0-1_low_mean)")
+    elif max_val > 1.0 and max_val <= 1.5:
+        # Ambiguous range - could be reflectance with errors or low absorbance
+        absorbance_score += 20
+        reflectance_score += 15
+        detection_methods.append("bounds_check(ambiguous_1.0-1.5)")
+    else:
+        # Negative values or very low values
+        if min_val < -0.5:
+            # Significantly negative suggests absorbance (or errors)
+            absorbance_score += 35
+            detection_methods.append("bounds_check(negative_values)")
+        else:
+            absorbance_score += 10
+            detection_methods.append("bounds_check(near_zero)")
+
+    # Criterion 2: Mean value analysis (weight: 30%)
+    if 0.3 <= mean_val <= 0.9:
+        # Typical reflectance range
+        reflectance_score += 30
+        detection_methods.append("mean_check(reflectance_range)")
+    elif mean_val > 1.0:
+        # High mean suggests absorbance
+        absorbance_score += 30
+        detection_methods.append("mean_check(absorbance_range)")
+    elif mean_val < 0.3 and max_val <= 1.0:
+        # Low mean in bounded range - dark reflectance
+        reflectance_score += 20
+        detection_methods.append("mean_check(dark_reflectance)")
+    else:
+        # Ambiguous mean
+        detection_methods.append("mean_check(ambiguous)")
+
+    # Criterion 3: Peak direction analysis (weight: 30%)
+    # Analyze first spectrum for peak/valley characteristics
+    if len(data) > 0:
+        first_spectrum = data[0, :]
+        first_spectrum = first_spectrum[~np.isnan(first_spectrum)]
+
+        if len(first_spectrum) > 10:
+            # Find local maxima and minima
+            from scipy.signal import find_peaks
+
+            # Find peaks (high points)
+            peaks, _ = find_peaks(first_spectrum, prominence=0.01 * (max_val - min_val))
+            # Find valleys (low points) by inverting
+            valleys, _ = find_peaks(-first_spectrum, prominence=0.01 * (max_val - min_val))
+
+            # Calculate prominence of peaks vs valleys
+            if len(peaks) > 0:
+                peak_heights = first_spectrum[peaks]
+                peak_prominence = np.mean(peak_heights - mean_val)
+            else:
+                peak_prominence = 0
+
+            if len(valleys) > 0:
+                valley_depths = first_spectrum[valleys]
+                valley_prominence = np.mean(mean_val - valley_depths)
+            else:
+                valley_prominence = 0
+
+            # In reflectance spectra, absorption features appear as valleys
+            # In absorbance spectra, absorption features appear as peaks
+            if valley_prominence > peak_prominence * 1.2:
+                # Valleys more prominent - suggests reflectance
+                reflectance_score += 25
+                detection_methods.append("peak_analysis(valleys_prominent)")
+            elif peak_prominence > valley_prominence * 1.2:
+                # Peaks more prominent - suggests absorbance
+                absorbance_score += 25
+                detection_methods.append("peak_analysis(peaks_prominent)")
+            else:
+                # Ambiguous peak structure
+                detection_methods.append("peak_analysis(ambiguous)")
+
+    # Criterion 4: Column name analysis (bonus weight: +15%)
+    if metadata and 'column_names' in metadata:
+        col_names.extend([str(c).lower() for c in metadata['column_names']])
+
+    if col_names:
+        refl_keywords = ['refl', 'reflect', '%r', 'pct_r', 'r_']
+        abs_keywords = ['abs', 'absorb', 'absorbance', 'a_']
+
+        col_string = ' '.join(col_names)
+
+        if any(kw in col_string for kw in refl_keywords):
+            reflectance_score += 15
+            detection_methods.append("metadata(reflectance_keywords)")
+        elif any(kw in col_string for kw in abs_keywords):
+            absorbance_score += 15
+            detection_methods.append("metadata(absorbance_keywords)")
+
+    # Normalize scores to 0-100 range
+    total_score = reflectance_score + absorbance_score
+    if total_score > 0:
+        reflectance_confidence = (reflectance_score / total_score) * 100
+        absorbance_confidence = (absorbance_score / total_score) * 100
+    else:
+        # No evidence either way - default to reflectance (ASD files typically are)
+        reflectance_confidence = 60.0
+        absorbance_confidence = 40.0
+        detection_methods.append("default(no_evidence)")
+
+    # Determine final classification
+    if reflectance_confidence > absorbance_confidence:
+        data_type = "reflectance"
+        confidence = reflectance_confidence
+    else:
+        data_type = "absorbance"
+        confidence = absorbance_confidence
+
+    method_str = "; ".join(detection_methods)
+
+    return (data_type, confidence, method_str)

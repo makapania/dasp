@@ -41,7 +41,9 @@
       "Bash(/c/Python314/python.exe:*)",
       "Bash(git config:*)",
       "Bash(git pull:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(git stash:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []
