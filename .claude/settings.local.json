@@ -38,7 +38,10 @@
       "Bash(.venv/Scripts/python.exe:*)",
       "Bash(C:Python314python.exe -c \"import numpy; import pandas; import matplotlib; print(''Python + packages working!'')\")",
       "Bash(\"/c/Python314/python.exe\" -c \"import numpy; import pandas; import matplotlib; print(''Python + packages working!'')\")",
-      "Bash(/c/Python314/python.exe:*)"
+      "Bash(/c/Python314/python.exe:*)",
+      "Bash(git config:*)",
+      "Bash(git pull:*)",
+      "Bash(git branch:*)"
     ],
     "deny": [],
     "ask": []
