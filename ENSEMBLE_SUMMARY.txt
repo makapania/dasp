@@ -1,0 +1,239 @@
+ENSEMBLE METHODS TRAINING - EXECUTIVE SUMMARY
+
+========================================
+QUESTION 1: Are fitted models accessible?
+========================================
+
+NO - Fitted models are discarded immediately after evaluation.
+
+CV Fold Models:
+- Cloned for each fold in _run_single_fold()
+- Fitted on training fold
+- Predictions computed on test fold
+- Discarded after metrics extracted
+- Run in parallel (joblib.Parallel)
+- Clones never stored or returned
+
+Full-Data Models:
+- Refitted in _run_single_config() on full dataset
+- Used to compute feature importances
+- Fitted model extracted from pipeline
+- Discarded after importances computed
+- Function returns only result dict, not model
+
+Result: NO direct access to fitted models
+
+
+========================================
+QUESTION 2: Can we rebuild models?
+========================================
+
+YES - All information needed is available.
+
+Information Stored in Results:
+1. Model type (Model column)
+2. Hyperparameters (Params column - stringified dict)
+3. Preprocessing config (Preprocess, Deriv, Window, Poly)
+4. Feature subset info (SubsetTag, all_vars)
+5. Performance metrics (RMSE, R2, Accuracy, AUC)
+
+Reconstruction Process:
+1. Select top-N models: results_df.nsmallest(N, 'CompositeScore')
+2. For each model:
+   a. Parse model name and parameters
+   b. Create model instance with get_model()
+   c. Build preprocessing pipeline with build_preprocessing_pipeline()
+   d. Assemble full Pipeline with preprocessing + model
+   e. Handle feature subset using all_vars column
+   f. Fit pipeline on X_train, y_train
+3. Result: List of fitted sklearn.pipeline.Pipeline objects
+
+Reconstruction Code Length: ~150 lines
+Complexity: LOW (straightforward parameter parsing and model fitting)
+
+
+========================================
+QUESTION 3: What preprocessing info is available?
+========================================
+
+COMPLETE PREPROCESSING INFORMATION:
+
+Each result stores:
+- Preprocess: Type (raw, snv, deriv, snv_deriv, deriv_snv)
+- Deriv: Derivative order (1, 2, or None)
+- Window: Savitzky-Golay window (7, 11, 17, 19, or None)
+- Poly: Polynomial order (2, 3, or None)
+
+All preprocessing is DETERMINISTIC (no learned parameters):
+- SNV: Row normalization (X - mean) / std
+- Savgol: FIR filter with fixed window/order
+- Order: snv_deriv is different from deriv_snv, both preserved
+
+Reproducibility: 100% - Identical results every time
+Factory Function: build_preprocessing_pipeline(name, deriv, window, poly)
+
+
+========================================
+QUESTION 4: What data is needed for ensemble?
+========================================
+
+Required:
+- X_train: Training features (DataFrame, 1360 × 2151)
+- y_train: Training targets (Series, 1360)
+- results_df: Model results with reconstruction metadata
+
+Optional:
+- X_val, y_val: Validation set (for ensemble evaluation)
+- n_regions: Number of regions (default: 5)
+
+Availability:
+- X_filtered, y_filtered: Available in _run_analysis_thread() local scope
+- results_df: Stored as self.results_df after run_search()
+- Must use before function returns (line 3420)
+
+
+========================================
+QUESTION 5: Can we access fitted models during ensemble?
+========================================
+
+Directly: NO
+
+Via Reconstruction: YES
+- Parse results metadata
+- Rebuild models with exact same hyperparameters
+- Refit on training data
+- Use for ensemble training
+
+
+========================================
+KEY FINDINGS
+========================================
+
+Fitted Models Accessibility:
+- CV Models: LOST (cloned and discarded in parallel)
+- Full-Data Models: LOST (not returned from _run_single_config)
+- Result: NOT ACCESSIBLE
+
+Model Reconstruction:
+- Possible: YES
+- All needed metadata: AVAILABLE in results_df
+- Preprocessing: DETERMINISTIC and REPRODUCIBLE
+- Feature subsets: TRACEABLE via all_vars column
+
+Data Availability:
+- X_train, y_train: Available in local scope
+- results_df: Stored for later use
+- Scope: Limited to _run_analysis_thread() function
+
+Effort Required:
+- Code to write: ~200 lines
+  * Reconstruction function: ~150 lines
+  * Integration with ensemble: ~50 lines
+- Complexity: LOW
+- Risk: LOW (uses existing APIs, no architectural changes)
+- Performance: GOOD (refit faster than original CV)
+
+
+========================================
+IMPLEMENTATION APPROACH
+========================================
+
+Option A: REBUILD MODELS (RECOMMENDED)
+
+Advantages:
++ Simple, straightforward code
++ Fits on FULL training data (no CV leakage)
++ Uses exact same hyperparameters
++ No architectural changes needed
++ Clean separation of concerns
+
+Steps:
+1. Create reconstruct_and_fit_models() function
+2. Call it after top models selected
+3. Pass fitted models to create_ensemble()
+4. Evaluate ensemble and log results
+
+Effort: ~200 lines
+Risk: LOW
+Timeline: 1-2 hours
+
+
+Option B: STORE MODELS (ALTERNATIVE)
+
+Advantages:
++ No refitting needed
++ Could cache for later use
++ Potentially faster
+
+Disadvantages:
+- Requires architectural changes
+- Memory overhead (especially with many configs)
+- Complex to manage model lifecycle
+- Breaking changes to existing code
+
+Not recommended for this use case.
+
+
+========================================
+CURRENT STATE
+========================================
+
+Location: spectral_predict_gui_optimized.py, lines 3352-3394
+
+Current Code:
+  if self.enable_ensembles.get():
+      try:
+          top_models_df = results_df.nsmallest(5, 'CompositeScore')
+          self._log_progress("Using top 5 models for ensemble")
+          # ... just logs, no actual training
+          self._log_progress("Ensemble methods are ready!")
+      except Exception as e:
+          self._log_progress(f"Error: {e}")
+
+Status: INCOMPLETE
+- No model reconstruction
+- No ensemble training
+- Only UI messages
+
+
+========================================
+NEXT STEPS
+========================================
+
+1. Add reconstruct_and_fit_models() function to ensemble.py
+
+2. Modify _run_analysis_thread() ensemble section:
+   - Call reconstruction after top_models_df selected
+   - Train each enabled ensemble method
+   - Evaluate and log results
+
+3. Test with different model types:
+   - PLS, Ridge, Lasso, RandomForest, MLP, NeuralBoosted
+
+4. Test with different preprocessing:
+   - Raw, SNV, Derivatives, Combinations
+
+5. Test with feature subsets:
+   - Full models
+   - Top-N variables
+   - Region subsets
+
+6. Evaluate ensemble performance:
+   - Compare to best individual model
+   - Compare different ensemble methods
+   - Analyze regional specialization
+
+
+========================================
+CONCLUSION
+========================================
+
+Fitted models are NOT accessible but CAN BE REBUILT using metadata.
+
+Reconstruction is straightforward with existing APIs.
+
+Recommended: Implement model reconstruction and ensemble training
+  - ~200 lines of code
+  - LOW complexity and risk
+  - HIGH probability of success
+  - Direct path to functional ensemble training
