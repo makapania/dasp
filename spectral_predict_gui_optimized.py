@@ -45,10 +45,13 @@ sys.path.insert(0, str(src_path))
 # Import spectral_predict modules
 try:
     from spectral_predict.preprocess import SavgolDerivative
+    from spectral_predict.model_registry import get_supported_models, is_valid_model
     HAS_DERIVATIVES = True
 except ImportError:
     HAS_DERIVATIVES = False
     SavgolDerivative = None
+    get_supported_models = None
+    is_valid_model = None
 
 try:
     from spectral_predict.outlier_detection import generate_outlier_report
@@ -1435,7 +1438,12 @@ class SpectralPredictApp:
         ttk.Label(params_frame, text="Model Type:", style='Subheading.TLabel').grid(row=7, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_model_type = tk.StringVar(value='PLS')
         model_combo = ttk.Combobox(params_frame, textvariable=self.refine_model_type, width=20, state='readonly')
-        model_combo['values'] = ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']
+        # Use central model registry for consistency
+        if get_supported_models is not None:
+            model_combo['values'] = get_supported_models('regression')
+        else:
+            # Fallback if registry import failed
+            model_combo['values'] = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
         model_combo.grid(row=8, column=0, sticky=tk.W, pady=5)
 
         # Task Type
@@ -3899,13 +3907,20 @@ Performance (Classification):
 
                 # Fallback to top_vars for backward compatibility with old results
                 if model_wavelengths is None and 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
-                    print(f"DEBUG: Falling back to top_vars (may be incomplete for large subsets)")
+                    model_name = config.get('Model', 'Unknown')
+                    print(f"⚠️  CRITICAL WARNING: Model '{model_name}' missing complete wavelength list ('all_vars')")
+                    print(f"⚠️  Falling back to 'top_vars' - this may cause R² mismatch if model used >30 wavelengths!")
+                    print(f"⚠️  Expected n_vars: {config.get('n_vars', 'unknown')}")
                     try:
                         # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
                         top_vars_str = str(config['top_vars']).strip()
                         wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
                         model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
+                        expected_n_vars = config.get('n_vars', len(model_wavelengths))
+                        if len(model_wavelengths) < expected_n_vars:
+                            print(f"⚠️  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
+                            print(f"⚠️  This WILL cause different R² when running refined model!")
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
                     except Exception as e:
                         print(f"WARNING: Could not parse top_vars: {e}")
@@ -3966,10 +3981,28 @@ Performance (Classification):
         if not pd.isna(window) and window in [7, 11, 17, 19]:
             self.refine_window.set(int(window))
 
-        # Set model type
+        # Set model type with validation
         model_name = config.get('Model', 'PLS')
-        if model_name in ['PLS', 'Ridge', 'Lasso', 'RandomForest', 'MLP', 'NeuralBoosted']:
-            self.refine_model_type.set(model_name)
+        # Use central model registry for validation
+        if is_valid_model is not None:
+            if is_valid_model(model_name, 'regression'):
+                self.refine_model_type.set(model_name)
+                print(f"✓ Model type '{model_name}' validated and loaded")
+            else:
+                valid_models = get_supported_models('regression') if get_supported_models is not None else []
+                print(f"⚠️  WARNING: Unknown model type '{model_name}' - defaulting to PLS")
+                print(f"⚠️  Valid models: {', '.join(valid_models)}")
+                self.refine_model_type.set('PLS')
+        else:
+            # Fallback if registry import failed
+            valid_models = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
+            if model_name in valid_models:
+                self.refine_model_type.set(model_name)
+                print(f"✓ Model type '{model_name}' validated and loaded")
+            else:
+                print(f"⚠️  WARNING: Unknown model type '{model_name}' - defaulting to PLS")
+                print(f"⚠️  Valid models: {', '.join(valid_models)}")
+                self.refine_model_type.set('PLS')
 
         # Set task type (auto-detect from data)
         if self.y is not None:
