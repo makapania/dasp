@@ -635,3 +635,389 @@ def read_spc_dir(spc_dir):
 
     except Exception as e:
         raise ValueError(f"Failed to read SPC files: {e}")
+
+
+def detect_combined_format(directory_path):
+    """
+    Detect if directory contains a single combined CSV/TXT file.
+
+    A combined file contains all spectra in one table with:
+    - Specimen ID column (optional)
+    - Wavelength columns (numeric headers)
+    - Target y column
+
+    Parameters
+    ----------
+    directory_path : str or Path
+        Path to directory
+
+    Returns
+    -------
+    tuple : (bool, str or None)
+        (is_combined, filepath) or (False, None)
+    """
+    from glob import glob
+    import os
+
+    directory_path = Path(directory_path)
+
+    if not directory_path.exists() or not directory_path.is_dir():
+        return False, None
+
+    # Get all CSV and TXT files
+    csv_files = list(directory_path.glob("*.csv"))
+    txt_files = list(directory_path.glob("*.txt"))
+
+    all_files = csv_files + txt_files
+
+    # If exactly ONE file, treat as combined format
+    if len(all_files) == 1:
+        return True, str(all_files[0])
+
+    return False, None
+
+
+def identify_wavelength_columns(df):
+    """
+    Identify columns that represent wavelengths.
+    Can appear anywhere in the column list.
+
+    Criteria:
+    - Column name is numeric (or can be converted to float)
+    - Value is in reasonable wavelength range (100-10000 nm)
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to analyze
+
+    Returns
+    -------
+    list
+        List of column names that appear to be wavelengths
+    """
+    wavelength_cols = []
+
+    for col in df.columns:
+        # Try to convert column name to float
+        try:
+            wavelength = float(str(col).strip().strip('"').strip("'"))
+
+            # Check if in reasonable range for spectroscopy
+            if 100 <= wavelength <= 10000:
+                wavelength_cols.append(col)
+        except (ValueError, TypeError):
+            continue
+
+    return wavelength_cols
+
+
+def auto_detect_specimen_id_column(df, exclude_wavelength_cols):
+    """
+    Detect specimen ID column with flexible positioning.
+
+    The specimen ID could be:
+    - First, last, or middle column
+    - String, numeric, or mixed type
+    - Named with various conventions
+    - **ABSENT** - in which case we return None and generate synthetic IDs
+
+    Detection Priority:
+    1. Column named 'specimen_id', 'sample_id', 'id', 'sample', 'specimen', etc.
+    2. Column with all/mostly unique values (>80% unique)
+    3. First non-wavelength column with object/string dtype
+    4. Check if all remaining columns are numeric/y-like → No ID column, return None
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to analyze
+    exclude_wavelength_cols : list
+        Wavelength columns to exclude from consideration
+
+    Returns
+    -------
+    str or None
+        Column name of detected specimen ID column, or None if absent
+    """
+    # Get candidate columns (exclude wavelengths)
+    candidate_cols = [col for col in df.columns
+                     if col not in exclude_wavelength_cols]
+
+    if not candidate_cols:
+        # No non-wavelength columns at all → no ID, no y → error
+        raise ValueError("No non-wavelength columns found")
+
+    # If only one candidate column, check if it looks like y data
+    if len(candidate_cols) == 1:
+        col = candidate_cols[0]
+        # If it looks like a target variable (numeric, not unique), assume no ID column
+        if pd.api.types.is_numeric_dtype(df[col]):
+            n_unique = df[col].nunique()
+            n_total = len(df[col].dropna())
+            if n_total > 0 and n_unique / n_total < 0.8:  # Not very unique → probably y, not ID
+                return None
+
+    # Priority 1: Check for common ID names (case-insensitive)
+    common_names = [
+        'specimen_id', 'sample_id', 'specimen', 'sample', 'id',
+        'file_number', 'file_name', 'filename', 'name',
+        'sample_name', 'specimen_name', 'sampleid', 'specimenid'
+    ]
+
+    for name in common_names:
+        matches = [col for col in candidate_cols
+                  if col.lower() == name.lower() or
+                     col.lower().replace('_', '') == name.lower().replace('_', '')]
+        if matches:
+            return matches[0]
+
+    # Priority 2: Find column with unique/mostly unique values
+    # Specimen IDs should be unique identifiers
+    for col in candidate_cols:
+        n_unique = df[col].nunique()
+        n_total = len(df[col].dropna())
+
+        if n_total > 0:
+            uniqueness_ratio = n_unique / n_total
+
+            # If >80% unique, likely an ID column
+            if uniqueness_ratio > 0.8:
+                return col
+
+    # Priority 3: Find non-numeric dtype column
+    # IDs often contain letters/special characters
+    for col in candidate_cols:
+        if df[col].dtype == 'object' or df[col].dtype.name == 'string':
+            return col
+
+    # Priority 4: Check if all remaining columns are numeric (likely all y-like)
+    # If so, assume no ID column present
+    all_numeric = all(pd.api.types.is_numeric_dtype(df[col])
+                     for col in candidate_cols)
+
+    if all_numeric and len(candidate_cols) <= 3:
+        # Likely format: wavelengths + 1-3 y columns, no ID
+        return None
+
+    # Priority 5: Fallback to first candidate column
+    return candidate_cols[0]
+
+
+def auto_detect_y_column(df, exclude_cols):
+    """
+    Detect target y column from remaining columns.
+    Could be before or after wavelengths.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame to analyze
+    exclude_cols : list
+        Columns to exclude (wavelengths + specimen ID)
+
+    Detection Priority:
+    1. Columns with target-related names (collagen, nitrogen, target, y, class, etc.)
+    2. Column with numeric or categorical values
+    3. If multiple remaining columns, pick the most "target-like" one
+
+    Returns
+    -------
+    str
+        Column name of detected y column
+    """
+    # Get candidate columns
+    candidate_cols = [col for col in df.columns if col not in exclude_cols]
+
+    if not candidate_cols:
+        raise ValueError("No remaining columns found for target y variable")
+
+    # If only one candidate, use it
+    if len(candidate_cols) == 1:
+        return candidate_cols[0]
+
+    # Priority 1: Check for target-related keywords
+    priority_keywords = [
+        'collagen', 'nitrogen', 'protein', 'target', 'y', 'value',
+        'class', 'label', 'category', 'group', 'type',
+        '%', 'percent', 'concentration', 'content', 'amount'
+    ]
+
+    for keyword in priority_keywords:
+        matches = [col for col in candidate_cols
+                  if keyword.lower() in str(col).lower()]
+        if matches:
+            return matches[0]
+
+    # Priority 2: Prefer numeric columns for regression tasks
+    numeric_cols = [col for col in candidate_cols
+                   if pd.api.types.is_numeric_dtype(df[col])]
+    if numeric_cols:
+        return numeric_cols[0]
+
+    # Priority 3: Fall back to first candidate
+    return candidate_cols[0]
+
+
+def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
+    """
+    Read a combined CSV/TXT file containing spectra + targets in one table.
+
+    Expected format:
+    - One row per specimen
+    - Specimen ID column (OPTIONAL - will generate if absent)
+    - Wavelength columns (numeric headers, possibly quoted, FLEXIBLE POSITION)
+    - Target y column (FLEXIBLE POSITION - before or after wavelengths)
+
+    Example formats supported:
+
+    Format A: With ID column
+    specimen_id, "400", "401", ..., "2400", collagen
+    A-53, 0.245, 0.248, ..., 0.156, 6.4
+
+    Format B: Without ID column (will generate Sample_1, Sample_2, ...)
+    "400", "401", ..., "2400", collagen
+    0.245, 0.248, ..., 0.156, 6.4
+    0.312, 0.315, ..., 0.201, 7.9
+
+    Format C: ID anywhere
+    collagen, specimen_id, "400", "401", ..., "2400"
+    6.4, A-53, 0.245, 0.248, ..., 0.156
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Path to combined CSV/TXT file
+    specimen_id_col : str, optional
+        Name of specimen ID column. If None, auto-detect. If "__GENERATE__", force generation.
+    y_col : str, optional
+        Name of target variable column. If None, auto-detect.
+
+    Returns
+    -------
+    X : pd.DataFrame
+        Spectral data (rows=specimens, cols=wavelengths)
+    y : pd.Series
+        Target values
+    metadata : dict
+        {
+            'specimen_id_col': detected column name or "__GENERATED__",
+            'y_col': detected column name,
+            'wavelength_cols': list of wavelength column names,
+            'n_spectra': number of spectra loaded,
+            'wavelength_range': (min, max),
+            'generated_ids': True if IDs were auto-generated
+        }
+    """
+    filepath = Path(filepath)
+
+    # Step 1: Read file with flexible delimiter
+    df = None
+    for sep in [',', '\t', ';', r'\s+']:
+        try:
+            df = pd.read_csv(filepath, sep=sep, engine='python' if sep == r'\s+' else 'c')
+            # Check if we got multiple columns (not all in one column)
+            if len(df.columns) > 10:  # Reasonable threshold
+                break
+        except Exception as e:
+            continue
+
+    if df is None or len(df.columns) <= 10:
+        raise ValueError(f"Could not parse file {filepath} with standard delimiters")
+
+    # Step 2: Clean column names (strip quotes, whitespace)
+    df.columns = df.columns.astype(str).str.strip().str.strip('"').str.strip("'")
+
+    # Step 3: Identify wavelength columns FIRST (position-independent)
+    wavelength_cols = identify_wavelength_columns(df)
+
+    if len(wavelength_cols) < 100:
+        raise ValueError(
+            f"Too few wavelength columns detected ({len(wavelength_cols)}). "
+            f"Expected at least 100. Detected columns: {wavelength_cols[:10] if wavelength_cols else 'none'}..."
+        )
+
+    # Step 4: Identify specimen ID column (from non-wavelength columns)
+    # Could be None if no ID column present
+    generated_ids = False
+
+    if specimen_id_col is None:
+        detected_specimen_id_col = auto_detect_specimen_id_column(df, wavelength_cols)
+
+        if detected_specimen_id_col is None:
+            # No ID column detected → generate synthetic IDs
+            specimen_ids = pd.Series([f"Sample_{i+1}" for i in range(len(df))],
+                                    name="specimen_id")
+            generated_ids = True
+            specimen_id_col = "__GENERATED__"
+        else:
+            specimen_id_col = detected_specimen_id_col
+            specimen_ids = df[specimen_id_col].astype(str)
+
+    elif specimen_id_col == "__GENERATE__":
+        # User explicitly requested generated IDs
+        specimen_ids = pd.Series([f"Sample_{i+1}" for i in range(len(df))],
+                                name="specimen_id")
+        generated_ids = True
+
+    else:
+        # User provided specific column name
+        if specimen_id_col not in df.columns:
+            raise ValueError(f"Specimen ID column '{specimen_id_col}' not found in file")
+        specimen_ids = df[specimen_id_col].astype(str)
+
+    # Step 5: Identify y column (from remaining non-wavelength, non-ID columns)
+    if y_col is None:
+        exclude_cols = wavelength_cols.copy()
+        if not generated_ids and specimen_id_col != "__GENERATED__":
+            exclude_cols.append(specimen_id_col)
+
+        y_col = auto_detect_y_column(df, exclude_cols)
+
+    if y_col not in df.columns:
+        raise ValueError(f"Target y column '{y_col}' not found in file")
+
+    # Step 6: Extract data
+    # Extract spectral data
+    X = df[wavelength_cols].copy()
+    X.index = specimen_ids
+
+    # Convert wavelength column names to float and sort
+    X.columns = X.columns.astype(float)
+    X = X.sort_index(axis=1)  # Sort by wavelength
+
+    # Extract target data
+    y = df[y_col].copy()
+    y.index = specimen_ids
+
+    # Step 7: Validation
+    # Check for duplicate specimen IDs (only if not generated)
+    if not generated_ids and specimen_ids.duplicated().any():
+        n_duplicates = specimen_ids.duplicated().sum()
+        duplicates = specimen_ids[specimen_ids.duplicated()].unique()[:5]
+        print(f"Warning: Found {n_duplicates} duplicate specimen IDs. "
+              f"Keeping first occurrence. Examples: {list(duplicates)}")
+
+        # Keep first occurrence of each duplicate
+        keep_mask = ~specimen_ids.duplicated(keep='first')
+        X = X[keep_mask]
+        y = y[keep_mask]
+
+    # Check wavelength ordering
+    wavelength_values = X.columns.values
+    if not all(wavelength_values[i] < wavelength_values[i+1]
+              for i in range(len(wavelength_values)-1)):
+        print("Warning: Wavelengths were not strictly increasing. Sorted automatically.")
+
+    # Step 8: Compile metadata
+    metadata = {
+        'specimen_id_col': specimen_id_col,
+        'y_col': y_col,
+        'wavelength_cols': wavelength_cols,
+        'n_spectra': len(X),
+        'wavelength_range': (X.columns.min(), X.columns.max()),
+        'file_format': 'combined',
+        'generated_ids': generated_ids
+    }
+
+    return X, y, metadata

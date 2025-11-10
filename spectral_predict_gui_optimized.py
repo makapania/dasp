@@ -156,7 +156,9 @@ class SpectralPredictApp:
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
-        self.detected_type = None  # Auto-detected type: "asd", "csv", or "spc"
+        self.detected_type = None  # Auto-detected type: "asd", "csv", "spc", or "combined"
+        self.combined_file_path = None  # Path to combined CSV/TXT file (if detected_type == "combined")
+        self.combined_metadata = None  # Metadata from combined file parsing
         self.reference_file = tk.StringVar()
         self.spectral_file_column = tk.StringVar()
         self.id_column = tk.StringVar()
@@ -1653,6 +1655,55 @@ class SpectralPredictApp:
                 )
             return
 
+        # Check for combined format (single CSV/TXT with all data)
+        from src.spectral_predict.io import detect_combined_format, read_combined_csv
+
+        is_combined, combined_file = detect_combined_format(directory)
+        if is_combined:
+            self.detected_type = 'combined'
+            self.combined_file_path = combined_file
+
+            # Try to read and detect columns
+            try:
+                X, y, metadata = read_combined_csv(combined_file)
+
+                # Store metadata for later use
+                self.combined_metadata = metadata
+
+                # Update status with detailed info
+                if metadata['generated_ids']:
+                    id_info = "Generated IDs (Sample_1, Sample_2, ...)"
+                else:
+                    id_info = f"Specimen ID: {metadata['specimen_id_col']}"
+
+                self.detection_status.config(
+                    text=f"✓ Combined format: {metadata['n_spectra']} spectra, "
+                         f"{len(metadata['wavelength_cols'])} wavelengths ({metadata['wavelength_range'][0]:.0f}-{metadata['wavelength_range'][1]:.0f} nm)",
+                    foreground=self.colors['success']
+                )
+
+                # Show info message with detected columns
+                info_msg = (
+                    f"Detected combined data format!\n\n"
+                    f"Auto-detected:\n"
+                    f"  • {id_info}\n"
+                    f"  • Target: {metadata['y_col']}\n"
+                    f"  • Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm\n"
+                    f"  • Spectra: {metadata['n_spectra']}\n\n"
+                    f"No reference CSV needed - all data is in one file.\n"
+                    f"Click 'Load Data' to proceed."
+                )
+                messagebox.showinfo("Combined Format Detected", info_msg)
+
+            except Exception as e:
+                self.detection_status.config(
+                    text=f"⚠ Error reading combined file: {str(e)}",
+                    foreground=self.colors['accent']
+                )
+                messagebox.showerror("Error", f"Could not parse combined file:\n{str(e)}")
+
+            return
+
         # No supported files found
         self.detected_type = None
         self.detection_status.config(
@@ -1660,7 +1711,7 @@ class SpectralPredictApp:
             foreground='red'
         )
         messagebox.showwarning("No Spectral Data",
-            "No supported spectral files found in this directory.\n\nSupported formats:\n• .asd (ASD files)\n• .csv (CSV spectral data)\n• .spc (GRAMS/Thermo Galactic)")
+            "No supported spectral files found in this directory.\n\nSupported formats:\n• .asd (ASD files)\n• .csv (CSV spectral data)\n• .spc (GRAMS/Thermo Galactic)\n• Combined CSV/TXT (single file with all spectra + targets)")
 
     def _browse_reference_file(self):
         """Browse for reference CSV file."""
@@ -1792,38 +1843,105 @@ class SpectralPredictApp:
                 return
 
             # Load spectral data based on detected type
-            if self.detected_type == "asd":
+            if self.detected_type == "combined":
+                # Combined format - all data in one file
+                from spectral_predict.io import read_combined_csv
+
+                X_aligned, y_aligned, metadata = read_combined_csv(self.combined_file_path)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = None  # No separate reference file for combined format
+
+                # Show success message
+                print(f"\n✓ Loaded combined format:")
+                print(f"  • Spectra: {metadata['n_spectra']}")
+                print(f"  • Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm")
+                print(f"  • Specimen ID: {metadata['specimen_id_col']}")
+                print(f"  • Target: {metadata['y_col']}")
+
+            elif self.detected_type == "asd":
                 X = read_asd_dir(self.spectral_data_path.get())
+
+                # Load reference data
+                if not self.reference_file.get():
+                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    return
+
+                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                # Align data and get alignment info
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref,
+                    self.spectral_file_column.get(),
+                    self.target_column.get(),
+                    return_alignment_info=True
+                )
+
+                # Show alignment report to user
+                self._show_alignment_report(alignment_info)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = ref
+
             elif self.detected_type == "csv":
                 X = read_csv_spectra(self.spectral_data_path.get())
+
+                # Load reference data
+                if not self.reference_file.get():
+                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    return
+
+                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                # Align data and get alignment info
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref,
+                    self.spectral_file_column.get(),
+                    self.target_column.get(),
+                    return_alignment_info=True
+                )
+
+                # Show alignment report to user
+                self._show_alignment_report(alignment_info)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = ref
+
             elif self.detected_type == "spc":
                 X = read_spc_dir(self.spectral_data_path.get())
+
+                # Load reference data
+                if not self.reference_file.get():
+                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    return
+
+                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                # Align data and get alignment info
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref,
+                    self.spectral_file_column.get(),
+                    self.target_column.get(),
+                    return_alignment_info=True
+                )
+
+                # Show alignment report to user
+                self._show_alignment_report(alignment_info)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = ref
+
             else:
                 messagebox.showerror("Error", f"Unknown data type: {self.detected_type}")
                 return
-
-            # Load reference data
-            if not self.reference_file.get():
-                messagebox.showwarning("Missing Input", "Please select reference CSV file")
-                return
-
-            ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
-
-            # Align data and get alignment info
-            X_aligned, y_aligned, alignment_info = align_xy(
-                X, ref,
-                self.spectral_file_column.get(),
-                self.target_column.get(),
-                return_alignment_info=True
-            )
-
-            # Show alignment report to user
-            self._show_alignment_report(alignment_info)
-
-            # Store original unfiltered data
-            self.X_original = X_aligned
-            self.y = y_aligned
-            self.ref = ref
 
             # Auto-populate wavelength range ONLY if empty
             if not self.wavelength_min.get().strip() and not self.wavelength_max.get().strip():
