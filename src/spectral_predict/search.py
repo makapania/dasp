@@ -26,7 +26,8 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                enable_region_subsets=True, n_top_regions=5, progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
-               spa_n_random_starts=10, ipls_n_intervals=20):
+               spa_n_random_starts=10, ipls_n_intervals=20,
+               tier='standard', enabled_models=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -80,6 +81,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
         Placeholder for SPA random restarts.
     ipls_n_intervals : int, default=20
         Placeholder for interval count in iPLS selection.
+    tier : str, default='standard'
+        Model tier: 'quick', 'standard', 'comprehensive', or 'experimental'
+        This sets optimized defaults for all hyperparameters
+    enabled_models : list of str, optional
+        List of specific models to include. If None, uses all models in tier.
+        Takes precedence over tier if both are specified.
 
     Returns
     -------
@@ -139,11 +146,13 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
 
     # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
     # rf_n_trees_list and rf_max_depth_list for RandomForest,
-    # ridge_alphas_list and lasso_alphas_list for Ridge and Lasso)
+    # ridge_alphas_list and lasso_alphas_list for Ridge and Lasso,
+    # tier for tiered defaults, and enabled_models for custom model selection)
     model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
                                    n_estimators_list=n_estimators_list, learning_rates=learning_rates,
                                    rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list,
-                                   ridge_alphas_list=ridge_alphas_list, lasso_alphas_list=lasso_alphas_list)
+                                   ridge_alphas_list=ridge_alphas_list, lasso_alphas_list=lasso_alphas_list,
+                                   tier=tier, enabled_models=enabled_models)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:

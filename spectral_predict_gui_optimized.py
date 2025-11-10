@@ -188,13 +188,23 @@ class SpectralPredictApp:
         self.validation_X = None  # Stored validation spectral data
         self.validation_y = None  # Stored validation target data
 
-        # Model selection
+        # Tier selection
+        self.model_tier = tk.StringVar(value="standard")  # quick, standard, comprehensive, experimental
+
+        # Model selection (original models)
         self.use_pls = tk.BooleanVar(value=True)
         self.use_ridge = tk.BooleanVar(value=True)
         self.use_lasso = tk.BooleanVar(value=True)
         self.use_randomforest = tk.BooleanVar(value=True)
         self.use_mlp = tk.BooleanVar(value=False)
         self.use_neuralboosted = tk.BooleanVar(value=False)
+
+        # New models (added in Phase 1-3)
+        self.use_elasticnet = tk.BooleanVar(value=False)
+        self.use_svr = tk.BooleanVar(value=False)
+        self.use_xgboost = tk.BooleanVar(value=False)
+        self.use_lightgbm = tk.BooleanVar(value=False)
+        self.use_catboost = tk.BooleanVar(value=False)
 
         # Preprocessing method selection
         self.use_raw = tk.BooleanVar(value=False)
@@ -856,27 +866,72 @@ class SpectralPredictApp:
         ttk.Label(content_frame, text="Models to Test", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
         row += 1
 
-        models_frame = ttk.LabelFrame(content_frame, text="Select Models", padding="20")
+        # Tier Selection
+        tier_frame = ttk.LabelFrame(content_frame, text="Model Tier (Quick Presets) 🆕", padding="20")
+        tier_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        ttk.Label(tier_frame, text="Select a preset tier for optimized defaults:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
+
+        tier_options_frame = ttk.Frame(tier_frame)
+        tier_options_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Radiobutton(tier_options_frame, text="⚡ Quick (3-5 min)", variable=self.model_tier, value="quick").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="⭐ Standard (10-15 min) [DEFAULT]", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="🔬 Comprehensive (20-30 min)", variable=self.model_tier, value="comprehensive").grid(row=0, column=2, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="🧪 Experimental (45-90 min)", variable=self.model_tier, value="experimental").grid(row=0, column=3, sticky=tk.W, padx=5)
+
+        ttk.Label(tier_frame, text="💡 Tiers automatically select models and hyperparameters. You can still customize individual models below.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        models_frame = ttk.LabelFrame(content_frame, text="Select Models (Override Tier Defaults)", padding="20")
         models_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)", variable=self.use_pls).grid(row=0, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Linear, fast, interpretable", style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
+        # Core Models (Column 1)
+        ttk.Label(models_frame, text="Core Models", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
 
-        ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge).grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="L2 regularized linear, fast baseline", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)", variable=self.use_pls).grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Linear, fast, interpretable", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso).grid(row=2, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="L1 regularized linear, sparse solutions", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge).grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L2 regularized linear", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest).grid(row=3, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso).grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L1 regularized, sparse", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp).grid(row=4, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ ElasticNet 🆕", variable=self.use_elasticnet).grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L1+L2 combined regularization", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=5, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Gradient boosting with NNs", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest).grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+
+        # Advanced Models (Column 2)
+        ttk.Label(models_frame, text="Advanced Models", style='Subheading.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5), padx=(40, 0))
+
+        ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp).grid(row=1, column=2, sticky=tk.W, pady=5, padx=(40, 0))
+        ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=1, column=3, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=2, column=2, sticky=tk.W, pady=5, padx=(40, 0))
+        ttk.Label(models_frame, text="Gradient boosting with NNs", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ SVR 🆕", variable=self.use_svr).grid(row=3, column=2, sticky=tk.W, pady=5, padx=(40, 0))
+        ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=3, column=3, sticky=tk.W, padx=15)
+
+        # Gradient Boosting Models (Column 3, spanning bottom)
+        ttk.Label(models_frame, text="Modern Gradient Boosting 🆕 (Best Performance)", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+
+        ttk.Checkbutton(models_frame, text="✓ XGBoost", variable=self.use_xgboost).grid(row=7, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Industry-leading gradient boosting", style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ LightGBM", variable=self.use_lightgbm).grid(row=8, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Microsoft's fast gradient boosting", style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ CatBoost", variable=self.use_catboost).grid(row=9, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
+
+        ttk.Label(models_frame, text="💡 Gradient boosting models (XGBoost, LightGBM, CatBoost) often outperform traditional methods. NO OTHER SPECTROSCOPY SOFTWARE HAS THESE!",
+                 style='Caption.TLabel', foreground=self.colors['success']).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Advanced Model Options ===
         ttk.Label(content_frame, text="Advanced Model Options", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -2720,13 +2775,28 @@ class SpectralPredictApp:
             selected_models.append("Ridge")
         if self.use_lasso.get():
             selected_models.append("Lasso")
+        if self.use_elasticnet.get():
+            selected_models.append("ElasticNet")
         if self.use_randomforest.get():
             selected_models.append("RandomForest")
         if self.use_mlp.get():
             selected_models.append("MLP")
         if self.use_neuralboosted.get():
             selected_models.append("NeuralBoosted")
+        if self.use_svr.get():
+            selected_models.append("SVR")
+        if self.use_xgboost.get():
+            selected_models.append("XGBoost")
+        if self.use_lightgbm.get():
+            selected_models.append("LightGBM")
+        if self.use_catboost.get():
+            selected_models.append("CatBoost")
 
+        # Get tier selection
+        tier = self.model_tier.get()
+
+        # If specific models are selected, pass them as enabled_models (overrides tier)
+        # If no models are selected, show warning
         if not selected_models:
             messagebox.showwarning("No Models", "Please select at least one model to test")
             return
@@ -2989,6 +3059,7 @@ class SpectralPredictApp:
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
             self._log_progress(f"Task type: {task_type}")
+            self._log_progress(f"Tier: {tier.upper()}")
             self._log_progress(f"Models: {', '.join(selected_models)}")
             self._log_progress(f"Preprocessing: {', '.join([k for k, v in preprocessing_methods.items() if v])}")
             self._log_progress(f"Window sizes: {window_sizes}")
@@ -3131,7 +3202,10 @@ class SpectralPredictApp:
                 uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
                 uve_n_components=uve_n_comp,
                 spa_n_random_starts=self.spa_n_random_starts.get(),
-                ipls_n_intervals=self.ipls_n_intervals.get()
+                ipls_n_intervals=self.ipls_n_intervals.get(),
+                # Tier system (NEW - Phase 3 implementation)
+                tier=tier,
+                enabled_models=selected_models  # User's manual selection overrides tier defaults
             )
 
             # Save results
