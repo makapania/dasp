@@ -17,11 +17,11 @@
 ### Current XGBoost Grid Search Configuration
 
 **Parameters Being Tested (3):**
-- `n_estimators`: [50, 100, 150] - Number of trees
-- `learning_rate`: [0.01, 0.1] - How fast the model learns
+- `n_estimators`: [100, 200] - Number of trees
+- `learning_rate`: [0.05, 0.1] - How fast the model learns
 - `max_depth`: [3, 6] - How deep each tree grows
 
-**Grid size:** 3 × 2 × 2 = **12 configurations**
+**Grid size:** 2 × 2 × 2 = **8 configurations**
 
 **Parameters Stuck at Defaults (3):**
 - `subsample`: **1.0** (uses 100% of data for each tree)
@@ -32,18 +32,18 @@
 
 ```python
 # Combination 1:
-XGBRegressor(n_estimators=50, learning_rate=0.01, max_depth=3,
+XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=3,
              subsample=1.0,           # ← Stuck at default
              colsample_bytree=1.0,    # ← Stuck at default
              reg_alpha=0)             # ← Stuck at default
 
 # Combination 2:
-XGBRegressor(n_estimators=50, learning_rate=0.01, max_depth=6,
+XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=6,
              subsample=1.0,           # ← Still stuck at default
              colsample_bytree=1.0,    # ← Still stuck at default
              reg_alpha=0)             # ← Still stuck at default
 
-# ... 12 combinations total, all with same defaults for the 3 missing params
+# ... 8 combinations total, all with same defaults for the 3 missing params
 ```
 
 ### Why This Causes R² Drop
@@ -79,31 +79,31 @@ XGBRegressor(n_estimators=50, learning_rate=0.01, max_depth=6,
 ### Proposed Grid Search Configuration
 
 **Parameters to Test (6):**
-- `n_estimators`: [50, 100, 150] - 3 values
-- `learning_rate`: [0.01, 0.1] - 2 values
+- `n_estimators`: [100, 200] - 2 values
+- `learning_rate`: [0.05, 0.1] - 2 values
 - `max_depth`: [3, 6] - 2 values
 - `subsample`: [0.8, 1.0] - 2 values ← **NEW**
 - `colsample_bytree`: [0.8, 1.0] - 2 values ← **NEW**
 - `reg_alpha`: [0, 0.1] - 2 values ← **NEW**
 
-**New grid size:** 3 × 2 × 2 × 2 × 2 × 2 = **96 configurations**
+**New grid size:** 2 × 2 × 2 × 2 × 2 × 2 = **64 configurations**
 
 ### Example of Fixed Grid Search
 
 ```python
 # Combination 1:
-XGBRegressor(n_estimators=50, learning_rate=0.01, max_depth=3,
+XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=3,
              subsample=0.8,           # ← Now being tested!
              colsample_bytree=0.8,    # ← Now being tested!
              reg_alpha=0.1)           # ← Now being tested!
 
 # Combination 2:
-XGBRegressor(n_estimators=50, learning_rate=0.01, max_depth=3,
+XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=3,
              subsample=0.8,           # ← Different combination
              colsample_bytree=1.0,    # ← Different combination
              reg_alpha=0)             # ← Different combination
 
-# ... 96 combinations total, testing ALL possible values
+# ... 64 combinations total, testing ALL possible values
 ```
 
 ---
@@ -112,7 +112,7 @@ XGBRegressor(n_estimators=50, learning_rate=0.01, max_depth=3,
 
 ### Before Fix:
 ```
-Grid search tests: 12 combinations with suboptimal defaults
+Grid search tests: 8 combinations with suboptimal defaults
 Best R² found: 0.95 (but using defaults for 3 params)
 Loaded in Dev Tab: 0.91-0.94 (same defaults, but still suboptimal)
 Drop: 0.01-0.04
@@ -120,7 +120,7 @@ Drop: 0.01-0.04
 
 ### After Fix:
 ```
-Grid search tests: 96 combinations with ALL parameters
+Grid search tests: 64 combinations with ALL parameters
 Best R² found: 0.96 (optimal values for ALL 6 params)
 Loaded in Dev Tab: 0.955-0.96 (same optimal values)
 Drop: 0.005-0.01 (much smaller!)
@@ -155,8 +155,8 @@ Drop: 0.005-0.01 (much smaller!)
 # BEFORE:
 'XGBoost': {
     'standard': {
-        'n_estimators': [50, 100, 150],
-        'learning_rate': [0.01, 0.1],
+        'n_estimators': [100, 200],
+        'learning_rate': [0.05, 0.1],
         'max_depth': [3, 6]
     }
 }
@@ -164,8 +164,8 @@ Drop: 0.005-0.01 (much smaller!)
 # AFTER:
 'XGBoost': {
     'standard': {
-        'n_estimators': [50, 100, 150],
-        'learning_rate': [0.01, 0.1],
+        'n_estimators': [100, 200],
+        'learning_rate': [0.05, 0.1],
         'max_depth': [3, 6],
         'subsample': [0.8, 1.0],              # ← ADD
         'colsample_bytree': [0.8, 1.0],       # ← ADD
@@ -307,7 +307,7 @@ print(model.get_params())
 **A:** Yes, you could use:
 - `subsample`: [0.8] only (remove 1.0)
 - `colsample_bytree`: [0.8] only (remove 1.0)
-- This would give 48 configs instead of 96 (still better than current 12)
+- This would give 16 configs instead of 64 (still better than current 8)
 
 ### Q4: Why not test more values?
 **A:** We could (e.g., subsample=[0.6, 0.8, 1.0]), but:
@@ -316,7 +316,7 @@ print(model.get_params())
 - Diminishing returns beyond 2 values per parameter
 
 ### Q5: What about reg_lambda (L2 regularization)?
-**A:** We could add it too, but reg_alpha (L1) is more important for feature selection in high-dimensional data like spectra. Adding reg_lambda would make grid even larger (96 → 192 configs).
+**A:** We could add it too, but reg_alpha (L1) is more important for feature selection in high-dimensional data like spectra. Adding reg_lambda would make grid even larger (64 → 128 configs).
 
 ---
 
@@ -331,7 +331,7 @@ print(model.get_params())
 ### Middle Ground:
 ⚡ **Implement with reduced grid:**
 - Only test `subsample=[0.8]`, `colsample_bytree=[0.8]`, `reg_alpha=[0.1]`
-- Grid size: 12 → 12 (no increase!)
+- Grid size: 8 → 8 (no increase!)
 - Just sets better defaults
 - Improves R² without increasing search time
 - Won't test alternative values, but uses empirically good ones
