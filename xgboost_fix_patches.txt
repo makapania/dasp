@@ -1,0 +1,289 @@
+===========================================================================================
+XGBOOST R² VARIANCE FIX - CODE PATCHES
+===========================================================================================
+
+FILE 1: /home/user/dasp/src/spectral_predict/model_config.py
+LOCATION: Lines 105-124 (XGBoost standard tier)
+
+ORIGINAL CODE:
+    'XGBoost': {
+        'standard': {
+            'n_estimators': [100, 200],  # 2 values
+            'learning_rate': [0.05, 0.1],  # 2 values
+            'max_depth': [3, 6],  # 2 values
+            'note': 'Grid size: 2×2×2 = 8 configs (vs 27 original) - 70% performance, 30% time'
+        },
+        'comprehensive': {
+            'n_estimators': [50, 100, 200],  # 3 values
+            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
+            'max_depth': [3, 6, 9],  # 3 values
+            'note': 'Grid size: 3×3×3 = 27 configs - full search'
+        },
+        'quick': {
+            'n_estimators': [100],  # 1 value
+            'learning_rate': [0.1],  # 1 value
+            'max_depth': [6],  # 1 value
+            'note': 'Grid size: 1×1×1 = 1 config - standard defaults only'
+        }
+    },
+
+REPLACEMENT CODE:
+    'XGBoost': {
+        'standard': {
+            'n_estimators': [100, 200],  # 2 values
+            'learning_rate': [0.05, 0.1],  # 2 values
+            'max_depth': [3, 6],  # 2 values
+            'subsample': [0.8, 1.0],  # NEW: 2 values - row subsampling
+            'colsample_bytree': [0.8, 1.0],  # NEW: 2 values - feature subsampling
+            'reg_alpha': [0, 0.1],  # NEW: 2 values - L1 regularization
+            'note': 'Grid size: 2×2×2×2×2×2 = 64 configs - optimized regularization + overfitting control'
+        },
+        'comprehensive': {
+            'n_estimators': [100, 200],  # REDUCED from 3 to 2 to manage grid explosion
+            'learning_rate': [0.05, 0.1],  # REDUCED from 3 to 2
+            'max_depth': [3, 6, 9],  # Keep at 3
+            'subsample': [0.8, 1.0],  # 2 values
+            'colsample_bytree': [0.8, 1.0],  # 2 values
+            'reg_alpha': [0, 0.1],  # 2 values
+            'note': 'Grid size: 2×2×3×2×2×2 = 96 configs - balanced performance and regularization'
+        },
+        'quick': {
+            'n_estimators': [100],  # 1 value
+            'learning_rate': [0.1],  # 1 value
+            'max_depth': [6],  # 1 value
+            'subsample': [0.8],  # NEW: 1 value - reasonable default
+            'colsample_bytree': [0.8],  # NEW: 1 value
+            'reg_alpha': [0.1],  # NEW: 1 value - light regularization
+            'note': 'Grid size: 1×1×1×1×1×1 = 1 config - standard defaults with regularization'
+        }
+    },
+
+===========================================================================================
+
+FILE 2: /home/user/dasp/src/spectral_predict/models.py
+LOCATION: Lines 450-474 (XGBoost Regression in get_model_grids)
+
+ORIGINAL CODE:
+        # XGBoost Regression - tier-aware
+        if 'XGBoost' in enabled_models:
+            xgb_config = get_hyperparameters('XGBoost', tier)
+            xgb_n_estimators = xgb_config.get('n_estimators', [100, 200])
+            xgb_lrs = xgb_config.get('learning_rate', [0.05, 0.1])
+            xgb_depths = xgb_config.get('max_depth', [3, 6])
+
+            xgb_configs = []
+            for n_est in xgb_n_estimators:
+                for lr in xgb_lrs:
+                    for max_depth in xgb_depths:
+                        xgb_configs.append(
+                            (
+                                XGBRegressor(
+                                    n_estimators=n_est,
+                                    learning_rate=lr,
+                                    max_depth=max_depth,
+                                    random_state=42,
+                                    n_jobs=-1,
+                                    verbosity=0
+                                ),
+                                {"n_estimators": n_est, "learning_rate": lr, "max_depth": max_depth}
+                            )
+                        )
+            grids["XGBoost"] = xgb_configs
+
+REPLACEMENT CODE:
+        # XGBoost Regression - tier-aware
+        if 'XGBoost' in enabled_models:
+            xgb_config = get_hyperparameters('XGBoost', tier)
+            xgb_n_estimators = xgb_config.get('n_estimators', [100, 200])
+            xgb_lrs = xgb_config.get('learning_rate', [0.05, 0.1])
+            xgb_depths = xgb_config.get('max_depth', [3, 6])
+            xgb_subsample = xgb_config.get('subsample', [0.8, 1.0])  # NEW
+            xgb_colsample = xgb_config.get('colsample_bytree', [0.8, 1.0])  # NEW
+            xgb_reg_alpha = xgb_config.get('reg_alpha', [0, 0.1])  # NEW
+
+            xgb_configs = []
+            for n_est in xgb_n_estimators:
+                for lr in xgb_lrs:
+                    for max_depth in xgb_depths:
+                        for subsample in xgb_subsample:  # NEW nested loop
+                            for colsample in xgb_colsample:  # NEW nested loop
+                                for reg_alpha in xgb_reg_alpha:  # NEW nested loop
+                                    xgb_configs.append(
+                                        (
+                                            XGBRegressor(
+                                                n_estimators=n_est,
+                                                learning_rate=lr,
+                                                max_depth=max_depth,
+                                                subsample=subsample,  # NEW param
+                                                colsample_bytree=colsample,  # NEW param
+                                                reg_alpha=reg_alpha,  # NEW param
+                                                random_state=42,
+                                                n_jobs=-1,
+                                                verbosity=0
+                                            ),
+                                            {
+                                                "n_estimators": n_est,
+                                                "learning_rate": lr,
+                                                "max_depth": max_depth,
+                                                "subsample": subsample,  # NEW in params dict
+                                                "colsample_bytree": colsample,  # NEW in params dict
+                                                "reg_alpha": reg_alpha  # NEW in params dict
+                                            }
+                                        )
+                                    )
+            grids["XGBoost"] = xgb_configs
+
+===========================================================================================
+
+FILE 3: /home/user/dasp/src/spectral_predict/models.py
+LOCATION: Lines 609-633 (XGBoost Classification in get_model_grids)
+
+ORIGINAL CODE:
+        # XGBoost Classification - tier-aware
+        if 'XGBoost' in enabled_models:
+            xgb_config = get_hyperparameters('XGBoost', tier)
+            xgb_n_estimators = xgb_config.get('n_estimators', [100, 200])
+            xgb_lrs = xgb_config.get('learning_rate', [0.05, 0.1])
+            xgb_depths = xgb_config.get('max_depth', [3, 6])
+
+            xgb_configs = []
+            for n_est in xgb_n_estimators:
+                for lr in xgb_lrs:
+                    for max_depth in xgb_depths:
+                        xgb_configs.append(
+                            (
+                                XGBClassifier(
+                                    n_estimators=n_est,
+                                    learning_rate=lr,
+                                    max_depth=max_depth,
+                                    random_state=42,
+                                    n_jobs=-1,
+                                    verbosity=0
+                                ),
+                                {"n_estimators": n_est, "learning_rate": lr, "max_depth": max_depth}
+                            )
+                        )
+            grids["XGBoost"] = xgb_configs
+
+REPLACEMENT CODE:
+        # XGBoost Classification - tier-aware
+        if 'XGBoost' in enabled_models:
+            xgb_config = get_hyperparameters('XGBoost', tier)
+            xgb_n_estimators = xgb_config.get('n_estimators', [100, 200])
+            xgb_lrs = xgb_config.get('learning_rate', [0.05, 0.1])
+            xgb_depths = xgb_config.get('max_depth', [3, 6])
+            xgb_subsample = xgb_config.get('subsample', [0.8, 1.0])  # NEW
+            xgb_colsample = xgb_config.get('colsample_bytree', [0.8, 1.0])  # NEW
+            xgb_reg_alpha = xgb_config.get('reg_alpha', [0, 0.1])  # NEW
+
+            xgb_configs = []
+            for n_est in xgb_n_estimators:
+                for lr in xgb_lrs:
+                    for max_depth in xgb_depths:
+                        for subsample in xgb_subsample:  # NEW nested loop
+                            for colsample in xgb_colsample:  # NEW nested loop
+                                for reg_alpha in xgb_reg_alpha:  # NEW nested loop
+                                    xgb_configs.append(
+                                        (
+                                            XGBClassifier(
+                                                n_estimators=n_est,
+                                                learning_rate=lr,
+                                                max_depth=max_depth,
+                                                subsample=subsample,  # NEW param
+                                                colsample_bytree=colsample,  # NEW param
+                                                reg_alpha=reg_alpha,  # NEW param
+                                                random_state=42,
+                                                n_jobs=-1,
+                                                verbosity=0
+                                            ),
+                                            {
+                                                "n_estimators": n_est,
+                                                "learning_rate": lr,
+                                                "max_depth": max_depth,
+                                                "subsample": subsample,  # NEW in params dict
+                                                "colsample_bytree": colsample,  # NEW in params dict
+                                                "reg_alpha": reg_alpha  # NEW in params dict
+                                            }
+                                        )
+                                    )
+            grids["XGBoost"] = xgb_configs
+
+===========================================================================================
+
+FILE 4: /home/user/dasp/src/spectral_predict/models.py
+LOCATION: Lines 106-114 (get_model function, XGBoost regression default)
+
+ORIGINAL CODE:
+        elif model_name == "XGBoost":
+            return XGBRegressor(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0
+            )
+
+REPLACEMENT CODE:
+        elif model_name == "XGBoost":
+            return XGBRegressor(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                subsample=0.8,  # NEW: row subsampling default
+                colsample_bytree=0.8,  # NEW: feature subsampling default
+                reg_alpha=0.1,  # NEW: L1 regularization default
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0
+            )
+
+===========================================================================================
+
+FILE 5: /home/user/dasp/src/spectral_predict/models.py
+LOCATION: Lines 166-174 (get_model function, XGBoost classification default)
+
+ORIGINAL CODE:
+        elif model_name == "XGBoost":
+            return XGBClassifier(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0
+            )
+
+REPLACEMENT CODE:
+        elif model_name == "XGBoost":
+            return XGBClassifier(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                subsample=0.8,  # NEW: row subsampling default
+                colsample_bytree=0.8,  # NEW: feature subsampling default
+                reg_alpha=0.1,  # NEW: L1 regularization default
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0
+            )
+
+===========================================================================================
+
+SUMMARY OF CHANGES:
+
+1. model_config.py:
+   - Added subsample, colsample_bytree, reg_alpha to all XGBoost tiers
+   - Reduced comprehensive grid slightly to avoid explosion (96 configs vs 8)
+
+2. models.py (3 locations):
+   - get_model_grids() regression: Added 3 nested loops for new parameters
+   - get_model_grids() classification: Added 3 nested loops for new parameters
+   - get_model() defaults: Added subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1
+
+EXPECTED RESULT:
+   - Params column now stores: n_estimators, learning_rate, max_depth, subsample, colsample_bytree, reg_alpha
+   - When refined models load, all regularization parameters are preserved
+   - R² variance drops from ±0.01-0.04 to ±0.005-0.01 (like ElasticNet)
+   - Grid size increases but manageable (64 configs for standard, 96 for comprehensive)
+
