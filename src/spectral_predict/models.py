@@ -4,8 +4,14 @@ import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.neural_network import MLPRegressor, MLPClassifier
-from sklearn.linear_model import LogisticRegression, Ridge, Lasso
+from sklearn.linear_model import LogisticRegression, Ridge, Lasso, ElasticNet
+from sklearn.svm import SVR, SVC
 from .neural_boosted import NeuralBoostedRegressor
+
+# Import gradient boosting libraries
+from xgboost import XGBRegressor, XGBClassifier
+from lightgbm import LGBMRegressor, LGBMClassifier
+from catboost import CatBoostRegressor, CatBoostClassifier
 
 
 def get_model(model_name, task_type='regression', n_components=10, max_n_components=24, max_iter=500):
@@ -43,6 +49,9 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         elif model_name == "Lasso":
             return Lasso(alpha=1.0, random_state=42, max_iter=max_iter)
 
+        elif model_name == "ElasticNet":
+            return ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42, max_iter=max_iter)
+
         elif model_name == "RandomForest":
             return RandomForestRegressor(
                 n_estimators=200,
@@ -75,6 +84,38 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 verbose=0
             )
 
+        elif model_name == "SVR":
+            return SVR(kernel='rbf', C=1.0, gamma='scale')
+
+        elif model_name == "XGBoost":
+            return XGBRegressor(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0
+            )
+
+        elif model_name == "LightGBM":
+            return LGBMRegressor(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=-1
+            )
+
+        elif model_name == "CatBoost":
+            return CatBoostRegressor(
+                iterations=100,
+                learning_rate=0.1,
+                depth=6,
+                random_state=42,
+                verbose=False
+            )
+
         else:
             raise ValueError(f"Unknown regression model: {model_name}")
 
@@ -99,6 +140,38 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 max_iter=max_iter,
                 random_state=42,
                 early_stopping=True
+            )
+
+        elif model_name == "SVM":
+            return SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=42)
+
+        elif model_name == "XGBoost":
+            return XGBClassifier(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0
+            )
+
+        elif model_name == "LightGBM":
+            return LGBMClassifier(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=6,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=-1
+            )
+
+        elif model_name == "CatBoost":
+            return CatBoostClassifier(
+                iterations=100,
+                learning_rate=0.1,
+                depth=6,
+                random_state=42,
+                verbose=False
             )
 
         else:
@@ -195,6 +268,18 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
             )
         grids["Lasso"] = lasso_configs
 
+        # ElasticNet Regression - combines L1 and L2 regularization
+        elasticnet_configs = []
+        for alpha in [0.001, 0.01, 0.1, 1.0]:
+            for l1_ratio in [0.3, 0.5, 0.7]:  # Balance between L1 and L2
+                elasticnet_configs.append(
+                    (
+                        ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42, max_iter=max_iter),
+                        {"alpha": alpha, "l1_ratio": l1_ratio}
+                    )
+                )
+        grids["ElasticNet"] = elasticnet_configs
+
         # Random Forest - uses configurable max_depth from GUI or defaults
         rf_configs = []
         for n_est in rf_n_trees_list:
@@ -280,6 +365,86 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
         grids["NeuralBoosted"] = nbr_configs
         # Total configurations: 2 * 3 * 2 * 2 = 24 per preprocessing method
 
+        # Support Vector Regression (SVR)
+        svr_configs = []
+        for kernel in ['rbf', 'linear']:
+            for C in [0.1, 1.0, 10.0]:
+                if kernel == 'rbf':
+                    for gamma in ['scale', 'auto']:
+                        svr_configs.append(
+                            (
+                                SVR(kernel=kernel, C=C, gamma=gamma),
+                                {"kernel": kernel, "C": C, "gamma": gamma}
+                            )
+                        )
+                else:
+                    svr_configs.append(
+                        (
+                            SVR(kernel=kernel, C=C),
+                            {"kernel": kernel, "C": C}
+                        )
+                    )
+        grids["SVR"] = svr_configs
+
+        # XGBoost Regression
+        xgb_configs = []
+        for n_est in [50, 100, 200]:
+            for lr in [0.05, 0.1, 0.2]:
+                for max_depth in [3, 6, 9]:
+                    xgb_configs.append(
+                        (
+                            XGBRegressor(
+                                n_estimators=n_est,
+                                learning_rate=lr,
+                                max_depth=max_depth,
+                                random_state=42,
+                                n_jobs=-1,
+                                verbosity=0
+                            ),
+                            {"n_estimators": n_est, "learning_rate": lr, "max_depth": max_depth}
+                        )
+                    )
+        grids["XGBoost"] = xgb_configs
+
+        # LightGBM Regression
+        lgbm_configs = []
+        for n_est in [50, 100, 200]:
+            for lr in [0.05, 0.1, 0.2]:
+                for num_leaves in [31, 50, 70]:
+                    lgbm_configs.append(
+                        (
+                            LGBMRegressor(
+                                n_estimators=n_est,
+                                learning_rate=lr,
+                                num_leaves=num_leaves,
+                                random_state=42,
+                                n_jobs=-1,
+                                verbosity=-1
+                            ),
+                            {"n_estimators": n_est, "learning_rate": lr, "num_leaves": num_leaves}
+                        )
+                    )
+        grids["LightGBM"] = lgbm_configs
+
+        # CatBoost Regression
+        catboost_configs = []
+        for iterations in [50, 100, 200]:
+            for lr in [0.05, 0.1, 0.2]:
+                for depth in [4, 6, 8]:
+                    catboost_configs.append(
+                        (
+                            CatBoostRegressor(
+                                iterations=iterations,
+                                learning_rate=lr,
+                                depth=depth,
+                                random_state=42,
+                                verbose=False
+                            ),
+                            {"iterations": iterations, "learning_rate": lr, "depth": depth}
+                        )
+                    )
+        grids["CatBoost"] = catboost_configs
+
     else:  # classification
         # PLS-DA (PLS + LogisticRegression)
         grids["PLS-DA"] = [
@@ -324,6 +489,86 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                         )
                     )
         grids["MLP"] = mlp_configs
+
+        # Support Vector Machine (SVM) for classification
+        svm_configs = []
+        for kernel in ['rbf', 'linear']:
+            for C in [0.1, 1.0, 10.0]:
+                if kernel == 'rbf':
+                    for gamma in ['scale', 'auto']:
+                        svm_configs.append(
+                            (
+                                SVC(kernel=kernel, C=C, gamma=gamma, probability=True, random_state=42),
+                                {"kernel": kernel, "C": C, "gamma": gamma}
+                            )
+                        )
+                else:
+                    svm_configs.append(
+                        (
+                            SVC(kernel=kernel, C=C, probability=True, random_state=42),
+                            {"kernel": kernel, "C": C}
+                        )
+                    )
+        grids["SVM"] = svm_configs
+
+        # XGBoost Classification
+        xgb_configs = []
+        for n_est in [50, 100, 200]:
+            for lr in [0.05, 0.1, 0.2]:
+                for max_depth in [3, 6, 9]:
+                    xgb_configs.append(
+                        (
+                            XGBClassifier(
+                                n_estimators=n_est,
+                                learning_rate=lr,
+                                max_depth=max_depth,
+                                random_state=42,
+                                n_jobs=-1,
+                                verbosity=0
+                            ),
+                            {"n_estimators": n_est, "learning_rate": lr, "max_depth": max_depth}
+                        )
+                    )
+        grids["XGBoost"] = xgb_configs
+
+        # LightGBM Classification
+        lgbm_configs = []
+        for n_est in [50, 100, 200]:
+            for lr in [0.05, 0.1, 0.2]:
+                for num_leaves in [31, 50, 70]:
+                    lgbm_configs.append(
+                        (
+                            LGBMClassifier(
+                                n_estimators=n_est,
+                                learning_rate=lr,
+                                num_leaves=num_leaves,
+                                random_state=42,
+                                n_jobs=-1,
+                                verbosity=-1
+                            ),
+                            {"n_estimators": n_est, "learning_rate": lr, "num_leaves": num_leaves}
+                        )
+                    )
+        grids["LightGBM"] = lgbm_configs
+
+        # CatBoost Classification
+        catboost_configs = []
+        for iterations in [50, 100, 200]:
+            for lr in [0.05, 0.1, 0.2]:
+                for depth in [4, 6, 8]:
+                    catboost_configs.append(
+                        (
+                            CatBoostClassifier(
+                                iterations=iterations,
+                                learning_rate=lr,
+                                depth=depth,
+                                random_state=42,
+                                verbose=False
+                            ),
+                            {"iterations": iterations, "learning_rate": lr, "depth": depth}
+                        )
+                    )
+        grids["CatBoost"] = catboost_configs
 
     return grids
 
@@ -393,7 +638,7 @@ def get_feature_importances(model, model_name, X, y):
         # Use VIP scores
         return compute_vip(model, X, y)
 
-    elif model_name in ["Ridge", "Lasso"]:
+    elif model_name in ["Ridge", "Lasso", "ElasticNet"]:
         # Get coefficients (linear models)
         coefs = np.abs(model.coef_)
         if len(coefs.shape) > 1:
@@ -401,6 +646,25 @@ def get_feature_importances(model, model_name, X, y):
 
         # Return absolute coefficient values as importance
         return coefs
+
+    elif model_name in ["SVR", "SVM"]:
+        # For SVR/SVM, use coefficient-based importance for linear kernel
+        # For RBF kernel, use absolute mean of support vector weights
+        if hasattr(model, 'coef_') and model.coef_ is not None:
+            coefs = np.abs(model.coef_)
+            if len(coefs.shape) > 1:
+                coefs = coefs[0]
+            return coefs
+        else:
+            # For non-linear kernels, compute feature importance from support vectors
+            # This is an approximation: weighted sum of absolute support vectors
+            support_vectors = model.support_vectors_
+            dual_coef = np.abs(model.dual_coef_)
+            if len(dual_coef.shape) > 1:
+                dual_coef = dual_coef[0]
+            # Weight each support vector by its coefficient and average
+            weighted_sv = np.dot(dual_coef, np.abs(support_vectors))
+            return weighted_sv / np.sum(weighted_sv)  # Normalize
 
     elif model_name == "RandomForest":
         # Use built-in feature importances
@@ -415,6 +679,10 @@ def get_feature_importances(model, model_name, X, y):
     elif model_name == "NeuralBoosted":
         # For Neural Boosted, aggregate importances across all weak learners
         return model.get_feature_importances()
+
+    elif model_name in ["XGBoost", "LightGBM", "CatBoost"]:
+        # All gradient boosting models have built-in feature importances
+        return model.feature_importances_
 
     else:
         raise ValueError(f"Unknown model type: {model_name}")
