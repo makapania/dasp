@@ -58,3 +58,6 @@ build/
 _archive/
 profile.stats
 *.log
+
+# CatBoost training artifacts
+catboost_info/
