@@ -1,5 +1,5 @@
 @echo off
-REM Launcher for Spectral Predict GUI with global Python
+REM Launcher for Spectral Predict GUI with virtual environment
 cd /d "%~dp0"
-C:\Python314\python.exe spectral_predict_gui_optimized.py
+.venv\Scripts\python.exe spectral_predict_gui_optimized.py
 pause
