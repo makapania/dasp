@@ -179,8 +179,13 @@ class SpectralPredictApp:
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
         self.show_progress = tk.BooleanVar(value=True)
 
-        # Reflectance/Absorbance toggle
-        self.use_absorbance = tk.BooleanVar(value=False)
+        # Reflectance/Absorbance tracking and conversion
+        self.use_absorbance = tk.BooleanVar(value=False)  # Legacy - for conversion display
+        self.original_data_type = tk.StringVar(value="reflectance")  # Detected from file
+        self.current_data_type = tk.StringVar(value="reflectance")  # Current displayed type
+        self.type_confidence = 0.0  # Detection confidence score
+        self.type_detection_method = ""  # Method used for detection
+        self.data_has_been_converted = False  # Track if conversion occurred
 
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
@@ -468,21 +473,48 @@ class SpectralPredictApp:
         self.update_wl_button = ttk.Button(wl_frame, text="Update Plots", command=self._update_wavelengths, style='Modern.TButton', state='disabled')
         self.update_wl_button.grid(row=0, column=4, padx=15)
 
-        # === Reflectance/Absorbance Toggle ===
-        ttk.Label(content_frame, text="Data Transformation:", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
+        # === Reflectance/Absorbance Detection & Conversion ===
+        ttk.Label(content_frame, text="Data Type (Reflectance/Absorbance):", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
         row += 1
 
         transform_frame = ttk.Frame(content_frame)
         transform_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
         row += 1
 
+        # Detection status label
+        self.data_type_status_label = ttk.Label(transform_frame, text="No data loaded",
+                                                 style='Caption.TLabel', foreground='gray')
+        self.data_type_status_label.grid(row=0, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
+
+        # Radio button frame for manual override
+        radio_frame = ttk.Frame(transform_frame)
+        radio_frame.grid(row=1, column=0, sticky=tk.W, padx=5)
+
+        ttk.Radiobutton(radio_frame, text="Reflectance",
+                       variable=self.current_data_type,
+                       value="reflectance",
+                       command=self._on_data_type_override,
+                       state='disabled').pack(side=tk.LEFT, padx=5)
+
+        ttk.Radiobutton(radio_frame, text="Absorbance",
+                       variable=self.current_data_type,
+                       value="absorbance",
+                       command=self._on_data_type_override,
+                       state='disabled').pack(side=tk.LEFT, padx=5)
+
+        # Conversion button (text updates dynamically)
+        self.convert_data_button = ttk.Button(transform_frame, text="Convert to Absorbance",
+                                              command=self._convert_and_replot,
+                                              style='Modern.TButton',
+                                              state='disabled')
+        self.convert_data_button.grid(row=1, column=1, padx=15)
+
+        # Keep legacy checkbox for backwards compatibility (hidden)
         self.absorbance_checkbox = ttk.Checkbutton(transform_frame, text="Convert to Absorbance (log10(1/R))",
                                                     variable=self.use_absorbance,
                                                     command=self._toggle_absorbance,
                                                     state='disabled')
-        self.absorbance_checkbox.grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Label(transform_frame, text="(Toggle to view data as absorbance instead of reflectance)",
-                 style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=10)
+        # Don't grid the checkbox - it's just for state tracking
 
         # === Spectrum Exclusion Controls ===
         ttk.Label(content_frame, text="Spectrum Selection:", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
@@ -1849,6 +1881,14 @@ class SpectralPredictApp:
 
                 X_aligned, y_aligned, metadata = read_combined_csv(self.combined_file_path)
 
+                # Store data type detection results
+                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.type_confidence = metadata.get('type_confidence', 0.0)
+                self.type_detection_method = metadata.get('detection_method', 'unknown')
+                self.data_has_been_converted = False
+                self.combined_metadata = metadata
+
                 # Store original unfiltered data
                 self.X_original = X_aligned
                 self.y = y_aligned
@@ -1862,7 +1902,14 @@ class SpectralPredictApp:
                 print(f"  • Target: {metadata['y_col']}")
 
             elif self.detected_type == "asd":
-                X = read_asd_dir(self.spectral_data_path.get())
+                X, metadata = read_asd_dir(self.spectral_data_path.get())
+
+                # Store data type detection results
+                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.type_confidence = metadata.get('type_confidence', 0.0)
+                self.type_detection_method = metadata.get('detection_method', 'unknown')
+                self.data_has_been_converted = False
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -1888,7 +1935,14 @@ class SpectralPredictApp:
                 self.ref = ref
 
             elif self.detected_type == "csv":
-                X = read_csv_spectra(self.spectral_data_path.get())
+                X, metadata = read_csv_spectra(self.spectral_data_path.get())
+
+                # Store data type detection results
+                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.type_confidence = metadata.get('type_confidence', 0.0)
+                self.type_detection_method = metadata.get('detection_method', 'unknown')
+                self.data_has_been_converted = False
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -1954,6 +2008,9 @@ class SpectralPredictApp:
 
             # Generate plots
             self._generate_plots()
+
+            # Update data type detection UI
+            self._update_data_type_status_ui()
 
             self.tab1_status.config(text=f"✓ Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
             # Enable interactive controls
@@ -2099,12 +2156,158 @@ class SpectralPredictApp:
             messagebox.showerror("Error", f"Failed to update wavelengths:\n{e}")
 
     def _toggle_absorbance(self):
-        """Toggle between reflectance and absorbance display."""
+        """
+        Toggle between reflectance and absorbance display (legacy method).
+
+        This method is kept for backwards compatibility with the old checkbox.
+        New code should use _convert_and_replot() instead.
+        """
         if self.X is None:
             return
 
         # Regenerate plots with current transformation state
         self._generate_plots()
+
+    def _on_data_type_override(self):
+        """
+        Handle manual override of data type via radio buttons.
+
+        Updates the UI to reflect the user's selection without converting data.
+        To actually convert, user must click the conversion button.
+        """
+        if self.X is None:
+            return
+
+        # Update the conversion button text based on current selection
+        current = self.current_data_type.get()
+        if current == "reflectance":
+            self.convert_data_button.config(text="Convert to Absorbance")
+        else:
+            self.convert_data_button.config(text="Convert to Reflectance")
+
+        # Update status label to show user override
+        original = self.original_data_type.get()
+        if current != original:
+            self.data_type_status_label.config(
+                text=f"⚠️  User override: Treating as {current.capitalize()} (originally {original.capitalize()})",
+                foreground="orange"
+            )
+        else:
+            confidence_str = "High" if self.type_confidence >= 70 else "Low"
+            self.data_type_status_label.config(
+                text=f"Detected: {current.capitalize()} ({confidence_str} confidence)",
+                foreground="green" if self.type_confidence >= 70 else "orange"
+            )
+
+    def _convert_and_replot(self):
+        """
+        Convert spectral data between reflectance and absorbance and regenerate plots.
+
+        This is the main conversion function that:
+        1. Determines target type (opposite of current)
+        2. Converts the data using bidirectional conversion functions
+        3. Updates state variables
+        4. Regenerates all plots with new data and labels
+        """
+        if self.X is None or self.X_original is None:
+            messagebox.showwarning("No Data", "Please load data first.")
+            return
+
+        # Determine current and target types
+        current_type = self.current_data_type.get()
+        target_type = "absorbance" if current_type == "reflectance" else "reflectance"
+
+        # Confirm with user if this seems unusual
+        if self.type_confidence >= 70 and current_type != self.original_data_type.get():
+            response = messagebox.askyesno(
+                "Confirm Conversion",
+                f"You're converting to {target_type}, but data was detected as {self.original_data_type.get()} "
+                f"with {self.type_confidence:.0f}% confidence.\n\nContinue with conversion?"
+            )
+            if not response:
+                return
+
+        # Convert the data
+        try:
+            # Convert X (filtered wavelength range)
+            X_converted = self._convert_data_type(self.X.values, current_type, target_type)
+            self.X = pd.DataFrame(X_converted, index=self.X.index, columns=self.X.columns)
+
+            # Convert X_original (full wavelength range)
+            X_orig_converted = self._convert_data_type(self.X_original.values, current_type, target_type)
+            self.X_original = pd.DataFrame(X_orig_converted,
+                                          index=self.X_original.index,
+                                          columns=self.X_original.columns)
+
+            # Update state
+            self.current_data_type.set(target_type)
+            self.data_has_been_converted = True
+
+            # Update legacy variable for backwards compatibility
+            self.use_absorbance.set(target_type == "absorbance")
+
+            # Update button text
+            next_target = "absorbance" if target_type == "reflectance" else "reflectance"
+            self.convert_data_button.config(text=f"Convert to {next_target.capitalize()}")
+
+            # Update status label
+            self.data_type_status_label.config(
+                text=f"✓ Converted to {target_type.capitalize()} (from {current_type})",
+                foreground="blue"
+            )
+
+            # Regenerate plots with new data and labels
+            self._generate_plots()
+
+            print(f"✓ Successfully converted data to {target_type}")
+
+        except Exception as e:
+            messagebox.showerror("Conversion Error", f"Failed to convert data:\n{str(e)}")
+            print(f"Error during conversion: {e}")
+
+    def _update_data_type_status_ui(self):
+        """
+        Update the data type status label and UI controls after data loading.
+
+        Called after data is loaded to show detection results.
+        """
+        if self.X is None:
+            self.data_type_status_label.config(text="No data loaded", foreground="gray")
+            self.convert_data_button.config(state='disabled')
+            return
+
+        # Get detected type and confidence
+        data_type = self.original_data_type.get()
+        confidence = self.type_confidence
+
+        # Format confidence level
+        if confidence >= 80:
+            conf_str = "High"
+            color = "green"
+        elif confidence >= 70:
+            conf_str = "Medium"
+            color="darkgreen"
+        else:
+            conf_str = "Low"
+            color = "orange"
+
+        # Update status label
+        status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence: {confidence:.0f}%)"
+        if confidence < 70:
+            status_text += " ⚠️"
+
+        self.data_type_status_label.config(text=status_text, foreground=color)
+
+        # Update button text
+        opposite_type = "Absorbance" if data_type == "reflectance" else "Reflectance"
+        self.convert_data_button.config(text=f"Convert to {opposite_type}", state='normal')
+
+        # Enable radio buttons
+        for widget in self.convert_data_button.master.winfo_children():
+            if isinstance(widget, ttk.Frame):  # radio_frame
+                for radio in widget.winfo_children():
+                    if isinstance(radio, ttk.Radiobutton):
+                        radio.config(state='normal')
 
     def _reset_exclusions(self):
         """Reset all spectrum exclusions."""
@@ -2406,15 +2609,113 @@ class SpectralPredictApp:
         self._update_exclusion_status()
 
     def _apply_transformation(self, data):
-        """Apply absorbance transformation if enabled."""
+        """
+        Apply absorbance transformation if enabled (legacy compatibility).
+
+        This method is deprecated but kept for backwards compatibility.
+        New code should use _convert_data_type() instead.
+        """
         if self.use_absorbance.get():
-            # Convert reflectance to absorbance: A = log10(1/R)
-            # Add small epsilon to avoid log(0)
-            epsilon = 1e-10
-            data_safe = np.maximum(data, epsilon)
-            return np.log10(1.0 / data_safe)
+            return self._convert_reflectance_to_absorbance(data)
         else:
             return data
+
+    def _convert_reflectance_to_absorbance(self, data):
+        """
+        Convert reflectance data to absorbance.
+
+        Formula: A = log10(1/R)
+
+        Parameters
+        ----------
+        data : numpy.ndarray or pandas.DataFrame
+            Reflectance data (values typically in [0, 1])
+
+        Returns
+        -------
+        numpy.ndarray or pandas.DataFrame
+            Absorbance data
+        """
+        # Add small epsilon to avoid log(0)
+        epsilon = 1e-10
+        data_safe = np.maximum(data, epsilon)
+
+        # Warn if values seem problematic
+        if np.any(data > 1.2):
+            print("⚠️  Warning: Some reflectance values > 1.2. Data may already be absorbance.")
+
+        return np.log10(1.0 / data_safe)
+
+    def _convert_absorbance_to_reflectance(self, data):
+        """
+        Convert absorbance data to reflectance.
+
+        Formula: R = 10^(-A)
+
+        Parameters
+        ----------
+        data : numpy.ndarray or pandas.DataFrame
+            Absorbance data (values typically 0-3)
+
+        Returns
+        -------
+        numpy.ndarray or pandas.DataFrame
+            Reflectance data (bounded to [0, 1])
+        """
+        # Convert using inverse formula
+        reflectance = np.power(10, -data)
+
+        # Clip to valid reflectance range [0, 1]
+        reflectance = np.clip(reflectance, 0.0, 1.0)
+
+        # Warn if many values were clipped
+        n_clipped = np.sum((np.power(10, -data) > 1.0) | (np.power(10, -data) < 0.0))
+        if n_clipped > 0:
+            print(f"⚠️  Warning: {n_clipped} values clipped to [0, 1] range after conversion.")
+
+        return reflectance
+
+    def _convert_data_type(self, data, from_type, to_type):
+        """
+        Convert spectral data between reflectance and absorbance.
+
+        Parameters
+        ----------
+        data : numpy.ndarray or pandas.DataFrame
+            Spectral data to convert
+        from_type : str
+            Current data type: "reflectance" or "absorbance"
+        to_type : str
+            Target data type: "reflectance" or "absorbance"
+
+        Returns
+        -------
+        numpy.ndarray or pandas.DataFrame
+            Converted data (or unchanged if from_type == to_type)
+        """
+        if from_type == to_type:
+            print(f"Data is already {to_type}, no conversion needed.")
+            return data
+
+        if from_type == "reflectance" and to_type == "absorbance":
+            print("Converting reflectance → absorbance (A = log10(1/R))")
+            return self._convert_reflectance_to_absorbance(data)
+        elif from_type == "absorbance" and to_type == "reflectance":
+            print("Converting absorbance → reflectance (R = 10^(-A))")
+            return self._convert_absorbance_to_reflectance(data)
+        else:
+            raise ValueError(f"Unknown conversion: {from_type} → {to_type}")
+
+    def _get_spectral_ylabel(self):
+        """
+        Get the appropriate Y-axis label for spectral plots.
+
+        Returns
+        -------
+        str
+            "Reflectance" or "Absorbance" based on current data type
+        """
+        return self.current_data_type.get().capitalize()
 
     def _generate_plots(self):
         """Generate spectral plots in the plot notebook."""
@@ -2426,10 +2727,10 @@ class SpectralPredictApp:
         for widget in self.plot_notebook.winfo_children():
             widget.destroy()
 
-        # Determine y-axis label based on transformation state
-        ylabel = "Absorbance" if self.use_absorbance.get() else "Reflectance"
+        # Determine y-axis label based on current data type
+        ylabel = self._get_spectral_ylabel()
 
-        # Apply transformation to raw data
+        # Apply transformation to raw data (for backwards compatibility with derivatives)
         data_transformed = self._apply_transformation(self.X.values)
 
         # Create plot tabs
@@ -5812,7 +6113,7 @@ Configuration:
                 if asd_files:
                     self.pred_status.config(text="Loading ASD files...")
                     self.root.update()
-                    self.prediction_data = read_asd_dir(str(path))
+                    self.prediction_data, _ = read_asd_dir(str(path))  # Unpack tuple, discard metadata
                 elif spc_files:
                     self.pred_status.config(text="Loading SPC files...")
                     self.root.update()
@@ -5824,7 +6125,7 @@ Configuration:
             else:  # csv
                 self.pred_status.config(text="Loading CSV file...")
                 self.root.update()
-                self.prediction_data = read_csv_spectra(str(path))
+                self.prediction_data, _ = read_csv_spectra(str(path))  # Unpack tuple, discard metadata
 
             # Update status
             n_samples = len(self.prediction_data)
@@ -6365,12 +6666,12 @@ Configuration:
 
             # Try ASD first, then CSV
             try:
-                data = read_asd_dir(str(data_path_obj))
+                data, _ = read_asd_dir(str(data_path_obj))  # Unpack tuple, discard metadata
                 wavelengths = data.columns.astype(float).values
                 X = data.values
             except:
                 # Try CSV format
-                data = read_csv_spectra(str(data_path_obj))
+                data, _ = read_csv_spectra(str(data_path_obj))  # Unpack tuple, discard metadata
                 wavelengths = data.columns.astype(float).values
                 X = data.values
 
@@ -7317,7 +7618,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ax1.fill_between(wl, master_mean - master_std, master_mean + master_std,
                         alpha=0.3, color='b', label='±1 Std')
         ax1.set_xlabel('Wavelength (nm)', fontsize=11)
-        ax1.set_ylabel('Reflectance', fontsize=11)
+        ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
         ax1.set_title(f'Master: {master_id}\n({X_master.shape[0]} spectra)', fontsize=12, fontweight='bold')
         ax1.legend(loc='best')
         ax1.grid(True, alpha=0.3)
@@ -7327,7 +7628,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ax2.fill_between(wl, slave_mean - slave_std, slave_mean + slave_std,
                         alpha=0.3, color='r', label='±1 Std')
         ax2.set_xlabel('Wavelength (nm)', fontsize=11)
-        ax2.set_ylabel('Reflectance', fontsize=11)
+        ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
         ax2.set_title(f'Slave: {slave_id}\n({X_slave.shape[0]} spectra)', fontsize=12, fontweight='bold')
         ax2.legend(loc='best')
         ax2.grid(True, alpha=0.3)
@@ -7349,7 +7650,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ax.plot(wl, slave_mean, 'r-', linewidth=2, label=f'Slave ({slave_id})')
 
         ax.set_xlabel('Wavelength (nm)', fontsize=11)
-        ax.set_ylabel('Reflectance', fontsize=11)
+        ax.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
         ax.set_title('Master vs. Slave Spectra Overlay (First 10 Samples + Means)', fontsize=12, fontweight='bold')
         ax.legend(loc='best')
         ax.grid(True, alpha=0.3)
@@ -7394,7 +7695,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                            master_mean + master_std,
                            alpha=0.3, color='b', label='±1 Std')
             ax1.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax1.set_ylabel('Reflectance', fontsize=10)
+            ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax1.set_title('Master Spectra', fontsize=11, fontweight='bold')
             ax1.legend(fontsize=8)
             ax1.grid(True, alpha=0.3)
@@ -7409,7 +7710,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                            slave_mean + slave_std,
                            alpha=0.3, color='r', label='±1 Std')
             ax2.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax2.set_ylabel('Reflectance', fontsize=10)
+            ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax2.set_title('Slave Before Transfer', fontsize=11, fontweight='bold')
             ax2.legend(fontsize=8)
             ax2.grid(True, alpha=0.3)
@@ -7424,7 +7725,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                            trans_mean + trans_std,
                            alpha=0.3, color='g', label='±1 Std')
             ax3.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax3.set_ylabel('Reflectance', fontsize=10)
+            ax3.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax3.set_title('Slave After Transfer', fontsize=11, fontweight='bold')
             ax3.legend(fontsize=8)
             ax3.grid(True, alpha=0.3)
@@ -7515,7 +7816,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                 ax1.plot(wl, mean_spectrum, linewidth=2, label=inst_id, color=colors[idx])
 
             ax1.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax1.set_ylabel('Reflectance', fontsize=10)
+            ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax1.set_title('Before Equalization\n(Different Wavelength Grids)',
                          fontsize=11, fontweight='bold')
             ax1.legend(fontsize=8, loc='best')
@@ -7528,7 +7829,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                 ax2.plot(common_grid, mean_spectrum, linewidth=2, label=inst_id, color=colors[idx])
 
             ax2.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax2.set_ylabel('Reflectance', fontsize=10)
+            ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax2.set_title('After Equalization\n(Common Wavelength Grid)',
                          fontsize=11, fontweight='bold')
             ax2.legend(fontsize=8, loc='best')
