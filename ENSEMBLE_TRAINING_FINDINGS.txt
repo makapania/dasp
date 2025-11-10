@@ -1,0 +1,206 @@
+ENSEMBLE TRAINING ANALYSIS - KEY FINDINGS
+
+QUESTION: Can we access fitted models during ensemble training?
+ANSWER: NO - Models are discarded immediately after evaluation
+
+---
+
+1. TRAINING DATA STRUCTURE
+
+Location: _run_analysis_thread() in spectral_predict_gui_optimized.py (line 2961)
+
+X_filtered (pandas DataFrame):
+- Shape: (~1360 samples, 2151 wavelengths)
+- Columns are wavelength strings
+- Indices aligned with y_filtered
+
+y_filtered (pandas Series):
+- Regression: continuous values
+- Classification: class labels
+- Indices match X_filtered
+
+Data passed to run_search() at line 3304:
+  results_df = run_search(X_filtered, y_filtered, ...)
+
+These variables are available throughout _run_analysis_thread() in local scope.
+
+---
+
+2. WHERE MODELS ARE FITTED
+
+Location 1: Cross-Validation (search.py, _run_single_fold, lines 609-666)
+
+- Each fold creates a pipeline CLONE
+- Clone fitted on training fold: pipe_clone.fit(X_train, y_train)
+- Predictions computed on test fold
+- Metrics extracted (RMSE, R2)
+- CLONE DISCARDED - metrics only returned
+
+Problem: Models run in parallel (joblib) and immediately discarded
+
+Location 2: Full-Data (search.py, _run_single_config, lines 798-825)
+
+- Pipeline REFITTED on full data: pipe.fit(X, y)
+- Fitted model extracted: fitted_model = pipe.named_steps["model"]
+- Feature importances computed from fitted_model
+- Top N wavelengths extracted
+- FITTED MODEL DISCARDED - only result dict returned
+
+Problem: Fitted model created but not stored or returned
+
+---
+
+3. WHAT'S IN RESULTS DATAFRAME
+
+Each result row (from search.py _run_single_config):
+
+Model:           'PLS', 'Ridge', 'RandomForest', 'MLP', 'NeuralBoosted'
+Params:          "{'n_components': 10, 'scale': False}" (stringified dict)
+Preprocess:      'raw', 'snv', 'deriv', 'snv_deriv', 'deriv_snv'
+Deriv:           1, 2, or None
+Window:          7, 11, 17, 19, or None
+Poly:            2, 3, or None
+LVs:             (for PLS models)
+n_vars:          Number of variables in subset
+full_vars:       Total wavelengths (usually 2151)
+SubsetTag:       'full', 'top50_importance', 'region_1', etc.
+all_vars:        "800.5,801.2,802.1,..." (actual wavelengths used)
+top_vars:        "1200.3,1250.1,..." (top 30 wavelengths)
+RMSE:            Cross-validation RMSE (regression)
+R2:              Cross-validation R² (regression)
+Accuracy:        Cross-validation accuracy (classification)
+ROC_AUC:         Cross-validation AUC (classification)
+CompositeScore:  Composite ranking score
+regional_rmse:   {"Q1": 0.02, "Q2": 0.024, ...}
+y_quartiles:     [10.5, 25.3, 40.1]
+
+---
+
+4. MODEL RECONSTRUCTION - CAN WE DO IT?
+
+YES. All information needed is in results_df:
+
+For each top model:
+1. Model type (Model column) -> get_model(model_name, task_type, **params)
+2. Hyperparameters (Params column) -> parse string to dict
+3. Preprocessing (Preprocess, Deriv, Window, Poly) -> build_preprocessing_pipeline()
+4. Feature subset (all_vars or SubsetTag) -> select wavelength columns
+5. Create Pipeline -> fit on X_train, y_train
+
+Result: Fitted sklearn.pipeline.Pipeline object ready for ensemble
+
+---
+
+5. PREPROCESSING REPRODUCIBILITY
+
+100% Reproducible:
+
+SNV Transformation (preprocess.py):
+- (X - mean) / std per spectrum
+- Stateless (no learned parameters)
+- Identical result every time
+
+Savitzky-Golay Derivative (preprocess.py):
+- FIR filter with specified window/order
+- No learned parameters
+- Identical result every time
+
+Factory function: build_preprocessing_pipeline(name, deriv, window, polyorder)
+- Returns list of (name, transformer) tuples
+- Can recreate exact preprocessing
+
+---
+
+6. FEATURE SUBSET HANDLING
+
+Full Model (SubsetTag == 'full'):
+- Use all wavelengths: X_subset = X_train
+
+Top-N Variables (SubsetTag == 'top50_importance'):
+- Extract wavelengths: wavelengths = [float(w) for w in row['all_vars'].split(',')]
+- Find indices: subset_indices = np.searchsorted(X_train.columns.astype(float), wavelengths)
+- Select: X_subset = X_train.iloc[:, subset_indices]
+
+Region Subsets (SubsetTag == 'region_1'):
+- Same as top-N: all_vars contains region wavelengths
+
+---
+
+7. CURRENT ENSEMBLE CODE
+
+File: spectral_predict_gui_optimized.py, lines 3352-3394
+
+Current implementation just logs that ensemble is ready:
+  top_models_df = results_df.nsmallest(5, 'CompositeScore')
+  self._log_progress("💡 Ensemble methods are configured and ready!")
+
+NO ACTUAL ENSEMBLE TRAINING HAPPENS
+
+---
+
+8. WHAT'S NEEDED
+
+After line 3364 (after top_models_df selection):
+
+1. Reconstruct fitted models from results metadata (~100 lines)
+   - Parse model type and hyperparameters
+   - Build preprocessing pipeline
+   - Create model instance
+   - Handle feature subsets
+   - Fit on X_filtered, y_filtered
+
+2. Train ensemble methods (~50 lines)
+   - Call create_ensemble() with fitted models
+   - Test each enabled ensemble type
+   - Evaluate on validation/test set
+   - Log results
+
+3. Compare to individual models (~30 lines)
+   - Extract ensemble predictions
+   - Compute metrics
+   - Compare to best individual model
+
+Total: ~180-200 lines of code needed
+
+---
+
+9. RELATED CODE LOCATIONS
+
+spectral_predict_gui_optimized.py:2961
+  -> _run_analysis_thread() main function
+
+spectral_predict_gui_optimized.py:3304
+  -> results_df = run_search(X_filtered, y_filtered, ...)
+
+spectral_predict_gui_optimized.py:3352-3394
+  -> Ensemble training section (WHERE CODE NEEDED)
+
+search.py:609-666
+  -> _run_single_fold() where models fitted and discarded in CV
+
+search.py:798-825
+  -> Full-data fitting for feature importance (models discarded)
+
+ensemble.py:464-535
+  -> create_ensemble() factory function
+
+preprocess.py:109-150
+  -> build_preprocessing_pipeline() for reconstruction
+
+models.py:33-200
+  -> get_model() factory for model creation
+
+---
+
+10. SUMMARY
+
+Fitted models:        NOT accessible after analysis
+All reconstruction info: AVAILABLE in results_df
+Preprocessing:        100% reproducible
+Implementation:       ~200 lines of straightforward code
+Complexity:           LOW
+Risk:                 LOW
+Performance:          Good (refit faster than original CV)
+
+RECOMMENDATION: Implement model reconstruction and ensemble training
+
