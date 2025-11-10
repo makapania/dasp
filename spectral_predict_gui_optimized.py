@@ -189,7 +189,8 @@ class SpectralPredictApp:
         self.validation_y = None  # Stored validation target data
 
         # Tier selection
-        self.model_tier = tk.StringVar(value="standard")  # quick, standard, comprehensive, experimental
+        self.model_tier = tk.StringVar(value="standard")  # quick, standard, comprehensive, experimental, custom
+        self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
         # Model selection (original models)
         self.use_pls = tk.BooleanVar(value=True)
@@ -205,6 +206,25 @@ class SpectralPredictApp:
         self.use_xgboost = tk.BooleanVar(value=False)
         self.use_lightgbm = tk.BooleanVar(value=False)
         self.use_catboost = tk.BooleanVar(value=False)
+
+        # Create model name to checkbox mapping
+        self.model_checkboxes = {
+            'PLS': self.use_pls,
+            'Ridge': self.use_ridge,
+            'Lasso': self.use_lasso,
+            'ElasticNet': self.use_elasticnet,
+            'RandomForest': self.use_randomforest,
+            'XGBoost': self.use_xgboost,
+            'LightGBM': self.use_lightgbm,
+            'CatBoost': self.use_catboost,
+            'SVR': self.use_svr,
+            'MLP': self.use_mlp,
+            'NeuralBoosted': self.use_neuralboosted
+        }
+
+        # Add trace callbacks to model checkboxes to switch to Custom tier when manually changed
+        for var in self.model_checkboxes.values():
+            var.trace_add('write', self._on_model_checkbox_changed)
 
         # Preprocessing method selection
         self.use_raw = tk.BooleanVar(value=False)
@@ -871,20 +891,24 @@ class SpectralPredictApp:
         tier_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        ttk.Label(tier_frame, text="Select a preset tier for optimized defaults:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
+        ttk.Label(tier_frame, text="Select a preset tier to auto-populate model selections:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0, 10))
 
         tier_options_frame = ttk.Frame(tier_frame)
-        tier_options_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
+        tier_options_frame.grid(row=1, column=0, columnspan=5, sticky=tk.W, pady=5)
 
         ttk.Radiobutton(tier_options_frame, text="⚡ Quick (3-5 min)", variable=self.model_tier, value="quick").grid(row=0, column=0, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="⭐ Standard (10-15 min) [DEFAULT]", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="🔬 Comprehensive (20-30 min)", variable=self.model_tier, value="comprehensive").grid(row=0, column=2, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="🧪 Experimental (45-90 min)", variable=self.model_tier, value="experimental").grid(row=0, column=3, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="⚙️ Custom", variable=self.model_tier, value="custom").grid(row=0, column=4, sticky=tk.W, padx=5)
 
-        ttk.Label(tier_frame, text="💡 Tiers automatically select models and hyperparameters. You can still customize individual models below.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        ttk.Label(tier_frame, text="💡 Tiers auto-update checkboxes below. Select Custom to manually choose models.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=5, sticky=tk.W, pady=(10, 0))
 
-        models_frame = ttk.LabelFrame(content_frame, text="Select Models (Override Tier Defaults)", padding="20")
+        # Add callback to tier selection to update checkboxes
+        self.model_tier.trace_add('write', self._on_tier_changed)
+
+        models_frame = ttk.LabelFrame(content_frame, text="Select Models", padding="20")
         models_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
@@ -1636,6 +1660,39 @@ class SpectralPredictApp:
         export_btn = ttk.Button(button_frame, text="💾 Export Plot",
                                command=export_plot, style='Modern.TButton')
         export_btn.pack(side='right')
+
+    def _on_tier_changed(self, *args):
+        """Update model checkboxes when tier selection changes."""
+        tier = self.model_tier.get()
+
+        if tier == "custom":
+            # Don't auto-update checkboxes for custom tier
+            return
+
+        # Import tier definitions
+        from spectral_predict.model_config import MODEL_TIERS
+
+        if tier not in MODEL_TIERS:
+            return
+
+        # Get models for this tier
+        tier_models = MODEL_TIERS[tier]['models']
+
+        # Set flag to prevent triggering custom tier switch
+        self._updating_from_tier = True
+
+        # Update all model checkboxes
+        for model_name, checkbox_var in self.model_checkboxes.items():
+            checkbox_var.set(model_name in tier_models)
+
+        # Reset flag
+        self._updating_from_tier = False
+
+    def _on_model_checkbox_changed(self, *args):
+        """Switch to Custom tier when user manually changes a model checkbox."""
+        # Only switch to custom if we're not currently updating from tier
+        if not self._updating_from_tier and self.model_tier.get() != "custom":
+            self.model_tier.set("custom")
 
     def _load_and_plot_data(self):
         """Load data and generate spectral plots."""
@@ -2827,10 +2884,10 @@ class SpectralPredictApp:
                 self._log_progress(f"✗ CSV export failed\n")
 
         # Run in thread
-        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models,))
+        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier))
         self.analysis_thread.start()
 
-    def _run_analysis_thread(self, selected_models):
+    def _run_analysis_thread(self, selected_models, tier):
         """Run analysis in background thread."""
         try:
             from spectral_predict.search import run_search
@@ -7664,6 +7721,9 @@ def main():
     """Main entry point."""
     root = tk.Tk()
     app = SpectralPredictApp(root)
+
+    # Initialize tier-based model selection (must be done after all UI is created)
+    app._on_tier_changed()
 
     # Add menu bar
     menubar = tk.Menu(root)
