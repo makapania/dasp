@@ -657,6 +657,35 @@ class SpectralPredictApp:
                  foreground=[('active', self.colors['text_inverse']),
                            ('!disabled', self.colors['text_inverse'])])
 
+        # Default style for all ttk.Button widgets (IMPORTANT: prevents invisible text)
+        style.configure('TButton',
+                       font=(body_font, 10),
+                       padding=(15, 8),
+                       borderwidth=0,
+                       relief='flat',
+                       foreground=self.colors['text'])  # Dark text for light backgrounds
+
+        style.map('TButton',
+                 background=[('active', self.colors['accent']),      # Colored on hover
+                           ('!disabled', self.colors['panel'])],     # White/light normally
+                 foreground=[('active', self.colors['text_inverse']),# White text on hover
+                           ('!disabled', self.colors['text'])])      # Dark text normally
+
+        # Secondary button style (for less prominent actions)
+        style.configure('Secondary.TButton',
+                       font=(body_font, 10),
+                       padding=(12, 6),
+                       borderwidth=1,
+                       relief='solid',
+                       foreground=self.colors['text'],
+                       background=self.colors['bg_secondary'])
+
+        style.map('Secondary.TButton',
+                 background=[('active', self.colors['panel']),
+                           ('!disabled', self.colors['bg_secondary'])],
+                 foreground=[('active', self.colors['text']),
+                           ('!disabled', self.colors['text'])])
+
         # Frame styling
         style.configure('TFrame', background=self.colors['bg'])
         style.configure('Card.TFrame', background=self.colors['card_bg'], relief='flat')
@@ -931,6 +960,192 @@ class SpectralPredictApp:
 
         return btn
 
+    # ========== Modern Layout Helper Methods ==========
+
+    def _create_card(self, parent, title=None, subtitle=None):
+        """Create a modern card container with optional title."""
+        # Card frame with subtle shadow effect
+        card_outer = tk.Frame(parent, bg=self.colors['shadow'], padx=2, pady=2)
+
+        card = tk.Frame(card_outer, bg=self.colors['card_bg'], padx=20, pady=20)
+        card.pack(fill='both', expand=True)
+
+        if title:
+            # Card title with accent color
+            title_label = tk.Label(card,
+                                  text=title,
+                                  font=('SF Pro Display', 'Segoe UI', 'Arial', 14, 'bold'),
+                                  fg=self.colors['text'],
+                                  bg=self.colors['card_bg'],
+                                  anchor='w')
+            title_label.pack(fill='x', pady=(0, 5))
+
+        if subtitle:
+            # Card subtitle
+            subtitle_label = tk.Label(card,
+                                     text=subtitle,
+                                     font=('SF Pro Text', 'Segoe UI', 'Arial', 10),
+                                     fg=self.colors['text_light'],
+                                     bg=self.colors['card_bg'],
+                                     anchor='w')
+            subtitle_label.pack(fill='x', pady=(0, 15))
+
+        return card_outer, card
+
+    def _create_section_header(self, parent, text, row, column=0, columnspan=3):
+        """Create a modern section header with accent line."""
+        header_frame = tk.Frame(parent, bg=self.colors['bg'])
+        header_frame.grid(row=row, column=column, columnspan=columnspan, sticky='ew', pady=(20, 10))
+
+        # Accent line on the left
+        accent_line = tk.Frame(header_frame, bg=self.colors['accent'], width=4)
+        accent_line.pack(side='left', fill='y', padx=(0, 10))
+
+        # Header text
+        header_label = tk.Label(header_frame,
+                               text=text,
+                               font=('SF Pro Display', 'Segoe UI', 'Arial', 16, 'bold'),
+                               fg=self.colors['text'],
+                               bg=self.colors['bg'],
+                               anchor='w')
+        header_label.pack(side='left', fill='x')
+
+        return header_frame
+
+    def _create_button_with_gradient(self, parent, text, command, style='accent'):
+        """Create a modern button with gradient-like effect."""
+        if style == 'accent':
+            bg_color = self.colors['accent']
+            hover_color = self.colors['accent_dark']
+        else:
+            bg_color = self.colors['panel']
+            hover_color = self.colors['bg_secondary']
+
+        btn = tk.Button(parent,
+                       text=text,
+                       font=('SF Pro Text', 'Segoe UI', 'Arial', 11, 'bold'),
+                       fg=self.colors['text_inverse'] if style == 'accent' else self.colors['text'],
+                       bg=bg_color,
+                       activebackground=hover_color,
+                       relief='flat',
+                       borderwidth=0,
+                       padx=25,
+                       pady=12,
+                       cursor='hand2',
+                       command=command)
+
+        # Add hover effect
+        def on_enter(e):
+            btn['bg'] = hover_color
+
+        def on_leave(e):
+            btn['bg'] = bg_color
+
+        btn.bind('<Enter>', on_enter)
+        btn.bind('<Leave>', on_leave)
+
+        return btn
+
+    def _create_info_badge(self, parent, text, bg_color=None):
+        """Create a small info badge/pill."""
+        if bg_color is None:
+            bg_color = self.colors['bg_secondary']
+
+        badge = tk.Label(parent,
+                        text=text,
+                        font=('SF Pro Text', 'Segoe UI', 'Arial', 9, 'bold'),
+                        fg=self.colors['text'],
+                        bg=bg_color,
+                        padx=10,
+                        pady=4)
+        return badge
+
+    def _create_grid_layout(self, parent, num_columns=2):
+        """Create a responsive grid layout container."""
+        grid_frame = tk.Frame(parent, bg=self.colors['bg'])
+
+        # Configure columns to distribute space evenly
+        for i in range(num_columns):
+            grid_frame.columnconfigure(i, weight=1, uniform='col')
+
+        return grid_frame
+
+    def _create_checkbox_group(self, parent, title, variables_dict, columns=3):
+        """Create a modern checkbox group with grid layout."""
+        # Create card for checkbox group
+        card_outer, card = self._create_card(parent, title=title)
+
+        # Create grid for checkboxes
+        checkbox_frame = tk.Frame(card, bg=self.colors['card_bg'])
+        checkbox_frame.pack(fill='both', expand=True)
+
+        row, col = 0, 0
+        for label, var in variables_dict.items():
+            cb = ttk.Checkbutton(checkbox_frame,
+                                text=label,
+                                variable=var,
+                                style='TCheckbutton')
+            cb.grid(row=row, column=col, sticky='w', padx=10, pady=5)
+
+            col += 1
+            if col >= columns:
+                col = 0
+                row += 1
+
+        return card_outer
+
+    def _create_collapsible_section(self, parent, title, expanded=True):
+        """Create a collapsible section with expand/collapse animation."""
+        section_frame = tk.Frame(parent, bg=self.colors['bg'])
+
+        # Header with toggle button
+        header = tk.Frame(section_frame, bg=self.colors['bg_secondary'], cursor='hand2')
+        header.pack(fill='x', pady=(5, 0))
+
+        # Expand/collapse indicator
+        indicator = tk.Label(header,
+                            text='▼' if expanded else '▶',
+                            font=('SF Pro Text', 'Segoe UI', 'Arial', 12),
+                            fg=self.colors['text'],
+                            bg=self.colors['bg_secondary'],
+                            padx=10)
+        indicator.pack(side='left')
+
+        # Section title
+        title_label = tk.Label(header,
+                              text=title,
+                              font=('SF Pro Display', 'Segoe UI', 'Arial', 13, 'bold'),
+                              fg=self.colors['text'],
+                              bg=self.colors['bg_secondary'],
+                              anchor='w')
+        title_label.pack(side='left', fill='x', expand=True, padx=(0, 10), pady=8)
+
+        # Content frame (initially visible if expanded)
+        content = tk.Frame(section_frame, bg=self.colors['bg'])
+        if expanded:
+            content.pack(fill='both', expand=True, pady=(0, 5))
+
+        # Toggle function
+        is_expanded = [expanded]  # Use list to allow modification in nested function
+
+        def toggle():
+            if is_expanded[0]:
+                content.pack_forget()
+                indicator.config(text='▶')
+                is_expanded[0] = False
+            else:
+                content.pack(fill='both', expand=True, pady=(0, 5))
+                indicator.config(text='▼')
+                is_expanded[0] = True
+
+        header.bind('<Button-1>', lambda e: toggle())
+        indicator.bind('<Button-1>', lambda e: toggle())
+        title_label.bind('<Button-1>', lambda e: toggle())
+
+        return section_frame, content
+
+    # ========== End of Modern Layout Helpers ==========
+
     def _create_ui(self):
         """Create 10-tab user interface with theme switching."""
         # Create top bar with theme switcher and title
@@ -980,44 +1195,68 @@ class SpectralPredictApp:
         row += 1
 
         # === SECTION 1: Input Data ===
-        ttk.Label(content_frame, text="1. Input Data", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        self._create_section_header(content_frame, "1. Input Data", row=row, columnspan=3)
         row += 1
+
+        # Create card for input data
+        input_card_outer, input_card = self._create_card(content_frame, title="Data Files",
+                                                          subtitle="Select spectral data directory and reference CSV")
+        input_card_outer.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+
+        # Inner frame for file inputs (to support grid layout within card)
+        input_frame = tk.Frame(input_card, bg=self.colors['card_bg'])
+        input_frame.pack(fill='both', expand=True)
+
+        input_row = 0
 
         # Spectral data directory (unified input with auto-detection)
-        ttk.Label(content_frame, text="Spectral File Directory:").grid(row=row, column=0, sticky=tk.W, pady=10)
-        ttk.Entry(content_frame, textvariable=self.spectral_data_path, width=60).grid(row=row, column=1, padx=10)
-        ttk.Button(content_frame, text="Browse...", command=self._browse_spectral_data, style='Modern.TButton').grid(row=row, column=2)
-        row += 1
+        ttk.Label(input_frame, text="Spectral File Directory:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
+        ttk.Entry(input_frame, textvariable=self.spectral_data_path, width=60).grid(row=input_row, column=1, padx=10)
+        ttk.Button(input_frame, text="Browse...", command=self._browse_spectral_data, style='Modern.TButton').grid(row=input_row, column=2)
+        input_row += 1
 
         # Detection status label
-        self.detection_status = ttk.Label(content_frame, text="", style='Caption.TLabel')
-        self.detection_status.grid(row=row, column=1, sticky=tk.W, padx=10, pady=(0, 10))
-        row += 1
+        self.detection_status = ttk.Label(input_frame, text="", style='Caption.TLabel')
+        self.detection_status.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 10))
+        input_row += 1
 
         # Reference file
-        ttk.Label(content_frame, text="Reference CSV:").grid(row=row, column=0, sticky=tk.W, pady=10)
-        ttk.Entry(content_frame, textvariable=self.reference_file, width=60).grid(row=row, column=1, padx=10)
-        ttk.Button(content_frame, text="Browse...", command=self._browse_reference_file, style='Modern.TButton').grid(row=row, column=2)
-        row += 1
+        ttk.Label(input_frame, text="Reference CSV:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
+        ttk.Entry(input_frame, textvariable=self.reference_file, width=60).grid(row=input_row, column=1, padx=10)
+        ttk.Button(input_frame, text="Browse...", command=self._browse_reference_file, style='Modern.TButton').grid(row=input_row, column=2)
+        input_row += 1
 
         # === SECTION 2: Column Names ===
-        ttk.Label(content_frame, text="2. Column Names", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "2. Column Names", row=row, columnspan=3)
         row += 1
 
-        ttk.Label(content_frame, text="Spectral File Column:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.spectral_file_combo = ttk.Combobox(content_frame, textvariable=self.spectral_file_column, width=35)
-        self.spectral_file_combo.grid(row=row, column=1, sticky=tk.W, padx=10)
+        # Create card for column configuration
+        column_card_outer, column_card = self._create_card(content_frame, title="Column Configuration",
+                                                            subtitle="Map CSV columns to data roles")
+        column_card_outer.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
-        ttk.Label(content_frame, text="Specimen ID Column:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.id_combo = ttk.Combobox(content_frame, textvariable=self.id_column, width=35)
-        self.id_combo.grid(row=row, column=1, sticky=tk.W, padx=10)
-        row += 1
+        # Inner frame for column inputs
+        column_frame = tk.Frame(column_card, bg=self.colors['card_bg'])
+        column_frame.pack(fill='both', expand=True)
 
-        ttk.Label(content_frame, text="Target Variable Column:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.target_combo = ttk.Combobox(content_frame, textvariable=self.target_column, width=35)
-        self.target_combo.grid(row=row, column=1, sticky=tk.W, padx=10)
-        row += 1
+        col_row = 0
+
+        ttk.Label(column_frame, text="Spectral File Column:").grid(row=col_row, column=0, sticky=tk.W, pady=5)
+        self.spectral_file_combo = ttk.Combobox(column_frame, textvariable=self.spectral_file_column, width=35)
+        self.spectral_file_combo.grid(row=col_row, column=1, sticky=tk.W, padx=10)
+        col_row += 1
+
+        ttk.Label(column_frame, text="Specimen ID Column:").grid(row=col_row, column=0, sticky=tk.W, pady=5)
+        self.id_combo = ttk.Combobox(column_frame, textvariable=self.id_column, width=35)
+        self.id_combo.grid(row=col_row, column=1, sticky=tk.W, padx=10)
+        col_row += 1
+
+        ttk.Label(column_frame, text="Target Variable Column:").grid(row=col_row, column=0, sticky=tk.W, pady=5)
+        self.target_combo = ttk.Combobox(column_frame, textvariable=self.target_column, width=35)
+        self.target_combo.grid(row=col_row, column=1, sticky=tk.W, padx=10)
+        col_row += 1
 
         # Task Type (Classification vs Regression)
         ttk.Label(content_frame, text="Task Type:", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
@@ -1118,9 +1357,9 @@ class SpectralPredictApp:
         ttk.Label(exclusion_frame, text="(Click individual spectra in plots to toggle visibility)",
                  style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
 
-        # Load Data Button
-        self.load_button = self._create_accent_button(content_frame, text="📊 Load Data & Generate Plots",
-                                                       command=self._load_and_plot_data)
+        # Load Data Button - use modern gradient button
+        self.load_button = self._create_button_with_gradient(content_frame, text="📊 Load Data & Generate Plots",
+                                                              command=self._load_and_plot_data, style='accent')
         self.load_button.grid(row=row, column=0, columnspan=3, pady=30)
         row += 1
 
@@ -1408,11 +1647,13 @@ class SpectralPredictApp:
         row += 1
 
         # === Analysis Options ===
-        ttk.Label(content_frame, text="Analysis Options", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        self._create_section_header(content_frame, "Analysis Options", row=row, columnspan=2)
         row += 1
 
-        options_frame = ttk.LabelFrame(content_frame, text="General Settings", padding="20")
-        options_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for general settings
+        options_card_outer, options_frame = self._create_card(content_frame, title="General Settings",
+                                                               subtitle="Configure cross-validation, penalties, and output settings")
+        options_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         # CV Folds
@@ -1449,11 +1690,13 @@ class SpectralPredictApp:
         ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
-        ttk.Label(content_frame, text="Preprocessing Methods", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Preprocessing Methods", row=row, columnspan=2)
         row += 1
 
-        preprocess_frame = ttk.LabelFrame(content_frame, text="Select Preprocessing", padding="20")
-        preprocess_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for preprocessing
+        preprocess_card_outer, preprocess_frame = self._create_card(content_frame, title="Select Preprocessing",
+                                                                     subtitle="Choose spectral preprocessing techniques")
+        preprocess_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         ttk.Checkbutton(preprocess_frame, text="✓ Raw (no preprocessing)", variable=self.use_raw).grid(row=0, column=0, sticky=tk.W, pady=5)
@@ -1485,11 +1728,13 @@ class SpectralPredictApp:
         ttk.Checkbutton(window_frame, text="Window=19", variable=self.window_19).grid(row=0, column=3, padx=5, pady=2)
 
         # === Subset Analysis ===
-        ttk.Label(content_frame, text="Subset Analysis", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Subset Analysis", row=row, columnspan=2)
         row += 1
 
-        subset_frame = ttk.LabelFrame(content_frame, text="Variable & Region Subsets", padding="20")
-        subset_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for subset analysis
+        subset_card_outer, subset_frame = self._create_card(content_frame, title="Variable & Region Subsets",
+                                                             subtitle="Test models using variable and region subsets")
+        subset_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         # Enable/disable toggles
@@ -1527,11 +1772,13 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Variable Selection Methods ===
-        ttk.Label(content_frame, text="Variable Selection Methods 🆕", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Variable Selection Methods 🆕", row=row, columnspan=2)
         row += 1
 
-        varsel_frame = ttk.LabelFrame(content_frame, text="Advanced Variable Selection", padding="20")
-        varsel_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for variable selection
+        varsel_card_outer, varsel_frame = self._create_card(content_frame, title="Advanced Variable Selection",
+                                                             subtitle="Sophisticated wavelength selection techniques")
+        varsel_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         # Method selection (checkboxes - multiple selection enabled)
@@ -1593,18 +1840,17 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
 
         # === Model Selection ===
-        ttk.Label(content_frame, text="Models to Test", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Models to Test", row=row, columnspan=2)
         row += 1
 
-        # Tier Selection
-        tier_frame = ttk.LabelFrame(content_frame, text="Model Tier (Quick Presets) 🆕", padding="20")
-        tier_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Tier Selection - use modern card
+        tier_card_outer, tier_frame = self._create_card(content_frame, title="Model Tier (Quick Presets) 🆕",
+                                                         subtitle="Select a preset tier to auto-populate model selections")
+        tier_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
-
-        ttk.Label(tier_frame, text="Select a preset tier to auto-populate model selections:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0, 10))
 
         tier_options_frame = ttk.Frame(tier_frame)
-        tier_options_frame.grid(row=1, column=0, columnspan=5, sticky=tk.W, pady=5)
+        tier_options_frame.grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=5)
 
         ttk.Radiobutton(tier_options_frame, text="⚡ Quick", variable=self.model_tier, value="quick").grid(row=0, column=0, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="⭐ Standard [DEFAULT]", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
@@ -1618,8 +1864,10 @@ class SpectralPredictApp:
         # Add callback to tier selection to update checkboxes
         self.model_tier.trace_add('write', self._on_tier_changed)
 
-        models_frame = ttk.LabelFrame(content_frame, text="Select Models", padding="20")
-        models_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for model selection
+        models_card_outer, models_frame = self._create_card(content_frame, title="Select Models",
+                                                            subtitle="Choose machine learning models for analysis")
+        models_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         # Core Models (Column 1)
@@ -1676,12 +1924,20 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['success']).grid(row=12, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Advanced Model Options ===
-        ttk.Label(content_frame, text="Advanced Model Options", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Advanced Model Options", row=row, columnspan=2)
         row += 1
 
-        advanced_frame = ttk.LabelFrame(content_frame, text="Neural Boosted Hyperparameters", padding="20")
-        advanced_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create collapsible section for Neural Boosted hyperparameters
+        neuralboosted_section, neuralboosted_content = self._create_collapsible_section(content_frame,
+                                                                                        "Neural Boosted Hyperparameters",
+                                                                                        expanded=False)
+        neuralboosted_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
         row += 1
+
+        # Create card inside collapsible section
+        advanced_card_outer, advanced_frame = self._create_card(neuralboosted_content,
+                                                                subtitle="Configure n_estimators and learning rates")
+        advanced_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
 
         # n_estimators options
         ttk.Label(advanced_frame, text="n_estimators (boosting rounds):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
@@ -1705,10 +1961,17 @@ class SpectralPredictApp:
         ttk.Label(advanced_frame, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
-        # Random Forest Hyperparameters
-        rf_frame = ttk.LabelFrame(content_frame, text="Random Forest Hyperparameters", padding="20")
-        rf_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Random Forest Hyperparameters - collapsible
+        rf_section, rf_content = self._create_collapsible_section(content_frame,
+                                                                   "Random Forest Hyperparameters",
+                                                                   expanded=False)
+        rf_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
         row += 1
+
+        # Create card inside collapsible section
+        rf_card_outer, rf_frame = self._create_card(rf_content,
+                                                    subtitle="Configure number of trees and tree depth")
+        rf_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
 
         # n_estimators (number of trees) options
         ttk.Label(rf_frame, text="Number of Trees (n_estimators):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
@@ -1741,10 +2004,17 @@ class SpectralPredictApp:
         ttk.Label(rf_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
-        # Ridge Regression Hyperparameters
-        ridge_frame = ttk.LabelFrame(content_frame, text="Ridge Regression Hyperparameters", padding="20")
-        ridge_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Ridge Regression Hyperparameters - collapsible
+        ridge_section, ridge_content = self._create_collapsible_section(content_frame,
+                                                                        "Ridge Regression Hyperparameters",
+                                                                        expanded=False)
+        ridge_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
         row += 1
+
+        # Create card inside collapsible section
+        ridge_card_outer, ridge_frame = self._create_card(ridge_content,
+                                                          subtitle="Configure alpha (regularization strength)")
+        ridge_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
 
         # Alpha (regularization strength) options
         ttk.Label(ridge_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
@@ -1764,10 +2034,17 @@ class SpectralPredictApp:
         ttk.Label(ridge_frame, text="💡 Lower alpha = less regularization (closer to OLS). Higher alpha = more shrinkage.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
-        # Lasso Regression Hyperparameters
-        lasso_frame = ttk.LabelFrame(content_frame, text="Lasso Regression Hyperparameters", padding="20")
-        lasso_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Lasso Regression Hyperparameters - collapsible
+        lasso_section, lasso_content = self._create_collapsible_section(content_frame,
+                                                                        "Lasso Regression Hyperparameters",
+                                                                        expanded=False)
+        lasso_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
         row += 1
+
+        # Create card inside collapsible section
+        lasso_card_outer, lasso_frame = self._create_card(lasso_content,
+                                                          subtitle="Configure alpha for sparse solutions")
+        lasso_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
 
         # Alpha (regularization strength) options
         ttk.Label(lasso_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
@@ -1786,10 +2063,17 @@ class SpectralPredictApp:
         ttk.Label(lasso_frame, text="💡 Lasso encourages sparse solutions (sets weak coefficients to zero). Higher alpha = more sparsity.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
-        # XGBoost Hyperparameters
-        xgb_frame = ttk.LabelFrame(content_frame, text="XGBoost Hyperparameters (Spectroscopy-Optimized)", padding="20")
-        xgb_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # XGBoost Hyperparameters - collapsible
+        xgb_section, xgb_content = self._create_collapsible_section(content_frame,
+                                                                     "XGBoost Hyperparameters (Spectroscopy-Optimized)",
+                                                                     expanded=False)
+        xgb_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
         row += 1
+
+        # Create card inside collapsible section
+        xgb_card_outer, xgb_frame = self._create_card(xgb_content,
+                                                      subtitle="Comprehensive hyperparameter tuning for XGBoost")
+        xgb_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
 
         # n_estimators (number of boosting rounds)
         ttk.Label(xgb_frame, text="Number of Boosting Rounds (n_estimators):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
@@ -1897,11 +2181,13 @@ class SpectralPredictApp:
         row += 1
 
         # === Validation Set Configuration ===
-        ttk.Label(content_frame, text="Validation Set Configuration 🆕", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Validation Set Configuration 🆕", row=row, columnspan=2)
         row += 1
 
-        validation_frame = ttk.LabelFrame(content_frame, text="Holdout Validation Set", padding="20")
-        validation_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for validation set
+        validation_card_outer, validation_frame = self._create_card(content_frame, title="Holdout Validation Set",
+                                                                     subtitle="Configure independent validation samples")
+        validation_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         # Enable checkbox
@@ -1954,8 +2240,8 @@ class SpectralPredictApp:
         button_frame = ttk.Frame(validation_frame)
         button_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(15, 5))
 
-        ttk.Button(button_frame, text="Create Validation Set", command=self._create_validation_set).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(button_frame, text="Reset", command=self._reset_validation_set).pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="Create Validation Set", command=self._create_validation_set, style='Modern.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Reset", command=self._reset_validation_set, style='Modern.TButton').pack(side=tk.LEFT)
 
         # Status label
         self.validation_status_label = ttk.Label(validation_frame, text="No validation set created", style='Caption.TLabel')
@@ -1965,11 +2251,13 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # === Ensemble Methods Configuration ===
-        ttk.Label(content_frame, text="Ensemble Methods 🆕", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        self._create_section_header(content_frame, "Ensemble Methods 🆕", row=row, columnspan=2)
         row += 1
 
-        ensemble_frame = ttk.LabelFrame(content_frame, text="Intelligent Model Combination", padding="20")
-        ensemble_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        # Create card for ensemble methods
+        ensemble_card_outer, ensemble_frame = self._create_card(content_frame, title="Intelligent Model Combination",
+                                                                 subtitle="Combine top models for improved predictions")
+        ensemble_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
 
         # Enable ensemble checkbox
@@ -2023,9 +2311,10 @@ class SpectralPredictApp:
         ttk.Label(ensemble_frame, text="💡 Region-based methods identify which models excel at low/mid/high predictions",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
-        # Run button
-        run_btn = self._create_accent_button(content_frame, text="▶ Run Analysis", command=self._run_analysis)
-        run_btn.grid(row=row, column=0, columnspan=2, pady=20, ipadx=30, ipady=10)
+        # Run button - use modern gradient button
+        run_btn = self._create_button_with_gradient(content_frame, text="▶ Run Analysis",
+                                                     command=self._run_analysis, style='accent')
+        run_btn.grid(row=row, column=0, columnspan=2, pady=30)
         row += 1
 
         self.tab3_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')
@@ -2087,14 +2376,18 @@ class SpectralPredictApp:
         # Title
         ttk.Label(content_frame, text="Analysis Results", style='Title.TLabel').pack(anchor=tk.W, pady=(0, 20))
 
-        # Instructions
-        instructions = ttk.Label(content_frame,
-            text="Click on any result row to load it into the 'Custom Model Development' tab for further tuning.",
-            style='Caption.TLabel')
-        instructions.pack(anchor=tk.W, pady=(0, 10))
+        # Instructions card
+        instructions_card_outer, instructions_card = self._create_card(content_frame,
+                                                                        subtitle="Click on any result row to load it into the 'Custom Model Development' tab for further tuning.")
+        instructions_card_outer.pack(fill='x', pady=(0, 10), padx=5)
+
+        # Create card for results table
+        results_card_outer, results_card = self._create_card(content_frame, title="Model Performance Results",
+                                                              subtitle="All tested models ranked by performance")
+        results_card_outer.pack(fill='both', expand=True, pady=10, padx=5)
 
         # Create frame for treeview and scrollbars
-        tree_frame = ttk.Frame(content_frame)
+        tree_frame = ttk.Frame(results_card)
         tree_frame.pack(fill='both', expand=True)
 
         # Create Treeview with scrollbars
@@ -2114,15 +2407,17 @@ class SpectralPredictApp:
         # Bind double-click event
         self.results_tree.bind('<Double-Button-1>', self._on_result_double_click)
 
-        # Button frame for actions
-        button_frame = ttk.Frame(content_frame)
+        # Button frame for actions (inside card)
+        button_frame = ttk.Frame(results_card)
         button_frame.pack(pady=10, fill='x')
 
-        ttk.Button(button_frame, text="📥 Export Results to CSV",
-                   command=self._export_results_table).pack(side='left', padx=5)
+        # Use modern gradient button for export
+        export_btn = self._create_button_with_gradient(button_frame, text="📥 Export Results to CSV",
+                                                        command=self._export_results_table, style='secondary')
+        export_btn.pack(side='left', padx=5)
 
-        # Status label
-        self.results_status = ttk.Label(content_frame, text="No results yet. Run an analysis to see results here.",
+        # Status label (inside card)
+        self.results_status = ttk.Label(results_card, text="No results yet. Run an analysis to see results here.",
                                        style='Caption.TLabel')
         self.results_status.pack(pady=5)
 
@@ -2130,16 +2425,13 @@ class SpectralPredictApp:
         ensemble_separator = ttk.Separator(content_frame, orient='horizontal')
         ensemble_separator.pack(fill='x', pady=20)
 
-        ensemble_title = ttk.Label(content_frame, text="Ensemble Model Results", style='Heading.TLabel')
-        ensemble_title.pack(anchor=tk.W, pady=(0, 10))
-
-        ensemble_info = ttk.Label(content_frame,
-            text="Ensemble methods combine multiple models to improve predictions. Results appear here after running analysis with ensembles enabled.",
-            style='Caption.TLabel', foreground=self.colors['accent'])
-        ensemble_info.pack(anchor=tk.W, pady=(0, 10))
+        # Create card for ensemble results
+        ensemble_card_outer, ensemble_card = self._create_card(content_frame, title="Ensemble Model Results",
+                                                                subtitle="Ensemble methods combine multiple models to improve predictions. Results appear here after running analysis with ensembles enabled.")
+        ensemble_card_outer.pack(fill='both', expand=True, pady=10, padx=5)
 
         # Ensemble results frame
-        self.ensemble_frame = ttk.Frame(content_frame)
+        self.ensemble_frame = ttk.Frame(ensemble_card)
         self.ensemble_frame.pack(fill='both', expand=False, pady=10)
 
         # Ensemble table
@@ -2164,19 +2456,19 @@ class SpectralPredictApp:
         ensemble_buttons.pack(pady=10, fill='x')
 
         self.btn_save_best_ensemble = ttk.Button(ensemble_buttons, text="💾 Save Best Ensemble",
-                   command=self._save_best_ensemble, state='disabled')
+                   command=self._save_best_ensemble, style='Modern.TButton', state='disabled')
         self.btn_save_best_ensemble.pack(side='left', padx=5)
 
         self.btn_show_regional_perf = ttk.Button(ensemble_buttons, text="📊 Show Regional Performance",
-                   command=self._show_regional_performance, state='disabled')
+                   command=self._show_regional_performance, style='Modern.TButton', state='disabled')
         self.btn_show_regional_perf.pack(side='left', padx=5)
 
         self.btn_show_weights = ttk.Button(ensemble_buttons, text="⚖️ Show Ensemble Weights",
-                   command=self._show_ensemble_weights, state='disabled')
+                   command=self._show_ensemble_weights, style='Modern.TButton', state='disabled')
         self.btn_show_weights.pack(side='left', padx=5)
 
         self.btn_show_specialization = ttk.Button(ensemble_buttons, text="🎯 Show Specialization",
-                   command=self._show_specialization_profile, state='disabled')
+                   command=self._show_specialization_profile, style='Modern.TButton', state='disabled')
         self.btn_show_specialization.pack(side='left', padx=5)
 
         # Ensemble status
@@ -2229,7 +2521,7 @@ class SpectralPredictApp:
 
         # Reset button
         ttk.Button(mode_frame, text="Reset to Defaults",
-                   command=self._load_default_parameters).pack(side='right', padx=5)
+                   command=self._load_default_parameters, style='Modern.TButton').pack(side='right', padx=5)
 
         # === Selected Model Info ===
         ttk.Label(content_frame, text="Selected Model Configuration", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
@@ -2262,13 +2554,13 @@ class SpectralPredictApp:
 
         ttk.Label(preset_frame, text="Quick presets:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
         ttk.Button(preset_frame, text="All", command=lambda: self._apply_wl_preset('all'),
-                   width=8).pack(side='left', padx=2)
+                   style='Modern.TButton', width=8).pack(side='left', padx=2)
         ttk.Button(preset_frame, text="NIR Only", command=lambda: self._apply_wl_preset('nir'),
-                   width=8).pack(side='left', padx=2)
+                   style='Modern.TButton', width=8).pack(side='left', padx=2)
         ttk.Button(preset_frame, text="Visible", command=lambda: self._apply_wl_preset('visible'),
-                   width=8).pack(side='left', padx=2)
+                   style='Modern.TButton', width=8).pack(side='left', padx=2)
         ttk.Button(preset_frame, text="Custom Range...", command=self._custom_range_dialog,
-                   width=12).pack(side='left', padx=2)
+                   style='Modern.TButton', width=12).pack(side='left', padx=2)
 
         # Instructions
         ttk.Label(params_frame, text="Enter wavelengths as individual values or ranges (e.g., 1920, 1930-1940, 1950)",
@@ -2287,7 +2579,7 @@ class SpectralPredictApp:
 
         # Button to preview wavelength selection
         ttk.Button(params_frame, text="Preview Selected Wavelengths",
-                   command=self._preview_wavelength_selection).grid(row=4, column=0, sticky=tk.W, pady=5)
+                   command=self._preview_wavelength_selection, style='Modern.TButton').grid(row=4, column=0, sticky=tk.W, pady=5)
 
         # Wavelength count display (real-time)
         self.refine_wl_count_label = ttk.Label(params_frame, text="Wavelengths: 0 selected",
@@ -3001,7 +3293,7 @@ class SpectralPredictApp:
             # Add OK button
             button_frame = ttk.Frame(dialog, padding=10)
             button_frame.pack(fill='x')
-            ok_button = ttk.Button(button_frame, text="OK", command=dialog.destroy)
+            ok_button = ttk.Button(button_frame, text="OK", command=dialog.destroy, style='Modern.TButton')
             ok_button.pack()
 
             # Center dialog on parent
@@ -8222,7 +8514,7 @@ Configuration:
         wl_text.config(state='disabled')
 
         # Close button
-        ttk.Button(preview_window, text="Close", command=preview_window.destroy).pack(pady=10)
+        ttk.Button(preview_window, text="Close", command=preview_window.destroy, style='Modern.TButton').pack(pady=10)
 
 
     def _update_wavelength_count(self, event=None):
@@ -8317,8 +8609,8 @@ Configuration:
 
         button_frame = ttk.Frame(dialog)
         button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Apply", command=apply_range).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Apply", command=apply_range, style='Modern.TButton').pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy, style='Modern.TButton').pack(side='left', padx=5)
 
     # === Tab 8: Model Prediction Methods ===
 
@@ -8362,9 +8654,9 @@ Configuration:
         button_frame1.grid(row=0, column=0, columnspan=2, pady=5)
 
         ttk.Button(button_frame1, text="📂 Load Model File(s)",
-                   command=self._load_model_for_prediction).pack(side='left', padx=5)
+                   command=self._load_model_for_prediction, style='Modern.TButton').pack(side='left', padx=5)
         ttk.Button(button_frame1, text="🗑️ Clear All Models",
-                   command=self._clear_loaded_models).pack(side='left', padx=5)
+                   command=self._clear_loaded_models, style='Modern.TButton').pack(side='left', padx=5)
 
         # Loaded models display
         ttk.Label(step1_frame, text="Loaded Models:", style='Subheading.TLabel').grid(
@@ -8418,7 +8710,7 @@ Configuration:
         self.pred_path_entry = ttk.Entry(path_frame, textvariable=self.pred_data_path, width=60)
         self.pred_path_entry.pack(side='left', fill='x', expand=True)
         self.pred_browse_button = ttk.Button(path_frame, text="Browse...",
-                   command=self._browse_prediction_data)
+                   command=self._browse_prediction_data, style='Modern.TButton')
         self.pred_browse_button.pack(side='left', padx=5)
 
         # Load button and status
@@ -8426,7 +8718,7 @@ Configuration:
         button_frame2.grid(row=4, column=0, columnspan=2, pady=10)
 
         ttk.Button(button_frame2, text="📊 Load Data",
-                   command=self._load_prediction_data).pack(side='left', padx=5)
+                   command=self._load_prediction_data, style='Modern.TButton').pack(side='left', padx=5)
 
         self.pred_data_status = ttk.Label(step2_frame, text="No data loaded", style='Caption.TLabel')
         self.pred_data_status.grid(row=5, column=0, columnspan=2, pady=5)
@@ -8442,7 +8734,7 @@ Configuration:
         ttk.Button(button_frame3, text="🚀 Run All Models",
                    command=self._run_predictions, style='Accent.TButton').pack(side='left', padx=5)
         ttk.Button(button_frame3, text="📥 Export to CSV",
-                   command=self._export_predictions).pack(side='left', padx=5)
+                   command=self._export_predictions, style='Modern.TButton').pack(side='left', padx=5)
 
         # Progress bar
         self.pred_progress = ttk.Progressbar(step3_frame, mode='determinate', length=400)
@@ -9501,7 +9793,7 @@ Configuration:
         ttk.Label(dir_frame, text="Data Directory:", style='TLabel').pack(side='left', padx=(0, 10))
         self.inst_data_path = tk.StringVar()
         ttk.Entry(dir_frame, textvariable=self.inst_data_path, width=50).pack(side='left', padx=(0, 10))
-        ttk.Button(dir_frame, text="Browse", command=self._browse_instrument_data).pack(side='left')
+        ttk.Button(dir_frame, text="Browse", command=self._browse_instrument_data, style='Modern.TButton').pack(side='left')
 
         # Load & Characterize button
         ttk.Button(section_a, text="Load & Characterize",
@@ -9538,11 +9830,11 @@ Configuration:
         reg_btn_frame.pack(fill='x', pady=(10, 0))
 
         ttk.Button(reg_btn_frame, text="Save Registry",
-                  command=self._save_instrument_registry).pack(side='left', padx=5)
+                  command=self._save_instrument_registry, style='Modern.TButton').pack(side='left', padx=5)
         ttk.Button(reg_btn_frame, text="Load Registry",
-                  command=self._load_instrument_registry).pack(side='left', padx=5)
+                  command=self._load_instrument_registry, style='Modern.TButton').pack(side='left', padx=5)
         ttk.Button(reg_btn_frame, text="Delete Selected",
-                  command=self._delete_selected_instrument).pack(side='left', padx=5)
+                  command=self._delete_selected_instrument, style='Modern.TButton').pack(side='left', padx=5)
 
     def _browse_instrument_data(self):
         """Browse for instrument data directory."""
@@ -10989,7 +11281,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         model_entry.pack(side='left', padx=(0, 10))
 
         ttk.Button(load_model_frame, text="Browse Model...",
-                  command=self._browse_ct_master_model).pack(side='left', padx=(0, 10))
+                  command=self._browse_ct_master_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
         ttk.Button(load_model_frame, text="Load Model",
                   command=self._load_ct_master_model, style='Accent.TButton').pack(side='left')
 
@@ -11024,7 +11316,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         self.ct_slave_instrument_combo.grid(row=0, column=3, sticky='w')
 
         ttk.Button(inst_grid, text="Refresh from Registry",
-                  command=self._refresh_ct_instrument_combos).grid(row=0, column=4, padx=(20, 0))
+                  command=self._refresh_ct_instrument_combos, style='Modern.TButton').grid(row=0, column=4, padx=(20, 0))
 
         # Load paired spectra from TWO separate directories
         load_spectra_frame = ttk.Frame(section_b, style='TFrame')
@@ -11043,7 +11335,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                                 width=50, state='readonly')
         master_entry.pack(side='left', padx=(0, 10))
         ttk.Button(master_dir_frame, text="Browse...",
-                  command=self._browse_ct_master_spectra_dir).pack(side='left')
+                  command=self._browse_ct_master_spectra_dir, style='Modern.TButton').pack(side='left')
 
         # Slave spectra directory
         slave_dir_frame = ttk.Frame(load_spectra_frame, style='TFrame')
@@ -11055,7 +11347,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                                width=50, state='readonly')
         slave_entry.pack(side='left', padx=(0, 10))
         ttk.Button(slave_dir_frame, text="Browse...",
-                  command=self._browse_ct_slave_spectra_dir).pack(side='left')
+                  command=self._browse_ct_slave_spectra_dir, style='Modern.TButton').pack(side='left')
 
         # Load button
         ttk.Button(load_spectra_frame, text="Load Paired Spectra",
@@ -11117,7 +11409,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         save_tm_frame.pack(fill='x', pady=(10, 0))
 
         ttk.Button(save_tm_frame, text="Save Transfer Model...",
-                  command=self._save_ct_transfer_model).pack(side='left')
+                  command=self._save_ct_transfer_model, style='Modern.TButton').pack(side='left')
 
         # ===================================================================
         # SECTION D: Export Equalized Spectra (Optional)
@@ -11134,7 +11426,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         eq_button_frame.pack(fill='x')
 
         ttk.Button(eq_button_frame, text="Load Multi-Instrument Dataset...",
-                  command=self._load_multiinstrument_dataset).pack(side='left', padx=(0, 10))
+                  command=self._load_multiinstrument_dataset, style='Modern.TButton').pack(side='left', padx=(0, 10))
         ttk.Button(eq_button_frame, text="Equalize & Export...",
                   command=self._equalize_and_export, style='Accent.TButton').pack(side='left')
 
@@ -11167,9 +11459,9 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         tm_entry.pack(side='left', padx=(0, 10))
 
         ttk.Button(load_tm_frame, text="Browse Transfer Model...",
-                  command=self._browse_ct_pred_transfer_model).pack(side='left', padx=(0, 10))
+                  command=self._browse_ct_pred_transfer_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
         ttk.Button(load_tm_frame, text="Load TM",
-                  command=self._load_ct_pred_transfer_model).pack(side='left')
+                  command=self._load_ct_pred_transfer_model, style='Modern.TButton').pack(side='left')
 
         # Load new slave spectra
         load_new_spectra_frame = ttk.Frame(section_e, style='TFrame')
@@ -11187,7 +11479,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         new_slave_entry.pack(side='left', padx=(0, 10))
 
         ttk.Button(new_spectra_entry_frame, text="Browse Directory...",
-                  command=self._browse_ct_new_slave_dir).pack(side='left', padx=(0, 10))
+                  command=self._browse_ct_new_slave_dir, style='Modern.TButton').pack(side='left', padx=(0, 10))
         ttk.Button(new_spectra_entry_frame, text="Load & Predict",
                   command=self._load_and_predict_ct, style='Accent.TButton').pack(side='left')
 
@@ -11202,7 +11494,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
 
         # Export predictions
         ttk.Button(section_e, text="Export Predictions...",
-                  command=self._export_ct_predictions).pack(pady=(10, 0), anchor='w')
+                  command=self._export_ct_predictions, style='Modern.TButton').pack(pady=(10, 0), anchor='w')
 
 
 def main():
