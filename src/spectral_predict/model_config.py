@@ -8,34 +8,65 @@ This module defines:
 4. User-customizable settings
 """
 
+from typing import List
+
 # =============================================================================
 # MODEL TIERS
 # =============================================================================
 
 MODEL_TIERS = {
+    'quick': {
+        'description': 'Minimal set for rapid testing',
+        'models': ['PLS', 'Ridge', 'ElasticNet'],
+        'recommended_for': 'Quick tests, preliminary analysis, daily QC'
+    },
+
     'standard': {
-        'description': 'Fast & reliable core models (10-15 min)',
-        'models': ['PLS', 'Ridge', 'ElasticNet', 'XGBoost'],
-        'recommended_for': 'Most users, daily analysis'
+        'description': 'Fast & reliable core models',
+        'models': ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'LightGBM'],
+        'recommended_for': 'Most users, daily analysis, routine work'
     },
 
     'comprehensive': {
-        'description': 'Advanced analysis with all top performers (20-30 min)',
-        'models': ['PLS', 'Ridge', 'ElasticNet', 'XGBoost', 'LightGBM', 'SVR', 'NeuralBoosted'],
+        'description': 'Advanced analysis with gradient boosting',
+        'models': ['PLS', 'Ridge', 'ElasticNet', 'RandomForest', 'LightGBM',
+                   'XGBoost', 'CatBoost', 'NeuralBoosted'],
         'recommended_for': 'Thorough analysis, research, publications'
     },
 
     'experimental': {
-        'description': 'All available models including experimental (45+ min)',
+        'description': 'All available models including slow ones',
         'models': ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'XGBoost',
                    'LightGBM', 'CatBoost', 'SVR', 'MLP', 'NeuralBoosted'],
-        'recommended_for': 'Exploration, method comparison, research'
+        'recommended_for': 'Exploration, method comparison, research, no time constraints'
+    }
+}
+
+# Classification-specific model tiers (optimized for categorical target variables)
+CLASSIFICATION_TIERS = {
+    'quick': {
+        'description': 'Minimal set for rapid classification testing',
+        'models': ['PLS-DA', 'LightGBM', 'RandomForest'],
+        'recommended_for': 'Quick tests, preliminary analysis, daily QC'
     },
 
-    'quick': {
-        'description': 'Minimal set for rapid testing (5 min)',
-        'models': ['PLS', 'Ridge', 'XGBoost'],
-        'recommended_for': 'Quick tests, preliminary analysis'
+    'standard': {
+        'description': 'Fast & reliable production classifiers',
+        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost'],
+        'recommended_for': 'Most users, daily classification, routine work'
+    },
+
+    'comprehensive': {
+        'description': 'Advanced classifiers for thorough analysis',
+        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'SVM', 'MLP'],
+        'recommended_for': 'Research, publications, thorough method comparison'
+    },
+
+    'experimental': {
+        'description': 'All available classifiers including experimental',
+        'models': ['PLS-DA', 'PLS', 'RandomForest', 'LightGBM', 'XGBoost',
+                   'CatBoost', 'SVM', 'MLP'],
+        'recommended_for': 'Exploration, method comparison, no time constraints'
     }
 }
 
@@ -107,19 +138,29 @@ OPTIMIZED_HYPERPARAMETERS = {
             'n_estimators': [100, 200],  # 2 values (reduced from 3)
             'learning_rate': [0.05, 0.1],  # 2 values (reduced from 3)
             'max_depth': [3, 6],  # 2 values (reduced from 3)
-            'note': 'Grid size: 2×2×2 = 8 configs (vs 27 original) - 70% performance, 30% time'
+            'subsample': [0.8, 1.0],  # 2 values - row sampling (0.8 recommended for spectroscopy)
+            'colsample_bytree': [0.8, 1.0],  # 2 values - column sampling (critical for 2000+ features)
+            'reg_alpha': [0, 0.1],  # 2 values - L1 regularization (helps with feature selection)
+            'note': 'Grid size: 2×2×2×2×2×2 = 64 configs - adds critical regularization for high-dim data'
         },
         'comprehensive': {
-            'n_estimators': [50, 100, 200],  # 3 values
-            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
+            'n_estimators': [100, 200],  # 2 values (keep manageable)
+            'learning_rate': [0.05, 0.1],  # 2 values
             'max_depth': [3, 6, 9],  # 3 values
-            'note': 'Grid size: 3×3×3 = 27 configs - full search'
+            'subsample': [0.7, 0.85, 1.0],  # 3 values - more thorough sampling search
+            'colsample_bytree': [0.7, 0.85, 1.0],  # 3 values - more thorough column search
+            'reg_alpha': [0, 0.1, 0.5],  # 3 values - test aggressive L1
+            'reg_lambda': [1.0, 5.0],  # 2 values - L2 regularization (synergy with L1)
+            'note': 'Grid size: 2×2×3×3×3×3×2 = 648 configs - comprehensive search with regularization'
         },
         'quick': {
             'n_estimators': [100],  # 1 value
             'learning_rate': [0.1],  # 1 value
             'max_depth': [6],  # 1 value
-            'note': 'Grid size: 1×1×1 = 1 config - standard defaults only'
+            'subsample': [0.8],  # Fixed at optimal value
+            'colsample_bytree': [0.8],  # Fixed at optimal value
+            'reg_alpha': [0.1],  # Fixed at optimal value
+            'note': 'Grid size: 1×1×1×1×1×1 = 1 config - optimized defaults for spectroscopy'
         }
     },
 
@@ -363,23 +404,31 @@ def get_grid_size_summary():
     return summary
 
 
-def get_tier_models(tier='standard'):
+def get_tier_models(tier: str = 'standard', task_type: str = 'regression') -> List[str]:
     """
-    Get list of models for a given tier.
+    Get the list of models for a given tier and task type.
 
     Parameters
     ----------
     tier : str
         One of 'quick', 'standard', 'comprehensive', 'experimental'
+    task_type : str
+        Either 'regression' or 'classification'
 
     Returns
     -------
-    list of str
-        Model names for this tier
+    List[str]
+        List of model names for the specified tier and task type
     """
-    if tier not in MODEL_TIERS:
-        raise ValueError(f"Unknown tier: {tier}. Choose from {list(MODEL_TIERS.keys())}")
-    return MODEL_TIERS[tier]['models']
+    if task_type == 'classification':
+        tier_dict = CLASSIFICATION_TIERS
+    else:
+        tier_dict = MODEL_TIERS
+
+    if tier not in tier_dict:
+        raise ValueError(f"Unknown tier: {tier}. Must be one of {list(tier_dict.keys())}")
+
+    return tier_dict[tier]['models']
 
 
 def get_hyperparameters(model_name, tier='standard'):

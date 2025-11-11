@@ -108,6 +108,10 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 n_estimators=100,
                 learning_rate=0.1,
                 max_depth=6,
+                subsample=0.8,  # Better default for spectroscopy (correlated samples)
+                colsample_bytree=0.8,  # Better default for 2000+ features (tree diversity)
+                reg_alpha=0.1,  # L1 regularization for implicit feature selection
+                tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
                 n_jobs=-1,
                 verbosity=0
@@ -117,7 +121,13 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return LGBMRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
-                max_depth=6,
+                num_leaves=15,  # Reduced for small datasets (was 31)
+                max_depth=-1,  # No limit (controlled by num_leaves)
+                min_child_samples=5,  # Reduced for small datasets (was 20)
+                subsample=0.8,  # Row sampling like XGBoost
+                colsample_bytree=0.8,  # Feature sampling for high-dimensional data
+                reg_alpha=0.1,  # L1 regularization
+                reg_lambda=1.0,  # L2 regularization
                 random_state=42,
                 n_jobs=-1,
                 verbosity=-1
@@ -168,6 +178,10 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 n_estimators=100,
                 learning_rate=0.1,
                 max_depth=6,
+                subsample=0.8,  # Better default for spectroscopy (correlated samples)
+                colsample_bytree=0.8,  # Better default for 2000+ features (tree diversity)
+                reg_alpha=0.1,  # L1 regularization for implicit feature selection
+                tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
                 n_jobs=-1,
                 verbosity=0
@@ -177,7 +191,13 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return LGBMClassifier(
                 n_estimators=100,
                 learning_rate=0.1,
-                max_depth=6,
+                num_leaves=15,  # Reduced for small datasets (was 31)
+                max_depth=-1,  # No limit (controlled by num_leaves)
+                min_child_samples=5,  # Reduced for small datasets (was 20)
+                subsample=0.8,  # Row sampling like XGBoost
+                colsample_bytree=0.8,  # Feature sampling for high-dimensional data
+                reg_alpha=0.1,  # L1 regularization
+                reg_lambda=1.0,  # L2 regularization
                 random_state=42,
                 n_jobs=-1,
                 verbosity=-1
@@ -203,6 +223,13 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                     n_estimators_list=None, learning_rates=None, rf_n_trees_list=None,
                     rf_max_depth_list=None, ridge_alphas_list=None, lasso_alphas_list=None,
+                    xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
+                    xgb_subsample=None, xgb_colsample_bytree=None, xgb_reg_alpha=None, xgb_reg_lambda=None,
+                    elasticnet_alphas_list=None, elasticnet_l1_ratios=None,
+                    lightgbm_n_estimators_list=None, lightgbm_learning_rates=None, lightgbm_num_leaves_list=None,
+                    catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
+                    svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
+                    mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
                     tier='standard', enabled_models=None):
     """
     Get model grids for hyperparameter search with tiered defaults.
@@ -284,6 +311,81 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
         lasso_config = get_hyperparameters('Lasso', tier)
         lasso_alphas_list = lasso_config.get('alpha', [0.01, 0.1, 1.0])
 
+    # XGBoost defaults (tier-aware)
+    if xgb_n_estimators_list is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_n_estimators_list = xgb_config.get('n_estimators', [100, 200])
+    if xgb_learning_rates is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_learning_rates = xgb_config.get('learning_rate', [0.05, 0.1])
+    if xgb_max_depths is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_max_depths = xgb_config.get('max_depth', [3, 6])
+    if xgb_subsample is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_subsample = xgb_config.get('subsample', [0.8, 1.0])
+    if xgb_colsample_bytree is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_colsample_bytree = xgb_config.get('colsample_bytree', [0.8, 1.0])
+    if xgb_reg_alpha is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_reg_alpha = xgb_config.get('reg_alpha', [0, 0.1])
+    if xgb_reg_lambda is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_reg_lambda = xgb_config.get('reg_lambda', [1.0])  # Default if not in tier
+
+    # ElasticNet defaults (tier-aware)
+    if elasticnet_alphas_list is None:
+        en_config = get_hyperparameters('ElasticNet', tier)
+        elasticnet_alphas_list = en_config.get('alpha', [0.01, 0.1, 1.0])
+    if elasticnet_l1_ratios is None:
+        en_config = get_hyperparameters('ElasticNet', tier)
+        elasticnet_l1_ratios = en_config.get('l1_ratio', [0.3, 0.5, 0.7])
+
+    # LightGBM defaults (tier-aware)
+    if lightgbm_n_estimators_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_n_estimators_list = lgbm_config.get('n_estimators', [100, 200])
+    if lightgbm_learning_rates is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_learning_rates = lgbm_config.get('learning_rate', [0.1])
+    if lightgbm_num_leaves_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_num_leaves_list = lgbm_config.get('num_leaves', [31, 50])
+
+    # CatBoost defaults (tier-aware)
+    if catboost_iterations_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_iterations_list = cb_config.get('iterations', [100, 200])
+    if catboost_learning_rates is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_learning_rates = cb_config.get('learning_rate', [0.1])
+    if catboost_depths is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_depths = cb_config.get('depth', [4, 6])
+
+    # SVR defaults (tier-aware)
+    if svr_kernels is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_kernels = svr_config.get('kernel', ['rbf', 'linear'])
+    if svr_C_list is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_C_list = svr_config.get('C', [1.0, 10.0])
+    if svr_gamma_list is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_gamma_list = svr_config.get('gamma', ['scale'])
+
+    # MLP defaults (tier-aware)
+    if mlp_hidden_layer_sizes_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_hidden_layer_sizes_list = mlp_config.get('hidden_layer_sizes', [(64,), (128, 64)])
+    if mlp_alphas_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_alphas_list = mlp_config.get('alpha', [1e-3])
+    if mlp_learning_rate_inits is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_learning_rate_inits = mlp_config.get('learning_rate_init', [1e-3])
+
     grids = {}
 
     # PLS components grid (tier-aware, clip to n_features and max_n_components)
@@ -323,15 +425,11 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                 )
             grids["Lasso"] = lasso_configs
 
-        # ElasticNet Regression (tier-aware)
+        # ElasticNet Regression (tier-aware with UI overrides)
         if 'ElasticNet' in enabled_models:
-            en_config = get_hyperparameters('ElasticNet', tier)
-            en_alphas = en_config.get('alpha', [0.01, 0.1, 1.0])
-            en_l1_ratios = en_config.get('l1_ratio', [0.3, 0.5, 0.7])
-
             elasticnet_configs = []
-            for alpha in en_alphas:
-                for l1_ratio in en_l1_ratios:
+            for alpha in elasticnet_alphas_list:
+                for l1_ratio in elasticnet_l1_ratios:
                     elasticnet_configs.append(
                         (
                             ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42, max_iter=max_iter),
@@ -355,17 +453,12 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                     )
             grids["RandomForest"] = rf_configs
 
-        # MLP (tier-aware)
+        # MLP (tier-aware with UI overrides)
         if 'MLP' in enabled_models:
-            mlp_config = get_hyperparameters('MLP', tier)
-            mlp_hidden = mlp_config.get('hidden_layer_sizes', [(64,), (128, 64)])
-            mlp_alphas = mlp_config.get('alpha', [1e-3])
-            mlp_lrs = mlp_config.get('learning_rate_init', [1e-3])
-
             mlp_configs = []
-            for hidden in mlp_hidden:
-                for alpha in mlp_alphas:
-                    for lr in mlp_lrs:
+            for hidden in mlp_hidden_layer_sizes_list:
+                for alpha in mlp_alphas_list:
+                    for lr in mlp_learning_rate_inits:
                         mlp_configs.append(
                             (
                                 MLPRegressor(
@@ -447,68 +540,87 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                         )
             grids["SVR"] = svr_configs
 
-        # XGBoost Regression - tier-aware
+        # XGBoost Regression - tier-aware with UI overrides
         if 'XGBoost' in enabled_models:
-            xgb_config = get_hyperparameters('XGBoost', tier)
-            xgb_n_estimators = xgb_config.get('n_estimators', [100, 200])
-            xgb_lrs = xgb_config.get('learning_rate', [0.05, 0.1])
-            xgb_depths = xgb_config.get('max_depth', [3, 6])
-
             xgb_configs = []
-            for n_est in xgb_n_estimators:
-                for lr in xgb_lrs:
-                    for max_depth in xgb_depths:
-                        xgb_configs.append(
-                            (
-                                XGBRegressor(
-                                    n_estimators=n_est,
-                                    learning_rate=lr,
-                                    max_depth=max_depth,
-                                    random_state=42,
-                                    n_jobs=-1,
-                                    verbosity=0
-                                ),
-                                {"n_estimators": n_est, "learning_rate": lr, "max_depth": max_depth}
-                            )
-                        )
+            for n_est in xgb_n_estimators_list:
+                for lr in xgb_learning_rates:
+                    for max_depth in xgb_max_depths:
+                        for subsample in xgb_subsample:
+                            for colsample in xgb_colsample_bytree:
+                                for reg_alpha in xgb_reg_alpha:
+                                    for reg_lambda in xgb_reg_lambda:
+                                        xgb_configs.append(
+                                            (
+                                                XGBRegressor(
+                                                    n_estimators=n_est,
+                                                    learning_rate=lr,
+                                                    max_depth=max_depth,
+                                                    subsample=subsample,
+                                                    colsample_bytree=colsample,
+                                                    reg_alpha=reg_alpha,
+                                                    reg_lambda=reg_lambda,
+                                                    tree_method='hist',  # Faster for high-dimensional data
+                                                    random_state=42,
+                                                    n_jobs=-1,
+                                                    verbosity=0
+                                                ),
+                                                {
+                                                    "n_estimators": n_est,
+                                                    "learning_rate": lr,
+                                                    "max_depth": max_depth,
+                                                    "subsample": subsample,
+                                                    "colsample_bytree": colsample,
+                                                    "reg_alpha": reg_alpha,
+                                                    "reg_lambda": reg_lambda,
+                                                    "tree_method": "hist"
+                                                }
+                                            )
+                                        )
             grids["XGBoost"] = xgb_configs
 
-        # LightGBM Regression - tier-aware
+        # LightGBM Regression - tier-aware with UI overrides
         if 'LightGBM' in enabled_models:
-            lgbm_config = get_hyperparameters('LightGBM', tier)
-            lgbm_n_estimators = lgbm_config.get('n_estimators', [100, 200])
-            lgbm_lrs = lgbm_config.get('learning_rate', [0.1])
-            lgbm_leaves = lgbm_config.get('num_leaves', [31, 50])
-
             lgbm_configs = []
-            for n_est in lgbm_n_estimators:
-                for lr in lgbm_lrs:
-                    for num_leaves in lgbm_leaves:
+            for n_est in lightgbm_n_estimators_list:
+                for lr in lightgbm_learning_rates:
+                    for num_leaves in lightgbm_num_leaves_list:
                         lgbm_configs.append(
                             (
                                 LGBMRegressor(
                                     n_estimators=n_est,
                                     learning_rate=lr,
                                     num_leaves=num_leaves,
+                                    max_depth=-1,
+                                    min_child_samples=5,
+                                    subsample=0.8,
+                                    colsample_bytree=0.8,
+                                    reg_alpha=0.1,
+                                    reg_lambda=1.0,
                                     random_state=42,
                                     n_jobs=-1,
                                     verbosity=-1
                                 ),
-                                {"n_estimators": n_est, "learning_rate": lr, "num_leaves": num_leaves}
+                                {
+                                    "n_estimators": n_est,
+                                    "learning_rate": lr,
+                                    "num_leaves": num_leaves,
+                                    "max_depth": -1,
+                                    "min_child_samples": 5,
+                                    "subsample": 0.8,
+                                    "colsample_bytree": 0.8,
+                                    "reg_alpha": 0.1,
+                                    "reg_lambda": 1.0
+                                }
                             )
                         )
             grids["LightGBM"] = lgbm_configs
 
-        # CatBoost Regression - tier-aware (optional - requires Visual Studio)
+        # CatBoost Regression - tier-aware with UI overrides (optional - requires Visual Studio)
         if 'CatBoost' in enabled_models and HAS_CATBOOST:
-            catboost_config = get_hyperparameters('CatBoost', tier)
-            catboost_iterations = catboost_config.get('iterations', [100, 200])
-            catboost_lrs = catboost_config.get('learning_rate', [0.1])
-            catboost_depths = catboost_config.get('depth', [4, 6])
-
             catboost_configs = []
-            for iterations in catboost_iterations:
-                for lr in catboost_lrs:
+            for iterations in catboost_iterations_list:
+                for lr in catboost_learning_rates:
                     for depth in catboost_depths:
                         catboost_configs.append(
                             (
@@ -549,17 +661,12 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                     )
             grids["RandomForest"] = rf_configs
 
-        # MLP Classifier - tier-aware
+        # MLP Classifier - tier-aware with UI overrides
         if 'MLP' in enabled_models:
-            mlp_config = get_hyperparameters('MLP', tier)
-            mlp_hidden = mlp_config.get('hidden_layer_sizes', [(64,), (128, 64)])
-            mlp_alphas = mlp_config.get('alpha', [1e-3])
-            mlp_lrs = mlp_config.get('learning_rate_init', [1e-3])
-
             mlp_configs = []
-            for hidden in mlp_hidden:
-                for alpha in mlp_alphas:
-                    for lr in mlp_lrs:
+            for hidden in mlp_hidden_layer_sizes_list:
+                for alpha in mlp_alphas_list:
+                    for lr in mlp_learning_rate_inits:
                         mlp_configs.append(
                             (
                                 MLPClassifier(
@@ -606,68 +713,87 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
                         )
             grids["SVM"] = svm_configs
 
-        # XGBoost Classification - tier-aware
+        # XGBoost Classification - tier-aware with UI overrides
         if 'XGBoost' in enabled_models:
-            xgb_config = get_hyperparameters('XGBoost', tier)
-            xgb_n_estimators = xgb_config.get('n_estimators', [100, 200])
-            xgb_lrs = xgb_config.get('learning_rate', [0.05, 0.1])
-            xgb_depths = xgb_config.get('max_depth', [3, 6])
-
             xgb_configs = []
-            for n_est in xgb_n_estimators:
-                for lr in xgb_lrs:
-                    for max_depth in xgb_depths:
-                        xgb_configs.append(
-                            (
-                                XGBClassifier(
-                                    n_estimators=n_est,
-                                    learning_rate=lr,
-                                    max_depth=max_depth,
-                                    random_state=42,
-                                    n_jobs=-1,
-                                    verbosity=0
-                                ),
-                                {"n_estimators": n_est, "learning_rate": lr, "max_depth": max_depth}
-                            )
-                        )
+            for n_est in xgb_n_estimators_list:
+                for lr in xgb_learning_rates:
+                    for max_depth in xgb_max_depths:
+                        for subsample in xgb_subsample:
+                            for colsample in xgb_colsample_bytree:
+                                for reg_alpha in xgb_reg_alpha:
+                                    for reg_lambda in xgb_reg_lambda:
+                                        xgb_configs.append(
+                                            (
+                                                XGBClassifier(
+                                                    n_estimators=n_est,
+                                                    learning_rate=lr,
+                                                    max_depth=max_depth,
+                                                    subsample=subsample,
+                                                    colsample_bytree=colsample,
+                                                    reg_alpha=reg_alpha,
+                                                    reg_lambda=reg_lambda,
+                                                    tree_method='hist',  # Faster for high-dimensional data
+                                                    random_state=42,
+                                                    n_jobs=-1,
+                                                    verbosity=0
+                                                ),
+                                                {
+                                                    "n_estimators": n_est,
+                                                    "learning_rate": lr,
+                                                    "max_depth": max_depth,
+                                                    "subsample": subsample,
+                                                    "colsample_bytree": colsample,
+                                                    "reg_alpha": reg_alpha,
+                                                    "reg_lambda": reg_lambda,
+                                                    "tree_method": "hist"
+                                                }
+                                            )
+                                        )
             grids["XGBoost"] = xgb_configs
 
-        # LightGBM Classification - tier-aware
+        # LightGBM Classification - tier-aware with UI overrides
         if 'LightGBM' in enabled_models:
-            lgbm_config = get_hyperparameters('LightGBM', tier)
-            lgbm_n_estimators = lgbm_config.get('n_estimators', [100, 200])
-            lgbm_lrs = lgbm_config.get('learning_rate', [0.1])
-            lgbm_leaves = lgbm_config.get('num_leaves', [31, 50])
-
             lgbm_configs = []
-            for n_est in lgbm_n_estimators:
-                for lr in lgbm_lrs:
-                    for num_leaves in lgbm_leaves:
+            for n_est in lightgbm_n_estimators_list:
+                for lr in lightgbm_learning_rates:
+                    for num_leaves in lightgbm_num_leaves_list:
                         lgbm_configs.append(
                             (
                                 LGBMClassifier(
                                     n_estimators=n_est,
                                     learning_rate=lr,
                                     num_leaves=num_leaves,
+                                    max_depth=-1,
+                                    min_child_samples=5,
+                                    subsample=0.8,
+                                    colsample_bytree=0.8,
+                                    reg_alpha=0.1,
+                                    reg_lambda=1.0,
                                     random_state=42,
                                     n_jobs=-1,
                                     verbosity=-1
                                 ),
-                                {"n_estimators": n_est, "learning_rate": lr, "num_leaves": num_leaves}
+                                {
+                                    "n_estimators": n_est,
+                                    "learning_rate": lr,
+                                    "num_leaves": num_leaves,
+                                    "max_depth": -1,
+                                    "min_child_samples": 5,
+                                    "subsample": 0.8,
+                                    "colsample_bytree": 0.8,
+                                    "reg_alpha": 0.1,
+                                    "reg_lambda": 1.0
+                                }
                             )
                         )
             grids["LightGBM"] = lgbm_configs
 
-        # CatBoost Classification - tier-aware (optional - requires Visual Studio)
+        # CatBoost Classification - tier-aware with UI overrides (optional - requires Visual Studio)
         if 'CatBoost' in enabled_models and HAS_CATBOOST:
-            catboost_config = get_hyperparameters('CatBoost', tier)
-            catboost_iterations = catboost_config.get('iterations', [100, 200])
-            catboost_lrs = catboost_config.get('learning_rate', [0.1])
-            catboost_depths = catboost_config.get('depth', [4, 6])
-
             catboost_configs = []
-            for iterations in catboost_iterations:
-                for lr in catboost_lrs:
+            for iterations in catboost_iterations_list:
+                for lr in catboost_learning_rates:
                     for depth in catboost_depths:
                         catboost_configs.append(
                             (

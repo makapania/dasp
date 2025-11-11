@@ -336,21 +336,24 @@ def check_y_data_consistency(y, lower_bound=None, upper_bound=None):
 
     Performs statistical checks on reference values to identify potential
     data entry errors, mislabeled samples, or values outside chemically
-    reasonable ranges.
+    reasonable ranges. For categorical data, returns class distribution
+    instead of outlier detection.
 
     Parameters
     ----------
     y : np.ndarray or pd.Series
-        Reference values
+        Reference values (numeric or categorical)
     lower_bound : float, optional
-        Minimum chemically reasonable value
+        Minimum chemically reasonable value (ignored for categorical data)
     upper_bound : float, optional
-        Maximum chemically reasonable value
+        Maximum chemically reasonable value (ignored for categorical data)
 
     Returns
     -------
     results : dict
         Dictionary containing:
+
+        For numeric data:
         - mean : float
             Mean of reference values
         - std : float
@@ -374,23 +377,69 @@ def check_y_data_consistency(y, lower_bound=None, upper_bound=None):
         - outlier_indices : np.ndarray
             Array indices of outlier samples
 
+        For categorical data (additional fields):
+        - is_categorical : bool
+            True for categorical data
+        - unique_values : list
+            List of unique class labels
+        - value_counts : list
+            Count of samples per class
+        - frequencies : list
+            Frequency (proportion) of each class
+
     Notes
     -----
-    Z-score outlier detection uses the ±3σ rule, which flags approximately
-    0.3% of samples from a normal distribution.
+    Categorical data detection:
+    - Data is considered categorical if dtype is object or non-numeric
+    - For categorical data, no outliers are flagged (all arrays are zero/empty)
+    - Class distribution statistics are provided instead
 
-    Range checks are optional and should be based on domain knowledge
-    (e.g., protein content cannot exceed 100%, pH must be 0-14, etc.)
+    Numeric data outlier detection:
+    - Z-score detection uses the ±3σ rule, flagging approximately 0.3% of
+      samples from a normal distribution
+    - Range checks are optional and should be based on domain knowledge
+      (e.g., protein content cannot exceed 100%, pH must be 0-14, etc.)
 
     Edge cases handled:
     - If std is zero (all values identical), z_scores are set to zero
     - If bounds are None, range_outliers are all False
+    - Categorical data returns None for numeric statistics
     """
     # Convert to numpy array
     if isinstance(y, pd.Series):
         y_array = y.values
     else:
         y_array = np.array(y)
+
+    # Check if data is categorical (non-numeric)
+    is_categorical = (y_array.dtype == object or
+                     not np.issubdtype(y_array.dtype, np.number))
+
+    if is_categorical:
+        # For categorical data, return class distribution instead of outliers
+        unique_values, counts = np.unique(y_array, return_counts=True)
+
+        # Calculate class frequencies
+        total_samples = len(y_array)
+        frequencies = counts / total_samples
+
+        return {
+            'mean': None,
+            'std': None,
+            'median': None,
+            'min': None,
+            'max': None,
+            'z_scores': np.zeros(len(y_array), dtype=float),
+            'z_outliers': np.zeros(len(y_array), dtype=bool),
+            'range_outliers': np.zeros(len(y_array), dtype=bool),
+            'all_outliers': np.zeros(len(y_array), dtype=bool),  # No outliers for categorical
+            'n_outliers': 0,
+            'outlier_indices': np.array([], dtype=int),
+            'is_categorical': True,
+            'unique_values': unique_values.tolist(),
+            'value_counts': counts.tolist(),
+            'frequencies': frequencies.tolist()
+        }
 
     # Compute statistics
     mean = np.mean(y_array)

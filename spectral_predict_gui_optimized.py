@@ -26,6 +26,7 @@ import threading
 from datetime import datetime
 import numpy as np
 import pandas as pd
+from sklearn.metrics import confusion_matrix, roc_curve, auc
 
 # Check for matplotlib
 try:
@@ -46,12 +47,16 @@ sys.path.insert(0, str(src_path))
 try:
     from spectral_predict.preprocess import SavgolDerivative
     from spectral_predict.model_registry import get_supported_models, is_valid_model
+    from spectral_predict.model_config import get_tier_models, CLASSIFICATION_TIERS, MODEL_TIERS
     HAS_DERIVATIVES = True
 except ImportError:
     HAS_DERIVATIVES = False
     SavgolDerivative = None
     get_supported_models = None
     is_valid_model = None
+    get_tier_models = None
+    CLASSIFICATION_TIERS = None
+    MODEL_TIERS = None
 
 try:
     from spectral_predict.outlier_detection import generate_outlier_report
@@ -59,6 +64,14 @@ try:
 except ImportError:
     HAS_OUTLIER_DETECTION = False
     generate_outlier_report = None
+
+# Check for CatBoost availability
+try:
+    from catboost import CatBoostRegressor
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
+    CatBoostRegressor = None
 
 # Import calibration transfer and instrument profile modules
 try:
@@ -113,6 +126,7 @@ class SpectralPredictApp:
         self.X_original = None  # Original unfiltered spectral data
         self.y = None  # Target data
         self.ref = None  # Reference dataframe
+        self.label_encoder = None  # Label encoder for classification with text labels
 
         # Results storage
         self.results_df = None  # Analysis results dataframe
@@ -127,12 +141,15 @@ class SpectralPredictApp:
         self.refined_wavelengths = None  # List of wavelengths used in refined model (subset for derivative+subset)
         self.refined_full_wavelengths = None  # List of ALL wavelengths (for derivative+subset preprocessing)
         self.refined_config = None  # Configuration dict for refined model
+        self.refined_y_proba = None  # Prediction probabilities for classification
+        self.task_type_detection_label = None  # Will be created in Import tab
 
         # Model Prediction Tab (Tab 7) variables
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
+        self.consensus_info = {}  # Store consensus model details for display
 
         # Instrument Lab Tab (Tab 8) variables
         self.instrument_profiles = {}  # Dict of instrument_id -> InstrumentProfile
@@ -169,6 +186,8 @@ class SpectralPredictApp:
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
+        self.task_type = tk.StringVar(value="auto")  # auto, regression, or classification
+        self.task_type.trace_add('write', lambda *args: self._on_task_type_changed())
 
         # NEW: User-friendly penalty system (0-10 scale)
         # 0 = only performance (R²) matters, 10 = strong penalty
@@ -203,19 +222,20 @@ class SpectralPredictApp:
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
         # Model selection (original models)
+        # Standard tier models (enabled by default)
         self.use_pls = tk.BooleanVar(value=True)
         self.use_ridge = tk.BooleanVar(value=True)
         self.use_lasso = tk.BooleanVar(value=True)
+        self.use_elasticnet = tk.BooleanVar(value=True)  # Moved to standard tier
         self.use_randomforest = tk.BooleanVar(value=True)
-        self.use_mlp = tk.BooleanVar(value=False)
-        self.use_neuralboosted = tk.BooleanVar(value=False)
+        self.use_lightgbm = tk.BooleanVar(value=True)    # Moved to standard tier
 
-        # New models (added in Phase 1-3)
-        self.use_elasticnet = tk.BooleanVar(value=False)
-        self.use_svr = tk.BooleanVar(value=False)
-        self.use_xgboost = tk.BooleanVar(value=False)
-        self.use_lightgbm = tk.BooleanVar(value=False)
-        self.use_catboost = tk.BooleanVar(value=False)
+        # Comprehensive/experimental tier models (disabled by default)
+        self.use_xgboost = tk.BooleanVar(value=False)      # Comprehensive (too slow for standard)
+        self.use_catboost = tk.BooleanVar(value=False)     # Comprehensive
+        self.use_neuralboosted = tk.BooleanVar(value=False)  # Comprehensive
+        self.use_svr = tk.BooleanVar(value=False)          # Experimental (very slow)
+        self.use_mlp = tk.BooleanVar(value=False)          # Experimental
 
         # Create model name to checkbox mapping
         self.model_checkboxes = {
@@ -295,6 +315,116 @@ class SpectralPredictApp:
         self.lasso_alpha_1 = tk.BooleanVar(value=True)      # 1.0
         self.lasso_alpha_custom = tk.StringVar(value="")    # Custom value
 
+        # XGBoost Hyperparameters (spectroscopy-optimized defaults)
+        # n_estimators (number of boosting rounds)
+        self.xgb_n_estimators_100 = tk.BooleanVar(value=True)   # ⭐ standard
+        self.xgb_n_estimators_200 = tk.BooleanVar(value=True)   # ⭐ standard
+        self.xgb_n_estimators_custom = tk.StringVar(value="")
+
+        # learning_rate (step size shrinkage)
+        self.xgb_lr_005 = tk.BooleanVar(value=True)   # 0.05 ⭐ standard
+        self.xgb_lr_01 = tk.BooleanVar(value=True)    # 0.1 ⭐ standard
+        self.xgb_lr_custom = tk.StringVar(value="")
+
+        # max_depth (maximum tree depth)
+        self.xgb_max_depth_3 = tk.BooleanVar(value=True)    # ⭐ standard
+        self.xgb_max_depth_6 = tk.BooleanVar(value=True)    # ⭐ standard
+        self.xgb_max_depth_9 = tk.BooleanVar(value=False)   # comprehensive
+        self.xgb_max_depth_custom = tk.StringVar(value="")
+
+        # subsample (row sampling ratio)
+        self.xgb_subsample_08 = tk.BooleanVar(value=True)   # 0.8 ⭐ standard
+        self.xgb_subsample_10 = tk.BooleanVar(value=True)   # 1.0 ⭐ standard
+        self.xgb_subsample_custom = tk.StringVar(value="")
+
+        # colsample_bytree (column sampling ratio)
+        self.xgb_colsample_08 = tk.BooleanVar(value=True)   # 0.8 ⭐ standard
+        self.xgb_colsample_10 = tk.BooleanVar(value=True)   # 1.0 ⭐ standard
+        self.xgb_colsample_custom = tk.StringVar(value="")
+
+        # reg_alpha (L1 regularization)
+        self.xgb_reg_alpha_0 = tk.BooleanVar(value=True)     # 0 ⭐ standard
+        self.xgb_reg_alpha_01 = tk.BooleanVar(value=True)    # 0.1 ⭐ standard
+        self.xgb_reg_alpha_05 = tk.BooleanVar(value=False)   # 0.5 comprehensive
+        self.xgb_reg_alpha_custom = tk.StringVar(value="")
+
+        # reg_lambda (L2 regularization) - comprehensive tier
+        self.xgb_reg_lambda_10 = tk.BooleanVar(value=False)  # 1.0 comprehensive
+        self.xgb_reg_lambda_50 = tk.BooleanVar(value=False)  # 5.0 comprehensive
+        self.xgb_reg_lambda_custom = tk.StringVar(value="")
+
+        # ElasticNet Hyperparameters
+        # alpha (regularization strength)
+        self.elasticnet_alpha_001 = tk.BooleanVar(value=True)   # 0.01 ⭐ standard
+        self.elasticnet_alpha_01 = tk.BooleanVar(value=True)    # 0.1 ⭐ standard
+        self.elasticnet_alpha_10 = tk.BooleanVar(value=True)    # 1.0 ⭐ standard
+        self.elasticnet_alpha_custom = tk.StringVar(value="")
+
+        # l1_ratio (L1 vs L2 mix: 0=Ridge, 1=Lasso)
+        self.elasticnet_l1_ratio_03 = tk.BooleanVar(value=True)  # 0.3 ⭐ standard
+        self.elasticnet_l1_ratio_05 = tk.BooleanVar(value=True)  # 0.5 ⭐ standard (balanced)
+        self.elasticnet_l1_ratio_07 = tk.BooleanVar(value=True)  # 0.7 ⭐ standard
+        self.elasticnet_l1_ratio_custom = tk.StringVar(value="")
+
+        # LightGBM Hyperparameters
+        # n_estimators
+        self.lightgbm_n_estimators_100 = tk.BooleanVar(value=True)  # ⭐ standard
+        self.lightgbm_n_estimators_200 = tk.BooleanVar(value=True)  # ⭐ standard
+        self.lightgbm_n_estimators_custom = tk.StringVar(value="")
+
+        # learning_rate
+        self.lightgbm_lr_01 = tk.BooleanVar(value=True)  # 0.1 ⭐ standard
+        self.lightgbm_lr_custom = tk.StringVar(value="")
+
+        # num_leaves (max number of leaves per tree)
+        self.lightgbm_num_leaves_31 = tk.BooleanVar(value=True)  # 31 ⭐ standard (default)
+        self.lightgbm_num_leaves_50 = tk.BooleanVar(value=True)  # 50 ⭐ standard
+        self.lightgbm_num_leaves_custom = tk.StringVar(value="")
+
+        # CatBoost Hyperparameters
+        # iterations (equivalent to n_estimators)
+        self.catboost_iterations_100 = tk.BooleanVar(value=True)  # ⭐ standard
+        self.catboost_iterations_200 = tk.BooleanVar(value=True)  # ⭐ standard
+        self.catboost_iterations_custom = tk.StringVar(value="")
+
+        # learning_rate
+        self.catboost_lr_01 = tk.BooleanVar(value=True)  # 0.1 ⭐ standard
+        self.catboost_lr_custom = tk.StringVar(value="")
+
+        # depth (tree depth)
+        self.catboost_depth_4 = tk.BooleanVar(value=True)  # 4 ⭐ standard
+        self.catboost_depth_6 = tk.BooleanVar(value=True)  # 6 ⭐ standard
+        self.catboost_depth_custom = tk.StringVar(value="")
+
+        # SVR Hyperparameters
+        # kernel type
+        self.svr_kernel_rbf = tk.BooleanVar(value=True)     # RBF ⭐ standard
+        self.svr_kernel_linear = tk.BooleanVar(value=True)  # Linear ⭐ standard
+
+        # C (regularization parameter)
+        self.svr_C_10 = tk.BooleanVar(value=True)   # 1.0 ⭐ standard
+        self.svr_C_100 = tk.BooleanVar(value=True)  # 10.0 ⭐ standard
+        self.svr_C_custom = tk.StringVar(value="")
+
+        # gamma (kernel coefficient for RBF)
+        self.svr_gamma_scale = tk.BooleanVar(value=True)  # 'scale' ⭐ standard
+        self.svr_gamma_auto = tk.BooleanVar(value=False)  # 'auto' comprehensive
+        self.svr_gamma_custom = tk.StringVar(value="")
+
+        # MLP Hyperparameters
+        # hidden_layer_sizes (neural network architecture)
+        self.mlp_hidden_64 = tk.BooleanVar(value=True)      # (64,) ⭐ standard - 1 layer
+        self.mlp_hidden_128_64 = tk.BooleanVar(value=True)  # (128,64) ⭐ standard - 2 layers
+        self.mlp_hidden_custom = tk.StringVar(value="")      # e.g., "100,50,25"
+
+        # alpha (L2 regularization penalty)
+        self.mlp_alpha_1e3 = tk.BooleanVar(value=True)  # 0.001 ⭐ standard
+        self.mlp_alpha_custom = tk.StringVar(value="")
+
+        # learning_rate_init (initial learning rate)
+        self.mlp_lr_init_1e3 = tk.BooleanVar(value=True)  # 0.001 ⭐ standard
+        self.mlp_lr_init_custom = tk.StringVar(value="")
+
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
         self.varsel_spa = tk.BooleanVar(value=False)
@@ -340,6 +470,14 @@ class SpectralPredictApp:
 
         self._create_ui()
 
+    def _is_categorical_target(self):
+        """Check if target variable is categorical (non-numeric)."""
+        if self.y is None:
+            return False
+        return (self.y.dtype == 'object' or
+                self.y.dtype.name == 'category' or
+                not np.issubdtype(self.y.dtype, np.number))
+
     def _configure_style(self):
         """Configure modern art gallery aesthetic."""
         style = ttk.Style()
@@ -378,14 +516,15 @@ class SpectralPredictApp:
 
         # Create tabs
         self._create_tab1_import_preview()
-        self._create_tab2_data_quality_check()
-        self._create_tab3_analysis_config()
-        self._create_tab4_progress()
-        self._create_tab5_results()
-        self._create_tab6_refine_model()
-        self._create_tab7_model_prediction()
-        self._create_tab8_instrument_lab()
-        self._create_tab9_calibration_transfer()
+        self._create_tab2_data_viewer()
+        self._create_tab3_data_quality_check()
+        self._create_tab4_analysis_config()
+        self._create_tab5_progress()
+        self._create_tab6_results()
+        self._create_tab7_refine_model()
+        self._create_tab8_model_prediction()
+        self._create_tab9_instrument_lab()
+        self._create_tab10_calibration_transfer()
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -453,6 +592,23 @@ class SpectralPredictApp:
         self.target_combo = ttk.Combobox(content_frame, textvariable=self.target_column, width=35)
         self.target_combo.grid(row=row, column=1, sticky=tk.W, padx=10)
         row += 1
+
+        # Task Type (Classification vs Regression)
+        ttk.Label(content_frame, text="Task Type:", style='Subheading.TLabel').grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
+        row += 1
+
+        task_type_frame = ttk.Frame(content_frame)
+        task_type_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+        row += 1
+
+        ttk.Label(task_type_frame, text="Analysis Type:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        ttk.Radiobutton(task_type_frame, text="Auto-detect", variable=self.task_type, value="auto").grid(row=0, column=1, padx=5)
+        ttk.Radiobutton(task_type_frame, text="Regression", variable=self.task_type, value="regression").grid(row=0, column=2, padx=5)
+        ttk.Radiobutton(task_type_frame, text="Classification", variable=self.task_type, value="classification").grid(row=0, column=3, padx=5)
+
+        # Detection result label
+        self.task_type_detection_label = ttk.Label(task_type_frame, text="", style='Caption.TLabel')
+        self.task_type_detection_label.grid(row=0, column=4, sticky=tk.W, padx=15)
 
         # Auto-detect button
         ttk.Button(content_frame, text="🔍 Auto-Detect Columns", command=self._auto_detect_columns,
@@ -561,17 +717,96 @@ class SpectralPredictApp:
         self.plot_notebook.add(placeholder, text="Load data to see plots")
         ttk.Label(placeholder, text="Load data to generate spectral plots", style='Caption.TLabel').pack(expand=True)
 
-    def _create_tab2_data_quality_check(self):
-        """Tab 2: Data Quality Check - Outlier detection and exclusion."""
+    def _create_tab2_data_viewer(self):
+        """Tab 2: Data Viewer - Excel-like spreadsheet view with smooth scrolling."""
+        from tksheet import Sheet
+
         self.tab2 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab2, text='  🔍 Data Quality Check  ')
+        self.notebook.add(self.tab2, text='  📋 Data Viewer  ')
+
+        content_frame = ttk.Frame(self.tab2, style='TFrame', padding="30")
+        content_frame.pack(fill='both', expand=True)
+
+        # Title
+        ttk.Label(content_frame, text="Data Viewer", style='Title.TLabel').pack(anchor=tk.W, pady=(0, 10))
+
+        # Instructions
+        instructions = ttk.Label(content_frame,
+            text="View imported spectral data with Excel-like scrolling. Scroll with mouse wheel or use arrow keys to navigate.",
+            style='Caption.TLabel')
+        instructions.pack(anchor=tk.W, pady=(0, 10))
+
+        # Control panel
+        control_frame = ttk.Frame(content_frame)
+        control_frame.pack(fill='x', pady=(0, 10))
+
+        # Left side controls
+        self.show_excluded_data_viewer = tk.BooleanVar(value=True)
+        ttk.Checkbutton(control_frame, text="Show excluded samples",
+                       variable=self.show_excluded_data_viewer,
+                       command=self._populate_data_viewer).pack(side='left', padx=(0, 10))
+
+        # Right side controls
+        ttk.Button(control_frame, text="📥 Export All Data to CSV",
+                  command=self._export_data_viewer_to_csv,
+                  style='Modern.TButton').pack(side='right', padx=(5, 0))
+
+        # Status bar
+        self.data_viewer_status = ttk.Label(content_frame, text="", style='Caption.TLabel')
+        self.data_viewer_status.pack(fill='x', pady=(0, 5))
+
+        # Create frame for tksheet
+        sheet_frame = ttk.Frame(content_frame)
+        sheet_frame.pack(fill='both', expand=True)
+
+        # Create tksheet (Excel-like table with virtual scrolling)
+        self.data_viewer_sheet = Sheet(
+            sheet_frame,
+            data=[],
+            headers=[],
+            show_row_index=True,
+            show_header=True,
+            show_top_left=True,
+            empty_horizontal=0,
+            empty_vertical=0,
+            height=600,
+            width=1200,
+        )
+
+        # Enable Excel-like interactions
+        self.data_viewer_sheet.enable_bindings(
+            "single_select",
+            "row_select",
+            "column_width_resize",
+            "double_click_column_resize",
+            "arrowkeys",
+            "right_click_popup_menu",
+            "rc_select",
+            "copy",
+        )
+
+        self.data_viewer_sheet.grid(row=0, column=0, sticky='nsew')
+        sheet_frame.grid_rowconfigure(0, weight=1)
+        sheet_frame.grid_columnconfigure(0, weight=1)
+
+        # Info label at bottom
+        self.data_viewer_info = ttk.Label(content_frame,
+            text="Load data in the Import & Preview tab to view it here.",
+            style='Caption.TLabel')
+        self.data_viewer_info.pack(pady=(10, 0))
+
+
+    def _create_tab3_data_quality_check(self):
+        """Tab 3: Data Quality Check - Outlier detection and exclusion."""
+        self.tab3 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab3, text='  🔍 Data Quality Check  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab2, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab2, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab3, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab3, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab2", canvas))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab3", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -602,9 +837,11 @@ class SpectralPredictApp:
         y_range_frame = ttk.Frame(controls_frame)
         y_range_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W)
         ttk.Label(y_range_frame, text="Min:").pack(side='left', padx=(0, 5))
-        ttk.Entry(y_range_frame, textvariable=self.y_min_bound, width=10).pack(side='left', padx=(0, 10))
+        self.y_min_entry = ttk.Entry(y_range_frame, textvariable=self.y_min_bound, width=10)
+        self.y_min_entry.pack(side='left', padx=(0, 10))
         ttk.Label(y_range_frame, text="Max:").pack(side='left', padx=(0, 5))
-        ttk.Entry(y_range_frame, textvariable=self.y_max_bound, width=10).pack(side='left')
+        self.y_max_entry = ttk.Entry(y_range_frame, textvariable=self.y_max_bound, width=10)
+        self.y_max_entry.pack(side='left')
 
         # Buttons
         button_frame = ttk.Frame(controls_frame)
@@ -721,17 +958,17 @@ class SpectralPredictApp:
         self.tab2_status = ttk.Label(content_frame, text="Load data and run outlier detection to begin", style='Caption.TLabel')
         self.tab2_status.grid(row=row, column=0, columnspan=3)
 
-    def _create_tab3_analysis_config(self):
-        """Tab 3: Analysis Configuration - All analysis settings."""
-        self.tab3 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab3, text='  ⚙️ Analysis Configuration  ')
+    def _create_tab4_analysis_config(self):
+        """Tab 4: Analysis Configuration - All analysis settings."""
+        self.tab4 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab4, text='  ⚙️ Analysis Configuration  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab3, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab3, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab4, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab4, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab3", canvas))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab4", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -943,10 +1180,10 @@ class SpectralPredictApp:
         tier_options_frame = ttk.Frame(tier_frame)
         tier_options_frame.grid(row=1, column=0, columnspan=5, sticky=tk.W, pady=5)
 
-        ttk.Radiobutton(tier_options_frame, text="⚡ Quick (3-5 min)", variable=self.model_tier, value="quick").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Radiobutton(tier_options_frame, text="⭐ Standard (10-15 min) [DEFAULT]", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Radiobutton(tier_options_frame, text="🔬 Comprehensive (20-30 min)", variable=self.model_tier, value="comprehensive").grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Radiobutton(tier_options_frame, text="🧪 Experimental (45-90 min)", variable=self.model_tier, value="experimental").grid(row=0, column=3, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="⚡ Quick", variable=self.model_tier, value="quick").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="⭐ Standard [DEFAULT]", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="🔬 Comprehensive", variable=self.model_tier, value="comprehensive").grid(row=0, column=2, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="🧪 Experimental", variable=self.model_tier, value="experimental").grid(row=0, column=3, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="⚙️ Custom", variable=self.model_tier, value="custom").grid(row=0, column=4, sticky=tk.W, padx=5)
 
         ttk.Label(tier_frame, text="💡 Tiers auto-update checkboxes below. Select Custom to manually choose models.",
@@ -983,14 +1220,11 @@ class SpectralPredictApp:
         ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp).grid(row=1, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=1, column=3, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=2, column=2, sticky=tk.W, pady=5, padx=(40, 0))
-        ttk.Label(models_frame, text="Gradient boosting with NNs", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
-
-        ttk.Checkbutton(models_frame, text="✓ SVR 🆕", variable=self.use_svr).grid(row=3, column=2, sticky=tk.W, pady=5, padx=(40, 0))
-        ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=3, column=3, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ SVR 🆕", variable=self.use_svr).grid(row=2, column=2, sticky=tk.W, pady=5, padx=(40, 0))
+        ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
 
         # Gradient Boosting Models (Column 3, spanning bottom)
-        ttk.Label(models_frame, text="Modern Gradient Boosting 🆕 (Best Performance)", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
 
         ttk.Checkbutton(models_frame, text="✓ XGBoost", variable=self.use_xgboost).grid(row=7, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Industry-leading gradient boosting", style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
@@ -998,11 +1232,19 @@ class SpectralPredictApp:
         ttk.Checkbutton(models_frame, text="✓ LightGBM", variable=self.use_lightgbm).grid(row=8, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Microsoft's fast gradient boosting", style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ CatBoost", variable=self.use_catboost).grid(row=9, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
+        self.catboost_checkbox = ttk.Checkbutton(models_frame, text="✓ CatBoost", variable=self.use_catboost)
+        self.catboost_checkbox.grid(row=9, column=0, sticky=tk.W, pady=5)
+        if not HAS_CATBOOST:
+            self.catboost_checkbox.state(['disabled'])
+            ttk.Label(models_frame, text="Requires Visual Studio 2022 Build Tools (not installed)", style='Caption.TLabel', foreground='red').grid(row=9, column=1, sticky=tk.W, padx=15)
+        else:
+            ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
 
-        ttk.Label(models_frame, text="💡 Gradient boosting models (XGBoost, LightGBM, CatBoost) often outperform traditional methods. NO OTHER SPECTROSCOPY SOFTWARE HAS THESE!",
-                 style='Caption.TLabel', foreground=self.colors['success']).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=10, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Gradient boosting with neural networks", style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
+
+        ttk.Label(models_frame, text="💡 Gradient boosting models (XGBoost, LightGBM, CatBoost, NeuralBoosted) often outperform traditional methods.",
+                 style='Caption.TLabel', foreground=self.colors['success']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Advanced Model Options ===
         ttk.Label(content_frame, text="Advanced Model Options", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -1114,6 +1356,111 @@ class SpectralPredictApp:
         # Info label
         ttk.Label(lasso_frame, text="💡 Lasso encourages sparse solutions (sets weak coefficients to zero). Higher alpha = more sparsity.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+
+        # XGBoost Hyperparameters
+        xgb_frame = ttk.LabelFrame(content_frame, text="XGBoost Hyperparameters (Spectroscopy-Optimized)", padding="20")
+        xgb_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # n_estimators (number of boosting rounds)
+        ttk.Label(xgb_frame, text="Number of Boosting Rounds (n_estimators):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        xgb_n_est_frame = ttk.Frame(xgb_frame)
+        xgb_n_est_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_n_est_frame, text="100 ⭐", variable=self.xgb_n_estimators_100).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_n_est_frame, text="200 ⭐", variable=self.xgb_n_estimators_200).grid(row=0, column=1, padx=5)
+        ttk.Label(xgb_n_est_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(xgb_n_est_frame, textvariable=self.xgb_n_estimators_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(xgb_n_est_frame, text="(default: 100, 200)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 More rounds = better fit but risk overfitting. 100-200 typical for spectral data.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # learning_rate (step size shrinkage)
+        ttk.Label(xgb_frame, text="Learning Rate (shrinkage):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_lr_frame = ttk.Frame(xgb_frame)
+        xgb_lr_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_lr_frame, text="0.05 ⭐", variable=self.xgb_lr_005).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_lr_frame, text="0.1 ⭐", variable=self.xgb_lr_01).grid(row=0, column=1, padx=5)
+        ttk.Label(xgb_lr_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(xgb_lr_frame, textvariable=self.xgb_lr_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(xgb_lr_frame, text="(default: 0.05, 0.1)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 Lower learning rate = more conservative updates (less overfitting). Range: 0.01-0.3.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # max_depth (maximum tree depth)
+        ttk.Label(xgb_frame, text="Maximum Tree Depth:", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_depth_frame = ttk.Frame(xgb_frame)
+        xgb_depth_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_depth_frame, text="3 ⭐", variable=self.xgb_max_depth_3).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_depth_frame, text="6 ⭐", variable=self.xgb_max_depth_6).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(xgb_depth_frame, text="9", variable=self.xgb_max_depth_9).grid(row=0, column=2, padx=5)
+        ttk.Label(xgb_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(xgb_depth_frame, textvariable=self.xgb_max_depth_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(xgb_depth_frame, text="(default: 3, 6)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 Shallow trees (3-6) reduce overfitting. Deeper trees capture complex patterns.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # subsample (row sampling ratio)
+        ttk.Label(xgb_frame, text="Row Sampling Ratio (subsample):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_subsample_frame = ttk.Frame(xgb_frame)
+        xgb_subsample_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_subsample_frame, text="0.8 ⭐", variable=self.xgb_subsample_08).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_subsample_frame, text="1.0 ⭐", variable=self.xgb_subsample_10).grid(row=0, column=1, padx=5)
+        ttk.Label(xgb_subsample_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(xgb_subsample_frame, textvariable=self.xgb_subsample_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(xgb_subsample_frame, text="(default: 0.8, 1.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 0.8 = use 80% of samples per tree (reduces overfitting). 1.0 = use all samples.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # colsample_bytree (column sampling ratio)
+        ttk.Label(xgb_frame, text="Feature Sampling Ratio (colsample_bytree):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_colsample_frame = ttk.Frame(xgb_frame)
+        xgb_colsample_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_colsample_frame, text="0.8 ⭐", variable=self.xgb_colsample_08).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_colsample_frame, text="1.0 ⭐", variable=self.xgb_colsample_10).grid(row=0, column=1, padx=5)
+        ttk.Label(xgb_colsample_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(xgb_colsample_frame, textvariable=self.xgb_colsample_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(xgb_colsample_frame, text="(default: 0.8, 1.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 0.8 = use 80% of wavelengths per tree (increases diversity). Critical for 2000+ features.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # reg_alpha (L1 regularization)
+        ttk.Label(xgb_frame, text="L1 Regularization (reg_alpha):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_reg_alpha_frame = ttk.Frame(xgb_frame)
+        xgb_reg_alpha_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_reg_alpha_frame, text="0 ⭐", variable=self.xgb_reg_alpha_0).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_reg_alpha_frame, text="0.1 ⭐", variable=self.xgb_reg_alpha_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(xgb_reg_alpha_frame, text="0.5", variable=self.xgb_reg_alpha_05).grid(row=0, column=2, padx=5)
+        ttk.Label(xgb_reg_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(xgb_reg_alpha_frame, textvariable=self.xgb_reg_alpha_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(xgb_reg_alpha_frame, text="(default: 0, 0.1)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 L1 penalty for feature selection. Higher = sparser model. 0.1-0.5 recommended for high-dim data.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # reg_lambda (L2 regularization) - comprehensive tier
+        ttk.Label(xgb_frame, text="L2 Regularization (reg_lambda) - Comprehensive:", style='Subheading.TLabel').grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_reg_lambda_frame = ttk.Frame(xgb_frame)
+        xgb_reg_lambda_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_reg_lambda_frame, text="1.0", variable=self.xgb_reg_lambda_10).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_reg_lambda_frame, text="5.0", variable=self.xgb_reg_lambda_50).grid(row=0, column=1, padx=5)
+        ttk.Label(xgb_reg_lambda_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(xgb_reg_lambda_frame, textvariable=self.xgb_reg_lambda_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(xgb_reg_lambda_frame, text="(comprehensive tier only)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(xgb_frame, text="💡 L2 penalty reduces weight magnitudes. Use with L1 for combined regularization (ElasticNet-style).",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -1246,8 +1593,6 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
         ttk.Label(ensemble_frame, text="💡 Region-based methods identify which models excel at low/mid/high predictions",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
-        ttk.Label(ensemble_frame, text="🚀 NO OTHER SPECTROSCOPY SOFTWARE HAS THESE INTELLIGENT ENSEMBLE METHODS!",
-                 style='Caption.TLabel', foreground=self.colors['success']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Run button
         ttk.Button(content_frame, text="▶ Run Analysis", command=self._run_analysis,
@@ -1257,12 +1602,12 @@ class SpectralPredictApp:
         self.tab3_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')
         self.tab3_status.grid(row=row, column=0, columnspan=2)
 
-    def _create_tab4_progress(self):
-        """Tab 4: Analysis Progress - Live progress monitor."""
-        self.tab4 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab4, text='  📊 Analysis Progress  ')
+    def _create_tab5_progress(self):
+        """Tab 5: Analysis Progress - Live progress monitor."""
+        self.tab5 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab5, text='  📊 Analysis Progress  ')
 
-        content_frame = ttk.Frame(self.tab4, style='TFrame', padding="30")
+        content_frame = ttk.Frame(self.tab5, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
         # Header with title and best model info side-by-side
@@ -1302,12 +1647,12 @@ class SpectralPredictApp:
         self.progress_status = ttk.Label(content_frame, text="Waiting for analysis to start...", style='Caption.TLabel')
         self.progress_status.pack(pady=10)
 
-    def _create_tab5_results(self):
-        """Tab 5: Results - Display analysis results in a table."""
-        self.tab5 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab5, text='  📊 Results  ')
+    def _create_tab6_results(self):
+        """Tab 6: Results - Display analysis results in a table."""
+        self.tab6 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab6, text='  📊 Results  ')
 
-        content_frame = ttk.Frame(self.tab5, style='TFrame', padding="30")
+        content_frame = ttk.Frame(self.tab6, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
         # Title
@@ -1352,17 +1697,80 @@ class SpectralPredictApp:
                                        style='Caption.TLabel')
         self.results_status.pack(pady=5)
 
-    def _create_tab6_refine_model(self):
-        """Tab 6: Custom Model Development - Interactive model parameter refinement."""
-        self.tab6 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab6, text='  🔧 Custom Model Development  ')
+        # === Ensemble Results Section ===
+        ensemble_separator = ttk.Separator(content_frame, orient='horizontal')
+        ensemble_separator.pack(fill='x', pady=20)
+
+        ensemble_title = ttk.Label(content_frame, text="Ensemble Model Results", style='Heading.TLabel')
+        ensemble_title.pack(anchor=tk.W, pady=(0, 10))
+
+        ensemble_info = ttk.Label(content_frame,
+            text="Ensemble methods combine multiple models to improve predictions. Results appear here after running analysis with ensembles enabled.",
+            style='Caption.TLabel', foreground=self.colors['accent'])
+        ensemble_info.pack(anchor=tk.W, pady=(0, 10))
+
+        # Ensemble results frame
+        self.ensemble_frame = ttk.Frame(content_frame)
+        self.ensemble_frame.pack(fill='both', expand=False, pady=10)
+
+        # Ensemble table
+        ensemble_tree_frame = ttk.Frame(self.ensemble_frame)
+        ensemble_tree_frame.pack(fill='both', expand=True)
+
+        self.ensemble_tree = ttk.Treeview(ensemble_tree_frame, show='headings', selectmode='browse', height=5)
+
+        ensemble_vsb = ttk.Scrollbar(ensemble_tree_frame, orient="vertical", command=self.ensemble_tree.yview)
+        ensemble_hsb = ttk.Scrollbar(ensemble_tree_frame, orient="horizontal", command=self.ensemble_tree.xview)
+        self.ensemble_tree.configure(yscrollcommand=ensemble_vsb.set, xscrollcommand=ensemble_hsb.set)
+
+        self.ensemble_tree.grid(row=0, column=0, sticky='nsew')
+        ensemble_vsb.grid(row=0, column=1, sticky='ns')
+        ensemble_hsb.grid(row=1, column=0, sticky='ew')
+
+        ensemble_tree_frame.grid_rowconfigure(0, weight=1)
+        ensemble_tree_frame.grid_columnconfigure(0, weight=1)
+
+        # Ensemble buttons frame
+        ensemble_buttons = ttk.Frame(self.ensemble_frame)
+        ensemble_buttons.pack(pady=10, fill='x')
+
+        self.btn_save_best_ensemble = ttk.Button(ensemble_buttons, text="💾 Save Best Ensemble",
+                   command=self._save_best_ensemble, state='disabled')
+        self.btn_save_best_ensemble.pack(side='left', padx=5)
+
+        self.btn_show_regional_perf = ttk.Button(ensemble_buttons, text="📊 Show Regional Performance",
+                   command=self._show_regional_performance, state='disabled')
+        self.btn_show_regional_perf.pack(side='left', padx=5)
+
+        self.btn_show_weights = ttk.Button(ensemble_buttons, text="⚖️ Show Ensemble Weights",
+                   command=self._show_ensemble_weights, state='disabled')
+        self.btn_show_weights.pack(side='left', padx=5)
+
+        self.btn_show_specialization = ttk.Button(ensemble_buttons, text="🎯 Show Specialization",
+                   command=self._show_specialization_profile, state='disabled')
+        self.btn_show_specialization.pack(side='left', padx=5)
+
+        # Ensemble status
+        self.ensemble_status = ttk.Label(self.ensemble_frame,
+            text="No ensemble results yet. Enable ensembles in Analysis Configuration and run analysis.",
+            style='Caption.TLabel')
+        self.ensemble_status.pack(pady=5)
+
+        # Initialize ensemble storage
+        self.ensemble_results = None
+        self.trained_ensembles = None
+
+    def _create_tab7_refine_model(self):
+        """Tab 7: Custom Model Development - Interactive model parameter refinement."""
+        self.tab7 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab7, text='  🔧 Custom Model Development  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab6, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab6, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab7, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab7, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab6", canvas))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab7", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -1824,31 +2232,75 @@ class SpectralPredictApp:
         export_btn.pack(side='right')
 
     def _on_tier_changed(self, *args):
-        """Update model checkboxes when tier selection changes."""
+        """Update model checkboxes based on selected tier."""
         tier = self.model_tier.get()
+        task_type = self.task_type.get()
 
         if tier == "custom":
             # Don't auto-update checkboxes for custom tier
             return
 
-        # Import tier definitions
-        from spectral_predict.model_config import MODEL_TIERS
+        # Determine actual task type for tier lookup
+        if task_type == "auto":
+            # If auto and data is loaded, try to detect
+            if hasattr(self, 'y') and self.y is not None:
+                if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+                    actual_task = "classification"
+                else:
+                    actual_task = "regression"
+            else:
+                # Default to regression if no data loaded
+                actual_task = "regression"
+        else:
+            actual_task = task_type
 
-        if tier not in MODEL_TIERS:
+        # Get models for this tier and task type
+        try:
+            tier_models = set(get_tier_models(tier, actual_task))
+        except ValueError:
+            # If tier not found, keep current selection
             return
 
-        # Get models for this tier
-        tier_models = MODEL_TIERS[tier]['models']
+        # Get all supported models for this task type
+        if actual_task == "classification":
+            supported_models = set(get_supported_models("classification"))
+        else:
+            supported_models = set(get_supported_models("regression"))
 
         # Set flag to prevent triggering custom tier switch
         self._updating_from_tier = True
 
-        # Update all model checkboxes
+        # Update checkboxes
         for model_name, checkbox_var in self.model_checkboxes.items():
-            checkbox_var.set(model_name in tier_models)
+            # Check if model should be selected for this tier AND is supported for task type
+            should_select = model_name in tier_models and model_name in supported_models
+            # Don't enable CatBoost if it's not available
+            if model_name == 'CatBoost' and not HAS_CATBOOST:
+                should_select = False
+            checkbox_var.set(1 if should_select else 0)
 
         # Reset flag
         self._updating_from_tier = False
+
+    def _on_task_type_changed(self):
+        """Handle task type changes - filter models and update tier selection."""
+        task_type = self.task_type.get()
+
+        if task_type == "auto":
+            # Show all models when auto-detect is selected
+            return
+
+        # Get supported models for this task type
+        supported_models = set(get_supported_models(task_type))
+
+        # Auto-deselect incompatible models silently
+        for model_name, checkbox_var in self.model_checkboxes.items():
+            if model_name not in supported_models:
+                if checkbox_var.get():
+                    checkbox_var.set(False)
+
+        # Refresh tier selection to use correct model set
+        self._on_tier_changed()
 
     def _on_model_checkbox_changed(self, *args):
         """Switch to Custom tier when user manually changes a model checkbox."""
@@ -2006,6 +2458,26 @@ class SpectralPredictApp:
             # Apply wavelength filtering
             self._apply_wavelength_filter()
 
+            # Auto-detect and display task type
+            if hasattr(self, 'task_type_detection_label') and self.task_type_detection_label:
+                if self.task_type.get() == "auto":
+                    if self.y.nunique() == 2:
+                        detected_type = "classification (binary)"
+                    elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                        detected_type = "classification"
+                    else:
+                        detected_type = "regression"
+                    self.task_type_detection_label.config(
+                        text=f"Detected: {detected_type}",
+                        foreground=self.colors.get('success', 'green')
+                    )
+                else:
+                    # User manually selected
+                    self.task_type_detection_label.config(
+                        text=f"(manual selection)",
+                        foreground=self.colors.get('info', 'blue')
+                    )
+
             # Generate plots
             self._generate_plots()
 
@@ -2018,6 +2490,9 @@ class SpectralPredictApp:
             self.absorbance_checkbox.config(state='normal')
             self.reset_exclusions_button.config(state='normal')
             # No popup needed - status label shows success and plots are visible
+
+            # Populate the data viewer tab
+            self._populate_data_viewer()
 
         except Exception as e:
             import traceback
@@ -2149,6 +2624,9 @@ class SpectralPredictApp:
 
             # Update status
             self.tab1_status.config(text=f"✓ Updated to {len(self.X)} samples × {self.X.shape[1]} wavelengths")
+
+            # Update data viewer
+            self._populate_data_viewer()
 
         except ValueError as e:
             messagebox.showerror("Invalid Input", "Wavelength values must be numbers")
@@ -2660,18 +3138,24 @@ class SpectralPredictApp:
         Returns
         -------
         numpy.ndarray or pandas.DataFrame
-            Reflectance data (bounded to [0, 1])
+            Reflectance data (lower-bounded at 0, values > 1.0 allowed)
         """
         # Convert using inverse formula
         reflectance = np.power(10, -data)
 
-        # Clip to valid reflectance range [0, 1]
-        reflectance = np.clip(reflectance, 0.0, 1.0)
+        # Only clip negative values (keep lower bound at 0)
+        # Allow values > 1.0 as they can occur in real spectral data
+        reflectance = np.maximum(reflectance, 0.0)
 
-        # Warn if many values were clipped
-        n_clipped = np.sum((np.power(10, -data) > 1.0) | (np.power(10, -data) < 0.0))
-        if n_clipped > 0:
-            print(f"⚠️  Warning: {n_clipped} values clipped to [0, 1] range after conversion.")
+        # Warn if negative values were encountered
+        n_negative = np.sum(np.power(10, -data) < 0.0)
+        if n_negative > 0:
+            print(f"⚠️  Warning: {n_negative} negative values clipped to 0 after conversion.")
+
+        # Info message if values exceed 1.0 (this is acceptable)
+        n_above_one = np.sum(reflectance > 1.0)
+        if n_above_one > 0:
+            print(f"ℹ️  Info: {n_above_one} reflectance values > 1.0 (this is acceptable for real spectra).")
 
         return reflectance
 
@@ -2840,8 +3324,20 @@ class SpectralPredictApp:
         try:
             # Get parameters
             n_components = self.n_pca_components.get()
-            y_min = float(self.y_min_bound.get()) if self.y_min_bound.get().strip() else None
-            y_max = float(self.y_max_bound.get()) if self.y_max_bound.get().strip() else None
+
+            # Hide Y range controls for categorical data
+            if self._is_categorical_target():
+                # Disable Y range input fields
+                self.y_min_entry.config(state='disabled')
+                self.y_max_entry.config(state='disabled')
+                y_min = None
+                y_max = None
+            else:
+                # Enable Y range input fields
+                self.y_min_entry.config(state='normal')
+                self.y_max_entry.config(state='normal')
+                y_min = float(self.y_min_bound.get()) if self.y_min_bound.get().strip() else None
+                y_max = float(self.y_max_bound.get()) if self.y_max_bound.get().strip() else None
 
             # Apply absorbance transformation if enabled
             X_data = self._apply_transformation(self.X.values)
@@ -2895,24 +3391,61 @@ class SpectralPredictApp:
         y_values = self.y.values
         outliers = self.outlier_report['pca']['outlier_flags']
 
-        # Scatter plot
-        scatter = ax.scatter(scores[:, 0], scores[:, 1], c=y_values,
-                           cmap='viridis', alpha=0.6, edgecolors='black', linewidths=0.5)
+        # Color points by Y value
+        if self._is_categorical_target():
+            # Use discrete colors for categorical targets
+            unique_classes = np.unique(y_values)
+            n_classes = len(unique_classes)
+            colors = plt.cm.Set1(np.linspace(0, 1, min(n_classes, 9)))  # Set1 has 9 colors
 
-        # Highlight outliers
-        if np.any(outliers):
-            ax.scatter(scores[outliers, 0], scores[outliers, 1],
-                      facecolors='none', edgecolors='red', linewidths=2, s=100,
-                      label='T² Outliers')
+            # Create color map
+            color_map = {cls: colors[i % len(colors)] for i, cls in enumerate(unique_classes)}
+            point_colors = [color_map[y] for y in y_values]
+
+            # Plot with discrete colors
+            for cls in unique_classes:
+                mask = y_values == cls
+                if outliers is not None:
+                    # Separate normal and outlier samples
+                    normal_mask = mask & ~outliers
+                    outlier_mask = mask & outliers
+
+                    if np.any(normal_mask):
+                        ax.scatter(scores[normal_mask, 0], scores[normal_mask, 1],
+                                  c=[color_map[cls]], alpha=0.6, edgecolors='black',
+                                  linewidths=0.5, label=str(cls), s=50)
+                    if np.any(outlier_mask):
+                        ax.scatter(scores[outlier_mask, 0], scores[outlier_mask, 1],
+                                  c=[color_map[cls]], alpha=0.6, edgecolors='red',
+                                  linewidths=2, s=100, marker='x')
+                else:
+                    ax.scatter(scores[mask, 0], scores[mask, 1],
+                              c=[color_map[cls]], alpha=0.6, edgecolors='black',
+                              linewidths=0.5, label=str(cls), s=50)
+
+            ax.legend(title='Category', loc='best', fontsize=8)
+        else:
+            # Use continuous colormap for numeric targets (existing code)
+            if outliers is not None and np.any(outliers):
+                # Normal samples
+                scatter_normal = ax.scatter(scores[~outliers, 0], scores[~outliers, 1],
+                                           c=y_values[~outliers], cmap='viridis',
+                                           alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+                # Outlier samples
+                ax.scatter(scores[outliers, 0], scores[outliers, 1],
+                          c=y_values[outliers], cmap='viridis',
+                          alpha=0.6, edgecolors='red', linewidths=2, s=100, marker='x')
+                fig.colorbar(scatter_normal, ax=ax, label='Y Value')
+            else:
+                scatter = ax.scatter(scores[:, 0], scores[:, 1], c=y_values,
+                                   cmap='viridis', alpha=0.6, edgecolors='black',
+                                   linewidths=0.5, s=50)
+                fig.colorbar(scatter, ax=ax, label='Y Value')
 
         ax.set_xlabel(f'PC1 ({self.outlier_report["pca"]["variance_explained"][0]*100:.1f}%)')
         ax.set_ylabel(f'PC2 ({self.outlier_report["pca"]["variance_explained"][1]*100:.1f}%)')
         ax.set_title('PCA Score Plot (PC1 vs PC2)')
         ax.grid(True, alpha=0.3)
-        if np.any(outliers):
-            ax.legend()
-
-        fig.colorbar(scatter, ax=ax, label='Y Value')
         fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.pca_plot_frame)
@@ -3029,10 +3562,17 @@ class SpectralPredictApp:
         self._add_plot_export_button(self.maha_plot_frame, fig, "mahalanobis_distance")
 
     def _plot_y_distribution(self):
-        """Plot Y value distribution with outliers highlighted."""
+        """Plot Y value distribution - handles both continuous and categorical."""
         if not HAS_MATPLOTLIB or self.outlier_report is None:
             return
 
+        if self._is_categorical_target():
+            self._plot_y_distribution_categorical()
+        else:
+            self._plot_y_distribution_continuous()
+
+    def _plot_y_distribution_continuous(self):
+        """Plot continuous Y value distribution with histogram and boxplot."""
         # Clear existing plot
         for widget in self.y_dist_plot_frame.winfo_children():
             widget.destroy()
@@ -3079,6 +3619,66 @@ class SpectralPredictApp:
         # Add export button
         self._add_plot_export_button(self.y_dist_plot_frame, fig, "y_distribution")
 
+    def _plot_y_distribution_categorical(self):
+        """Plot categorical Y value distribution with bar chart."""
+        # Clear existing plot
+        for widget in self.y_dist_plot_frame.winfo_children():
+            widget.destroy()
+
+        y_consistency = self.outlier_report['y_consistency']
+
+        # Get class distribution from outlier report
+        if 'unique_values' in y_consistency and 'value_counts' in y_consistency:
+            unique_values = y_consistency['unique_values']
+            counts = y_consistency['value_counts']
+        else:
+            # Fallback: compute from self.y
+            unique_values, counts = np.unique(self.y.values, return_counts=True)
+
+        # Create figure with single bar chart
+        fig = Figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+
+        # Create bar chart
+        x_pos = np.arange(len(unique_values))
+        bars = ax.bar(x_pos, counts, color='steelblue', alpha=0.7, edgecolor='black')
+
+        # Add value labels on bars
+        for bar, count in zip(bars, counts):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{int(count)}',
+                   ha='center', va='bottom', fontweight='bold')
+
+        # Set labels and formatting
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(unique_values, rotation=45, ha='right')
+        ax.set_xlabel('Category', fontsize=10, fontweight='bold')
+        ax.set_ylabel('Frequency', fontsize=10, fontweight='bold')
+        ax.set_title('Target Variable Class Distribution', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # Add statistics text
+        total_samples = sum(counts)
+        proportions = [count/total_samples for count in counts]
+        stats_text = "Class Distribution:\n"
+        for val, count, prop in zip(unique_values, counts, proportions):
+            stats_text += f"  {val}: {count} ({prop*100:.1f}%)\n"
+
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+               fontfamily='monospace', fontsize=8)
+
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.y_dist_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.y_dist_plot_frame, fig, "class_distribution")
+
     def _populate_outlier_table(self):
         """Populate the outlier summary table."""
         if self.outlier_report is None:
@@ -3093,9 +3693,16 @@ class SpectralPredictApp:
 
         # Add rows
         for idx, row in summary.iterrows():
+            # Format Y value - handle both numeric and categorical
+            y_val = row['Y_Value']
+            if isinstance(y_val, (int, float)):
+                y_display = f"{y_val:.2f}"
+            else:
+                y_display = str(y_val)
+
             values = (
                 row['Sample_Index'],
-                f"{row['Y_Value']:.2f}",
+                y_display,  # Use formatted value
                 "✓" if row['T2_Outlier'] else "",
                 "✓" if row['Q_Outlier'] else "",
                 "✓" if row['Maha_Outlier'] else "",
@@ -3356,9 +3963,9 @@ class SpectralPredictApp:
             messagebox.showwarning("No Models", "Please select at least one model to test")
             return
 
-        # Switch to Analysis Progress tab (index 3)
-        # Tab indices: 0=Import, 1=Quality Check, 2=Analysis Config, 3=Analysis Progress, 4=Results, 5=Custom Model Dev
-        self.notebook.select(3)
+        # Switch to Analysis Progress tab (index 4)
+        # Tab indices: 0=Import, 1=Data Viewer, 2=Quality Check, 3=Analysis Config, 4=Analysis Progress, 5=Results, 6=Custom Model Dev
+        self.notebook.select(4)
 
         # Clear progress text
         self.progress_text.delete('1.0', tk.END)
@@ -3392,12 +3999,21 @@ class SpectralPredictApp:
             from spectral_predict.report import write_markdown_report
 
             # Determine task type
-            if self.y.nunique() == 2:
-                task_type = "classification"
-            elif self.y.dtype == 'object' or self.y.nunique() < 10:
-                task_type = "classification"
+            task_type_setting = self.task_type.get()
+
+            if task_type_setting == "auto":
+                # Auto-detect task type
+                if self.y.nunique() == 2:
+                    task_type = "classification"
+                elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                    task_type = "classification"
+                else:
+                    task_type = "regression"
+                self._log_progress(f"Task type: {task_type} (auto-detected)")
             else:
-                task_type = "regression"
+                # User explicitly selected task type
+                task_type = task_type_setting
+                self._log_progress(f"Task type: {task_type} (user-selected)")
 
             # Collect preprocessing method selections
             preprocessing_methods = {
@@ -3610,6 +4226,164 @@ class SpectralPredictApp:
             # Sort for consistent ordering
             lasso_alphas_list = sorted(lasso_alphas_list)
 
+            # Collect XGBoost hyperparameters
+            # n_estimators
+            xgb_n_estimators_list = []
+            if self.xgb_n_estimators_100.get():
+                xgb_n_estimators_list.append(100)
+            if self.xgb_n_estimators_200.get():
+                xgb_n_estimators_list.append(200)
+
+            custom_xgb_n_est = self.xgb_n_estimators_custom.get().strip()
+            if custom_xgb_n_est:
+                try:
+                    custom_val = int(custom_xgb_n_est)
+                    if custom_val > 0 and custom_val not in xgb_n_estimators_list:
+                        xgb_n_estimators_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost n_estimators '{custom_xgb_n_est}', ignoring")
+
+            if not xgb_n_estimators_list:
+                xgb_n_estimators_list = [100, 200]  # Standard tier defaults
+            xgb_n_estimators_list = sorted(xgb_n_estimators_list)
+
+            # learning_rate
+            xgb_learning_rates = []
+            if self.xgb_lr_005.get():
+                xgb_learning_rates.append(0.05)
+            if self.xgb_lr_01.get():
+                xgb_learning_rates.append(0.1)
+
+            custom_xgb_lr = self.xgb_lr_custom.get().strip()
+            if custom_xgb_lr:
+                try:
+                    custom_val = float(custom_xgb_lr)
+                    if 0 < custom_val <= 1.0 and custom_val not in xgb_learning_rates:
+                        xgb_learning_rates.append(custom_val)
+                    elif custom_val <= 0 or custom_val > 1.0:
+                        print(f"WARNING: Invalid XGBoost learning_rate '{custom_xgb_lr}' (must be 0-1), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost learning_rate '{custom_xgb_lr}', ignoring")
+
+            if not xgb_learning_rates:
+                xgb_learning_rates = [0.05, 0.1]  # Standard tier defaults
+            xgb_learning_rates = sorted(xgb_learning_rates)
+
+            # max_depth
+            xgb_max_depths = []
+            if self.xgb_max_depth_3.get():
+                xgb_max_depths.append(3)
+            if self.xgb_max_depth_6.get():
+                xgb_max_depths.append(6)
+            if self.xgb_max_depth_9.get():
+                xgb_max_depths.append(9)
+
+            custom_xgb_depth = self.xgb_max_depth_custom.get().strip()
+            if custom_xgb_depth:
+                try:
+                    custom_val = int(custom_xgb_depth)
+                    if custom_val > 0 and custom_val not in xgb_max_depths:
+                        xgb_max_depths.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost max_depth '{custom_xgb_depth}', ignoring")
+
+            if not xgb_max_depths:
+                xgb_max_depths = [3, 6]  # Standard tier defaults
+            xgb_max_depths = sorted(xgb_max_depths)
+
+            # subsample
+            xgb_subsample = []
+            if self.xgb_subsample_08.get():
+                xgb_subsample.append(0.8)
+            if self.xgb_subsample_10.get():
+                xgb_subsample.append(1.0)
+
+            custom_xgb_subsample = self.xgb_subsample_custom.get().strip()
+            if custom_xgb_subsample:
+                try:
+                    custom_val = float(custom_xgb_subsample)
+                    if 0 < custom_val <= 1.0 and custom_val not in xgb_subsample:
+                        xgb_subsample.append(custom_val)
+                    elif custom_val <= 0 or custom_val > 1.0:
+                        print(f"WARNING: Invalid XGBoost subsample '{custom_xgb_subsample}' (must be 0-1), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost subsample '{custom_xgb_subsample}', ignoring")
+
+            if not xgb_subsample:
+                xgb_subsample = [0.8, 1.0]  # Standard tier defaults
+            xgb_subsample = sorted(xgb_subsample)
+
+            # colsample_bytree
+            xgb_colsample_bytree = []
+            if self.xgb_colsample_08.get():
+                xgb_colsample_bytree.append(0.8)
+            if self.xgb_colsample_10.get():
+                xgb_colsample_bytree.append(1.0)
+
+            custom_xgb_colsample = self.xgb_colsample_custom.get().strip()
+            if custom_xgb_colsample:
+                try:
+                    custom_val = float(custom_xgb_colsample)
+                    if 0 < custom_val <= 1.0 and custom_val not in xgb_colsample_bytree:
+                        xgb_colsample_bytree.append(custom_val)
+                    elif custom_val <= 0 or custom_val > 1.0:
+                        print(f"WARNING: Invalid XGBoost colsample_bytree '{custom_xgb_colsample}' (must be 0-1), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost colsample_bytree '{custom_xgb_colsample}', ignoring")
+
+            if not xgb_colsample_bytree:
+                xgb_colsample_bytree = [0.8, 1.0]  # Standard tier defaults
+            xgb_colsample_bytree = sorted(xgb_colsample_bytree)
+
+            # reg_alpha (L1 regularization)
+            xgb_reg_alpha = []
+            if self.xgb_reg_alpha_0.get():
+                xgb_reg_alpha.append(0.0)
+            if self.xgb_reg_alpha_01.get():
+                xgb_reg_alpha.append(0.1)
+            if self.xgb_reg_alpha_05.get():
+                xgb_reg_alpha.append(0.5)
+
+            custom_xgb_reg_alpha = self.xgb_reg_alpha_custom.get().strip()
+            if custom_xgb_reg_alpha:
+                try:
+                    custom_val = float(custom_xgb_reg_alpha)
+                    if custom_val >= 0 and custom_val not in xgb_reg_alpha:
+                        xgb_reg_alpha.append(custom_val)
+                    elif custom_val < 0:
+                        print(f"WARNING: Invalid XGBoost reg_alpha '{custom_xgb_reg_alpha}' (must be >= 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost reg_alpha '{custom_xgb_reg_alpha}', ignoring")
+
+            if not xgb_reg_alpha:
+                xgb_reg_alpha = [0.0, 0.1]  # Standard tier defaults
+            xgb_reg_alpha = sorted(xgb_reg_alpha)
+
+            # reg_lambda (L2 regularization) - comprehensive tier
+            xgb_reg_lambda = []
+            if self.xgb_reg_lambda_10.get():
+                xgb_reg_lambda.append(1.0)
+            if self.xgb_reg_lambda_50.get():
+                xgb_reg_lambda.append(5.0)
+
+            custom_xgb_reg_lambda = self.xgb_reg_lambda_custom.get().strip()
+            if custom_xgb_reg_lambda:
+                try:
+                    custom_val = float(custom_xgb_reg_lambda)
+                    if custom_val >= 0 and custom_val not in xgb_reg_lambda:
+                        xgb_reg_lambda.append(custom_val)
+                    elif custom_val < 0:
+                        print(f"WARNING: Invalid XGBoost reg_lambda '{custom_xgb_reg_lambda}' (must be >= 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost reg_lambda '{custom_xgb_reg_lambda}', ignoring")
+
+            # Only pass reg_lambda if user explicitly selected values (comprehensive tier feature)
+            # Default: None (will use tier defaults in models.py)
+            if not xgb_reg_lambda:
+                xgb_reg_lambda = None
+            else:
+                xgb_reg_lambda = sorted(xgb_reg_lambda)
+
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
@@ -3728,7 +4502,7 @@ class SpectralPredictApp:
                 y_filtered = y_filtered.loc[common_idx]
                 self._log_progress(f"✓ Realigned to {len(common_idx)} common samples")
 
-            results_df = run_search(
+            results_df, label_encoder = run_search(
                 X_filtered,
                 y_filtered,
                 task_type=task_type,
@@ -3746,6 +4520,13 @@ class SpectralPredictApp:
                 rf_max_depth_list=rf_max_depth_list,
                 ridge_alphas_list=ridge_alphas_list,
                 lasso_alphas_list=lasso_alphas_list,
+                xgb_n_estimators_list=xgb_n_estimators_list,
+                xgb_learning_rates=xgb_learning_rates,
+                xgb_max_depths=xgb_max_depths,
+                xgb_subsample=xgb_subsample,
+                xgb_colsample_bytree=xgb_colsample_bytree,
+                xgb_reg_alpha=xgb_reg_alpha,
+                xgb_reg_lambda=xgb_reg_lambda,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
@@ -3763,6 +4544,9 @@ class SpectralPredictApp:
                 enabled_models=selected_models  # User's manual selection overrides tier defaults
             )
 
+            # Store label_encoder for saving with models
+            self.label_encoder = label_encoder
+
             # Save results
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = Path(self.output_dir.get())
@@ -3775,6 +4559,108 @@ class SpectralPredictApp:
             report_dir = Path("reports")
             report_dir.mkdir(parents=True, exist_ok=True)
             write_markdown_report(self.target_column.get(), results_df, str(report_dir))
+
+            # === Helper function to reconstruct models from results ===
+            def reconstruct_models_from_results(top_models_df, X_train, y_train):
+                """
+                Reconstruct and refit models from results DataFrame rows.
+
+                Args:
+                    top_models_df: DataFrame rows with model configurations
+                    X_train: Training features
+                    y_train: Training targets
+
+                Returns:
+                    List of tuples: [(fitted_model, model_name, metadata), ...]
+                """
+                from spectral_predict.models import get_model
+                from spectral_predict.preprocess import SavgolDerivative
+                from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                import ast
+
+                reconstructed_models = []
+
+                for idx, row in enumerate(top_models_df.itertuples(), 1):
+                    try:
+                        # Extract configuration
+                        model_name = row.Model
+                        params_str = row.Params
+                        preprocess = row.Preprocess
+                        deriv = row.Deriv
+                        window = row.Window
+                        polyorder = row.Poly
+
+                        # Parse parameters
+                        if params_str and params_str != '{}':
+                            try:
+                                params_dict = ast.literal_eval(params_str)
+                            except:
+                                params_dict = {}
+                        else:
+                            params_dict = {}
+
+                        # Create preprocessing pipeline
+                        steps = []
+
+                        # Add derivative/SNV preprocessing if applicable
+                        if preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
+                            if preprocess == 'snv':
+                                # SNV only - no derivative
+                                pass  # Will add scaler below
+                            elif preprocess in ['sg1', 'sg2']:
+                                # Savitzky-Golay derivative
+                                deriv_order = 1 if preprocess == 'sg1' else 2
+                                steps.append(('derivative', SavgolDerivative(
+                                    window_length=int(window),
+                                    polyorder=int(polyorder),
+                                    deriv=deriv_order
+                                )))
+                            elif preprocess == 'deriv_snv':
+                                # Derivative then SNV
+                                deriv_order = int(deriv)
+                                steps.append(('derivative', SavgolDerivative(
+                                    window_length=int(window),
+                                    polyorder=int(polyorder),
+                                    deriv=deriv_order
+                                )))
+
+                        # Add scaler for models that need it
+                        if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
+                            steps.append(('scaler', StandardScaler()))
+
+                        # Create model with exact parameters
+                        if params_dict:
+                            model = get_model(model_name, task_type=task_type, **params_dict)
+                        else:
+                            model = get_model(model_name, task_type=task_type)
+
+                        steps.append(('model', model))
+
+                        # Create pipeline
+                        if len(steps) > 1:
+                            pipeline = Pipeline(steps)
+                        else:
+                            pipeline = model
+
+                        # Fit on training data
+                        pipeline.fit(X_train, y_train)
+
+                        # Store metadata
+                        metadata = {
+                            'model_name': model_name,
+                            'preprocess': preprocess,
+                            'params': params_dict,
+                            'score': row.CompositeScore if hasattr(row, 'CompositeScore') else 0.0
+                        }
+
+                        reconstructed_models.append((pipeline, model_name, metadata))
+
+                    except Exception as e:
+                        self._log_progress(f"⚠️ Failed to reconstruct {row.Model}: {e}")
+                        continue
+
+                return reconstructed_models
 
             # === Run Ensemble Methods (if enabled) ===
             if self.enable_ensembles.get():
@@ -3794,34 +4680,144 @@ class SpectralPredictApp:
                     for i, row in enumerate(top_models_df.itertuples(), 1):
                         self._log_progress(f"  {i}. {row.Model} ({row.Preprocess}) - Score: {row.CompositeScore:.4f}")
 
-                    # Collect ensemble methods to run
-                    ensemble_methods = []
-                    if self.ensemble_simple_average.get():
-                        ensemble_methods.append(('simple_average', 'Simple Average'))
-                    if self.ensemble_region_weighted.get():
-                        ensemble_methods.append(('region_weighted', 'Region-Aware Weighted'))
-                    if self.ensemble_mixture_experts.get():
-                        ensemble_methods.append(('mixture_experts', 'Mixture of Experts'))
-                    if self.ensemble_stacking.get():
-                        ensemble_methods.append(('stacking', 'Stacking'))
-                    if self.ensemble_stacking_region.get():
-                        ensemble_methods.append(('stacking', 'Stacking + Region Features'))
+                    # Reconstruct models from results
+                    self._log_progress(f"\nReconstructing top {len(top_models_df)} models...")
+                    reconstructed = reconstruct_models_from_results(top_models_df, X_filtered, y_filtered)
 
-                    if not ensemble_methods:
-                        self._log_progress("⚠️ No ensemble methods selected, skipping...")
+                    if len(reconstructed) < 2:
+                        self._log_progress(f"⚠️ Need at least 2 models for ensemble (got {len(reconstructed)}), skipping...")
                     else:
-                        self._log_progress(f"\nTesting {len(ensemble_methods)} ensemble methods...")
-                        self._log_progress(f"Number of regions: {self.ensemble_n_regions.get()}")
+                        self._log_progress(f"✓ Successfully reconstructed {len(reconstructed)} models")
 
-                        # Build base models from top results (simplified - just create fitted models)
-                        # Note: In a complete implementation, we'd rebuild and refit models
-                        # For now, log that ensemble functionality is available
-                        self._log_progress(f"\n💡 Ensemble methods are configured and ready!")
-                        self._log_progress(f"   To use them, select top models and create ensembles in post-analysis")
-                        self._log_progress(f"   See docs/MACHINE_LEARNING_MODELS.md for ensemble usage examples")
+                        # Extract models and names
+                        models = [m[0] for m in reconstructed]
+                        model_names = [m[1] for m in reconstructed]
+
+                        # Collect ensemble methods to run
+                        ensemble_methods = []
+                        if self.ensemble_simple_average.get():
+                            ensemble_methods.append(('simple_average', 'Simple Average'))
+                        if self.ensemble_region_weighted.get():
+                            ensemble_methods.append(('region_weighted', 'Region-Aware Weighted'))
+                        if self.ensemble_mixture_experts.get():
+                            ensemble_methods.append(('mixture_experts', 'Mixture of Experts'))
+                        if self.ensemble_stacking.get():
+                            ensemble_methods.append(('stacking', 'Stacking'))
+                        if self.ensemble_stacking_region.get():
+                            ensemble_methods.append(('region_stacking', 'Stacking + Region Features'))
+
+                        if not ensemble_methods:
+                            self._log_progress("⚠️ No ensemble methods selected, skipping...")
+                        else:
+                            self._log_progress(f"\nTesting {len(ensemble_methods)} ensemble methods...")
+                            n_regions = self.ensemble_n_regions.get()
+                            self._log_progress(f"Number of regions: {n_regions}")
+
+                            # Train and evaluate each ensemble method
+                            ensemble_results = []
+                            trained_ensembles = {}
+
+                            for ensemble_type, ensemble_name in ensemble_methods:
+                                try:
+                                    self._log_progress(f"\n--- Training {ensemble_name} ---")
+
+                                    # Create ensemble
+                                    ensemble = create_ensemble(
+                                        models=models,
+                                        model_names=model_names,
+                                        X=X_filtered,
+                                        y=y_filtered,
+                                        ensemble_type=ensemble_type,
+                                        n_regions=n_regions,
+                                        cv=min(5, len(y_filtered))  # Use 5-fold or less if small dataset
+                                    )
+
+                                    # Make predictions
+                                    ensemble_pred = ensemble.predict(X_filtered)
+
+                                    # Calculate metrics
+                                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+                                    import numpy as np
+
+                                    rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
+                                    r2 = r2_score(y_filtered, ensemble_pred)
+                                    mae = mean_absolute_error(y_filtered, ensemble_pred)
+
+                                    # Calculate RPD (Ratio of Performance to Deviation)
+                                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
+
+                                    self._log_progress(f"✓ {ensemble_name} Results:")
+                                    self._log_progress(f"   RMSE: {rmse:.4f}")
+                                    self._log_progress(f"   R²:   {r2:.4f}")
+                                    self._log_progress(f"   MAE:  {mae:.4f}")
+                                    self._log_progress(f"   RPD:  {rpd:.2f}")
+
+                                    # Store results
+                                    ensemble_results.append({
+                                        'method': ensemble_name,
+                                        'type': ensemble_type,
+                                        'rmse': rmse,
+                                        'r2': r2,
+                                        'mae': mae,
+                                        'rpd': rpd,
+                                        'ensemble': ensemble
+                                    })
+
+                                    # Store trained ensemble
+                                    trained_ensembles[ensemble_type] = ensemble
+
+                                except Exception as e:
+                                    self._log_progress(f"✗ {ensemble_name} failed: {e}")
+                                    import traceback
+                                    self._log_progress(f"   {traceback.format_exc()}")
+                                    continue
+
+                            # Summary of ensemble results
+                            if ensemble_results:
+                                self._log_progress(f"\n{'='*70}")
+                                self._log_progress(f"ENSEMBLE RESULTS SUMMARY")
+                                self._log_progress(f"{'='*70}")
+
+                                # Sort by R² (best first)
+                                ensemble_results.sort(key=lambda x: x['r2'], reverse=True)
+
+                                # Find best individual model for comparison
+                                best_individual_r2 = results_df['R2'].max() if 'R2' in results_df.columns else 0
+                                best_individual_rmse = results_df['RMSE'].min() if 'RMSE' in results_df.columns else float('inf')
+
+                                self._log_progress(f"\nBest Individual Model: R²={best_individual_r2:.4f}, RMSE={best_individual_rmse:.4f}")
+                                self._log_progress(f"\nEnsemble Rankings:")
+
+                                for i, result in enumerate(ensemble_results, 1):
+                                    r2_improvement = result['r2'] - best_individual_r2
+                                    rmse_improvement = ((best_individual_rmse - result['rmse']) / best_individual_rmse * 100) if best_individual_rmse > 0 else 0
+
+                                    status = "🏆" if i == 1 else f"  {i}."
+                                    self._log_progress(f"{status} {result['method']}")
+                                    self._log_progress(f"     R²:   {result['r2']:.4f} ({r2_improvement:+.4f})")
+                                    self._log_progress(f"     RMSE: {result['rmse']:.4f} ({rmse_improvement:+.1f}%)")
+                                    self._log_progress(f"     RPD:  {result['rpd']:.2f}")
+
+                                # Store ensemble results for later use
+                                self.ensemble_results = ensemble_results
+                                self.trained_ensembles = trained_ensembles
+                                # Store training data for visualizations
+                                self.ensemble_X = X_filtered
+                                self.ensemble_y = y_filtered
+
+                                # Populate ensemble results table in Tab 5
+                                self.root.after(0, self._populate_ensemble_results)
+
+                                self._log_progress(f"\n✓ Ensemble training complete!")
+                                self._log_progress(f"✓ Trained {len(ensemble_results)} ensemble(s)")
+                                self._log_progress(f"✓ View ensemble results in the Results tab")
+                            else:
+                                self._log_progress(f"\n⚠️ No ensembles were successfully trained")
 
                 except Exception as e:
+                    import traceback
                     self._log_progress(f"\n⚠️ Ensemble execution failed: {e}")
+                    self._log_progress(f"   {traceback.format_exc()}")
                     self._log_progress(f"   Individual model results are still available")
 
             # Store results for Results tab
@@ -3861,15 +4857,28 @@ class SpectralPredictApp:
             remaining_configs = total - current
             estimated_remaining = time_per_config * remaining_configs
 
+            # Format elapsed time
+            if elapsed < 60:
+                elapsed_str = f"{int(elapsed)}s"
+            elif elapsed < 3600:
+                elapsed_str = f"{int(elapsed / 60)}m {int(elapsed % 60)}s"
+            else:
+                hours = int(elapsed / 3600)
+                minutes = int((elapsed % 3600) / 60)
+                elapsed_str = f"{hours}h {minutes}m"
+
             # Format time remaining
             if estimated_remaining < 60:
-                time_str = f"~{int(estimated_remaining)}s remaining"
+                remaining_str = f"~{int(estimated_remaining)}s"
             elif estimated_remaining < 3600:
-                time_str = f"~{int(estimated_remaining / 60)}m {int(estimated_remaining % 60)}s remaining"
+                remaining_str = f"~{int(estimated_remaining / 60)}m {int(estimated_remaining % 60)}s"
             else:
                 hours = int(estimated_remaining / 3600)
                 minutes = int((estimated_remaining % 3600) / 60)
-                time_str = f"~{hours}h {minutes}m remaining"
+                remaining_str = f"~{hours}h {minutes}m"
+
+            # Combine elapsed and remaining
+            time_str = f"Elapsed: {elapsed_str} | Remaining: {remaining_str}"
         else:
             time_str = "Calculating..."
 
@@ -4109,7 +5118,310 @@ class SpectralPredictApp:
         self._load_model_for_refinement(model_config)
 
         # Switch to the Custom Model Development tab
-        self.notebook.select(5)  # Tab 6 (index 5)
+        self.notebook.select(6)  # Tab 7 (index 6)
+
+    def _populate_ensemble_results(self):
+        """Populate the ensemble results table with trained ensemble performance."""
+        if not hasattr(self, 'ensemble_results') or self.ensemble_results is None or len(self.ensemble_results) == 0:
+            self.ensemble_status.config(text="No ensemble results. Enable ensembles in Analysis Configuration.")
+            # Disable buttons
+            self.btn_save_best_ensemble.config(state='disabled')
+            self.btn_show_regional_perf.config(state='disabled')
+            self.btn_show_weights.config(state='disabled')
+            self.btn_show_specialization.config(state='disabled')
+            return
+
+        # Clear existing items
+        for item in self.ensemble_tree.get_children():
+            self.ensemble_tree.delete(item)
+
+        # Define columns
+        columns = ['Rank', 'Method', 'RMSE', 'R²', 'MAE', 'RPD', 'vs Best Individual']
+        self.ensemble_tree['columns'] = columns
+
+        # Configure columns
+        column_widths = {
+            'Rank': 60,
+            'Method': 200,
+            'RMSE': 100,
+            'R²': 100,
+            'MAE': 100,
+            'RPD': 80,
+            'vs Best Individual': 150
+        }
+
+        for col in columns:
+            self.ensemble_tree.heading(col, text=col)
+            self.ensemble_tree.column(col, width=column_widths.get(col, 100), anchor='center')
+
+        # Get best individual model performance for comparison
+        best_individual_r2 = self.results_df['R2'].max() if self.results_df is not None and 'R2' in self.results_df.columns else 0
+        best_individual_rmse = self.results_df['RMSE'].min() if self.results_df is not None and 'RMSE' in self.results_df.columns else float('inf')
+
+        # Populate table (already sorted by R² descending from training)
+        for i, result in enumerate(self.ensemble_results, 1):
+            # Calculate improvement
+            r2_improvement = result['r2'] - best_individual_r2
+
+            # Format comparison
+            if r2_improvement > 0:
+                comparison = f"+{r2_improvement:.4f} ✓"
+            elif r2_improvement < 0:
+                comparison = f"{r2_improvement:.4f} ✗"
+            else:
+                comparison = "Same"
+
+            # Add rank indicator
+            rank = "🏆 1" if i == 1 else str(i)
+
+            values = (
+                rank,
+                result['method'],
+                f"{result['rmse']:.4f}",
+                f"{result['r2']:.4f}",
+                f"{result['mae']:.4f}",
+                f"{result['rpd']:.2f}",
+                comparison
+            )
+
+            # Highlight best ensemble
+            tag = 'best' if i == 1 else ''
+            self.ensemble_tree.insert('', 'end', values=values, tags=(tag,))
+
+        # Configure tag colors
+        self.ensemble_tree.tag_configure('best', background='#d4edda', foreground='#155724')
+
+        # Update status
+        n_ensembles = len(self.ensemble_results)
+        best_method = self.ensemble_results[0]['method']
+        self.ensemble_status.config(
+            text=f"✓ {n_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})")
+
+        # Enable buttons
+        self.btn_save_best_ensemble.config(state='normal')
+        self.btn_show_regional_perf.config(state='normal')
+        self.btn_show_weights.config(state='normal')
+        self.btn_show_specialization.config(state='normal')
+
+    def _show_regional_performance(self):
+        """Show regional performance heatmap for all models in the ensemble."""
+        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+            messagebox.showwarning("No Ensembles", "No ensemble results available.")
+            return
+
+        if not hasattr(self, 'ensemble_X') or not hasattr(self, 'ensemble_y'):
+            messagebox.showwarning("No Training Data", "Ensemble training data not available. Visualizations only work for freshly trained ensembles.")
+            return
+
+        try:
+            from spectral_predict.ensemble_viz import plot_regional_performance
+            import matplotlib.pyplot as plt
+
+            # Get best ensemble
+            best_result = self.ensemble_results[0]
+            ensemble = best_result['ensemble']
+
+            # Check if ensemble has analyzer (only region-aware ensembles)
+            if not hasattr(ensemble, 'analyzer_'):
+                messagebox.showinfo(
+                    "Not Applicable",
+                    f"Regional performance visualization is only available for region-aware ensembles.\n\n"
+                    f"Current ensemble type: {best_result['method']}\n\n"
+                    f"Try 'Region-Aware Weighted' or 'Mixture of Experts' ensemble methods."
+                )
+                return
+
+            # Create predictions dict from base models
+            predictions_dict = {}
+            for model, name in zip(ensemble.models, ensemble.model_names):
+                predictions_dict[name] = model.predict(self.ensemble_X)
+
+            # Create figure
+            fig, axes = plot_regional_performance(
+                analyzer=ensemble.analyzer_,
+                y_true=self.ensemble_y,
+                predictions_dict=predictions_dict,
+                metric='rmse'
+            )
+
+            # Add explanation text
+            fig.suptitle(
+                'Regional Performance: Which Models Excel Where?\n'
+                'Lower RMSE (darker blue) = Better Performance',
+                fontsize=12, y=0.98
+            )
+
+            # Show in popup window
+            fig.canvas.manager.set_window_title('Regional Performance Heatmap - Ensemble Analysis')
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            messagebox.showerror("Visualization Error", f"Failed to show regional performance:\n{str(e)}\n\nDetails:\n{error_details}")
+
+    def _show_ensemble_weights(self):
+        """Show ensemble weights visualization."""
+        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+            messagebox.showwarning("No Ensembles", "No ensemble results available.")
+            return
+
+        try:
+            from spectral_predict.ensemble_viz import plot_ensemble_weights
+            import matplotlib.pyplot as plt
+
+            # Get best ensemble
+            best_result = self.ensemble_results[0]
+            ensemble = best_result['ensemble']
+
+            # Check if ensemble has weights
+            if not hasattr(ensemble, 'weights_'):
+                messagebox.showinfo(
+                    "Not Applicable",
+                    f"Ensemble weights visualization is only available for weighted ensembles.\n\n"
+                    f"Current ensemble type: {best_result['method']}\n\n"
+                    f"Try 'Region-Aware Weighted' ensemble method."
+                )
+                return
+
+            # Create figure
+            fig, axes = plot_ensemble_weights(ensemble=ensemble)
+
+            # Add explanation
+            fig.suptitle(
+                'Ensemble Weights: How Much Each Model Contributes\n'
+                'Higher weight = More influence on final prediction',
+                fontsize=12, y=0.98
+            )
+
+            # Show in popup window
+            fig.canvas.manager.set_window_title('Ensemble Weights Analysis')
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            messagebox.showerror("Visualization Error", f"Failed to show ensemble weights:\n{str(e)}\n\nDetails:\n{error_details}")
+
+    def _show_specialization_profile(self):
+        """Show model specialization profiles."""
+        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+            messagebox.showwarning("No Ensembles", "No ensemble results available.")
+            return
+
+        if not hasattr(self, 'ensemble_X') or not hasattr(self, 'ensemble_y'):
+            messagebox.showwarning("No Training Data", "Ensemble training data not available. Visualizations only work for freshly trained ensembles.")
+            return
+
+        try:
+            from spectral_predict.ensemble_viz import plot_model_specialization_profile
+            import matplotlib.pyplot as plt
+
+            # Get best ensemble
+            best_result = self.ensemble_results[0]
+            ensemble = best_result['ensemble']
+
+            # Check if ensemble has analyzer (only region-aware ensembles)
+            if not hasattr(ensemble, 'analyzer_'):
+                messagebox.showinfo(
+                    "Not Applicable",
+                    f"Specialization profile is only available for region-aware ensembles.\n\n"
+                    f"Current ensemble type: {best_result['method']}\n\n"
+                    f"Try 'Region-Aware Weighted' or 'Mixture of Experts' ensemble methods."
+                )
+                return
+
+            # Create figure
+            fig, axes = plot_model_specialization_profile(ensemble=ensemble)
+
+            # Add explanation
+            fig.suptitle(
+                'Model Specialization: Performance Across Prediction Range\n'
+                'Shows which models excel at low/medium/high target values',
+                fontsize=12, y=0.98
+            )
+
+            # Show in popup window
+            fig.canvas.manager.set_window_title('Model Specialization Analysis')
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            messagebox.showerror("Visualization Error", f"Failed to show specialization profile:\n{str(e)}\n\nDetails:\n{error_details}")
+
+    def _save_best_ensemble(self):
+        """Save the best ensemble model to a .dasp file."""
+        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+            messagebox.showwarning("No Ensembles", "No ensemble results available.")
+            return
+
+        try:
+            from pathlib import Path
+            from spectral_predict.model_io import save_ensemble
+
+            # Get best ensemble
+            best_result = self.ensemble_results[0]
+            ensemble = best_result['ensemble']
+            ensemble_type = best_result['type']
+            ensemble_name = best_result['method']
+
+            # Determine initial directory (prefer data import folder over output folder)
+            initial_dir = None
+            if self.spectral_data_path.get():
+                data_path = Path(self.spectral_data_path.get())
+                initial_dir = str(data_path.parent if data_path.is_file() else data_path)
+            elif self.output_dir.get():
+                initial_dir = self.output_dir.get()
+            else:
+                initial_dir = str(Path.home())
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_name = f"ensemble_{ensemble_type}_{timestamp}.dasp"
+
+            filepath = filedialog.asksaveasfilename(
+                title="Save Ensemble Model",
+                initialdir=initial_dir,
+                initialfile=default_name,
+                defaultextension=".dasp",
+                filetypes=[("DASP Model Files", "*.dasp"), ("All Files", "*.*")]
+            )
+
+            if not filepath:
+                return  # User cancelled
+
+            # Collect metadata
+            metadata = {
+                'ensemble_type': ensemble_type,
+                'ensemble_name': ensemble_name,
+                'n_models': len(ensemble.models),
+                'model_names': ensemble.model_names,
+                'rmse': float(best_result['rmse']),  # Ensure JSON-serializable
+                'r2': float(best_result['r2']),
+                'mae': float(best_result['mae']),
+                'rpd': float(best_result['rpd']),
+                'training_date': datetime.now().isoformat(),
+                'target_column': self.target_column.get(),
+                'n_training_samples': int(len(self.ensemble_y)) if hasattr(self, 'ensemble_y') else 0
+            }
+
+            # Save ensemble
+            self._log_progress(f"\nSaving ensemble to: {filepath}")
+            save_ensemble(ensemble, filepath, metadata)
+            self._log_progress(f"✓ Ensemble saved successfully!")
+
+            messagebox.showinfo(
+                "Success",
+                f"Ensemble saved successfully!\n\nFile: {Path(filepath).name}\nLocation: {Path(filepath).parent}"
+            )
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            messagebox.showerror("Save Error", f"Failed to save ensemble:\n{str(e)}\n\n{error_details}")
 
     def _export_results_table(self):
         """Export the current results table to a CSV file."""
@@ -4149,6 +5461,170 @@ class SpectralPredictApp:
             messagebox.showerror(
                 "Export Error",
                 f"Failed to export results:\n\n{str(e)}"
+            )
+
+    def _populate_data_viewer(self):
+        """Populate the data viewer with Excel-like scrolling using tksheet.
+
+        PERFORMANCE: Uses tksheet's virtual scrolling - only visible cells are rendered.
+        No pagination needed - smooth scrolling through entire dataset.
+        """
+        # Check if data is loaded
+        if self.X is None or self.y is None:
+            self.data_viewer_info.config(
+                text="Load data in the Import & Preview tab to view it here.")
+            self.data_viewer_status.config(text="")
+            # Clear sheet
+            self.data_viewer_sheet.set_sheet_data([[]])
+            self.data_viewer_sheet.headers([])
+            return
+
+        try:
+            # Show loading cursor
+            original_cursor = self.root.cget('cursor')
+            self.root.config(cursor='wait')
+            self.root.update_idletasks()
+
+            # Get settings
+            show_excluded = self.show_excluded_data_viewer.get()
+
+            # Get target column name
+            target_col = "Target"
+            if hasattr(self, 'target_col') and self.target_col.get():
+                target_col = self.target_col.get()
+
+            # Filter samples based on exclusion setting
+            if show_excluded:
+                display_df = self.X.copy()
+                display_y = self.y.copy()
+                excluded_indices = list(self.excluded_spectra)
+            else:
+                # Filter out excluded samples
+                mask = ~self.X.index.isin(self.excluded_spectra)
+                display_df = self.X[mask].copy()
+                display_y = self.y[mask].copy()
+                excluded_indices = []
+
+            # Build headers: Sample ID, Target, then all wavelengths
+            wavelength_headers = [str(wl) for wl in display_df.columns]
+            headers = ['Sample ID', target_col] + wavelength_headers
+
+            # Pre-format all data
+            formatted_data = []
+            for idx in display_df.index:
+                # Sample ID
+                sample_id = str(idx)
+
+                # Target value
+                if np.issubdtype(display_y.dtype, np.number):
+                    target_val = f"{display_y.loc[idx]:.4f}"
+                else:
+                    target_val = str(display_y.loc[idx])
+
+                # Spectral values (format to 5 decimals)
+                spectral_vals = [f"{val:.5f}" for val in display_df.loc[idx].values]
+
+                row_data = [sample_id, target_val] + spectral_vals
+                formatted_data.append(row_data)
+
+            # Set sheet data and headers
+            self.data_viewer_sheet.set_sheet_data(formatted_data)
+            self.data_viewer_sheet.headers(headers)
+
+            # Highlight excluded samples in pink
+            if show_excluded and len(excluded_indices) > 0:
+                # Find row indices of excluded samples in the display dataframe
+                for display_row_idx, original_idx in enumerate(display_df.index):
+                    if original_idx in excluded_indices:
+                        self.data_viewer_sheet[display_row_idx].bg = "#FFE0E0"
+
+            # Update status
+            n_total_samples = len(self.X)
+            n_total_wavelengths = len(self.X.columns)
+            n_displayed = len(display_df)
+            n_excluded = len(self.excluded_spectra)
+
+            if n_excluded > 0 and not show_excluded:
+                status_text = f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths | {n_excluded} excluded samples hidden"
+            elif n_excluded > 0 and show_excluded:
+                status_text = f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths | {n_excluded} excluded samples shown in pink"
+            else:
+                status_text = f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths"
+
+            self.data_viewer_status.config(text=status_text)
+            self.data_viewer_info.config(
+                text=f"Total dataset: {n_total_samples} samples × {n_total_wavelengths} wavelengths | Scroll to navigate")
+
+            # Restore cursor
+            self.root.config(cursor=original_cursor)
+
+        except Exception as e:
+            # Restore cursor on error
+            self.root.config(cursor='arrow')
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror(
+                "Data Viewer Error",
+                f"Failed to populate data viewer:\n\n{str(e)}"
+            )
+            self.data_viewer_info.config(text=f"Error loading data: {str(e)}")
+
+    def _export_data_viewer_to_csv(self):
+        """Export the currently displayed data to a CSV file."""
+        if self.X is None or self.y is None:
+            messagebox.showwarning(
+                "No Data",
+                "No data to export. Load data first.")
+            return
+
+        try:
+            # Get default directory from spectral data path
+            initial_dir = None
+            if self.spectral_data_path.get():
+                data_path = Path(self.spectral_data_path.get())
+                initial_dir = str(data_path.parent if data_path.is_file() else data_path)
+
+            # Ask user for save location
+            default_name = f"spectral_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialfile=default_name,
+                initialdir=initial_dir,
+                title="Export Data to CSV"
+            )
+
+            if not filepath:
+                return  # User cancelled
+
+            # Determine what to export based on checkbox
+            show_excluded = self.show_excluded_data_viewer.get()
+
+            # Get target column name
+            target_col = "Target"
+            if hasattr(self, 'target_col') and self.target_col.get():
+                target_col = self.target_col.get()
+
+            # Create combined dataframe
+            export_df = self.X.copy()
+            export_df.insert(0, target_col, self.y)
+            export_df.index.name = 'Sample_ID'
+
+            # Filter out excluded samples if checkbox is unchecked
+            if not show_excluded and len(self.excluded_spectra) > 0:
+                export_df = export_df.drop(index=self.excluded_spectra, errors='ignore')
+
+            # Export
+            export_df.to_csv(filepath, index=True)
+
+            # Update status
+            n_rows = len(export_df)
+            self.data_viewer_status.config(text=f"✓ Exported {n_rows} samples to {Path(filepath).name}")
+
+        except Exception as e:
+            messagebox.showerror(
+                "Export Error",
+                f"Failed to export data:\n\n{str(e)}"
             )
 
     def _validate_data_for_refinement(self):
@@ -4471,10 +5947,19 @@ Performance (Classification):
         self._update_wavelength_count()
 
     def _plot_refined_predictions(self):
-        """Plot reference vs predicted values for refined model."""
+        """Plot reference vs predicted - handles both regression and classification."""
         if not HAS_MATPLOTLIB:
             return
 
+        task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') and self.refined_config else 'regression'
+
+        if task_type == 'classification':
+            self._plot_classification_predictions()
+        else:
+            self._plot_regression_predictions()
+
+    def _plot_regression_predictions(self):
+        """Plot scatter of reference vs predicted for regression."""
         if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
             return
 
@@ -4524,15 +6009,108 @@ Performance (Classification):
         # Add export button
         self._add_plot_export_button(self.refine_plot_frame, fig, "cv_predictions")
 
+    def _plot_classification_predictions(self):
+        """Plot confusion matrix for classification."""
+        if self.refined_y_true is None or self.refined_y_pred is None:
+            return
+
+        # Clear existing plot
+        for widget in self.refine_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Create confusion matrix
+        cm = confusion_matrix(self.refined_y_true, self.refined_y_pred)
+
+        # Get class labels (handle label encoder if present)
+        if self.label_encoder is not None:
+            class_labels = self.label_encoder.classes_
+        else:
+            class_labels = np.unique(np.concatenate([self.refined_y_true, self.refined_y_pred]))
+
+        # Create figure
+        fig = Figure(figsize=(8, 6))
+        ax = fig.add_subplot(111)
+
+        # Plot confusion matrix as heatmap
+        im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+        fig.colorbar(im, ax=ax)
+
+        # Set ticks and labels
+        tick_marks = np.arange(len(class_labels))
+        ax.set_xticks(tick_marks)
+        ax.set_yticks(tick_marks)
+        ax.set_xticklabels(class_labels, rotation=45, ha='right')
+        ax.set_yticklabels(class_labels)
+
+        # Add text annotations
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, format(cm[i, j], 'd'),
+                       ha="center", va="center",
+                       color="white" if cm[i, j] > thresh else "black",
+                       fontsize=12, fontweight='bold')
+
+        ax.set_xlabel('Predicted Label', fontsize=10, fontweight='bold')
+        ax.set_ylabel('True Label', fontsize=10, fontweight='bold')
+        ax.set_title('Confusion Matrix', fontsize=12, fontweight='bold')
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.refine_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.refine_plot_frame, fig, "confusion_matrix")
+
+        # Calculate and display metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+        accuracy = accuracy_score(self.refined_y_true, self.refined_y_pred)
+
+        # Handle binary vs multi-class
+        n_classes = len(class_labels)
+        if n_classes == 2:
+            precision = precision_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
+            recall = recall_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
+            f1 = f1_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
+        else:
+            precision = precision_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
+            recall = recall_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
+            f1 = f1_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
+
+        # Display metrics in text box
+        metrics_text = f"""
+═══════════════════════════════════════════════════
+CLASSIFICATION METRICS
+═══════════════════════════════════════════════════
+Accuracy:  {accuracy:.4f}
+Precision: {precision:.4f}
+Recall:    {recall:.4f}
+F1 Score:  {f1:.4f}
+═══════════════════════════════════════════════════
+"""
+
+        # Update or create metrics display
+        if hasattr(self, 'refine_metrics_text'):
+            self.refine_metrics_text.delete('1.0', tk.END)
+            self.refine_metrics_text.insert('1.0', metrics_text)
+
     def _plot_residual_diagnostics(self):
-        """Plot three residual diagnostic plots in Tab 6."""
+        """Plot diagnostics - residuals for regression, ROC curves for classification."""
         if not HAS_MATPLOTLIB:
             return
 
-        # Only for regression
-        if not hasattr(self, 'refined_config') or self.refined_config.get('task_type') != 'regression':
-            return
+        task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') and self.refined_config else 'regression'
 
+        if task_type == 'classification':
+            self._plot_classification_roc_curves()
+        else:
+            self._plot_regression_residual_diagnostics()
+
+    def _plot_regression_residual_diagnostics(self):
+        """Plot residual diagnostics for regression."""
         if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
             return
 
@@ -4597,6 +6175,84 @@ Performance (Classification):
 
         # Add dynamic model assessment below the plots
         self._add_residual_assessment(residuals, std_residuals)
+
+    def _plot_classification_roc_curves(self):
+        """Plot ROC curves for classification."""
+        if self.refined_y_true is None or self.refined_y_pred is None:
+            return
+
+        # Clear existing plot
+        for widget in self.residual_diagnostics_frame.winfo_children():
+            widget.destroy()
+
+        # Check if probabilities are available
+        if self.refined_y_proba is None:
+            # Show message that ROC curves require predict_proba
+            msg_label = ttk.Label(
+                self.residual_diagnostics_frame,
+                text="ROC curves require probability predictions.\nThis model does not support predict_proba().",
+                font=('Arial', 10),
+                justify=tk.CENTER
+            )
+            msg_label.pack(expand=True)
+            return
+
+        # Get class labels
+        if self.label_encoder is not None:
+            class_labels = self.label_encoder.classes_
+        else:
+            class_labels = np.unique(self.refined_y_true)
+
+        n_classes = len(class_labels)
+
+        # Create figure
+        fig = Figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+
+        if n_classes == 2:
+            # Binary classification - single ROC curve
+            fpr, tpr, _ = roc_curve(self.refined_y_true, self.refined_y_proba[:, 1])
+            roc_auc = auc(fpr, tpr)
+
+            ax.plot(fpr, tpr, color='darkorange', lw=2,
+                    label=f'ROC curve (AUC = {roc_auc:.3f})')
+            ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random')
+            ax.set_xlabel('False Positive Rate', fontweight='bold')
+            ax.set_ylabel('True Positive Rate', fontweight='bold')
+            ax.set_title('ROC Curve - Binary Classification', fontweight='bold')
+            ax.legend(loc="lower right")
+            ax.grid(True, alpha=0.3)
+        else:
+            # Multi-class - one-vs-rest ROC curves
+            from sklearn.preprocessing import label_binarize
+
+            # Binarize labels
+            y_true_bin = label_binarize(self.refined_y_true, classes=range(n_classes))
+
+            # Plot ROC curve for each class
+            colors = plt.cm.Set1(np.linspace(0, 1, n_classes))
+            for i, (color, label) in enumerate(zip(colors, class_labels)):
+                fpr, tpr, _ = roc_curve(y_true_bin[:, i], self.refined_y_proba[:, i])
+                roc_auc = auc(fpr, tpr)
+                ax.plot(fpr, tpr, color=color, lw=2,
+                       label=f'{label} (AUC = {roc_auc:.3f})')
+
+            ax.plot([0, 1], [0, 1], color='black', lw=2, linestyle='--',
+                   label='Random', alpha=0.3)
+            ax.set_xlabel('False Positive Rate', fontweight='bold')
+            ax.set_ylabel('True Positive Rate', fontweight='bold')
+            ax.set_title('ROC Curves - Multi-class (One-vs-Rest)', fontweight='bold')
+            ax.legend(loc="lower right", fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self._add_plot_export_button(self.residual_diagnostics_frame, fig, "roc_curves")
 
     def _add_residual_assessment(self, residuals, std_residuals):
         """Add a dynamic assessment box that evaluates residual quality."""
@@ -4738,19 +6394,26 @@ Performance (Classification):
         assessment_label.pack(fill='x')
 
     def _plot_leverage_diagnostics(self):
-        """Plot leverage (hat values) to identify influential samples."""
+        """Plot diagnostics - leverage for regression, confidence for classification."""
         if not HAS_MATPLOTLIB:
             return
 
-        # Only for regression with linear/PLS models
+        task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') and self.refined_config else 'regression'
+
+        if task_type == 'classification':
+            self._plot_classification_confidence()
+        else:
+            self._plot_regression_leverage_diagnostics()
+
+    def _plot_regression_leverage_diagnostics(self):
+        """Plot leverage diagnostics for regression."""
         if not hasattr(self, 'refined_config'):
             return
 
-        task_type = self.refined_config.get('task_type')
         model_name = self.refined_config.get('model_name')
 
         # Leverage only meaningful for linear models (PLS, Ridge, Lasso, ElasticNet)
-        if task_type != 'regression' or model_name not in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
+        if model_name not in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
             return
 
         if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
@@ -4825,6 +6488,69 @@ Performance (Classification):
 
         # Add dynamic leverage assessment below the plot
         self._add_leverage_assessment(leverage, threshold_2p, threshold_3p, n_samples)
+
+    def _plot_classification_confidence(self):
+        """Plot prediction confidence distribution for classification."""
+        if self.refined_y_true is None or self.refined_y_pred is None:
+            return
+
+        # Clear existing plot
+        for widget in self.leverage_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Check if probabilities are available
+        if self.refined_y_proba is None:
+            msg_label = ttk.Label(
+                self.leverage_plot_frame,
+                text="Confidence analysis requires probability predictions.\nThis model does not support predict_proba().",
+                font=('Arial', 10),
+                justify=tk.CENTER
+            )
+            msg_label.pack(expand=True)
+            return
+
+        # Get maximum probability for each prediction (confidence)
+        confidences = np.max(self.refined_y_proba, axis=1)
+
+        # Identify correct vs incorrect predictions
+        correct = (self.refined_y_true == self.refined_y_pred)
+
+        # Create figure
+        fig = Figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+
+        # Plot histogram for correct and incorrect predictions
+        ax.hist(confidences[correct], bins=30, alpha=0.7, color='green',
+               label=f'Correct ({np.sum(correct)} samples)', edgecolor='black')
+        ax.hist(confidences[~correct], bins=30, alpha=0.7, color='red',
+               label=f'Incorrect ({np.sum(~correct)} samples)', edgecolor='black')
+
+        ax.set_xlabel('Prediction Confidence', fontweight='bold')
+        ax.set_ylabel('Frequency', fontweight='bold')
+        ax.set_title('Prediction Confidence Distribution', fontweight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # Add vertical lines for mean confidence
+        mean_conf_correct = np.mean(confidences[correct]) if np.sum(correct) > 0 else 0
+        mean_conf_incorrect = np.mean(confidences[~correct]) if np.sum(~correct) > 0 else 0
+
+        if np.sum(correct) > 0:
+            ax.axvline(mean_conf_correct, color='darkgreen', linestyle='--', lw=2,
+                      label=f'Mean (correct): {mean_conf_correct:.3f}')
+        if np.sum(~correct) > 0:
+            ax.axvline(mean_conf_incorrect, color='darkred', linestyle='--', lw=2,
+                      label=f'Mean (incorrect): {mean_conf_incorrect:.3f}')
+
+        ax.legend()
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self._add_plot_export_button(self.leverage_plot_frame, fig, "confidence_distribution")
 
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
@@ -5045,8 +6771,39 @@ Performance (Classification):
 
             if params_from_search:
                 try:
+                    # DIAGNOSTIC: Capture parameters BEFORE set_params
+                    if model_name in ["XGBoost", "LightGBM"]:
+                        print(f"\n{'='*80}")
+                        print(f"DIAGNOSTIC - {model_name} Model Development (BEFORE set_params)")
+                        print(f"{'='*80}")
+                        try:
+                            before_params = model.get_params()
+                            print(f"Default {model_name} parameters before loading:")
+                            for key in sorted(before_params.keys()):
+                                print(f"  {key}: {before_params[key]}")
+                        except Exception as e:
+                            print(f"ERROR capturing before params: {e}")
+                        print(f"{'='*80}\n")
+
                     model.set_params(**params_from_search)
                     print(f"DEBUG: Applied saved search parameters: {params_from_search}")
+
+                    # DIAGNOSTIC: Capture parameters AFTER set_params
+                    if model_name in ["XGBoost", "LightGBM"]:
+                        print(f"\n{'='*80}")
+                        print(f"DIAGNOSTIC - {model_name} Model Development (AFTER set_params)")
+                        print(f"{'='*80}")
+                        try:
+                            after_params = model.get_params()
+                            print(f"ALL {model_name} parameters after loading:")
+                            for key in sorted(after_params.keys()):
+                                print(f"  {key}: {after_params[key]}")
+                            print(f"\nParams loaded from CSV:")
+                            print(f"  {params_from_search}")
+                            print(f"{'='*80}\n")
+                        except Exception as e:
+                            print(f"ERROR capturing after params: {e}\n")
+
                 except Exception as e:
                     print(f"WARNING: Failed to apply saved parameters {params_from_search}: {e}")
 
@@ -5117,6 +6874,7 @@ Performance (Classification):
             fold_metrics = []
             all_y_true = []
             all_y_pred = []
+            all_y_proba = []  # Store prediction probabilities for classification
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
@@ -5134,6 +6892,14 @@ Performance (Classification):
                 # Store predictions for plotting
                 all_y_true.extend(y_test)
                 all_y_pred.extend(y_pred)
+
+                # Store prediction probabilities if available (for classification)
+                if hasattr(pipe_fold, 'predict_proba'):
+                    y_proba = pipe_fold.predict_proba(X_test)
+                    all_y_proba.append(y_proba)
+                elif hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
+                    y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
+                    all_y_proba.append(y_proba)
 
                 if task_type == "regression":
                     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -5300,6 +7066,12 @@ Configuration:
             self.refined_y_true = np.array(all_y_true)
             self.refined_y_pred = np.array(all_y_pred)
 
+            # Store prediction probabilities if available
+            if all_y_proba:
+                self.refined_y_proba = np.concatenate(all_y_proba, axis=0)
+            else:
+                self.refined_y_proba = None
+
             # Store X data for leverage diagnostics
             self.refined_X_cv = X_raw
 
@@ -5431,7 +7203,8 @@ Configuration:
                 model=self.refined_model,
                 preprocessor=self.refined_preprocessor,
                 metadata=metadata,
-                filepath=filepath
+                filepath=filepath,
+                label_encoder=self.label_encoder
             )
 
             # Model saved successfully - update status
@@ -5732,19 +7505,19 @@ Configuration:
         ttk.Button(button_frame, text="Apply", command=apply_range).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side='left', padx=5)
 
-    # === Tab 7: Model Prediction Methods ===
+    # === Tab 8: Model Prediction Methods ===
 
-    def _create_tab7_model_prediction(self):
-        """Create Tab 7: Model Prediction - Load models and make predictions on new data."""
-        self.tab7 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab7, text='  🔮 Model Prediction  ')
+    def _create_tab8_model_prediction(self):
+        """Create Tab 8: Model Prediction - Load models and make predictions on new data."""
+        self.tab8 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab8, text='  🔮 Model Prediction  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab7, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab7, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab8, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab8, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
-        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab7", canvas))
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab8", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -5912,8 +7685,26 @@ Configuration:
         stats_scrollbar.pack(side='right', fill='y')
         self.pred_stats_text.config(yscrollcommand=stats_scrollbar.set)
 
+        # Consensus information display
+        ttk.Label(step4_frame, text="Consensus Details:", style='Subheading.TLabel').grid(
+            row=4, column=0, sticky=tk.W, pady=(15, 5))
+
+        consensus_info_frame = ttk.Frame(step4_frame)
+        consensus_info_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=5)
+
+        self.consensus_info_text = tk.Text(consensus_info_frame, height=8, width=90,
+                                           font=('Consolas', 9),
+                                           bg='#FAFAFA', fg=self.colors['text'],
+                                           wrap=tk.WORD, state='disabled')
+        self.consensus_info_text.pack(side='left', fill='both', expand=True)
+
+        consensus_scrollbar = ttk.Scrollbar(consensus_info_frame, orient='vertical',
+                                           command=self.consensus_info_text.yview)
+        consensus_scrollbar.pack(side='right', fill='y')
+        self.consensus_info_text.config(yscrollcommand=consensus_scrollbar.set)
+
     def _load_model_for_prediction(self):
-        """Browse and load one or more .dasp model files."""
+        """Browse and load one or more .dasp model files (individual or ensemble)."""
         filepaths = filedialog.askopenfilenames(
             title="Select DASP Model File(s)",
             filetypes=[("DASP Model", "*.dasp"), ("All files", "*.*")]
@@ -5923,7 +7714,8 @@ Configuration:
             return
 
         try:
-            from spectral_predict.model_io import load_model
+            from spectral_predict.model_io import load_model, load_ensemble
+            import zipfile
 
             # Load each model
             loaded_count = 0
@@ -5931,12 +7723,39 @@ Configuration:
 
             for filepath in filepaths:
                 try:
-                    # Load the model
-                    model_dict = load_model(filepath)
+                    # Check if this is an ensemble file
+                    is_ensemble = False
+                    try:
+                        with zipfile.ZipFile(filepath, 'r') as zf:
+                            if 'ensemble_config.json' in zf.namelist():
+                                is_ensemble = True
+                    except:
+                        pass
 
-                    # Add file information
-                    model_dict['filepath'] = filepath
-                    model_dict['filename'] = Path(filepath).name
+                    if is_ensemble:
+                        # Load as ensemble
+                        ensemble_dict = load_ensemble(filepath)
+
+                        # Create model_dict format compatible with existing code
+                        model_dict = {
+                            'model': ensemble_dict['ensemble'],
+                            'metadata': ensemble_dict['metadata'],
+                            'preprocessor': None,  # Ensembles have preprocessing in base models
+                            'filepath': filepath,
+                            'filename': Path(filepath).name,
+                            'is_ensemble': True,
+                            'ensemble_type': ensemble_dict['config']['ensemble_type'],
+                            'ensemble_name': ensemble_dict['config']['ensemble_name'],
+                            'model_names': ensemble_dict['model_names']
+                        }
+                    else:
+                        # Load as individual model
+                        model_dict = load_model(filepath)
+
+                        # Add file information
+                        model_dict['filepath'] = filepath
+                        model_dict['filename'] = Path(filepath).name
+                        model_dict['is_ensemble'] = False
 
                     # Add to loaded models list
                     self.loaded_models.append(model_dict)
@@ -5980,51 +7799,105 @@ Configuration:
             self.loaded_models_text.insert('1.0', "No models loaded. Click 'Load Model File(s)' to add models.")
         else:
             for i, model_dict in enumerate(self.loaded_models, 1):
-                metadata = model_dict['metadata']
-
-                # Extract key information
-                model_name = metadata.get('model_name', 'Unknown')
-                preprocessing = metadata.get('preprocessing', 'Unknown')
-                n_vars = metadata.get('n_vars', 'Unknown')
-
-                # Performance metrics
-                perf = metadata.get('performance', {})
-                r2 = perf.get('R2', perf.get('R2_cv', 'N/A'))
-                rmse = perf.get('RMSE', perf.get('RMSE_cv', 'N/A'))
-
-                # Format R2 and RMSE
-                if isinstance(r2, (int, float)):
-                    r2_str = f"{r2:.4f}"
-                else:
-                    r2_str = str(r2)
-
-                if isinstance(rmse, (int, float)):
-                    rmse_str = f"{rmse:.4f}"
-                else:
-                    rmse_str = str(rmse)
-
                 filename = model_dict.get('filename', 'Unknown')
 
-                # Build display text
-                text = f"[{i}] {filename}\n"
-                text += f"    Model: {model_name}  |  Preprocessing: {preprocessing}\n"
-                text += f"    R²: {r2_str}  |  RMSE: {rmse_str}  |  Variables: {n_vars}\n"
-                text += f"    Path: {model_dict.get('filepath', 'Unknown')}\n"
-                text += "\n"
+                # Check if this is an ensemble
+                if model_dict.get('is_ensemble', False):
+                    # Ensemble display
+                    ensemble_name = model_dict.get('ensemble_name', 'Ensemble')
+                    ensemble_type = model_dict.get('ensemble_type', 'unknown')
+                    model_names = model_dict.get('model_names', [])
+                    metadata = model_dict.get('metadata', {})
+
+                    # Performance metrics
+                    r2 = metadata.get('r2', 'N/A')
+                    rmse = metadata.get('rmse', 'N/A')
+
+                    # Format metrics
+                    if isinstance(r2, (int, float)):
+                        r2_str = f"{r2:.4f}"
+                    else:
+                        r2_str = str(r2)
+
+                    if isinstance(rmse, (int, float)):
+                        rmse_str = f"{rmse:.4f}"
+                    else:
+                        rmse_str = str(rmse)
+
+                    # Build display text
+                    text = f"[{i}] 🎯 ENSEMBLE: {filename}\n"
+                    text += f"    Type: {ensemble_name}  |  Method: {ensemble_type}\n"
+                    text += f"    Base Models: {', '.join(model_names)}\n"
+                    text += f"    R²: {r2_str}  |  RMSE: {rmse_str}\n"
+                    text += f"    Path: {model_dict.get('filepath', 'Unknown')}\n"
+                    text += "\n"
+                else:
+                    # Individual model display
+                    metadata = model_dict['metadata']
+
+                    # Extract key information
+                    model_name = metadata.get('model_name', 'Unknown')
+                    preprocessing = metadata.get('preprocessing', 'Unknown')
+                    n_vars = metadata.get('n_vars', 'Unknown')
+
+                    # Performance metrics
+                    perf = metadata.get('performance', {})
+                    r2 = perf.get('R2', perf.get('R2_cv', 'N/A'))
+                    rmse = perf.get('RMSE', perf.get('RMSE_cv', 'N/A'))
+
+                    # Format R2 and RMSE
+                    if isinstance(r2, (int, float)):
+                        r2_str = f"{r2:.4f}"
+                    else:
+                        r2_str = str(r2)
+
+                    if isinstance(rmse, (int, float)):
+                        rmse_str = f"{rmse:.4f}"
+                    else:
+                        rmse_str = str(rmse)
+
+                    # Build display text
+                    text = f"[{i}] {filename}\n"
+                    text += f"    Model: {model_name}  |  Preprocessing: {preprocessing}\n"
+                    text += f"    R²: {r2_str}  |  RMSE: {rmse_str}  |  Variables: {n_vars}\n"
+                    text += f"    Path: {model_dict.get('filepath', 'Unknown')}\n"
+                    text += "\n"
 
                 self.loaded_models_text.insert('end', text)
 
         self.loaded_models_text.config(state='disabled')
 
     def _clear_loaded_models(self):
-        """Clear all loaded models."""
+        """Clear all loaded models and prediction results."""
         if self.loaded_models:
             response = messagebox.askyesno("Confirm Clear",
-                f"Clear all {len(self.loaded_models)} loaded model(s)?")
+                f"Clear all {len(self.loaded_models)} loaded model(s)?\n\n"
+                "This will also clear any prediction results.")
             if response:
+                # Clear models
                 self.loaded_models = []
                 self._update_loaded_models_display()
-                # Models cleared - display updated
+
+                # Clear prediction results
+                self.predictions_df = None
+                self.predictions_model_map = {}
+                self.consensus_info = {}
+
+                # Clear predictions treeview
+                for item in self.predictions_tree.get_children():
+                    self.predictions_tree.delete(item)
+
+                # Clear statistics display
+                self.pred_stats_text.config(state='normal')
+                self.pred_stats_text.delete('1.0', 'end')
+                self.pred_stats_text.config(state='disabled')
+
+                # Clear consensus info display
+                self.consensus_info_text.config(state='normal')
+                self.consensus_info_text.delete('1.0', 'end')
+                self.consensus_info_text.config(state='disabled')
+
+                # Models and results cleared
         # else: No models to clear
 
     def _browse_prediction_data(self):
@@ -6228,6 +8101,7 @@ Configuration:
 
             # Display results
             self._display_predictions()
+            self._display_consensus_info()
 
             # Update status
             if successful_models == len(self.loaded_models):
@@ -6308,7 +8182,25 @@ Configuration:
             # Filter out poor performers
             filtered_model_r2 = {col: r2 for col, r2 in model_r2.items() if r2 >= threshold}
 
-            # Print filtering info
+            # Capture consensus info for display
+            self.consensus_info['quality'] = {
+                'threshold': threshold,
+                'best_r2': best_r2,
+                'median_r2': median_r2,
+                'included': {},
+                'excluded': {}
+            }
+
+            # Compute weights for included models
+            total_weight = sum(filtered_model_r2.values())
+            for col, r2 in filtered_model_r2.items():
+                weight = r2 / total_weight
+                self.consensus_info['quality']['included'][col] = {
+                    'r2': r2,
+                    'weight': weight
+                }
+
+            # Store excluded models
             if len(filtered_model_r2) < len(model_r2):
                 excluded = set(model_r2.keys()) - set(filtered_model_r2.keys())
                 excluded_r2 = {col: model_r2[col] for col in excluded}
@@ -6316,60 +8208,85 @@ Configuration:
                 print(f"Excluded {len(excluded)} poor model(s):")
                 for col, r2 in excluded_r2.items():
                     print(f"  - {col}: R²={r2:.3f}")
+                    self.consensus_info['quality']['excluded'][col] = {
+                        'r2': r2,
+                        'reason': f"R² < {threshold:.3f}"
+                    }
 
             model_r2 = filtered_model_r2
 
-        # Compute simple quality-weighted consensus
+        # Compute simple quality-weighted consensus (fully vectorized)
         if len(model_r2) > 0:
-            consensus_simple = np.zeros(len(results_df))
-            total_weight = sum(model_r2.values())
+            # Get all model columns as a 2D numpy array: (n_samples, n_models)
+            model_cols = list(model_r2.keys())
+            model_data = results_df[model_cols].values
 
-            for col, r2 in model_r2.items():
-                weight = r2 / total_weight
-                consensus_simple += results_df[col].values * weight
+            # Create normalized weight array
+            weights = np.array([model_r2[col] for col in model_cols])
+            weights = weights / weights.sum()
+
+            # Vectorized weighted sum: (n_samples, n_models) @ (n_models,) = (n_samples,)
+            consensus_simple = model_data @ weights
 
             results_df['Consensus_Quality_Weighted'] = consensus_simple
 
         # Compute regional quartile-based consensus
         if len(model_regional_rmse) > 0 and len(model_quartiles) > 0:
-            consensus_regional = np.zeros(len(results_df))
+            # Capture regional consensus info for display
+            ref_quartiles = list(model_quartiles.values())[0]
+            self.consensus_info['regional'] = {
+                'quartiles': ref_quartiles,
+                'models': list(model_regional_rmse.keys()),
+                'regional_rmse': model_regional_rmse
+            }
 
-            # For each sample, determine which quartile it's in and weight accordingly
-            for idx in range(len(results_df)):
-                # Get all predictions for this sample
-                sample_preds = {col: results_df.loc[idx, col] for col in model_regional_rmse.keys()}
+            # Vectorized regional consensus computation
+            regional_cols = list(model_regional_rmse.keys())
+            regional_data = results_df[regional_cols].values  # (n_samples, n_models)
 
-                # Use median of predictions to estimate which region we're in
-                median_pred = np.median(list(sample_preds.values()))
+            # Compute median predictions for all samples at once
+            median_preds = np.median(regional_data, axis=1)  # (n_samples,)
 
-                # Determine quartile based on available quartile data
-                # Use first model's quartiles as reference (they should be similar across models)
-                ref_quartiles = list(model_quartiles.values())[0]
+            # Assign quartiles to all samples (vectorized)
+            quartile_indices = np.zeros(len(results_df), dtype=int)
+            quartile_indices[median_preds >= ref_quartiles[2]] = 3  # Q4
+            quartile_indices[(median_preds >= ref_quartiles[1]) & (median_preds < ref_quartiles[2])] = 2  # Q3
+            quartile_indices[(median_preds >= ref_quartiles[0]) & (median_preds < ref_quartiles[1])] = 1  # Q2
+            quartile_indices[median_preds < ref_quartiles[0]] = 0  # Q1
 
-                # Determine which quartile this prediction falls into
-                if median_pred < ref_quartiles[0]:
-                    quartile_key = 'Q1'
-                elif median_pred < ref_quartiles[1]:
-                    quartile_key = 'Q2'
-                elif median_pred < ref_quartiles[2]:
-                    quartile_key = 'Q3'
-                else:
-                    quartile_key = 'Q4'
+            quartile_names = ['Q1', 'Q2', 'Q3', 'Q4']
 
-                # Weight models by inverse of their RMSE in this quartile
-                weights = {}
-                for col, regional_rmse in model_regional_rmse.items():
-                    if quartile_key in regional_rmse and not np.isnan(regional_rmse[quartile_key]):
-                        # Inverse RMSE weighting: lower RMSE = higher weight
-                        weights[col] = 1.0 / (regional_rmse[quartile_key] ** 2 + 1e-10)
+            # Build RMSE matrix for weighting: (4 quartiles, n_models)
+            rmse_matrix = np.zeros((4, len(regional_cols)))
+            for j, col in enumerate(regional_cols):
+                regional_rmse = model_regional_rmse[col]
+                for i, q_name in enumerate(quartile_names):
+                    if q_name in regional_rmse and not np.isnan(regional_rmse[q_name]):
+                        rmse_matrix[i, j] = regional_rmse[q_name]
+                    else:
+                        rmse_matrix[i, j] = np.inf  # Invalid RMSE
 
-                # If no valid weights, fall back to simple average
-                if len(weights) == 0:
-                    consensus_regional[idx] = median_pred
-                else:
-                    total_weight = sum(weights.values())
-                    weighted_sum = sum(sample_preds[col] * weights[col] for col in weights.keys())
-                    consensus_regional[idx] = weighted_sum / total_weight
+            # Compute weights: inverse RMSE squared (vectorized)
+            # Shape: (4 quartiles, n_models)
+            weight_matrix = 1.0 / (rmse_matrix ** 2 + 1e-10)
+            weight_matrix[np.isinf(rmse_matrix)] = 0  # Zero weight for invalid
+
+            # Normalize weights per quartile
+            weight_sums = weight_matrix.sum(axis=1, keepdims=True)
+            weight_sums[weight_sums == 0] = 1  # Avoid division by zero
+            weight_matrix = weight_matrix / weight_sums
+
+            # Apply weights based on each sample's quartile assignment (fully vectorized)
+            # Get the weight vector for each sample based on its quartile
+            # Shape: (n_samples, n_models)
+            sample_weights = weight_matrix[quartile_indices, :]
+
+            # Compute weighted sum for each sample
+            consensus_regional = (regional_data * sample_weights).sum(axis=1)
+
+            # Handle cases where all weights are zero (fallback to median)
+            no_valid_weights = sample_weights.sum(axis=1) == 0
+            consensus_regional[no_valid_weights] = median_preds[no_valid_weights]
 
             results_df['Consensus_Regional'] = consensus_regional
 
@@ -6388,11 +8305,35 @@ Configuration:
         columns = list(self.predictions_df.columns)
         self.predictions_tree['columns'] = columns
 
+        # Detect if this is a classification task by checking prediction columns
+        # Classification predictions will have string/text labels (not just numeric)
+        is_classification = False
+        prediction_cols = [col for col in columns if col not in ['Sample', 'Actual']]
+
+        if prediction_cols:
+            # Sample first prediction column to detect type
+            first_pred_col = prediction_cols[0]
+            sample_values = self.predictions_df[first_pred_col].dropna()
+            if len(sample_values) > 0:
+                # Check if values are strings (excluding numeric strings that look like floats)
+                first_val = sample_values.iloc[0]
+                if isinstance(first_val, str):
+                    try:
+                        float(first_val)
+                        # It's a numeric string, likely regression
+                        is_classification = False
+                    except (ValueError, TypeError):
+                        # It's a text label, classification
+                        is_classification = True
+
         # Configure column headings and widths
         for col in columns:
             self.predictions_tree.heading(col, text=col)
             if col == 'Sample':
                 self.predictions_tree.column(col, width=150, anchor='w')
+            elif is_classification and col != 'Sample':
+                # Wider columns for text labels in classification
+                self.predictions_tree.column(col, width=150, anchor='center')
             else:
                 self.predictions_tree.column(col, width=120, anchor='e')
 
@@ -6401,7 +8342,7 @@ Configuration:
             values = []
             for col in columns:
                 val = row[col]
-                # Format numeric values
+                # Format numeric values only for regression (not classification text labels)
                 if isinstance(val, (int, float)) and col != 'Sample':
                     values.append(f"{val:.4f}")
                 else:
@@ -6446,6 +8387,23 @@ Configuration:
                 if len(values) > 0:
                     stats_text += f"{col}:\n"
 
+                    # Detect if this is a classification model
+                    is_classification = False
+                    if col in self.predictions_model_map:
+                        metadata = self.predictions_model_map[col]
+                        task_type = metadata.get('task_type', None)
+
+                        # Check metadata first
+                        if task_type == 'classification':
+                            is_classification = True
+                        # Also check if values are strings (text labels)
+                        elif len(values) > 0 and isinstance(values.iloc[0], str):
+                            try:
+                                float(values.iloc[0])
+                                is_classification = False
+                            except (ValueError, TypeError):
+                                is_classification = True
+
                     # Add variable information from model metadata
                     if col in self.predictions_model_map:
                         metadata = self.predictions_model_map[col]
@@ -6463,43 +8421,180 @@ Configuration:
                     # If validation set, calculate performance metrics
                     if is_validation:
                         try:
-                            from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-
                             # Get actual values aligned with predictions
                             y_true = self.validation_y.loc[self.predictions_df['Sample']].values
                             y_pred = values.values
 
-                            # Calculate metrics
-                            r2 = r2_score(y_true, y_pred)
-                            rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-                            mae = mean_absolute_error(y_true, y_pred)
+                            if is_classification:
+                                # Use classification metrics
+                                from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-                            stats_text += f"  ✓ R² Score:     {r2:.4f}\n"
-                            stats_text += f"  ✓ RMSE:         {rmse:.4f}\n"
-                            stats_text += f"  ✓ MAE:          {mae:.4f}\n"
-                            stats_text += f"  • Samples:      {len(y_true)}\n"
-                            stats_text += f"  • Pred Mean:    {y_pred.mean():.4f}\n"
-                            stats_text += f"  • Actual Mean:  {y_true.mean():.4f}\n"
-                            stats_text += f"  • Pred Range:   [{y_pred.min():.4f}, {y_pred.max():.4f}]\n"
-                            stats_text += f"  • Actual Range: [{y_true.min():.4f}, {y_true.max():.4f}]\n"
+                                accuracy = accuracy_score(y_true, y_pred)
+                                stats_text += f"  ✓ Accuracy:     {accuracy:.4f}\n"
+
+                                # For multi-class, use weighted average
+                                unique_classes = np.unique(np.concatenate([y_true, y_pred]))
+                                if len(unique_classes) > 2:
+                                    precision = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+                                    recall = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+                                    f1 = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+                                    stats_text += f"  ✓ Precision:    {precision:.4f} (weighted)\n"
+                                    stats_text += f"  ✓ Recall:       {recall:.4f} (weighted)\n"
+                                    stats_text += f"  ✓ F1 Score:     {f1:.4f} (weighted)\n"
+                                else:
+                                    # Binary classification
+                                    precision = precision_score(y_true, y_pred, zero_division=0)
+                                    recall = recall_score(y_true, y_pred, zero_division=0)
+                                    f1 = f1_score(y_true, y_pred, zero_division=0)
+                                    stats_text += f"  ✓ Precision:    {precision:.4f}\n"
+                                    stats_text += f"  ✓ Recall:       {recall:.4f}\n"
+                                    stats_text += f"  ✓ F1 Score:     {f1:.4f}\n"
+
+                                stats_text += f"  • Samples:      {len(y_true)}\n"
+                                stats_text += f"  • Classes:      {len(unique_classes)}\n"
+
+                                # Show class distribution
+                                unique_pred, counts_pred = np.unique(y_pred, return_counts=True)
+                                stats_text += f"  • Pred Distribution:\n"
+                                for cls, cnt in zip(unique_pred, counts_pred):
+                                    stats_text += f"      {cls}: {cnt} ({cnt/len(y_pred)*100:.1f}%)\n"
+
+                            else:
+                                # Use regression metrics
+                                from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+
+                                # Calculate metrics
+                                r2 = r2_score(y_true, y_pred)
+                                rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+                                mae = mean_absolute_error(y_true, y_pred)
+
+                                stats_text += f"  ✓ R² Score:     {r2:.4f}\n"
+                                stats_text += f"  ✓ RMSE:         {rmse:.4f}\n"
+                                stats_text += f"  ✓ MAE:          {mae:.4f}\n"
+                                stats_text += f"  • Samples:      {len(y_true)}\n"
+                                stats_text += f"  • Pred Mean:    {y_pred.mean():.4f}\n"
+                                stats_text += f"  • Actual Mean:  {y_true.mean():.4f}\n"
+                                stats_text += f"  • Pred Range:   [{y_pred.min():.4f}, {y_pred.max():.4f}]\n"
+                                stats_text += f"  • Actual Range: [{y_true.min():.4f}, {y_true.max():.4f}]\n"
+
                         except Exception as e:
                             stats_text += f"  ⚠ Could not calculate validation metrics: {e}\n"
-                            stats_text += f"  • Count:  {len(values)}\n"
-                            stats_text += f"  • Mean:   {values.mean():.4f}\n"
-                            stats_text += f"  • Std:    {values.std():.4f}\n"
+                            if is_classification:
+                                stats_text += f"  • Count:  {len(values)}\n"
+                                unique_vals, counts = np.unique(values, return_counts=True)
+                                stats_text += f"  • Classes: {len(unique_vals)}\n"
+                                stats_text += f"  • Distribution:\n"
+                                for val, cnt in zip(unique_vals, counts):
+                                    stats_text += f"      {val}: {cnt} ({cnt/len(values)*100:.1f}%)\n"
+                            else:
+                                stats_text += f"  • Count:  {len(values)}\n"
+                                stats_text += f"  • Mean:   {values.mean():.4f}\n"
+                                stats_text += f"  • Std:    {values.std():.4f}\n"
                     else:
-                        # Regular prediction statistics
-                        stats_text += f"  Count: {len(values)}\n"
-                        stats_text += f"  Mean:  {values.mean():.4f}\n"
-                        stats_text += f"  Std:   {values.std():.4f}\n"
-                        stats_text += f"  Min:   {values.min():.4f}\n"
-                        stats_text += f"  Max:   {values.max():.4f}\n"
-                        stats_text += f"  Median:{values.median():.4f}\n"
+                        # Regular prediction statistics (no validation)
+                        if is_classification:
+                            stats_text += f"  Count: {len(values)}\n"
+                            unique_vals, counts = np.unique(values, return_counts=True)
+                            stats_text += f"  Classes: {len(unique_vals)}\n"
+                            stats_text += f"  Distribution:\n"
+                            for val, cnt in zip(unique_vals, counts):
+                                stats_text += f"    {val}: {cnt} ({cnt/len(values)*100:.1f}%)\n"
+                        else:
+                            stats_text += f"  Count: {len(values)}\n"
+                            stats_text += f"  Mean:  {values.mean():.4f}\n"
+                            stats_text += f"  Std:   {values.std():.4f}\n"
+                            stats_text += f"  Min:   {values.min():.4f}\n"
+                            stats_text += f"  Max:   {values.max():.4f}\n"
+                            stats_text += f"  Median:{values.median():.4f}\n"
 
                     stats_text += "\n"
 
         self.pred_stats_text.insert('1.0', stats_text)
         self.pred_stats_text.config(state='disabled')
+
+    def _display_consensus_info(self):
+        """Display detailed information about consensus predictions."""
+        self.consensus_info_text.config(state='normal')
+        self.consensus_info_text.delete('1.0', 'end')
+
+        if not self.consensus_info:
+            self.consensus_info_text.insert('1.0', "No consensus predictions available.\n")
+            self.consensus_info_text.config(state='disabled')
+            return
+
+        info_text = ""
+
+        # Quality-Weighted Consensus
+        if 'quality' in self.consensus_info:
+            quality_info = self.consensus_info['quality']
+            info_text += "="*80 + "\n"
+            info_text += "QUALITY-WEIGHTED CONSENSUS\n"
+            info_text += "="*80 + "\n\n"
+
+            if 'included' in quality_info and quality_info['included']:
+                info_text += f"Included Models ({len(quality_info['included'])}):\n"
+                for model_name, model_data in quality_info['included'].items():
+                    r2 = model_data.get('r2', 0)
+                    weight = model_data.get('weight', 0) * 100  # Convert to percentage
+                    info_text += f"  • {model_name}\n"
+                    info_text += f"      R² = {r2:.4f}, Weight = {weight:.1f}%\n"
+                info_text += "\n"
+
+            if 'excluded' in quality_info and quality_info['excluded']:
+                info_text += f"Excluded Models ({len(quality_info['excluded'])}):\n"
+                for model_name, model_data in quality_info['excluded'].items():
+                    r2 = model_data.get('r2', 0)
+                    reason = model_data.get('reason', 'Unknown')
+                    info_text += f"  • {model_name}\n"
+                    info_text += f"      R² = {r2:.4f}, Reason: {reason}\n"
+                info_text += "\n"
+
+            if 'threshold' in quality_info:
+                info_text += f"Filtering Threshold: R² >= {quality_info['threshold']:.4f}\n"
+            if 'best_r2' in quality_info:
+                info_text += f"Best R²: {quality_info['best_r2']:.4f}\n"
+            if 'median_r2' in quality_info:
+                info_text += f"Median R²: {quality_info['median_r2']:.4f}\n"
+            info_text += "\n"
+
+        # Regional Consensus
+        if 'regional' in self.consensus_info:
+            regional_info = self.consensus_info['regional']
+            info_text += "="*80 + "\n"
+            info_text += "REGIONAL CONSENSUS (Quartile-Based)\n"
+            info_text += "="*80 + "\n\n"
+
+            if 'quartiles' in regional_info:
+                quartiles = regional_info['quartiles']
+                info_text += "Quartile Boundaries:\n"
+                info_text += f"  Q1: y <= {quartiles[0]:.4f}\n"
+                info_text += f"  Q2: {quartiles[0]:.4f} < y <= {quartiles[1]:.4f}\n"
+                info_text += f"  Q3: {quartiles[1]:.4f} < y <= {quartiles[2]:.4f}\n"
+                info_text += f"  Q4: y > {quartiles[2]:.4f}\n\n"
+
+            if 'models' in regional_info and regional_info['models']:
+                info_text += f"Models Used ({len(regional_info['models'])} total):\n"
+                for model_name in regional_info['models']:
+                    info_text += f"  • {model_name}\n"
+                info_text += "\n"
+
+            if 'regional_rmse' in regional_info:
+                info_text += "Per-Quartile Performance (RMSE):\n"
+                for model_name, rmse_dict in regional_info['regional_rmse'].items():
+                    info_text += f"  {model_name}:\n"
+                    for quartile, rmse in rmse_dict.items():
+                        info_text += f"      {quartile}: {rmse:.4f}\n"
+                info_text += "\n"
+
+            info_text += "Note: For each prediction, the model weight is based on its\n"
+            info_text += "performance in the quartile that the prediction value falls into.\n"
+            info_text += "Models with lower RMSE in that quartile get higher weight.\n"
+
+        if not info_text:
+            info_text = "No consensus prediction details available.\n"
+
+        self.consensus_info_text.insert('1.0', info_text)
+        self.consensus_info_text.config(state='disabled')
 
     def _export_predictions(self):
         """Export predictions to CSV file."""
@@ -6539,14 +8634,14 @@ Configuration:
             messagebox.showerror("Export Error",
                 f"Failed to export predictions:\n{str(e)}")
 
-    def _create_tab8_instrument_lab(self):
-        """Tab 8: Instrument Lab - Instrument characterization and registry."""
-        self.tab8 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab8, text='  🔬 Instrument Lab  ')
+    def _create_tab9_instrument_lab(self):
+        """Tab 9: Instrument Lab - Instrument characterization and registry."""
+        self.tab9 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab9, text='  🔬 Instrument Lab  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab8, bg='white', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab8, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab9, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas, style='TFrame')
 
         scrollable_frame.bind(
@@ -8027,15 +10122,15 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         else:
             raise ValueError("No supported spectral files found in directory (ASD, CSV, or SPC)")
 
-    def _create_tab9_calibration_transfer(self):
-        """Tab 9: Calibration Transfer & Equalized Prediction."""
+    def _create_tab10_calibration_transfer(self):
+        """Tab 10: Calibration Transfer & Equalized Prediction."""
         # This will be a large implementation - to be continued
-        self.tab9 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab9, text='  🔄 Calibration Transfer  ')
+        self.tab10 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab10, text='  🔄 Calibration Transfer  ')
 
         # Create scrollable content
-        canvas = tk.Canvas(self.tab9, bg='white', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.tab10, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab10, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas, style='TFrame')
 
         scrollable_frame.bind(

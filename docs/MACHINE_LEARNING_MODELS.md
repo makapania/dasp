@@ -951,6 +951,161 @@ fig, axes = plot_prediction_comparison(
 
 ---
 
+### Using Ensembles in the GUI
+
+The Spectral Predict GUI provides full ensemble functionality with automatic training, visualization, and model persistence.
+
+#### Step 1: Enable Ensemble Methods (Tab 3: Analysis Configuration)
+
+1. **Navigate to Tab 3** (Analysis Configuration)
+2. **Scroll to "Intelligent Ensemble Methods 🆕"** section
+3. **Check "Enable Ensemble Methods"**
+4. **Select ensemble types** to test:
+   - **Simple Average**: Baseline (equal weight averaging)
+   - **Region-Aware Weighted**: Dynamic weights based on regional performance (recommended)
+   - **Mixture of Experts**: Assigns regions to best-performing models
+   - **Stacking**: Meta-model learns optimal combination
+   - **Stacking + Region Features**: Stacking with region information
+5. **Choose number of regions**: 3, 5 (default), 7, or 10
+   - More regions = more fine-grained adaptation
+   - 5 regions works well for most datasets
+
+**Recommendation**: Start with "Region-Aware Weighted" and 5 regions for best results.
+
+#### Step 2: Run Analysis (Tab 4: Analysis Progress)
+
+1. **Configure models and preprocessing** in Tab 3
+2. **Click "Run Analysis"** in Tab 4
+3. Watch progress log:
+   ```
+   ============================================================
+   RUNNING ENSEMBLE METHODS
+   ============================================================
+   Using top 5 models for ensemble:
+     1. XGBoost (snv) - Score: 0.0234
+     2. LightGBM (sg1) - Score: 0.0245
+     ...
+
+   Reconstructing top 5 models...
+   ✓ Successfully reconstructed 5 models
+
+   Testing 3 ensemble methods...
+   Number of regions: 5
+
+   --- Training Region-Aware Weighted ---
+   ✓ Region-Aware Weighted Results:
+      RMSE: 0.0212
+      R²:   0.9875
+      MAE:  0.0165
+      RPD:  7.23
+   ```
+
+4. **Ensemble automatically trained** using top 5 models from grid search
+
+#### Step 3: View Results (Tab 5: Results)
+
+1. **Switch to Tab 5** (Results)
+2. **Scroll down to "Ensemble Model Results"** section
+3. View ensemble performance table:
+
+| Rank | Method | RMSE | R² | MAE | RPD | vs Best Individual |
+|------|--------|------|----|----|-----|-------------------|
+| 🏆 1 | Region-Aware Weighted | 0.0212 | 0.9875 | 0.0165 | 7.23 | +0.0032 ✓ |
+| 2 | Mixture of Experts | 0.0219 | 0.9867 | 0.0171 | 7.01 | +0.0024 ✓ |
+| 3 | Stacking | 0.0223 | 0.9860 | 0.0175 | 6.88 | +0.0017 ✓ |
+
+**Interpretation:**
+- **Green row (🏆 1)**: Best ensemble method
+- **vs Best Individual**: How much ensemble improves over best single model
+  - **+0.0032 ✓**: Ensemble R² is 0.0032 higher (improvement)
+  - **Negative values**: Ensemble performed worse (rare)
+
+#### Step 4: Visualize Ensemble Behavior
+
+Click visualization buttons in Tab 5:
+
+1. **📊 Show Regional Performance**
+   - Heatmap showing which models excel in which regions
+   - Helps understand why ensemble improves performance
+
+2. **⚖️ Show Ensemble Weights**
+   - Bar plot showing how much each model contributes
+   - Region-aware ensembles show weights varying across regions
+
+3. **🎯 Show Specialization**
+   - Line plots showing each model's performance across target range
+   - Identifies "specialist" vs "generalist" models
+
+**Example insights:**
+- "XGBoost dominates high values (>3.0), PLS better at low values (<1.0)"
+- "Random Forest is consistent (generalist), LightGBM specializes mid-range"
+
+#### Step 5: Save Best Ensemble
+
+1. **Click "💾 Save Best Ensemble"** in Tab 5
+2. **Choose save location** (e.g., `models/my_ensemble_20250110.dasp`)
+3. **Ensemble file contains**:
+   - All base models (XGBoost, LightGBM, etc.)
+   - Ensemble weights/configuration
+   - Performance metrics
+   - Training metadata
+
+**File format**: `.dasp` (ZIP archive with embedded models)
+
+#### Step 6: Use Ensemble for Predictions (Tab 7: Model Prediction)
+
+1. **Navigate to Tab 7** (Model Prediction)
+2. **Click "Load Model File(s)"**
+3. **Select saved `.dasp` file**
+4. Ensemble appears in loaded models list:
+   ```
+   [1] 🎯 ENSEMBLE: ensemble_region_weighted_20250110.dasp
+       Type: Region-Aware Weighted  |  Method: region_weighted
+       Base Models: XGBoost, LightGBM, PLS, RandomForest, ElasticNet
+       R²: 0.9875  |  RMSE: 0.0212
+       Path: C:/projects/models/ensemble_region_weighted_20250110.dasp
+   ```
+5. **Load new spectral data** (CSV/TXT/ASD/SPC)
+6. **Click "Run Predictions"**
+7. **Ensemble predictions** generated automatically
+
+**Advantages:**
+- Uses best-performing combination of models
+- Adapts to different prediction regions
+- More robust than single model
+
+---
+
+### Ensemble Best Practices
+
+**When to use ensembles:**
+- ✅ Multiple models perform similarly well
+- ✅ Models show complementary strengths (some good at low values, others at high)
+- ✅ Want maximum predictive performance
+- ✅ Production deployment (ensembles more robust)
+
+**When individual models are sufficient:**
+- ❌ One model clearly dominates (>0.05 R² better than others)
+- ❌ Need maximum interpretability (PLS VIP scores)
+- ❌ Computational resources limited
+- ❌ Rapid predictions needed (ensembles slower)
+
+**Typical improvements:**
+- **Region-aware ensembles**: 0.01-0.05 R² improvement
+- **Simple averaging**: 0.005-0.02 R² improvement
+- **No improvement**: When best model already optimal
+
+**Troubleshooting:**
+
+| Issue | Solution |
+|-------|----------|
+| "No ensemble results" | Enable ensembles in Tab 3, run analysis again |
+| Ensemble worse than best model | Top models too similar; use diverse preprocessing |
+| Visualizations fail | Ensure ensemble was trained (not just loaded) |
+| Can't load ensemble in Tab 7 | Use `.dasp` file saved from Tab 5 |
+
+---
+
 ## Preprocessing Recommendations
 
 ### Savitzky-Golay Window Size Guidelines
