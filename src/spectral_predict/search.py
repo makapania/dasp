@@ -19,7 +19,7 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 
 
 def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=5,
-               max_n_components=24, max_iter=500, models_to_test=None, preprocessing_methods=None,
+               max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                rf_n_trees_list=None, rf_max_depth_list=None,
                ridge_alphas_list=None, lasso_alphas_list=None,
@@ -53,7 +53,7 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
         Penalty for using many variables (0=ignore, 10=strong penalty)
     complexity_penalty : int (0-10), default=5
         Penalty for model complexity (0=ignore, 10=strong penalty)
-    max_n_components : int, default=24
+    max_n_components : int, default=8
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for MLP

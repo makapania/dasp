@@ -87,39 +87,39 @@ OPTIMIZED_HYPERPARAMETERS = {
 
     'PLS': {
         'standard': {
-            'n_components': [2, 4, 6, 8, 10, 12, 16, 20],  # 8 configs
-            'note': 'Core range covers most spectral applications'
+            'n_components': [2, 4, 6, 8, 10, 12, 16, 20, 24, 30, 40, 50],  # 12 configs - same as comprehensive
+            'note': 'All tiers use same hyperparams - tier controls models/preprocessing only'
         },
         'comprehensive': {
             'n_components': [2, 4, 6, 8, 10, 12, 16, 20, 24, 30, 40, 50],  # 12 configs
-            'note': 'Extended range for high-dimensional data'
+            'note': 'All tiers use same hyperparams - tier controls models/preprocessing only'
         },
         'quick': {
-            'n_components': [5, 10, 15],  # 3 configs
-            'note': 'Quick scan'
+            'n_components': [2, 4, 6, 8, 10, 12, 16, 20, 24, 30, 40, 50],  # 12 configs - same as comprehensive
+            'note': 'All tiers use same hyperparams - tier controls models/preprocessing only'
         }
     },
 
     'Ridge': {
         'standard': {
-            'alpha': [0.01, 0.1, 1.0, 10.0],  # 4 configs
-            'note': 'Log-scale coverage'
+            'alpha': [0.001, 0.01, 0.1, 1.0, 10.0],  # 5 configs - same as comprehensive
+            'note': 'All tiers use same hyperparams'
         },
         'comprehensive': {
             'alpha': [0.001, 0.01, 0.1, 1.0, 10.0],  # 5 configs
-            'note': 'Extended low range for less regularization'
+            'note': 'All tiers use same hyperparams'
         },
         'quick': {
-            'alpha': [0.1, 1.0],  # 2 configs
-            'note': 'Most common sweet spot'
+            'alpha': [0.001, 0.01, 0.1, 1.0, 10.0],  # 5 configs - same as comprehensive
+            'note': 'All tiers use same hyperparams'
         }
     },
 
     'ElasticNet': {
         'standard': {
-            'alpha': [0.01, 0.1, 1.0],  # 3 values (reduced from 4)
-            'l1_ratio': [0.3, 0.5, 0.7],  # 3 values
-            'note': 'Grid size: 3×3 = 9 configs (vs 12 original)'
+            'alpha': [0.001, 0.01, 0.1, 1.0],  # 4 values - same as comprehensive
+            'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9],  # 5 values - same as comprehensive
+            'note': 'Grid size: 4×5 = 20 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'alpha': [0.001, 0.01, 0.1, 1.0],  # 4 values
@@ -127,40 +127,42 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 4×5 = 20 configs'
         },
         'quick': {
-            'alpha': [0.1, 1.0],  # 2 values
-            'l1_ratio': [0.5],  # 1 value (balanced)
-            'note': 'Grid size: 2×1 = 2 configs'
+            'alpha': [0.001, 0.01, 0.1, 1.0],  # 4 values - same as comprehensive
+            'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9],  # 5 values - same as comprehensive
+            'note': 'Grid size: 4×5 = 20 configs - all tiers use same hyperparams'
         }
     },
 
     'XGBoost': {
         'standard': {
-            'n_estimators': [100, 200],  # 2 values (reduced from 3)
-            'learning_rate': [0.05, 0.1],  # 2 values (reduced from 3)
-            'max_depth': [3, 6],  # 2 values (reduced from 3)
-            'subsample': [0.8, 1.0],  # 2 values - row sampling (0.8 recommended for spectroscopy)
-            'colsample_bytree': [0.8, 1.0],  # 2 values - column sampling (critical for 2000+ features)
-            'reg_alpha': [0, 0.1],  # 2 values - L1 regularization (helps with feature selection)
-            'note': 'Grid size: 2×2×2×2×2×2 = 64 configs - adds critical regularization for high-dim data'
-        },
-        'comprehensive': {
-            'n_estimators': [100, 200],  # 2 values (keep manageable)
+            'n_estimators': [100, 200],  # 2 values
             'learning_rate': [0.05, 0.1],  # 2 values
             'max_depth': [3, 6, 9],  # 3 values
-            'subsample': [0.7, 0.85, 1.0],  # 3 values - more thorough sampling search
-            'colsample_bytree': [0.7, 0.85, 1.0],  # 3 values - more thorough column search
-            'reg_alpha': [0, 0.1, 0.5],  # 3 values - test aggressive L1
-            'reg_lambda': [1.0, 5.0],  # 2 values - L2 regularization (synergy with L1)
-            'note': 'Grid size: 2×2×3×3×3×3×2 = 648 configs - comprehensive search with regularization'
+            'subsample': [0.7, 0.85, 1.0],  # 3 values
+            'colsample_bytree': [0.7, 0.85, 1.0],  # 3 values
+            'reg_alpha': [0, 0.1, 0.5],  # 3 values
+            'reg_lambda': [1.0, 5.0],  # 2 values
+            'note': 'Grid size: 2×2×3×3×3×3×2 = 648 configs - all tiers use same hyperparams'
+        },
+        'comprehensive': {
+            'n_estimators': [100, 200],  # 2 values
+            'learning_rate': [0.05, 0.1],  # 2 values
+            'max_depth': [3, 6, 9],  # 3 values
+            'subsample': [0.7, 0.85, 1.0],  # 3 values
+            'colsample_bytree': [0.7, 0.85, 1.0],  # 3 values
+            'reg_alpha': [0, 0.1, 0.5],  # 3 values
+            'reg_lambda': [1.0, 5.0],  # 2 values
+            'note': 'Grid size: 2×2×3×3×3×3×2 = 648 configs'
         },
         'quick': {
-            'n_estimators': [100],  # 1 value
-            'learning_rate': [0.1],  # 1 value
-            'max_depth': [6],  # 1 value
-            'subsample': [0.8],  # Fixed at optimal value
-            'colsample_bytree': [0.8],  # Fixed at optimal value
-            'reg_alpha': [0.1],  # Fixed at optimal value
-            'note': 'Grid size: 1×1×1×1×1×1 = 1 config - optimized defaults for spectroscopy'
+            'n_estimators': [100, 200],  # 2 values
+            'learning_rate': [0.05, 0.1],  # 2 values
+            'max_depth': [3, 6, 9],  # 3 values
+            'subsample': [0.7, 0.85, 1.0],  # 3 values
+            'colsample_bytree': [0.7, 0.85, 1.0],  # 3 values
+            'reg_alpha': [0, 0.1, 0.5],  # 3 values
+            'reg_lambda': [1.0, 5.0],  # 2 values
+            'note': 'Grid size: 2×2×3×3×3×3×2 = 648 configs - all tiers use same hyperparams'
         }
     },
 
@@ -170,10 +172,10 @@ OPTIMIZED_HYPERPARAMETERS = {
 
     'LightGBM': {
         'standard': {
-            'n_estimators': [100, 200],  # 2 values
-            'learning_rate': [0.1],  # 1 value (not very sensitive)
-            'num_leaves': [31, 50],  # 2 values
-            'note': 'Grid size: 2×1×2 = 4 configs (vs 27 original)'
+            'n_estimators': [50, 100, 200],  # 3 values
+            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
+            'num_leaves': [31, 50, 70],  # 3 values
+            'note': 'Grid size: 3×3×3 = 27 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'n_estimators': [50, 100, 200],  # 3 values
@@ -182,19 +184,19 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 3×3×3 = 27 configs'
         },
         'quick': {
-            'n_estimators': [100],  # 1 value
-            'learning_rate': [0.1],  # 1 value
-            'num_leaves': [31],  # 1 value (default)
-            'note': 'Grid size: 1×1×1 = 1 config'
+            'n_estimators': [50, 100, 200],  # 3 values
+            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
+            'num_leaves': [31, 50, 70],  # 3 values
+            'note': 'Grid size: 3×3×3 = 27 configs - all tiers use same hyperparams'
         }
     },
 
     'SVR': {
         'standard': {
             'kernel': ['rbf', 'linear'],  # 2 kernels
-            'C': [1.0, 10.0],  # 2 values (reduced from 3)
-            'gamma': ['scale'],  # 1 value (only for RBF)
-            'note': 'Grid size: 5 configs (2 RBF + 2 linear + 1 poly removed)'
+            'C': [0.1, 1.0, 10.0],  # 3 values
+            'gamma': ['scale', 'auto'],  # 2 values for RBF
+            'note': 'Grid size: 9 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'kernel': ['rbf', 'linear'],  # 2 kernels
@@ -203,21 +205,21 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 9 configs'
         },
         'quick': {
-            'kernel': ['rbf'],  # 1 kernel
-            'C': [1.0],  # 1 value
-            'gamma': ['scale'],  # 1 value
-            'note': 'Grid size: 1 config'
+            'kernel': ['rbf', 'linear'],  # 2 kernels
+            'C': [0.1, 1.0, 10.0],  # 3 values
+            'gamma': ['scale', 'auto'],  # 2 values for RBF
+            'note': 'Grid size: 9 configs - all tiers use same hyperparams'
         }
     },
 
     'NeuralBoosted': {
         # Keep existing intelligent defaults - they're already optimized
         'standard': {
-            'n_estimators': [100],  # 1 value
-            'learning_rate': [0.1, 0.2],  # 2 values (reduced from 3)
+            'n_estimators': [100, 150],  # 2 values
+            'learning_rate': [0.1, 0.2, 0.3],  # 3 values
             'hidden_layer_size': [3, 5],  # 2 values
             'activation': ['tanh', 'identity'],  # 2 values
-            'note': 'Grid size: 1×2×2×2 = 8 configs (vs 24 max)'
+            'note': 'Grid size: 2×3×2×2 = 24 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'n_estimators': [100, 150],  # 2 values
@@ -227,11 +229,11 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 2×3×2×2 = 24 configs'
         },
         'quick': {
-            'n_estimators': [100],  # 1 value
-            'learning_rate': [0.3],  # 1 value (empirically best from recent testing)
-            'hidden_layer_size': [3],  # 1 value
-            'activation': ['tanh'],  # 1 value
-            'note': 'Grid size: 1×1×1×1 = 1 config'
+            'n_estimators': [100, 150],  # 2 values
+            'learning_rate': [0.1, 0.2, 0.3],  # 3 values
+            'hidden_layer_size': [3, 5],  # 2 values
+            'activation': ['tanh', 'identity'],  # 2 values
+            'note': 'Grid size: 2×3×2×2 = 24 configs - all tiers use same hyperparams'
         }
     },
 
@@ -241,10 +243,10 @@ OPTIMIZED_HYPERPARAMETERS = {
 
     'CatBoost': {
         'standard': {
-            'iterations': [100, 200],  # 2 values
-            'learning_rate': [0.1],  # 1 value
-            'depth': [4, 6],  # 2 values
-            'note': 'Grid size: 2×1×2 = 4 configs (vs 27 original)'
+            'iterations': [50, 100, 200],  # 3 values
+            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
+            'depth': [4, 6, 8],  # 3 values
+            'note': 'Grid size: 3×3×3 = 27 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'iterations': [50, 100, 200],  # 3 values
@@ -253,18 +255,18 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 3×3×3 = 27 configs'
         },
         'quick': {
-            'iterations': [100],  # 1 value
-            'learning_rate': [0.1],  # 1 value
-            'depth': [6],  # 1 value
-            'note': 'Grid size: 1×1×1 = 1 config'
+            'iterations': [50, 100, 200],  # 3 values
+            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
+            'depth': [4, 6, 8],  # 3 values
+            'note': 'Grid size: 3×3×3 = 27 configs - all tiers use same hyperparams'
         }
     },
 
     'RandomForest': {
         'standard': {
-            'n_estimators': [200, 500],  # 2 values
-            'max_depth': [None, 30],  # 2 values
-            'note': 'Grid size: 2×2 = 4 configs'
+            'n_estimators': [100, 200, 500],  # 3 values
+            'max_depth': [None, 15, 30],  # 3 values
+            'note': 'Grid size: 3×3 = 9 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'n_estimators': [100, 200, 500],  # 3 values
@@ -272,18 +274,18 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 3×3 = 9 configs'
         },
         'quick': {
-            'n_estimators': [200],  # 1 value
-            'max_depth': [None],  # 1 value
-            'note': 'Grid size: 1×1 = 1 config'
+            'n_estimators': [100, 200, 500],  # 3 values
+            'max_depth': [None, 15, 30],  # 3 values
+            'note': 'Grid size: 3×3 = 9 configs - all tiers use same hyperparams'
         }
     },
 
     'MLP': {
         'standard': {
             'hidden_layer_sizes': [(64,), (128, 64)],  # 2 architectures
-            'alpha': [1e-3],  # 1 value
-            'learning_rate_init': [1e-3],  # 1 value
-            'note': 'Grid size: 2×1×1 = 2 configs (vs 8 original)'
+            'alpha': [1e-4, 1e-3],  # 2 values
+            'learning_rate_init': [1e-3, 1e-2],  # 2 values
+            'note': 'Grid size: 2×2×2 = 8 configs - all tiers use same hyperparams'
         },
         'comprehensive': {
             'hidden_layer_sizes': [(64,), (128, 64)],  # 2 architectures
@@ -292,26 +294,26 @@ OPTIMIZED_HYPERPARAMETERS = {
             'note': 'Grid size: 2×2×2 = 8 configs'
         },
         'quick': {
-            'hidden_layer_sizes': [(64,)],  # 1 architecture
-            'alpha': [1e-3],  # 1 value
-            'learning_rate_init': [1e-3],  # 1 value
-            'note': 'Grid size: 1×1×1 = 1 config'
+            'hidden_layer_sizes': [(64,), (128, 64)],  # 2 architectures
+            'alpha': [1e-4, 1e-3],  # 2 values
+            'learning_rate_init': [1e-3, 1e-2],  # 2 values
+            'note': 'Grid size: 2×2×2 = 8 configs - all tiers use same hyperparams'
         }
     },
 
     'Lasso': {
         # Same as Ridge but typically not needed if ElasticNet is used
         'standard': {
-            'alpha': [0.01, 0.1, 1.0],  # 3 configs (reduced from 4)
-            'note': 'ElasticNet is usually better - consider disabling Lasso'
+            'alpha': [0.001, 0.01, 0.1, 1.0],  # 4 configs - all tiers use same hyperparams
+            'note': 'All tiers use same hyperparams'
         },
         'comprehensive': {
             'alpha': [0.001, 0.01, 0.1, 1.0],  # 4 configs
             'note': 'Full search'
         },
         'quick': {
-            'alpha': [0.1],  # 1 config
-            'note': 'Single default'
+            'alpha': [0.001, 0.01, 0.1, 1.0],  # 4 configs - all tiers use same hyperparams
+            'note': 'All tiers use same hyperparams'
         }
     }
 }

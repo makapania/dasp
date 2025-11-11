@@ -888,6 +888,49 @@ class SpectralPredictApp:
 
         self.root.after(2000, fade_out)
 
+    def _create_accent_button(self, parent, text, command, **kwargs):
+        """Create an accent button with proper colors that work across themes.
+
+        This replaces ttk.Button with style='Accent.TButton' to ensure
+        text is always visible (white on colored background).
+        """
+        # Get platform-appropriate font
+        import platform
+        system = platform.system()
+        if system == 'Darwin':
+            button_font = ('SF Pro Text', 11, 'bold')
+        elif system == 'Windows':
+            button_font = ('Segoe UI', 11, 'bold')
+        else:
+            button_font = ('Ubuntu', 11, 'bold')
+
+        btn = tk.Button(parent,
+                       text=text,
+                       command=command,
+                       font=button_font,
+                       fg=self.colors['text_inverse'],  # White text
+                       bg=self.colors['accent'],  # Colored background
+                       activeforeground=self.colors['text_inverse'],
+                       activebackground=self.colors['accent_dark'],
+                       relief='flat',
+                       borderwidth=0,
+                       padx=20,
+                       pady=12,
+                       cursor='hand2',
+                       **kwargs)
+
+        # Add hover effect
+        def on_enter(e):
+            btn.config(bg=self.colors['accent_dark'])
+
+        def on_leave(e):
+            btn.config(bg=self.colors['accent'])
+
+        btn.bind('<Enter>', on_enter)
+        btn.bind('<Leave>', on_leave)
+
+        return btn
+
     def _create_ui(self):
         """Create 10-tab user interface with theme switching."""
         # Create top bar with theme switcher and title
@@ -1076,8 +1119,8 @@ class SpectralPredictApp:
                  style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
 
         # Load Data Button
-        self.load_button = ttk.Button(content_frame, text="📊 Load Data & Generate Plots",
-                                     command=self._load_and_plot_data, style='Accent.TButton')
+        self.load_button = self._create_accent_button(content_frame, text="📊 Load Data & Generate Plots",
+                                                       command=self._load_and_plot_data)
         self.load_button.grid(row=row, column=0, columnspan=3, pady=30)
         row += 1
 
@@ -1981,8 +2024,8 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Run button
-        ttk.Button(content_frame, text="▶ Run Analysis", command=self._run_analysis,
-                  style='Accent.TButton').grid(row=row, column=0, columnspan=2, pady=20, ipadx=30, ipady=10)
+        run_btn = self._create_accent_button(content_frame, text="▶ Run Analysis", command=self._run_analysis)
+        run_btn.grid(row=row, column=0, columnspan=2, pady=20, ipadx=30, ipady=10)
         row += 1
 
         self.tab3_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')

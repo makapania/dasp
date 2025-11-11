@@ -30,7 +30,7 @@ from .model_config import (
 )
 
 
-def get_model(model_name, task_type='regression', n_components=10, max_n_components=24, max_iter=500):
+def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500):
     """
     Get a single model instance with default hyperparameters.
 
@@ -42,7 +42,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         'regression' or 'classification'
     n_components : int, default=10
         Number of components for PLS models
-    max_n_components : int, default=24
+    max_n_components : int, default=8
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for neural network models
@@ -220,7 +220,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
     return model
 
 
-def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
+def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     n_estimators_list=None, learning_rates=None, rf_n_trees_list=None,
                     rf_max_depth_list=None, ridge_alphas_list=None, lasso_alphas_list=None,
                     xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
@@ -240,7 +240,7 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
         'regression' or 'classification'
     n_features : int
         Number of input features
-    max_n_components : int, default=24
+    max_n_components : int, default=8
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for MLP
@@ -388,10 +388,10 @@ def get_model_grids(task_type, n_features, max_n_components=24, max_iter=500,
 
     grids = {}
 
-    # PLS components grid (tier-aware, clip to n_features and max_n_components)
-    pls_config = get_hyperparameters('PLS', tier)
-    pls_components = pls_config.get('n_components', [2, 4, 6, 8, 10, 12, 16, 20])
-    pls_components = [c for c in pls_components if c <= n_features and c <= max_n_components]
+    # PLS components grid - test ALL integer values from 2 to max allowed
+    # Max is limited by both n_features and max_n_components (which is adjusted for CV fold size)
+    pls_max = min(n_features, max_n_components)
+    pls_components = list(range(2, pls_max + 1)) if pls_max >= 2 else [2]
 
     if task_type == "regression":
         # PLS Regression (only if in enabled_models)
