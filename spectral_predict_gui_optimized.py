@@ -1272,8 +1272,8 @@ class SpectralPredictApp:
         # Buttons
         button_frame = ttk.Frame(controls_frame)
         button_frame.grid(row=2, column=0, columnspan=3, pady=20)
-        self.run_outlier_btn = ttk.Button(button_frame, text="Run Outlier Detection",
-                                          command=self._run_outlier_detection, style='Accent.TButton')
+        self.run_outlier_btn = self._create_accent_button(button_frame, text="Run Outlier Detection",
+                                                           command=self._run_outlier_detection)
         self.run_outlier_btn.pack(side='left', padx=5)
         self.export_report_btn = ttk.Button(button_frame, text="Export Report",
                                            command=self._export_outlier_report, style='Modern.TButton')
@@ -2347,8 +2347,8 @@ class SpectralPredictApp:
         button_frame.grid(row=row, column=0, columnspan=2, pady=30)
         row += 1
 
-        self.refine_run_button = ttk.Button(button_frame, text="▶ Run Refined Model", command=self._run_refined_model,
-                  style='Accent.TButton', state='disabled')
+        self.refine_run_button = self._create_accent_button(button_frame, text="▶ Run Refined Model",
+                                                             command=self._run_refined_model, state='disabled')
         self.refine_run_button.grid(row=0, column=0, padx=10, ipadx=30, ipady=10)
 
         self.refine_save_button = ttk.Button(button_frame, text="💾 Save Model", command=self._save_refined_model,
