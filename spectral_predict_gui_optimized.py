@@ -724,6 +724,25 @@ class SpectralPredictApp:
 
     def _create_top_bar(self):
         """Create a beautiful top bar with app title and theme switcher."""
+        # Get platform-appropriate font
+        import platform
+        system = platform.system()
+        if system == 'Darwin':  # macOS
+            title_font = ('SF Pro Display', 32, 'bold')
+            subtitle_font = ('SF Pro Text', 12)
+            label_font = ('SF Pro Text', 11)
+            button_font = ('SF Pro Text', 10, 'bold')
+        elif system == 'Windows':
+            title_font = ('Segoe UI', 32, 'bold')
+            subtitle_font = ('Segoe UI', 12)
+            label_font = ('Segoe UI', 11)
+            button_font = ('Segoe UI', 10, 'bold')
+        else:  # Linux
+            title_font = ('Ubuntu', 32, 'bold')
+            subtitle_font = ('Ubuntu', 12)
+            label_font = ('Ubuntu', 11)
+            button_font = ('Ubuntu', 10, 'bold')
+
         top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=80)
         top_bar.pack(fill='x', padx=20, pady=(20, 10))
         top_bar.pack_propagate(False)
@@ -734,14 +753,14 @@ class SpectralPredictApp:
 
         app_title = tk.Label(title_frame,
                             text="Spectral Predict",
-                            font=('SF Pro Display', 'Segoe UI', 'Arial', 32, 'bold'),
+                            font=title_font,
                             fg=self.colors['text'],
                             bg=self.colors['bg'])
         app_title.pack(side='left', pady=5)
 
         subtitle = tk.Label(title_frame,
                            text="  Automated Spectral Analysis",
-                           font=('SF Pro Text', 'Segoe UI', 'Arial', 12),
+                           font=subtitle_font,
                            fg=self.colors['text_light'],
                            bg=self.colors['bg'])
         subtitle.pack(side='left', pady=8)
@@ -752,7 +771,7 @@ class SpectralPredictApp:
 
         tk.Label(theme_frame,
                 text="Theme:",
-                font=('SF Pro Text', 'Segoe UI', 'Arial', 11),
+                font=label_font,
                 fg=self.colors['text_light'],
                 bg=self.colors['bg']).pack(side='left', padx=(0, 10))
 
@@ -761,7 +780,7 @@ class SpectralPredictApp:
         for theme_name, theme_data in self.themes.items():
             btn = tk.Button(theme_frame,
                           text=theme_data['name'],
-                          font=('SF Pro Text', 'Segoe UI', 'Arial', 10, 'bold'),
+                          font=button_font,
                           fg='white',
                           bg=theme_data['accent'],
                           activebackground=theme_data['accent_dark'],
@@ -835,10 +854,20 @@ class SpectralPredictApp:
 
     def _show_theme_notification(self, theme_name):
         """Show a beautiful notification when theme changes."""
+        # Get platform-appropriate font
+        import platform
+        system = platform.system()
+        if system == 'Darwin':  # macOS
+            notif_font = ('SF Pro Text', 11)
+        elif system == 'Windows':
+            notif_font = ('Segoe UI', 11)
+        else:  # Linux
+            notif_font = ('Ubuntu', 11)
+
         # Create a temporary notification label
         notif = tk.Label(self.root,
                         text=f"✨ Theme changed to {theme_name}",
-                        font=('SF Pro Text', 'Segoe UI', 'Arial', 11),
+                        font=notif_font,
                         fg=self.colors['text_inverse'],
                         bg=self.colors['accent'],
                         padx=20,
