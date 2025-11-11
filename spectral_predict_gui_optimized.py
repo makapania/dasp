@@ -722,11 +722,146 @@ class SpectralPredictApp:
                        foreground=self.colors['text'],
                        font=(body_font, 10))
 
+    def _create_top_bar(self):
+        """Create a beautiful top bar with app title and theme switcher."""
+        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=80)
+        top_bar.pack(fill='x', padx=20, pady=(20, 10))
+        top_bar.pack_propagate(False)
+
+        # Left side: App title with gradient effect (simulated)
+        title_frame = tk.Frame(top_bar, bg=self.colors['bg'])
+        title_frame.pack(side='left', fill='y')
+
+        app_title = tk.Label(title_frame,
+                            text="Spectral Predict",
+                            font=('SF Pro Display', 'Segoe UI', 'Arial', 32, 'bold'),
+                            fg=self.colors['text'],
+                            bg=self.colors['bg'])
+        app_title.pack(side='left', pady=5)
+
+        subtitle = tk.Label(title_frame,
+                           text="  Automated Spectral Analysis",
+                           font=('SF Pro Text', 'Segoe UI', 'Arial', 12),
+                           fg=self.colors['text_light'],
+                           bg=self.colors['bg'])
+        subtitle.pack(side='left', pady=8)
+
+        # Right side: Theme switcher with beautiful buttons
+        theme_frame = tk.Frame(top_bar, bg=self.colors['bg'])
+        theme_frame.pack(side='right', fill='y', padx=10)
+
+        tk.Label(theme_frame,
+                text="Theme:",
+                font=('SF Pro Text', 'Segoe UI', 'Arial', 11),
+                fg=self.colors['text_light'],
+                bg=self.colors['bg']).pack(side='left', padx=(0, 10))
+
+        # Create theme buttons with hover effects
+        self.theme_buttons = {}
+        for theme_name, theme_data in self.themes.items():
+            btn = tk.Button(theme_frame,
+                          text=theme_data['name'],
+                          font=('SF Pro Text', 'Segoe UI', 'Arial', 10, 'bold'),
+                          fg='white',
+                          bg=theme_data['accent'],
+                          activebackground=theme_data['accent_dark'],
+                          relief='flat',
+                          borderwidth=0,
+                          padx=15,
+                          pady=8,
+                          cursor='hand2',
+                          command=lambda tn=theme_name: self._switch_theme(tn))
+            btn.pack(side='left', padx=3)
+
+            # Add hover effect
+            def on_enter(e, b=btn, td=theme_data):
+                b['bg'] = td['accent_dark']
+
+            def on_leave(e, b=btn, td=theme_data):
+                b['bg'] = td['accent']
+
+            btn.bind('<Enter>', on_enter)
+            btn.bind('<Leave>', on_leave)
+
+            self.theme_buttons[theme_name] = btn
+
+        # Add a subtle gradient line separator
+        separator = tk.Frame(self.root, bg=self.colors['border'], height=2)
+        separator.pack(fill='x', padx=20)
+
+    def _switch_theme(self, theme_name):
+        """Switch to a new theme with smooth transition effect."""
+        # Store current tab selection
+        current_tab = self.notebook.index(self.notebook.select())
+
+        # Apply new theme
+        self._apply_theme(theme_name)
+
+        # Update all widgets to reflect new theme
+        self._update_widget_colors(self.root)
+
+        # Restore tab selection
+        self.notebook.select(current_tab)
+
+        # Show a subtle notification
+        self._show_theme_notification(self.themes[theme_name]['name'])
+
+    def _update_widget_colors(self, widget):
+        """Recursively update all widget colors to match current theme."""
+        try:
+            # Update widget background if it has one
+            if hasattr(widget, 'configure'):
+                widget_type = widget.winfo_class()
+
+                # Update different widget types appropriately
+                if widget_type == 'Frame':
+                    widget.configure(bg=self.colors['bg'])
+                elif widget_type == 'Label':
+                    widget.configure(bg=self.colors['bg'], fg=self.colors['text'])
+                elif widget_type == 'Canvas':
+                    widget.configure(bg=self.colors['bg'])
+                elif widget_type == 'Button':
+                    # Skip theme buttons as they have custom colors
+                    if widget not in self.theme_buttons.values():
+                        widget.configure(bg=self.colors['panel'], fg=self.colors['text'])
+
+            # Recursively update children
+            for child in widget.winfo_children():
+                self._update_widget_colors(child)
+
+        except Exception:
+            # Some widgets might not support color changes
+            pass
+
+    def _show_theme_notification(self, theme_name):
+        """Show a beautiful notification when theme changes."""
+        # Create a temporary notification label
+        notif = tk.Label(self.root,
+                        text=f"✨ Theme changed to {theme_name}",
+                        font=('SF Pro Text', 'Segoe UI', 'Arial', 11),
+                        fg=self.colors['text_inverse'],
+                        bg=self.colors['accent'],
+                        padx=20,
+                        pady=10)
+        notif.place(relx=0.5, rely=0.95, anchor='center')
+
+        # Fade out after 2 seconds
+        def fade_out():
+            try:
+                notif.destroy()
+            except:
+                pass
+
+        self.root.after(2000, fade_out)
+
     def _create_ui(self):
-        """Create 7-tab user interface."""
-        # Create notebook
+        """Create 10-tab user interface with theme switching."""
+        # Create top bar with theme switcher and title
+        self._create_top_bar()
+
+        # Create main content area with notebook
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        self.notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
 
         # Create tabs
         self._create_tab1_import_preview()
