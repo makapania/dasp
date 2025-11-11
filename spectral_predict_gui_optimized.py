@@ -636,10 +636,13 @@ class SpectralPredictApp:
                        font=(body_font, 10),
                        padding=(15, 8),
                        borderwidth=0,
-                       relief='flat')
+                       relief='flat',
+                       foreground=self.colors['text'])
         style.map('Modern.TButton',
                  background=[('active', self.colors['accent']),
-                           ('!disabled', self.colors['panel'])])
+                           ('!disabled', self.colors['panel'])],
+                 foreground=[('active', self.colors['text_inverse']),
+                           ('!disabled', self.colors['text'])])
 
         style.configure('Accent.TButton',
                        font=(body_font, 11, 'bold'),
@@ -650,7 +653,9 @@ class SpectralPredictApp:
                        relief='flat')
         style.map('Accent.TButton',
                  background=[('active', self.colors['accent_dark']),
-                           ('!disabled', self.colors['accent'])])
+                           ('!disabled', self.colors['accent'])],
+                 foreground=[('active', self.colors['text_inverse']),
+                           ('!disabled', self.colors['text_inverse'])])
 
         # Frame styling
         style.configure('TFrame', background=self.colors['bg'])
