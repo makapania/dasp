@@ -2,14 +2,13 @@
 REM ============================================================================
 REM Spectral Predict - One-Click Launcher
 REM ============================================================================
-REM This script launches the Spectral Predict GUI with Julia backend
+REM This script launches the Spectral Predict GUI
 REM No configuration needed - just double-click this file!
 REM ============================================================================
 
 echo.
 echo ================================================================================
 echo    SPECTRAL PREDICT - Automated Spectral Analysis
-echo    Julia-Powered High-Performance Edition
 echo ================================================================================
 echo.
 echo Starting GUI...

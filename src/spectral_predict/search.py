@@ -23,6 +23,13 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                rf_n_trees_list=None, rf_max_depth_list=None,
                ridge_alphas_list=None, lasso_alphas_list=None,
+               xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
+               xgb_subsample=None, xgb_colsample_bytree=None, xgb_reg_alpha=None, xgb_reg_lambda=None,
+               elasticnet_alphas_list=None, elasticnet_l1_ratios=None,
+               lightgbm_n_estimators_list=None, lightgbm_learning_rates=None, lightgbm_num_leaves_list=None,
+               catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
+               svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
+               mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
                enable_variable_subsets=True, variable_counts=None,
                enable_region_subsets=True, n_top_regions=5, progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
@@ -100,6 +107,26 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
     n_features = X_np.shape[1]
     n_samples = X_np.shape[0]
 
+    # Handle categorical labels for classification
+    label_encoder = None
+    if task_type == "classification":
+        # Check if labels are non-numeric (text labels like "low", "medium", "high")
+        if y_np.dtype == object or not np.issubdtype(y_np.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder
+            label_encoder = LabelEncoder()
+            y_original = y_np.copy()  # Keep original for logging
+            y_np = label_encoder.fit_transform(y_np)
+            # Log the label mapping
+            label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+            print(f"\n{'='*70}")
+            print(f"CATEGORICAL LABEL ENCODING")
+            print(f"{'='*70}")
+            print(f"Detected non-numeric classification labels.")
+            print(f"Encoding mapping:")
+            for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
+                print(f"  '{label}' -> {code}")
+            print(f"{'='*70}\n")
+
     # Create results container
     df_results = create_results_dataframe(task_type)
 
@@ -148,11 +175,25 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
     # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
     # rf_n_trees_list and rf_max_depth_list for RandomForest,
     # ridge_alphas_list and lasso_alphas_list for Ridge and Lasso,
+    # xgb_* for XGBoost, elasticnet_* for ElasticNet, lightgbm_* for LightGBM, etc.,
     # tier for tiered defaults, and enabled_models for custom model selection)
     model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
                                    n_estimators_list=n_estimators_list, learning_rates=learning_rates,
                                    rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list,
                                    ridge_alphas_list=ridge_alphas_list, lasso_alphas_list=lasso_alphas_list,
+                                   xgb_n_estimators_list=xgb_n_estimators_list, xgb_learning_rates=xgb_learning_rates,
+                                   xgb_max_depths=xgb_max_depths, xgb_subsample=xgb_subsample,
+                                   xgb_colsample_bytree=xgb_colsample_bytree, xgb_reg_alpha=xgb_reg_alpha,
+                                   xgb_reg_lambda=xgb_reg_lambda,
+                                   elasticnet_alphas_list=elasticnet_alphas_list, elasticnet_l1_ratios=elasticnet_l1_ratios,
+                                   lightgbm_n_estimators_list=lightgbm_n_estimators_list,
+                                   lightgbm_learning_rates=lightgbm_learning_rates,
+                                   lightgbm_num_leaves_list=lightgbm_num_leaves_list,
+                                   catboost_iterations_list=catboost_iterations_list,
+                                   catboost_learning_rates=catboost_learning_rates, catboost_depths=catboost_depths,
+                                   svr_kernels=svr_kernels, svr_C_list=svr_C_list, svr_gamma_list=svr_gamma_list,
+                                   mlp_hidden_layer_sizes_list=mlp_hidden_layer_sizes_list,
+                                   mlp_alphas_list=mlp_alphas_list, mlp_learning_rate_inits=mlp_learning_rate_inits,
                                    tier=tier, enabled_models=enabled_models)
 
     # Filter models if models_to_test is specified
@@ -389,7 +430,7 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                 # wavelength selection reflects the actual transformed features the model sees
                 if supports_subset_analysis(model_name):
                     if not enable_variable_subsets:
-                        print(f"  ⊗ Skipping subset analysis for {model_name} (variable subsets disabled)")
+                        print(f"  -> Skipping subset analysis for {model_name} (variable subsets disabled)")
                     else:
                         print(f"  -> Computing feature importances for {model_name} subset analysis...")
 
@@ -494,7 +535,7 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                 print(f"  -> Variable selection method: {varsel_method}")
 
                                 if not valid_variable_counts:
-                                    print(f"  ⚠ Warning: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
+                                    print(f"  WARNING: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
 
                                 # Run subsets with user-selected counts
                                 for n_top in valid_variable_counts:
@@ -604,10 +645,11 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
 
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
 
-    return df_ranked
+    # Return results along with label_encoder (for classification with text labels)
+    return df_ranked, label_encoder
 
 
-def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification):
+def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes=None):
     """
     Run a single CV fold in parallel.
 
@@ -659,7 +701,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                 auc = roc_auc_score(y_test, y_proba)
             else:
                 y_proba = pipe_clone.predict_proba(X_test)
-                y_test_bin = label_binarize(y_test, classes=np.unique(y))
+                # Use all_classes if provided, otherwise infer from full dataset
+                classes_to_use = all_classes if all_classes is not None else np.unique(y)
+                y_test_bin = label_binarize(y_test, classes=classes_to_use)
                 auc = roc_auc_score(y_test_bin, y_proba, average="macro", multi_class="ovr")
         except Exception:
             auc = np.nan
@@ -726,10 +770,13 @@ def _run_single_config(
 
     pipe = Pipeline(pipe_steps) if pipe_steps else model
 
+    # For multiclass classification, compute all classes for label_binarize
+    all_classes = np.unique(y) if task_type == "classification" and not is_binary_classification else None
+
     # Run CV in parallel (use n_jobs=-1 to use all available cores)
     cv_metrics = Parallel(n_jobs=-1, backend='loky')(
         delayed(_run_single_fold)(
-            pipe, X, y, train_idx, test_idx, task_type, is_binary_classification
+            pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes
         )
         for train_idx, test_idx in cv_splitter.split(X, y)
     )
@@ -806,6 +853,39 @@ def _run_single_config(
             fitted_model = (
                 pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
             )
+
+            # FIX: Capture ALL parameters for XGBoost and LightGBM
+            # This fixes the R² reproducibility issue by ensuring ALL parameters are saved
+            if model_name in ["XGBoost", "LightGBM"]:
+                print(f"\n{'='*80}")
+                print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
+                print(f"{'='*80}")
+                try:
+                    all_params = fitted_model.get_params()
+                    print(f"ALL {model_name} parameters after training:")
+                    for key in sorted(all_params.keys()):
+                        print(f"  {key}: {all_params[key]}")
+                    print(f"\nOld params dict (incomplete - only grid search params):")
+                    print(f"  {params}")
+
+                    # CRITICAL FIX: Replace params with complete parameter set
+                    # Filter out non-serializable parameters and None values
+                    filtered_params = {}
+                    for key, value in all_params.items():
+                        # Skip parameters that are objects or None (except explicitly set None values)
+                        if value is not None and not callable(value) and not hasattr(value, '__dict__'):
+                            filtered_params[key] = value
+                        elif key in params:  # Keep original grid search params even if None
+                            filtered_params[key] = value
+
+                    params = filtered_params  # Replace params with complete set
+
+                    print(f"\nNew params dict (complete - ALL parameters):")
+                    print(f"  {params}")
+                    print(f"{'='*80}\n")
+                except Exception as e:
+                    print(f"ERROR capturing {model_name} params: {e}\n")
+                    print(f"Continuing with original params dict\n")
 
             # For PLS-DA, get the PLS component
             if model_name == "PLS-DA" and hasattr(pipe, "named_steps"):

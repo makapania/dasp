@@ -49,7 +49,8 @@ def save_model(
     model: Any,
     preprocessor: Optional[Any],
     metadata: Dict[str, Any],
-    filepath: Union[str, Path]
+    filepath: Union[str, Path],
+    label_encoder: Optional[Any] = None
 ) -> None:
     """
     Save a trained model with all metadata to a .dasp file.
@@ -61,6 +62,9 @@ def save_model(
     preprocessor : sklearn Pipeline or None
         Fitted preprocessing pipeline (e.g., SNV, derivatives).
         Can be None if model was trained on raw data.
+    label_encoder : sklearn.preprocessing.LabelEncoder or None
+        Label encoder for classification with text labels (e.g., "low", "medium", "high").
+        Used to convert between text labels and numeric codes.
     metadata : dict
         Model metadata. Should include:
         - 'model_name' (str): Model type (e.g., 'PLS', 'Ridge')
@@ -115,6 +119,17 @@ def save_model(
     metadata_complete['dasp_version'] = __version__
     metadata_complete['model_class'] = str(type(model).__name__)
 
+    # Add label encoder information if present
+    if label_encoder is not None:
+        metadata_complete['has_label_encoder'] = True
+        metadata_complete['label_classes'] = label_encoder.classes_.tolist()
+        metadata_complete['label_mapping'] = dict(zip(
+            label_encoder.classes_,
+            label_encoder.transform(label_encoder.classes_).tolist()
+        ))
+    else:
+        metadata_complete['has_label_encoder'] = False
+
     # Ensure filepath has .dasp extension
     filepath = Path(filepath)
     if filepath.suffix != '.dasp':
@@ -138,12 +153,19 @@ def save_model(
         if preprocessor is not None:
             joblib.dump(preprocessor, preprocessor_path, compress=3)
 
+        # Save label_encoder if present
+        label_encoder_path = tmppath / 'label_encoder.pkl'
+        if label_encoder is not None:
+            joblib.dump(label_encoder, label_encoder_path, compress=3)
+
         # Create ZIP archive
         with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(metadata_path, 'metadata.json')
             zf.write(model_path, 'model.pkl')
             if preprocessor is not None:
                 zf.write(preprocessor_path, 'preprocessor.pkl')
+            if label_encoder is not None:
+                zf.write(label_encoder_path, 'label_encoder.pkl')
 
 
 def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -218,9 +240,16 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if preprocessor_path.exists():
             preprocessor = joblib.load(preprocessor_path)
 
+        # Load label_encoder if present
+        label_encoder = None
+        label_encoder_path = tmppath / 'label_encoder.pkl'
+        if label_encoder_path.exists():
+            label_encoder = joblib.load(label_encoder_path)
+
     return {
         'model': model,
         'preprocessor': preprocessor,
+        'label_encoder': label_encoder,
         'metadata': metadata
     }
 
@@ -373,6 +402,12 @@ def predict_with_model(
     # Make predictions
     predictions = model.predict(X_processed)
 
+    # If label_encoder exists, convert predictions back to original text labels
+    if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
+        label_encoder = model_dict['label_encoder']
+        # Convert integer predictions back to text labels
+        predictions = label_encoder.inverse_transform(predictions.astype(int))
+
     return predictions
 
 
@@ -501,10 +536,236 @@ def _json_serializer(obj):
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> None:
+    """
+    Save an ensemble model to a .dasp file.
+
+    Parameters
+    ----------
+    ensemble : Any
+        Trained ensemble object (RegionAwareWeightedEnsemble, MixtureOfExpertsEnsemble, etc.)
+    filepath : str
+        Path where the ensemble .dasp file will be saved
+    metadata : dict
+        Additional metadata (ensemble_type, performance metrics, etc.)
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Ensemble .dasp files are ZIP archives containing:
+    - ensemble_config.json: Ensemble configuration and metadata
+    - base_model_0.dasp, base_model_1.dasp, ...: Individual model files
+    - ensemble_state.pkl: Ensemble-specific state (weights, analyzer, etc.)
+    """
+    filepath = Path(filepath)
+
+    # Create temporary directory for base model files
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        # Save each base model
+        base_model_files = []
+        for i, (model, model_name) in enumerate(zip(ensemble.models, ensemble.model_names)):
+            base_model_path = tmpdir_path / f"base_model_{i}.dasp"
+
+            # Save individual model
+            base_metadata = {
+                'model_name': model_name,
+                'model_index': i,
+                'is_base_model': True
+            }
+            save_model(model, None, base_metadata, str(base_model_path))
+            base_model_files.append(f"base_model_{i}.dasp")
+
+        # Create ensemble config
+        ensemble_config = {
+            'format_version': '1.0',
+            'ensemble_type': metadata.get('ensemble_type', 'unknown'),
+            'ensemble_name': metadata.get('ensemble_name', 'Ensemble'),
+            'n_models': len(ensemble.models),
+            'model_names': ensemble.model_names,
+            'base_model_files': base_model_files,
+            'metadata': metadata,
+            'save_date': datetime.now().isoformat()
+        }
+
+        # Save ensemble-specific state
+        ensemble_state = {}
+
+        # Save weights if present (for weighted ensembles)
+        if hasattr(ensemble, 'weights_'):
+            ensemble_state['weights'] = ensemble.weights_
+
+        # Save analyzer if present (for region-aware ensembles)
+        if hasattr(ensemble, 'analyzer_'):
+            ensemble_state['analyzer'] = ensemble.analyzer_
+
+        # Save meta_model if present (for stacking)
+        if hasattr(ensemble, 'meta_model_'):
+            ensemble_state['meta_model'] = ensemble.meta_model_
+
+        # Save region info if present
+        if hasattr(ensemble, 'n_regions'):
+            ensemble_state['n_regions'] = ensemble.n_regions
+
+        # Pickle ensemble state
+        ensemble_state_path = tmpdir_path / "ensemble_state.pkl"
+        joblib.dump(ensemble_state, ensemble_state_path)
+
+        # Save config as JSON
+        config_path = tmpdir_path / "ensemble_config.json"
+        with open(config_path, 'w') as f:
+            json.dump(ensemble_config, f, indent=2, default=_convert_to_serializable)
+
+        # Create ZIP archive
+        with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # Add config
+            zf.write(config_path, "ensemble_config.json")
+
+            # Add ensemble state
+            zf.write(ensemble_state_path, "ensemble_state.pkl")
+
+            # Add all base models
+            for base_file in base_model_files:
+                zf.write(tmpdir_path / base_file, base_file)
+
+
+def load_ensemble(filepath: str) -> Dict[str, Any]:
+    """
+    Load an ensemble model from a .dasp file.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the ensemble .dasp file
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'ensemble': Reconstructed ensemble object
+        - 'metadata': Ensemble metadata
+        - 'model_names': List of base model names
+        - 'config': Full ensemble configuration
+
+    Raises
+    ------
+    FileNotFoundError
+        If the .dasp file doesn't exist
+    ValueError
+        If the file is not a valid ensemble .dasp file
+    """
+    filepath = Path(filepath)
+
+    if not filepath.exists():
+        raise FileNotFoundError(f"Ensemble file not found: {filepath}")
+
+    # Create temporary directory for extraction
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        # Extract ZIP contents
+        with zipfile.ZipFile(filepath, 'r') as zf:
+            zf.extractall(tmpdir_path)
+
+        # Load config
+        config_path = tmpdir_path / "ensemble_config.json"
+        if not config_path.exists():
+            raise ValueError(f"Not a valid ensemble file: missing ensemble_config.json")
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Load base models
+        base_models = []
+        base_model_files = config['base_model_files']
+        model_names = config['model_names']
+
+        for base_file in base_model_files:
+            base_model_path = tmpdir_path / base_file
+            model_dict = load_model(str(base_model_path))
+            base_models.append(model_dict['model'])
+
+        # Load ensemble state
+        ensemble_state_path = tmpdir_path / "ensemble_state.pkl"
+        ensemble_state = joblib.load(ensemble_state_path)
+
+        # Reconstruct ensemble object
+        from spectral_predict.ensemble import (
+            RegionAwareWeightedEnsemble,
+            MixtureOfExpertsEnsemble,
+            StackingEnsemble
+        )
+
+        ensemble_type = config['ensemble_type']
+
+        # Create appropriate ensemble object
+        if ensemble_type == 'region_weighted':
+            ensemble = RegionAwareWeightedEnsemble(
+                models=base_models,
+                model_names=model_names,
+                n_regions=ensemble_state.get('n_regions', 5)
+            )
+            # Restore weights and analyzer
+            if 'weights' in ensemble_state:
+                ensemble.weights_ = ensemble_state['weights']
+            if 'analyzer' in ensemble_state:
+                ensemble.analyzer_ = ensemble_state['analyzer']
+
+        elif ensemble_type == 'mixture_experts':
+            ensemble = MixtureOfExpertsEnsemble(
+                models=base_models,
+                model_names=model_names,
+                n_regions=ensemble_state.get('n_regions', 5)
+            )
+            # Restore analyzer
+            if 'analyzer' in ensemble_state:
+                ensemble.analyzer_ = ensemble_state['analyzer']
+
+        elif ensemble_type in ['stacking', 'region_stacking']:
+            region_aware = (ensemble_type == 'region_stacking')
+            ensemble = StackingEnsemble(
+                models=base_models,
+                model_names=model_names,
+                region_aware=region_aware,
+                n_regions=ensemble_state.get('n_regions', 5) if region_aware else None
+            )
+            # Restore meta_model
+            if 'meta_model' in ensemble_state:
+                ensemble.meta_model_ = ensemble_state['meta_model']
+
+        elif ensemble_type == 'simple_average':
+            # Simple average - just store models
+            class SimpleAverageEnsemble:
+                def __init__(self, models, model_names):
+                    self.models = models
+                    self.model_names = model_names
+
+                def predict(self, X):
+                    predictions = np.array([model.predict(X) for model in self.models])
+                    return predictions.mean(axis=0)
+
+            ensemble = SimpleAverageEnsemble(base_models, model_names)
+        else:
+            raise ValueError(f"Unknown ensemble type: {ensemble_type}")
+
+        return {
+            'ensemble': ensemble,
+            'metadata': config['metadata'],
+            'model_names': model_names,
+            'config': config
+        }
+
+
 # Module exports
 __all__ = [
     'save_model',
     'load_model',
     'predict_with_model',
-    'get_model_info'
+    'get_model_info',
+    'save_ensemble',
+    'load_ensemble'
 ]
