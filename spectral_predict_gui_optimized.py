@@ -489,34 +489,238 @@ class SpectralPredictApp:
                 not np.issubdtype(self.y.dtype, np.number))
 
     def _configure_style(self):
-        """Configure modern art gallery aesthetic."""
+        """Configure modern Wabi-Sabi aesthetic with multiple theme support."""
         style = ttk.Style()
 
-        # Art gallery color palette
-        self.colors = {
-            'bg': '#F5F5F5',
-            'panel': '#FFFFFF',
-            'text': '#2C3E50',
-            'text_light': '#7F8C8D',
-            'accent': '#3498DB',
-            'accent_dark': '#2980B9',
-            'success': '#27AE60',
-            'border': '#E8E8E8',
-            'shadow': '#D0D0D0'
+        # Define 5 beautiful theme skins inspired by Japanese aesthetics and modern design
+        self.themes = {
+            'sakura': {  # Cherry Blossom - Soft, elegant, feminine
+                'name': '🌸 Sakura',
+                'bg': '#FFF8F8',
+                'bg_secondary': '#FFE8E8',
+                'panel': '#FFFFFF',
+                'sidebar': '#FFD1D1',
+                'sidebar_hover': '#FFC1C1',
+                'text': '#5D4157',
+                'text_light': '#9B8A96',
+                'text_inverse': '#FFFFFF',
+                'accent': '#FF6B9D',
+                'accent_dark': '#E85A8A',
+                'accent_gradient': ['#FF6B9D', '#FFB6D9'],
+                'success': '#82C785',
+                'warning': '#F4A261',
+                'border': '#FFD1D1',
+                'shadow': '#FFE8E8',
+                'tab_bg': '#FFFFFF',
+                'tab_active': '#FF6B9D',
+                'card_bg': '#FFFFFF',
+            },
+            'matcha': {  # Green Tea - Calm, natural, balanced
+                'name': '🍵 Matcha',
+                'bg': '#F8FBF6',
+                'bg_secondary': '#E8F5E0',
+                'panel': '#FFFFFF',
+                'sidebar': '#B8D4A8',
+                'sidebar_hover': '#A8C498',
+                'text': '#2D4A2B',
+                'text_light': '#6B8268',
+                'text_inverse': '#FFFFFF',
+                'accent': '#88CC77',
+                'accent_dark': '#6BB85C',
+                'accent_gradient': ['#88CC77', '#B8E6A8'],
+                'success': '#6BBD6C',
+                'warning': '#E8A547',
+                'border': '#D0E5C8',
+                'shadow': '#E8F5E0',
+                'tab_bg': '#FFFFFF',
+                'tab_active': '#88CC77',
+                'card_bg': '#FFFFFF',
+            },
+            'sumie': {  # Ink Painting - Minimalist, monochromatic, zen
+                'name': '🖌️ Sumi-e',
+                'bg': '#F5F5F5',
+                'bg_secondary': '#E8E8E8',
+                'panel': '#FFFFFF',
+                'sidebar': '#4A4A4A',
+                'sidebar_hover': '#5A5A5A',
+                'text': '#2C2C2C',
+                'text_light': '#7A7A7A',
+                'text_inverse': '#FFFFFF',
+                'accent': '#5A5A5A',
+                'accent_dark': '#3A3A3A',
+                'accent_gradient': ['#5A5A5A', '#8A8A8A'],
+                'success': '#6B9B6C',
+                'warning': '#D89A5A',
+                'border': '#D8D8D8',
+                'shadow': '#C8C8C8',
+                'tab_bg': '#FFFFFF',
+                'tab_active': '#5A5A5A',
+                'card_bg': '#FFFFFF',
+            },
+            'yuhi': {  # Sunset - Warm, vibrant, energetic
+                'name': '🌅 Yuhi',
+                'bg': '#FFF9F5',
+                'bg_secondary': '#FFE8D8',
+                'panel': '#FFFFFF',
+                'sidebar': '#FF9A6C',
+                'sidebar_hover': '#FF8A5C',
+                'text': '#4A3A2F',
+                'text_light': '#8A7A6F',
+                'text_inverse': '#FFFFFF',
+                'accent': '#FF6B4A',
+                'accent_dark': '#E85A3A',
+                'accent_gradient': ['#FF6B4A', '#FFB494'],
+                'success': '#7FC77F',
+                'warning': '#FFA726',
+                'border': '#FFD1B8',
+                'shadow': '#FFE8D8',
+                'tab_bg': '#FFFFFF',
+                'tab_active': '#FF6B4A',
+                'card_bg': '#FFFFFF',
+            },
+            'ocean': {  # Ocean Wave - Deep, sophisticated, modern
+                'name': '🌊 Ocean',
+                'bg': '#F5F9FB',
+                'bg_secondary': '#E0EEF5',
+                'panel': '#FFFFFF',
+                'sidebar': '#5BA3C4',
+                'sidebar_hover': '#4B93B4',
+                'text': '#1E3A52',
+                'text_light': '#5E7A92',
+                'text_inverse': '#FFFFFF',
+                'accent': '#3D8AB8',
+                'accent_dark': '#2D7AA8',
+                'accent_gradient': ['#3D8AB8', '#7DC4E8'],
+                'success': '#5CB85C',
+                'warning': '#F0AD4E',
+                'border': '#A8D4E8',
+                'shadow': '#D0E4F0',
+                'tab_bg': '#FFFFFF',
+                'tab_active': '#3D8AB8',
+                'card_bg': '#FFFFFF',
+            }
         }
 
+        # Set default theme (can be changed by user)
+        self.current_theme_name = tk.StringVar(value='ocean')
+        self._apply_theme('ocean')
+
+    def _apply_theme(self, theme_name):
+        """Apply a specific theme to the application."""
+        if theme_name not in self.themes:
+            theme_name = 'ocean'
+
+        self.colors = self.themes[theme_name]
+        self.current_theme_name.set(theme_name)
+
+        # Configure root window
         self.root.configure(bg=self.colors['bg'])
 
-        style.configure('Modern.TButton', font=('Segoe UI', 10), padding=(15, 8))
-        style.configure('Accent.TButton', font=('Segoe UI', 11, 'bold'), padding=(20, 12))
+        # Get modern font stack (try Inter, SF Pro, fallback to system fonts)
+        import platform
+        system = platform.system()
+        if system == 'Darwin':  # macOS
+            heading_font = ('SF Pro Display', 'Helvetica Neue', 'Arial')
+            body_font = ('SF Pro Text', 'Helvetica Neue', 'Arial')
+        elif system == 'Windows':
+            heading_font = ('Segoe UI', 'Arial')
+            body_font = ('Segoe UI', 'Arial')
+        else:  # Linux
+            heading_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
+            body_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
+
+        style = ttk.Style()
+
+        # Modern button styles with gradients (simulated with colors)
+        style.configure('Modern.TButton',
+                       font=(body_font, 10),
+                       padding=(15, 8),
+                       borderwidth=0,
+                       relief='flat')
+        style.map('Modern.TButton',
+                 background=[('active', self.colors['accent']),
+                           ('!disabled', self.colors['panel'])])
+
+        style.configure('Accent.TButton',
+                       font=(body_font, 11, 'bold'),
+                       padding=(20, 12),
+                       background=self.colors['accent'],
+                       foreground=self.colors['text_inverse'],
+                       borderwidth=0,
+                       relief='flat')
+        style.map('Accent.TButton',
+                 background=[('active', self.colors['accent_dark']),
+                           ('!disabled', self.colors['accent'])])
+
+        # Frame styling
         style.configure('TFrame', background=self.colors['bg'])
-        style.configure('TLabel', background=self.colors['bg'], foreground=self.colors['text'], font=('Segoe UI', 10))
-        style.configure('Title.TLabel', font=('Segoe UI', 24, 'bold'), foreground=self.colors['text'])
-        style.configure('Heading.TLabel', font=('Segoe UI', 14, 'bold'), foreground=self.colors['text'])
-        style.configure('Subheading.TLabel', font=('Segoe UI', 11, 'bold'), foreground=self.colors['accent'])
-        style.configure('Caption.TLabel', font=('Segoe UI', 9), foreground=self.colors['text_light'])
-        style.configure('TNotebook', background=self.colors['bg'], borderwidth=0)
-        style.configure('TNotebook.Tab', font=('Segoe UI', 11), padding=(20, 10))
+        style.configure('Card.TFrame', background=self.colors['card_bg'], relief='flat')
+        style.configure('Sidebar.TFrame', background=self.colors['sidebar'])
+
+        # Label hierarchy with modern typography
+        style.configure('TLabel',
+                       background=self.colors['bg'],
+                       foreground=self.colors['text'],
+                       font=(body_font, 10))
+        style.configure('Title.TLabel',
+                       font=(heading_font, 28, 'bold'),
+                       foreground=self.colors['text'],
+                       background=self.colors['bg'])
+        style.configure('Heading.TLabel',
+                       font=(heading_font, 16, 'bold'),
+                       foreground=self.colors['text'],
+                       background=self.colors['bg'])
+        style.configure('Subheading.TLabel',
+                       font=(heading_font, 12, 'bold'),
+                       foreground=self.colors['accent'],
+                       background=self.colors['bg'])
+        style.configure('Caption.TLabel',
+                       font=(body_font, 9),
+                       foreground=self.colors['text_light'],
+                       background=self.colors['bg'])
+        style.configure('SidebarLabel.TLabel',
+                       font=(body_font, 11),
+                       foreground=self.colors['text_inverse'],
+                       background=self.colors['sidebar'],
+                       padding=(15, 10))
+        style.configure('CardLabel.TLabel',
+                       background=self.colors['card_bg'],
+                       foreground=self.colors['text'],
+                       font=(body_font, 10))
+
+        # Notebook styling - will be replaced with sidebar navigation
+        style.configure('TNotebook',
+                       background=self.colors['bg'],
+                       borderwidth=0,
+                       tabmargins=[0, 0, 0, 0])
+        style.configure('TNotebook.Tab',
+                       font=(body_font, 11),
+                       padding=(20, 10),
+                       borderwidth=0)
+        style.map('TNotebook.Tab',
+                 background=[('selected', self.colors['tab_active']),
+                           ('!selected', self.colors['tab_bg'])],
+                 foreground=[('selected', self.colors['text_inverse']),
+                           ('!selected', self.colors['text'])])
+
+        # Entry and input styling
+        style.configure('TEntry',
+                       fieldbackground=self.colors['panel'],
+                       foreground=self.colors['text'],
+                       borderwidth=1,
+                       relief='solid')
+
+        # Checkbutton styling
+        style.configure('TCheckbutton',
+                       background=self.colors['bg'],
+                       foreground=self.colors['text'],
+                       font=(body_font, 10))
+
+        # Radiobutton styling
+        style.configure('TRadiobutton',
+                       background=self.colors['bg'],
+                       foreground=self.colors['text'],
+                       font=(body_font, 10))
 
     def _create_ui(self):
         """Create 7-tab user interface."""
