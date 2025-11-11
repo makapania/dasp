@@ -142,6 +142,7 @@ class SpectralPredictApp:
         self.refined_full_wavelengths = None  # List of ALL wavelengths (for derivative+subset preprocessing)
         self.refined_config = None  # Configuration dict for refined model
         self.refined_y_proba = None  # Prediction probabilities for classification
+        self.refined_cv_indices = None  # CV sample indices for mapping predictions back to specimen IDs
         self.task_type_detection_label = None  # Will be created in Import tab
 
         # Model Prediction Tab (Tab 7) variables
@@ -194,7 +195,7 @@ class SpectralPredictApp:
         self.variable_penalty = tk.IntVar(value=2)     # Penalty for using many variables
         self.complexity_penalty = tk.IntVar(value=2)   # Penalty for model complexity (LVs, etc.)
 
-        self.max_n_components = tk.IntVar(value=24)
+        self.max_n_components = tk.IntVar(value=8)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
         self.show_progress = tk.BooleanVar(value=True)
 
@@ -208,6 +209,10 @@ class SpectralPredictApp:
 
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
+
+        # Interactive plot annotation tracking
+        self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
+        self.active_annotation = None  # Currently visible annotation object
 
         # Validation set tracking
         self.validation_enabled = tk.BooleanVar(value=False)
@@ -224,6 +229,7 @@ class SpectralPredictApp:
         # Model selection (original models)
         # Standard tier models (enabled by default)
         self.use_pls = tk.BooleanVar(value=True)
+        self.use_plsda = tk.BooleanVar(value=True)         # PLS-DA for classification
         self.use_ridge = tk.BooleanVar(value=True)
         self.use_lasso = tk.BooleanVar(value=True)
         self.use_elasticnet = tk.BooleanVar(value=True)  # Moved to standard tier
@@ -240,6 +246,7 @@ class SpectralPredictApp:
         # Create model name to checkbox mapping
         self.model_checkboxes = {
             'PLS': self.use_pls,
+            'PLS-DA': self.use_plsda,
             'Ridge': self.use_ridge,
             'Lasso': self.use_lasso,
             'ElasticNet': self.use_elasticnet,
@@ -467,6 +474,9 @@ class SpectralPredictApp:
 
         # Configure event debouncing (prevent slowdown on tab switches)
         self._configure_timers = {}
+
+        # Theme system (will be populated by _create_top_bar())
+        self.theme_buttons = {}
 
         self._create_ui()
 
@@ -1202,17 +1212,20 @@ class SpectralPredictApp:
         ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)", variable=self.use_pls).grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Linear, fast, interpretable", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge).grid(row=2, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="L2 regularized linear", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ PLS-DA (Discriminant Analysis)", variable=self.use_plsda).grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="PLS for classification tasks", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso).grid(row=3, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="L1 regularized, sparse", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge).grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L2 regularized linear", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ ElasticNet 🆕", variable=self.use_elasticnet).grid(row=4, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="L1+L2 combined regularization", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso).grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L1 regularized, sparse", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest).grid(row=5, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ ElasticNet 🆕", variable=self.use_elasticnet).grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="L1+L2 combined regularization", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest).grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
         # Advanced Models (Column 2)
         ttk.Label(models_frame, text="Advanced Models", style='Subheading.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5), padx=(40, 0))
@@ -1224,27 +1237,27 @@ class SpectralPredictApp:
         ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
 
         # Gradient Boosting Models (Column 3, spanning bottom)
-        ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
 
-        ttk.Checkbutton(models_frame, text="✓ XGBoost", variable=self.use_xgboost).grid(row=7, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Industry-leading gradient boosting", style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ XGBoost", variable=self.use_xgboost).grid(row=8, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Industry-leading gradient boosting", style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ LightGBM", variable=self.use_lightgbm).grid(row=8, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Microsoft's fast gradient boosting", style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ LightGBM", variable=self.use_lightgbm).grid(row=9, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Microsoft's fast gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
 
         self.catboost_checkbox = ttk.Checkbutton(models_frame, text="✓ CatBoost", variable=self.use_catboost)
-        self.catboost_checkbox.grid(row=9, column=0, sticky=tk.W, pady=5)
+        self.catboost_checkbox.grid(row=10, column=0, sticky=tk.W, pady=5)
         if not HAS_CATBOOST:
             self.catboost_checkbox.state(['disabled'])
-            ttk.Label(models_frame, text="Requires Visual Studio 2022 Build Tools (not installed)", style='Caption.TLabel', foreground='red').grid(row=9, column=1, sticky=tk.W, padx=15)
+            ttk.Label(models_frame, text="Requires Visual Studio 2022 Build Tools (not installed)", style='Caption.TLabel', foreground='red').grid(row=10, column=1, sticky=tk.W, padx=15)
         else:
-            ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
+            ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=10, column=0, sticky=tk.W, pady=5)
-        ttk.Label(models_frame, text="Gradient boosting with neural networks", style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
+        ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted).grid(row=11, column=0, sticky=tk.W, pady=5)
+        ttk.Label(models_frame, text="Gradient boosting with neural networks", style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
 
         ttk.Label(models_frame, text="💡 Gradient boosting models (XGBoost, LightGBM, CatBoost, NeuralBoosted) often outperform traditional methods.",
-                 style='Caption.TLabel', foreground=self.colors['success']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['success']).grid(row=12, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Advanced Model Options ===
         ttk.Label(content_frame, text="Advanced Model Options", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -3068,10 +3081,29 @@ class SpectralPredictApp:
     # ==================== End Validation Set Methods ====================
 
     def _on_spectrum_click(self, event):
-        """Handle clicking on a spectrum line to toggle its visibility."""
+        """Handle clicking on a spectrum line to toggle its visibility and show info."""
         line = event.artist
         sample_idx = int(line.get_gid())  # Get stored sample index
 
+        # Get Y value for this sample
+        y_value = self.y.values[sample_idx] if self.y is not None else None
+
+        # Format and display specimen information
+        info_text = self._format_specimen_info(sample_idx, y_value=y_value)
+
+        # Get click coordinates from the line data
+        xdata = line.get_xdata()
+        ydata = line.get_ydata()
+        if len(xdata) > 0:
+            # Use middle point of spectrum for annotation
+            mid_idx = len(xdata) // 2
+            x_coord = xdata[mid_idx]
+            y_coord = ydata[mid_idx]
+
+            # Show annotation with specimen info
+            self._create_or_update_annotation(event.artist.axes, x_coord, y_coord, info_text, event.canvas)
+
+        # Toggle exclusion (existing behavior)
         if sample_idx in self.excluded_spectra:
             # Re-include the spectrum
             self.excluded_spectra.remove(sample_idx)
@@ -3085,6 +3117,140 @@ class SpectralPredictApp:
 
         event.canvas.draw()
         self._update_exclusion_status()
+
+    def _format_specimen_info(self, specimen_idx, y_value=None, y_pred=None, extra_info=None):
+        """
+        Format specimen information for display in plot annotations.
+
+        Args:
+            specimen_idx: Index into self.y for specimen lookup
+            y_value: Actual Y value (if available)
+            y_pred: Predicted Y value (if available, for Model Dev page)
+            extra_info: Dict of additional information to display
+
+        Returns:
+            Formatted string for annotation display
+        """
+        lines = []
+
+        # Get specimen ID if available
+        if self.y is not None and hasattr(self.y, 'index'):
+            specimen_id = self.y.index[specimen_idx]
+            lines.append(f"Specimen: {specimen_id}")
+
+        # Format Y value (handle both regression and classification)
+        if y_value is not None:
+            # Check if this is a classification task with text labels
+            if self.label_encoder is not None:
+                try:
+                    # Decode numeric value back to text label
+                    if isinstance(y_value, (int, np.integer)):
+                        text_label = self.label_encoder.inverse_transform([int(y_value)])[0]
+                    else:
+                        text_label = str(y_value)
+                    lines.append(f"Y: {text_label}")
+                except:
+                    # Fallback if decoding fails
+                    lines.append(f"Y: {y_value:.4f}" if isinstance(y_value, (float, np.floating)) else f"Y: {y_value}")
+            else:
+                # Regression or classification without encoder
+                if isinstance(y_value, (float, np.floating)):
+                    lines.append(f"Y: {y_value:.4f}")
+                else:
+                    lines.append(f"Y: {y_value}")
+
+        # Add predicted value if available
+        if y_pred is not None:
+            if self.label_encoder is not None:
+                try:
+                    # Decode predicted value for classification
+                    if isinstance(y_pred, (int, np.integer)):
+                        text_label = self.label_encoder.inverse_transform([int(y_pred)])[0]
+                    else:
+                        text_label = str(y_pred)
+                    lines.append(f"Predicted: {text_label}")
+                except:
+                    lines.append(f"Predicted: {y_pred:.4f}" if isinstance(y_pred, (float, np.floating)) else f"Predicted: {y_pred}")
+            else:
+                if isinstance(y_pred, (float, np.floating)):
+                    lines.append(f"Predicted: {y_pred:.4f}")
+                else:
+                    lines.append(f"Predicted: {y_pred}")
+
+        # Add extra information
+        if extra_info:
+            for key, value in extra_info.items():
+                if isinstance(value, (float, np.floating)):
+                    lines.append(f"{key}: {value:.4f}")
+                else:
+                    lines.append(f"{key}: {value}")
+
+        return "\n".join(lines)
+
+    def _create_or_update_annotation(self, ax, x, y, text, canvas):
+        """
+        Create or update annotation at the clicked point with smart positioning to stay in bounds.
+
+        Args:
+            ax: Matplotlib axis object
+            x: X coordinate for annotation
+            y: Y coordinate for annotation
+            text: Text to display
+            canvas: Matplotlib canvas for redrawing
+        """
+        # Remove existing annotation if any
+        if self.active_annotation is not None:
+            try:
+                self.active_annotation.remove()
+            except:
+                pass
+            self.active_annotation = None
+
+        # Get axis limits to determine position
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+
+        # Calculate relative position of point (0-1 range for each axis)
+        x_rel = (x - xlim[0]) / (xlim[1] - xlim[0]) if xlim[1] != xlim[0] else 0.5
+        y_rel = (y - ylim[0]) / (ylim[1] - ylim[0]) if ylim[1] != ylim[0] else 0.5
+
+        # Determine annotation position based on point location
+        # Use larger offsets for points in the middle, smaller for edges
+        # Position annotation away from nearest edge
+
+        # Horizontal offset
+        if x_rel < 0.3:  # Point on left side
+            x_offset = 20
+        elif x_rel > 0.7:  # Point on right side
+            x_offset = -20
+        else:  # Point in middle
+            x_offset = 20
+
+        # Vertical offset
+        if y_rel < 0.3:  # Point on bottom
+            y_offset = 20
+        elif y_rel > 0.7:  # Point on top
+            y_offset = -20
+        else:  # Point in middle
+            y_offset = 20
+
+        # Create new annotation with smart positioning
+        annotation = ax.annotate(
+            text,
+            xy=(x, y),
+            xytext=(x_offset, y_offset),
+            textcoords='offset points',
+            bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8, edgecolor='black'),
+            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='black'),
+            fontsize=9,
+            zorder=1000,  # Ensure annotation is on top
+            # Horizontal alignment based on position
+            ha='left' if x_offset > 0 else 'right',
+            va='bottom' if y_offset > 0 else 'top'
+        )
+
+        self.active_annotation = annotation
+        canvas.draw()
 
     def _apply_transformation(self, data):
         """
@@ -3275,10 +3441,9 @@ class SpectralPredictApp:
             line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
                           color=color, linewidth=current_linewidth)
 
-            # Make clickable only for raw spectra
-            if is_raw:
-                line.set_gid(str(i))  # Store sample index as gid
-                line.set_picker(5)  # Enable picking with 5-point tolerance
+            # Make clickable for all spectra (raw and derivatives)
+            line.set_gid(str(i))  # Store sample index as gid
+            line.set_picker(5)  # Enable picking with 5-point tolerance
 
         ax.set_xlabel('Wavelength (nm)', fontsize=12)
         ax.set_ylabel(ylabel, fontsize=12)
@@ -3288,9 +3453,8 @@ class SpectralPredictApp:
         if "Derivative" in title:
             ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
 
-        # Add click handler only for raw spectra
-        if is_raw:
-            fig.canvas.mpl_connect('pick_event', self._on_spectrum_click)
+        # Add click handler to all spectral plots
+        fig.canvas.mpl_connect('pick_event', self._on_spectrum_click)
 
         canvas = FigureCanvasTkAgg(fig, master=frame)
         canvas.draw()
@@ -3452,6 +3616,43 @@ class SpectralPredictApp:
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add click handler for point identification
+        def on_pca_click(event):
+            if event.inaxes != ax:
+                return
+
+            # Find nearest point to click
+            click_x, click_y = event.xdata, event.ydata
+            if click_x is None or click_y is None:
+                return
+
+            # Calculate distances to all points
+            distances = np.sqrt((scores[:, 0] - click_x)**2 + (scores[:, 1] - click_y)**2)
+            nearest_idx = np.argmin(distances)
+
+            # Only show annotation if click is reasonably close (within 10% of plot range)
+            x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
+            y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
+            threshold = 0.1 * np.sqrt(x_range**2 + y_range**2)
+
+            if distances[nearest_idx] < threshold:
+                # Get specimen info
+                y_value = y_values[nearest_idx]
+                pc1 = scores[nearest_idx, 0]
+                pc2 = scores[nearest_idx, 1]
+                is_outlier = outliers[nearest_idx] if outliers is not None else False
+
+                extra_info = {
+                    'PC1': pc1,
+                    'PC2': pc2,
+                    'Outlier': 'Yes' if is_outlier else 'No'
+                }
+
+                info_text = self._format_specimen_info(nearest_idx, y_value=y_value, extra_info=extra_info)
+                self._create_or_update_annotation(ax, pc1, pc2, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_pca_click)
+
         # Add export button
         self._add_plot_export_button(self.pca_plot_frame, fig, "pca_scores")
 
@@ -3486,6 +3687,29 @@ class SpectralPredictApp:
         canvas = FigureCanvasTkAgg(fig, self.t2_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add click handler for bar identification
+        def on_t2_click(event):
+            if event.inaxes != ax or event.xdata is None:
+                return
+
+            # Find nearest bar (round to nearest integer)
+            bar_idx = int(round(event.xdata))
+            if 0 <= bar_idx < len(t2_values):
+                y_value = self.y.values[bar_idx]
+                t2_value = t2_values[bar_idx]
+                is_outlier = outliers[bar_idx]
+
+                extra_info = {
+                    'T²': t2_value,
+                    'Threshold': threshold,
+                    'Outlier': 'Yes' if is_outlier else 'No'
+                }
+
+                info_text = self._format_specimen_info(bar_idx, y_value=y_value, extra_info=extra_info)
+                self._create_or_update_annotation(ax, bar_idx, t2_value, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_t2_click)
 
         # Add export button
         self._add_plot_export_button(self.t2_plot_frame, fig, "hotelling_t2")
@@ -3522,6 +3746,29 @@ class SpectralPredictApp:
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add click handler for bar identification
+        def on_q_click(event):
+            if event.inaxes != ax or event.xdata is None:
+                return
+
+            # Find nearest bar (round to nearest integer)
+            bar_idx = int(round(event.xdata))
+            if 0 <= bar_idx < len(q_values):
+                y_value = self.y.values[bar_idx]
+                q_value = q_values[bar_idx]
+                is_outlier = outliers[bar_idx]
+
+                extra_info = {
+                    'Q-Residual': q_value,
+                    'Threshold': threshold,
+                    'Outlier': 'Yes' if is_outlier else 'No'
+                }
+
+                info_text = self._format_specimen_info(bar_idx, y_value=y_value, extra_info=extra_info)
+                self._create_or_update_annotation(ax, bar_idx, q_value, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_q_click)
+
         # Add export button
         self._add_plot_export_button(self.q_plot_frame, fig, "q_residuals")
 
@@ -3557,6 +3804,29 @@ class SpectralPredictApp:
         canvas = FigureCanvasTkAgg(fig, self.maha_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add click handler for bar identification
+        def on_maha_click(event):
+            if event.inaxes != ax or event.xdata is None:
+                return
+
+            # Find nearest bar (round to nearest integer)
+            bar_idx = int(round(event.xdata))
+            if 0 <= bar_idx < len(distances):
+                y_value = self.y.values[bar_idx]
+                distance = distances[bar_idx]
+                is_outlier = outliers[bar_idx]
+
+                extra_info = {
+                    'Mahalanobis': distance,
+                    'Threshold': threshold,
+                    'Outlier': 'Yes' if is_outlier else 'No'
+                }
+
+                info_text = self._format_specimen_info(bar_idx, y_value=y_value, extra_info=extra_info)
+                self._create_or_update_annotation(ax, bar_idx, distance, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_maha_click)
 
         # Add export button
         self._add_plot_export_button(self.maha_plot_frame, fig, "mahalanobis_distance")
@@ -3933,6 +4203,8 @@ class SpectralPredictApp:
         selected_models = []
         if self.use_pls.get():
             selected_models.append("PLS")
+        if self.use_plsda.get():
+            selected_models.append("PLS-DA")
         if self.use_ridge.get():
             selected_models.append("Ridge")
         if self.use_lasso.get():
@@ -6006,6 +6278,39 @@ Performance (Classification):
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Add click handler for point identification
+        def on_prediction_click(event):
+            if event.inaxes != ax or event.xdata is None or event.ydata is None:
+                return
+
+            # Find nearest point to click
+            click_x, click_y = event.xdata, event.ydata
+            distances = np.sqrt((y_true - click_x)**2 + (y_pred - click_y)**2)
+            nearest_idx = np.argmin(distances)
+
+            # Only show annotation if click is reasonably close
+            x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
+            y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
+            threshold = 0.1 * np.sqrt(x_range**2 + y_range**2)
+
+            if distances[nearest_idx] < threshold:
+                # Map CV index back to original specimen index
+                if self.refined_cv_indices is not None:
+                    original_idx = self.refined_cv_indices[nearest_idx]
+                    y_actual = y_true[nearest_idx]
+                    y_predicted = y_pred[nearest_idx]
+                    residual = y_actual - y_predicted
+
+                    extra_info = {
+                        'Residual': residual
+                    }
+
+                    info_text = self._format_specimen_info(original_idx, y_value=y_actual,
+                                                          y_pred=y_predicted, extra_info=extra_info)
+                    self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_prediction_click)
+
         # Add export button
         self._add_plot_export_button(self.refine_plot_frame, fig, "cv_predictions")
 
@@ -6169,6 +6474,60 @@ F1 Score:  {f1:.4f}
         canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add click handlers for point identification
+        def on_residual_vs_fitted_click(event):
+            if event.inaxes != ax1 or event.xdata is None or event.ydata is None:
+                return
+
+            # Find nearest point
+            click_x, click_y = event.xdata, event.ydata
+            distances = np.sqrt((y_pred - click_x)**2 + (residuals - click_y)**2)
+            nearest_idx = np.argmin(distances)
+
+            # Check if click is reasonably close
+            x_range = ax1.get_xlim()[1] - ax1.get_xlim()[0]
+            y_range = ax1.get_ylim()[1] - ax1.get_ylim()[0]
+            threshold = 0.1 * np.sqrt(x_range**2 + y_range**2)
+
+            if distances[nearest_idx] < threshold and self.refined_cv_indices is not None:
+                original_idx = self.refined_cv_indices[nearest_idx]
+                y_actual = y_true[nearest_idx]
+                y_predicted = y_pred[nearest_idx]
+                residual_val = residuals[nearest_idx]
+
+                extra_info = {
+                    'Fitted': y_predicted,
+                    'Residual': residual_val
+                }
+
+                info_text = self._format_specimen_info(original_idx, y_value=y_actual,
+                                                      y_pred=y_predicted, extra_info=extra_info)
+                self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas)
+
+        def on_residual_vs_index_click(event):
+            if event.inaxes != ax2 or event.xdata is None:
+                return
+
+            # Find nearest index
+            bar_idx = int(round(event.xdata))
+            if 0 <= bar_idx < len(residuals) and self.refined_cv_indices is not None:
+                original_idx = self.refined_cv_indices[bar_idx]
+                y_actual = y_true[bar_idx]
+                y_predicted = y_pred[bar_idx]
+                residual_val = residuals[bar_idx]
+
+                extra_info = {
+                    'Fitted': y_predicted,
+                    'Residual': residual_val
+                }
+
+                info_text = self._format_specimen_info(original_idx, y_value=y_actual,
+                                                      y_pred=y_predicted, extra_info=extra_info)
+                self._create_or_update_annotation(ax2, bar_idx, residual_val, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_residual_vs_fitted_click)
+        fig.canvas.mpl_connect('button_press_event', on_residual_vs_index_click)
 
         # Add export button
         self._add_plot_export_button(self.residual_diagnostics_frame, fig, "residual_diagnostics")
@@ -6482,6 +6841,43 @@ F1 Score:  {f1:.4f}
         canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add click handler for point identification
+        def on_leverage_click(event):
+            if event.inaxes != ax or event.xdata is None or event.ydata is None:
+                return
+
+            # Find nearest point
+            click_x, click_y = event.xdata, event.ydata
+            distances = np.sqrt((indices - click_x)**2 + ((leverage - click_y) * 100)**2)  # Scale y for better matching
+            nearest_idx = np.argmin(distances)
+
+            # Check if click is reasonably close
+            x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
+            threshold = 0.05 * x_range
+
+            if abs(indices[nearest_idx] - click_x) < threshold and self.refined_cv_indices is not None:
+                original_idx = self.refined_cv_indices[nearest_idx]
+                y_value = self.refined_y_true[nearest_idx] if hasattr(self, 'refined_y_true') else None
+                leverage_val = leverage[nearest_idx]
+
+                # Determine leverage category
+                if leverage_val > threshold_3p:
+                    leverage_cat = 'High'
+                elif leverage_val > threshold_2p:
+                    leverage_cat = 'Moderate'
+                else:
+                    leverage_cat = 'Normal'
+
+                extra_info = {
+                    'Leverage': leverage_val,
+                    'Category': leverage_cat
+                }
+
+                info_text = self._format_specimen_info(original_idx, y_value=y_value, extra_info=extra_info)
+                self._create_or_update_annotation(ax, indices[nearest_idx], leverage_val, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_leverage_click)
 
         # Add export button
         self._add_plot_export_button(self.leverage_plot_frame, fig, "leverage_analysis")
@@ -6875,6 +7271,7 @@ F1 Score:  {f1:.4f}
             all_y_true = []
             all_y_pred = []
             all_y_proba = []  # Store prediction probabilities for classification
+            all_cv_indices = []  # Store CV sample indices for specimen ID mapping
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
@@ -6892,6 +7289,7 @@ F1 Score:  {f1:.4f}
                 # Store predictions for plotting
                 all_y_true.extend(y_test)
                 all_y_pred.extend(y_pred)
+                all_cv_indices.extend(test_idx)  # Track indices for specimen ID mapping
 
                 # Store prediction probabilities if available (for classification)
                 if hasattr(pipe_fold, 'predict_proba'):
@@ -7065,6 +7463,7 @@ Configuration:
             # Store predictions for plotting
             self.refined_y_true = np.array(all_y_true)
             self.refined_y_pred = np.array(all_y_pred)
+            self.refined_cv_indices = np.array(all_cv_indices)  # Store CV indices for specimen ID mapping
 
             # Store prediction probabilities if available
             if all_y_proba:
