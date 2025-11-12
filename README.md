@@ -100,7 +100,69 @@ Output: results.csv + report.md
 
 ---
 
-## 📥 Input Formats
+## 📥 Supported File Formats
+
+Spectral Predict supports 10+ spectral file formats with automatic detection and unified I/O API.
+
+### Format Support Matrix
+
+| Format | Extensions | Read | Write | Auto-Detect | Dependencies |
+|--------|-----------|------|-------|-------------|--------------|
+| CSV | .csv | ✅ | ✅ | ✅ | Built-in |
+| Excel | .xlsx, .xls | ✅ | ✅ | ✅ | openpyxl, xlsxwriter |
+| ASD (ASCII) | .asd, .sig | ✅ | ❌ | ✅ | Built-in |
+| ASD (Binary) | .asd | ✅ | ❌ | ✅ | specdal (optional) |
+| SPC | .spc | ✅ | ✅ | ✅ | spc-io |
+| JCAMP-DX | .jdx, .dx, .jcm | ✅ | ✅ | ✅ | jcamp |
+| ASCII Text | .txt, .dat | ✅ | ✅ | ✅ | Built-in |
+| Bruker OPUS | .0, .1, .2, etc. | ✅ | ❌ | ✅ | brukeropus (optional) |
+| PerkinElmer | .sp | ✅ | ❌ | ✅ | specio (optional) |
+| Agilent | .seq | 🚧 | ❌ | ✅ | agilent-ir-formats (optional) |
+
+**Legend:**
+- ✅ = Fully supported
+- 🚧 = In development
+- ❌ = Not supported
+
+### Installation with Optional Formats
+
+```bash
+# Basic installation (CSV, Excel, ASCII, JCAMP, SPC)
+pip install -e .
+
+# With binary ASD support
+pip install -e ".[asd]"
+
+# With vendor formats
+pip install -e ".[opus]"          # Bruker OPUS
+pip install -e ".[perkinelmer]"   # PerkinElmer
+pip install -e ".[agilent]"       # Agilent
+
+# Install all format support
+pip install -e ".[all-formats]"
+```
+
+### Unified I/O API
+
+The unified API automatically detects formats and provides consistent interface:
+
+```python
+from spectral_predict.io import read_spectra, write_spectra
+
+# Read any supported format (auto-detect)
+df, metadata = read_spectra('data/spectra.xlsx')
+df, metadata = read_spectra('data/spectra.csv')
+df, metadata = read_spectra('data/asd_files/')
+df, metadata = read_spectra('data/spectrum.jdx')
+
+# Explicit format specification
+df, metadata = read_spectra('data/file.dat', format='ascii')
+
+# Write to various formats
+write_spectra(df, 'output.csv', format='csv')
+write_spectra(df, 'output.xlsx', format='excel')
+write_spectra(df, 'output.jdx', format='jcamp')
+```
 
 ### CSV Wide Format
 
@@ -131,10 +193,76 @@ wavelength,value
 
 Automatically detected and converted to wide format.
 
-### ASD ASCII Format
+### Combined CSV/Excel Format (Spectra + Targets)
 
-Text-based `.sig` or ASCII `.asd` files:
+**NEW:** Load all data from a single file containing both spectra and target variables. Perfect for sharing complete datasets!
 
+The combined format is automatically detected when you provide a directory containing a single CSV or Excel file. The file can have columns in any order:
+
+```csv
+specimen_id,400.0,401.0,...,2400.0,nitrogen,protein
+S001,0.123,0.125,...,0.456,2.45,15.3
+S002,0.134,0.136,...,0.467,2.78,17.4
+```
+
+Or even with targets first:
+
+```csv
+nitrogen,specimen_id,400.0,401.0,...,2400.0
+2.45,S001,0.123,0.125,...,0.456
+2.78,S002,0.134,0.136,...,0.467
+```
+
+**Key Features:**
+- ✅ Automatic column detection (wavelengths, specimen ID, target)
+- ✅ Flexible column ordering (columns can be in any position)
+- ✅ Auto-generates sample IDs if missing (Sample_1, Sample_2, etc.)
+- ✅ Works with both CSV and Excel files
+- ✅ No separate reference file needed!
+
+**Usage:**
+
+```python
+from spectral_predict.io import read_combined_csv, read_combined_excel
+
+# CSV combined format
+X, y, metadata = read_combined_csv('data.csv')
+print(f"Loaded {len(X)} spectra with {X.shape[1]} wavelengths")
+print(f"Target variable: {metadata['y_col']}")
+
+# Excel combined format (same logic)
+X, y, metadata = read_combined_excel('data.xlsx')
+```
+
+**Automatic Detection:**
+If you place a single CSV/Excel file in a directory, the GUI will automatically detect it as a combined format and load both spectra and targets together.
+
+**Without Specimen ID column:**
+The system automatically generates IDs if your file only has wavelengths and targets:
+
+```csv
+400.0,401.0,...,2400.0,nitrogen
+0.123,0.125,...,0.456,2.45
+0.134,0.136,...,0.467,2.78
+```
+→ Creates Sample_1, Sample_2, etc.
+
+### Excel Format
+
+Same layout as CSV, supports multiple sheets:
+
+```python
+# Read specific sheet
+df, meta = read_spectra('data.xlsx', sheet_name='Spectra')
+
+# Write with formatting
+write_spectra(df, 'output.xlsx', format='excel',
+              sheet_name='Data', freeze_panes=(1, 1))
+```
+
+### ASD Format
+
+**ASCII ASD** (.sig, ASCII .asd):
 ```bash
 spectral-predict --asd-dir data/asd_files/ \
                  --reference data/ref.csv \
@@ -142,10 +270,7 @@ spectral-predict --asd-dir data/asd_files/ \
                  --target protein
 ```
 
-### ASD Binary Format
-
-Binary `.asd` files (requires SpecDAL):
-
+**Binary ASD** (requires SpecDAL):
 ```bash
 pip install specdal
 spectral-predict --asd-dir data/binary_asd/ \
@@ -153,6 +278,70 @@ spectral-predict --asd-dir data/binary_asd/ \
                  --id-column filename \
                  --target "%collagen"
 ```
+
+### SPC Format (GRAMS/Thermo Galactic)
+
+```python
+# Read SPC file or directory
+df, meta = read_spectra('data/spectrum.spc')
+df, meta = read_spectra('data/spc_files/')
+
+# Write SPC (single spectrum only)
+write_spectra(df.iloc[[0]], 'output.spc', format='spc')
+```
+
+### JCAMP-DX Format
+
+```python
+# Read JCAMP file
+df, meta = read_spectra('spectrum.jdx')
+
+# Write JCAMP with metadata
+write_spectra(df.iloc[[0]], 'output.jdx', format='jcamp',
+              title='Sample A',
+              data_type='INFRARED SPECTRUM',
+              xunits='NANOMETERS',
+              yunits='REFLECTANCE')
+```
+
+### ASCII Text Format
+
+Generic two-column format (wavelength, intensity):
+
+```python
+# Auto-detect delimiter
+df, meta = read_spectra('spectrum.txt')
+
+# Specify delimiter
+df, meta = read_spectra('data.dat', format='ascii', delimiter='\t')
+
+# Write ASCII
+write_spectra(df.iloc[[0]], 'output.txt', format='ascii', delimiter='\t')
+```
+
+### Vendor Formats
+
+**Bruker OPUS** (.0, .1, .2, etc.):
+```bash
+pip install brukeropus
+```
+```python
+df, meta = read_spectra('spectrum.0', format='opus')
+```
+
+**PerkinElmer** (.sp):
+```bash
+pip install specio
+```
+```python
+df, meta = read_spectra('spectrum.sp', format='perkinelmer')
+```
+
+**Agilent** (.seq):
+```bash
+pip install agilent-ir-formats
+```
+Status: In development - contributions welcome!
 
 ### Reference CSV
 
@@ -315,14 +504,36 @@ flake8 src/ tests/              # Lint code
 
 ## 📋 Requirements
 
+### Core Dependencies
+
 - Python ≥ 3.10
 - numpy ≥ 1.21.0
 - pandas ≥ 1.3.0
 - scikit-learn ≥ 1.0.0
 - scipy ≥ 1.7.0
+- matplotlib ≥ 3.5.0
+- tabulate ≥ 0.9.0
+- xgboost ≥ 2.0.0
+- lightgbm ≥ 4.0.0
+- catboost ≥ 1.2.0
 
-**Optional:**
-- specdal (for binary ASD files)
+### File Format Dependencies
+
+**Built-in formats** (no additional packages):
+- CSV
+- ASCII ASD (.sig, ASCII .asd)
+- Generic ASCII text files
+
+**Included in default installation:**
+- Excel: openpyxl ≥ 3.1.0, xlsxwriter ≥ 3.2.0
+- JCAMP-DX: jcamp ≥ 1.3.0
+- SPC: spc-io ≥ 0.2.0
+
+**Optional vendor formats:**
+- Binary ASD: specdal
+- Bruker OPUS: brukeropus
+- PerkinElmer: specio
+- Agilent: agilent-ir-formats
 
 ---
 

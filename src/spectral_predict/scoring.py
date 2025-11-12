@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-def compute_composite_score(df_results, task_type, variable_penalty=3, complexity_penalty=5):
+def compute_composite_score(df_results, task_type, variable_penalty=2, complexity_penalty=2):
     """
     Compute composite score with user-friendly penalty system.
 
@@ -80,9 +80,10 @@ def compute_composite_score(df_results, task_type, variable_penalty=3, complexit
         full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
         var_fraction = n_vars_array / full_vars_array  # 0-1 scale
 
-        # Scale by user penalty (0-10) and make it affect ranking reasonably
+        # Scale by user penalty (0-10) with quadratic scaling for better behavior
+        # At penalty=2, using all variables adds ~0.04 units (minimal impact)
         # At penalty=10, using all variables adds ~1 unit (comparable to ~0.3 std deviations in performance)
-        var_penalty_term = (variable_penalty / 10.0) * var_fraction
+        var_penalty_term = ((variable_penalty / 10.0) ** 2) * var_fraction
     else:
         var_penalty_term = 0
 
@@ -100,8 +101,8 @@ def compute_composite_score(df_results, task_type, variable_penalty=3, complexit
         median_lv_fraction = 0.4  # Equivalent to ~10 LVs
         lv_fraction_adjusted = np.where(lvs == 0, median_lv_fraction, lv_fraction)
 
-        # Scale by user penalty (0-10)
-        comp_penalty_term = (complexity_penalty / 10.0) * lv_fraction_adjusted
+        # Scale by user penalty (0-10) with quadratic scaling for better behavior
+        comp_penalty_term = ((complexity_penalty / 10.0) ** 2) * lv_fraction_adjusted
     else:
         comp_penalty_term = 0
 
