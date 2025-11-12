@@ -9682,36 +9682,17 @@ Configuration:
                     step_part = parts[1].strip()
 
                     # Parse the range bounds
-                    if '-' not in range_part:
-                        raise ValueError(f"Invalid range syntax in '{segment}'. Expected 'start-end' before 'step'")
+                    # Use regex to properly handle negative numbers
+                    import re
+                    # Match pattern: optional_minus + digits + dash + optional_minus + digits
+                    # This handles cases like: "10-20", "-10-20", "10--20", "-10--20"
+                    match = re.match(r'^(-?\d+(?:\.\d+)?)-(-?\d+(?:\.\d+)?)$', range_part)
 
-                    # Handle negative numbers in range
-                    # Split by '-' but be careful with negative numbers
-                    range_components = range_part.split('-')
+                    if not match:
+                        raise ValueError(f"Invalid range syntax in '{segment}'. Expected 'start-end' format")
 
-                    # Filter out empty strings (from leading minus signs)
-                    range_components = [c for c in range_components if c]
-
-                    if len(range_components) < 2:
-                        raise ValueError(f"Invalid range syntax in '{segment}'. Expected 'start-end step increment'")
-
-                    # If we have more than 2 components, we might have negative numbers
-                    if len(range_components) == 2:
-                        start_str, end_str = range_components
-                    elif len(range_components) == 3:
-                        # Could be "-5-10" (negative start) or "5--10" (negative end)
-                        if range_part.startswith('-'):
-                            start_str = '-' + range_components[0]
-                            end_str = range_components[1]
-                        else:
-                            start_str = range_components[0]
-                            end_str = '-' + range_components[1]
-                    elif len(range_components) == 4:
-                        # Both negative: "-5--10"
-                        start_str = '-' + range_components[0]
-                        end_str = '-' + range_components[1]
-                    else:
-                        raise ValueError(f"Invalid range syntax in '{segment}'")
+                    start_str = match.group(1)
+                    end_str = match.group(2)
 
                     # Parse the numeric values
                     try:
