@@ -202,6 +202,11 @@ class SpectralPredictApp:
         self.wavelength_min = tk.StringVar(value="")
         self.wavelength_max = tk.StringVar(value="")
 
+        # Preprocessing wavelength range (for derivatives before subsetting)
+        self.preprocess_wl_min = tk.StringVar(value="")
+        self.preprocess_wl_max = tk.StringVar(value="")
+        self.preprocess_wl_preset = tk.StringVar(value="whole")  # whole, nir, custom
+
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
@@ -1626,6 +1631,36 @@ class SpectralPredictApp:
         self.update_wl_button = ttk.Button(wl_subframe, text="Update Plots", command=self._update_wavelengths,
                                           style='Modern.TButton', state='disabled')
         self.update_wl_button.pack(side=tk.LEFT, padx=5)
+        cfg_row += 1
+
+        # Preprocessing Wavelength Range (for derivatives)
+        ttk.Label(config_frame, text="Preprocessing Range:").grid(row=cfg_row, column=0, sticky=tk.W, pady=(10, 5), padx=(0, 5))
+        preprocess_wl_subframe = ttk.Frame(config_frame)
+        preprocess_wl_subframe.grid(row=cfg_row, column=1, columnspan=3, sticky=tk.W, pady=(10, 5))
+
+        # Preset buttons
+        ttk.Radiobutton(preprocess_wl_subframe, text="Whole Spectrum", variable=self.preprocess_wl_preset,
+                       value="whole", command=self._on_preprocess_wl_preset).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(preprocess_wl_subframe, text="NIR Range", variable=self.preprocess_wl_preset,
+                       value="nir", command=self._on_preprocess_wl_preset).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(preprocess_wl_subframe, text="Custom", variable=self.preprocess_wl_preset,
+                       value="custom", command=self._on_preprocess_wl_preset).pack(side=tk.LEFT, padx=(0, 5))
+
+        # Custom range inputs (disabled by default)
+        self.preprocess_wl_min_entry = ttk.Entry(preprocess_wl_subframe, textvariable=self.preprocess_wl_min, width=10, state='disabled')
+        self.preprocess_wl_min_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(preprocess_wl_subframe, text="to").pack(side=tk.LEFT, padx=2)
+        self.preprocess_wl_max_entry = ttk.Entry(preprocess_wl_subframe, textvariable=self.preprocess_wl_max, width=10, state='disabled')
+        self.preprocess_wl_max_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(preprocess_wl_subframe, text="nm", style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
+        cfg_row += 1
+
+        # Add help text for preprocessing wavelength range
+        preprocess_help_frame = ttk.Frame(config_frame)
+        preprocess_help_frame.grid(row=cfg_row, column=1, columnspan=3, sticky=tk.W, pady=(0, 5))
+        ttk.Label(preprocess_help_frame,
+                 text="⚠️ Apply derivatives to full spectrum before wavelength subsetting. Use custom only if absolutely needed.",
+                 style='Caption.TLabel', foreground=self.colors['warning']).pack(side=tk.LEFT)
         cfg_row += 1
 
         # Data Type
@@ -4027,6 +4062,13 @@ class SpectralPredictApp:
                 self.wavelength_min.set(str(int(wavelengths.min())))
                 self.wavelength_max.set(str(int(wavelengths.max())))
 
+            # Auto-populate preprocessing wavelength range to whole spectrum (default)
+            if not self.preprocess_wl_min.get().strip() and not self.preprocess_wl_max.get().strip():
+                wavelengths = self.X_original.columns.astype(float)
+                self.preprocess_wl_min.set(str(int(wavelengths.min())))
+                self.preprocess_wl_max.set(str(int(wavelengths.max())))
+                self.preprocess_wl_preset.set("whole")
+
             # Apply wavelength filtering
             self._apply_wavelength_filter()
 
@@ -4153,6 +4195,49 @@ class SpectralPredictApp:
             # Center dialog on parent
             dialog.transient(self.root)
             dialog.grab_set()
+
+    def _on_preprocess_wl_preset(self):
+        """Handle preprocessing wavelength preset selection."""
+        preset = self.preprocess_wl_preset.get()
+
+        if self.X_original is None:
+            return
+
+        wavelengths = self.X_original.columns.astype(float)
+        wl_min = wavelengths.min()
+        wl_max = wavelengths.max()
+
+        if preset == "whole":
+            # Whole spectrum
+            self.preprocess_wl_min.set(str(int(wl_min)))
+            self.preprocess_wl_max.set(str(int(wl_max)))
+            self.preprocess_wl_min_entry.config(state='disabled')
+            self.preprocess_wl_max_entry.config(state='disabled')
+
+        elif preset == "nir":
+            # NIR range (typically 780-2500 nm, but constrain to available data)
+            nir_min = max(780, wl_min)
+            nir_max = min(2500, wl_max)
+            self.preprocess_wl_min.set(str(int(nir_min)))
+            self.preprocess_wl_max.set(str(int(nir_max)))
+            self.preprocess_wl_min_entry.config(state='disabled')
+            self.preprocess_wl_max_entry.config(state='disabled')
+
+        elif preset == "custom":
+            # Enable custom inputs
+            if not self.preprocess_wl_min.get():
+                self.preprocess_wl_min.set(str(int(wl_min)))
+            if not self.preprocess_wl_max.get():
+                self.preprocess_wl_max.set(str(int(wl_max)))
+            self.preprocess_wl_min_entry.config(state='normal')
+            self.preprocess_wl_max_entry.config(state='normal')
+            # Show warning message
+            messagebox.showwarning(
+                "Custom Preprocessing Range",
+                "⚠️ Warning: Using a custom preprocessing range is not recommended.\n\n"
+                "It's better to apply derivatives to the full spectrum before subsetting wavelengths.\n"
+                "Only use custom range if you have a specific scientific reason to do so."
+            )
 
     def _apply_wavelength_filter(self):
         """Apply wavelength filtering to X_original and store in self.X."""

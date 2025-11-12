@@ -764,7 +764,11 @@ def _run_single_config(
     # For PLS-DA, we need PLS + LogisticRegression
     if model_name == "PLS-DA":
         pipe_steps.append(("pls", model))
-        pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=42)))
+        # Extract LogisticRegression parameters from param_dict (with 'lr__' prefix)
+        lr_C = param_dict.get('lr__C', 1.0)
+        lr_penalty = param_dict.get('lr__penalty', 'l2')
+        lr_solver = param_dict.get('lr__solver', 'lbfgs')
+        pipe_steps.append(("lr", LogisticRegression(C=lr_C, penalty=lr_penalty, solver=lr_solver, max_iter=1000, random_state=42)))
     else:
         pipe_steps.append(("model", model))
 

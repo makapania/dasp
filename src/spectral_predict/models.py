@@ -222,11 +222,14 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
 def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     n_estimators_list=None, learning_rates=None, rf_n_trees_list=None,
-                    rf_max_depth_list=None, ridge_alphas_list=None, lasso_alphas_list=None,
+                    rf_max_depth_list=None, rf_min_samples_split_list=None, rf_min_samples_leaf_list=None,
+                    rf_max_features_list=None, ridge_alphas_list=None, lasso_alphas_list=None,
                     xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
                     xgb_subsample=None, xgb_colsample_bytree=None, xgb_reg_alpha=None, xgb_reg_lambda=None,
                     elasticnet_alphas_list=None, elasticnet_l1_ratios=None,
                     lightgbm_n_estimators_list=None, lightgbm_learning_rates=None, lightgbm_num_leaves_list=None,
+                    lightgbm_min_child_samples_list=None, lightgbm_subsample_list=None,
+                    lightgbm_colsample_bytree_list=None, lightgbm_reg_alpha_list=None, lightgbm_reg_lambda_list=None,
                     catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
                     svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
                     mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
@@ -300,6 +303,15 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if rf_max_depth_list is None:
         rf_config = get_hyperparameters('RandomForest', tier)
         rf_max_depth_list = rf_config.get('max_depth', [None, 30])
+    if rf_min_samples_split_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_min_samples_split_list = rf_config.get('min_samples_split', [2, 5])
+    if rf_min_samples_leaf_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_min_samples_leaf_list = rf_config.get('min_samples_leaf', [1, 2])
+    if rf_max_features_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_max_features_list = rf_config.get('max_features', ['sqrt'])
 
     # Ridge defaults (tier-aware)
     if ridge_alphas_list is None:
@@ -352,6 +364,21 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if lightgbm_num_leaves_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
         lightgbm_num_leaves_list = lgbm_config.get('num_leaves', [31, 50])
+    if lightgbm_min_child_samples_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [5])
+    if lightgbm_subsample_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_subsample_list = lgbm_config.get('subsample', [0.8])
+    if lightgbm_colsample_bytree_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_colsample_bytree_list = lgbm_config.get('colsample_bytree', [0.8])
+    if lightgbm_reg_alpha_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_reg_alpha_list = lgbm_config.get('reg_alpha', [0.1])
+    if lightgbm_reg_lambda_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_reg_lambda_list = lgbm_config.get('reg_lambda', [1.0])
 
     # CatBoost defaults (tier-aware)
     if catboost_iterations_list is None:
@@ -443,14 +470,29 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             rf_configs = []
             for n_est in rf_n_trees_list:
                 for max_d in rf_max_depth_list:
-                    rf_configs.append(
-                        (
-                            RandomForestRegressor(
-                                n_estimators=n_est, max_depth=max_d, random_state=42, n_jobs=-1
-                            ),
-                            {"n_estimators": n_est, "max_depth": max_d},
-                        )
-                    )
+                    for min_split in rf_min_samples_split_list:
+                        for min_leaf in rf_min_samples_leaf_list:
+                            for max_feat in rf_max_features_list:
+                                rf_configs.append(
+                                    (
+                                        RandomForestRegressor(
+                                            n_estimators=n_est,
+                                            max_depth=max_d,
+                                            min_samples_split=min_split,
+                                            min_samples_leaf=min_leaf,
+                                            max_features=max_feat,
+                                            random_state=42,
+                                            n_jobs=-1
+                                        ),
+                                        {
+                                            "n_estimators": n_est,
+                                            "max_depth": max_d,
+                                            "min_samples_split": min_split,
+                                            "min_samples_leaf": min_leaf,
+                                            "max_features": max_feat
+                                        },
+                                    )
+                                )
             grids["RandomForest"] = rf_configs
 
         # MLP (tier-aware with UI overrides)
@@ -585,35 +627,40 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for n_est in lightgbm_n_estimators_list:
                 for lr in lightgbm_learning_rates:
                     for num_leaves in lightgbm_num_leaves_list:
-                        lgbm_configs.append(
-                            (
-                                LGBMRegressor(
-                                    n_estimators=n_est,
-                                    learning_rate=lr,
-                                    num_leaves=num_leaves,
-                                    max_depth=-1,
-                                    min_child_samples=5,
-                                    subsample=0.8,
-                                    colsample_bytree=0.8,
-                                    reg_alpha=0.1,
-                                    reg_lambda=1.0,
-                                    random_state=42,
-                                    n_jobs=-1,
-                                    verbosity=-1
-                                ),
-                                {
-                                    "n_estimators": n_est,
-                                    "learning_rate": lr,
-                                    "num_leaves": num_leaves,
-                                    "max_depth": -1,
-                                    "min_child_samples": 5,
-                                    "subsample": 0.8,
-                                    "colsample_bytree": 0.8,
-                                    "reg_alpha": 0.1,
-                                    "reg_lambda": 1.0
-                                }
-                            )
-                        )
+                        for min_child in lightgbm_min_child_samples_list:
+                            for subsample in lightgbm_subsample_list:
+                                for colsample in lightgbm_colsample_bytree_list:
+                                    for reg_alpha in lightgbm_reg_alpha_list:
+                                        for reg_lambda in lightgbm_reg_lambda_list:
+                                            lgbm_configs.append(
+                                                (
+                                                    LGBMRegressor(
+                                                        n_estimators=n_est,
+                                                        learning_rate=lr,
+                                                        num_leaves=num_leaves,
+                                                        max_depth=-1,
+                                                        min_child_samples=min_child,
+                                                        subsample=subsample,
+                                                        colsample_bytree=colsample,
+                                                        reg_alpha=reg_alpha,
+                                                        reg_lambda=reg_lambda,
+                                                        random_state=42,
+                                                        n_jobs=-1,
+                                                        verbosity=-1
+                                                    ),
+                                                    {
+                                                        "n_estimators": n_est,
+                                                        "learning_rate": lr,
+                                                        "num_leaves": num_leaves,
+                                                        "max_depth": -1,
+                                                        "min_child_samples": min_child,
+                                                        "subsample": subsample,
+                                                        "colsample_bytree": colsample,
+                                                        "reg_alpha": reg_alpha,
+                                                        "reg_lambda": reg_lambda
+                                                    }
+                                                )
+                                            )
             grids["LightGBM"] = lgbm_configs
 
         # CatBoost Regression - tier-aware with UI overrides (optional - requires Visual Studio)
@@ -641,24 +688,63 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     else:  # classification
         # PLS-DA (PLS + LogisticRegression) - tier-aware
         if 'PLS-DA' in enabled_models or 'PLS' in enabled_models:
-            grids["PLS-DA"] = [
-                (PLSRegression(n_components=nc, scale=False), {"n_components": nc})
-                for nc in pls_components
-            ]
+            # Get PLS-DA specific config from model_config.py
+            from spectral_predict.model_config import PLS_DA_HYPERPARAMETERS
+            plsda_config = PLS_DA_HYPERPARAMETERS.get(tier, PLS_DA_HYPERPARAMETERS['standard'])
+
+            # Extract parameters
+            pls_n_components_list = plsda_config.get('pls__n_components', pls_components)
+            lr_C_list = plsda_config.get('lr__C', [1.0])
+            lr_penalty_list = plsda_config.get('lr__penalty', ['l2'])
+            lr_solver_list = plsda_config.get('lr__solver', ['lbfgs'])
+
+            # Create grid with all combinations
+            plsda_configs = []
+            for nc in pls_n_components_list:
+                for C in lr_C_list:
+                    for penalty in lr_penalty_list:
+                        for solver in lr_solver_list:
+                            plsda_configs.append(
+                                (
+                                    PLSRegression(n_components=nc, scale=False),
+                                    {
+                                        "pls__n_components": nc,
+                                        "lr__C": C,
+                                        "lr__penalty": penalty,
+                                        "lr__solver": solver
+                                    }
+                                )
+                            )
+            grids["PLS-DA"] = plsda_configs
 
         # Random Forest Classifier - tier-aware
         if 'RandomForest' in enabled_models:
             rf_configs = []
             for n_est in rf_n_trees_list:
                 for max_d in rf_max_depth_list:
-                    rf_configs.append(
-                        (
-                            RandomForestClassifier(
-                                n_estimators=n_est, max_depth=max_d, random_state=42, n_jobs=-1
-                            ),
-                            {"n_estimators": n_est, "max_depth": max_d},
-                        )
-                    )
+                    for min_split in rf_min_samples_split_list:
+                        for min_leaf in rf_min_samples_leaf_list:
+                            for max_feat in rf_max_features_list:
+                                rf_configs.append(
+                                    (
+                                        RandomForestClassifier(
+                                            n_estimators=n_est,
+                                            max_depth=max_d,
+                                            min_samples_split=min_split,
+                                            min_samples_leaf=min_leaf,
+                                            max_features=max_feat,
+                                            random_state=42,
+                                            n_jobs=-1
+                                        ),
+                                        {
+                                            "n_estimators": n_est,
+                                            "max_depth": max_d,
+                                            "min_samples_split": min_split,
+                                            "min_samples_leaf": min_leaf,
+                                            "max_features": max_feat
+                                        },
+                                    )
+                                )
             grids["RandomForest"] = rf_configs
 
         # MLP Classifier - tier-aware with UI overrides
@@ -758,35 +844,40 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for n_est in lightgbm_n_estimators_list:
                 for lr in lightgbm_learning_rates:
                     for num_leaves in lightgbm_num_leaves_list:
-                        lgbm_configs.append(
-                            (
-                                LGBMClassifier(
-                                    n_estimators=n_est,
-                                    learning_rate=lr,
-                                    num_leaves=num_leaves,
-                                    max_depth=-1,
-                                    min_child_samples=5,
-                                    subsample=0.8,
-                                    colsample_bytree=0.8,
-                                    reg_alpha=0.1,
-                                    reg_lambda=1.0,
-                                    random_state=42,
-                                    n_jobs=-1,
-                                    verbosity=-1
-                                ),
-                                {
-                                    "n_estimators": n_est,
-                                    "learning_rate": lr,
-                                    "num_leaves": num_leaves,
-                                    "max_depth": -1,
-                                    "min_child_samples": 5,
-                                    "subsample": 0.8,
-                                    "colsample_bytree": 0.8,
-                                    "reg_alpha": 0.1,
-                                    "reg_lambda": 1.0
-                                }
-                            )
-                        )
+                        for min_child in lightgbm_min_child_samples_list:
+                            for subsample in lightgbm_subsample_list:
+                                for colsample in lightgbm_colsample_bytree_list:
+                                    for reg_alpha in lightgbm_reg_alpha_list:
+                                        for reg_lambda in lightgbm_reg_lambda_list:
+                                            lgbm_configs.append(
+                                                (
+                                                    LGBMClassifier(
+                                                        n_estimators=n_est,
+                                                        learning_rate=lr,
+                                                        num_leaves=num_leaves,
+                                                        max_depth=-1,
+                                                        min_child_samples=min_child,
+                                                        subsample=subsample,
+                                                        colsample_bytree=colsample,
+                                                        reg_alpha=reg_alpha,
+                                                        reg_lambda=reg_lambda,
+                                                        random_state=42,
+                                                        n_jobs=-1,
+                                                        verbosity=-1
+                                                    ),
+                                                    {
+                                                        "n_estimators": n_est,
+                                                        "learning_rate": lr,
+                                                        "num_leaves": num_leaves,
+                                                        "max_depth": -1,
+                                                        "min_child_samples": min_child,
+                                                        "subsample": subsample,
+                                                        "colsample_bytree": colsample,
+                                                        "reg_alpha": reg_alpha,
+                                                        "reg_lambda": reg_lambda
+                                                    }
+                                                )
+                                            )
             grids["LightGBM"] = lgbm_configs
 
         # CatBoost Classification - tier-aware with UI overrides (optional - requires Visual Studio)

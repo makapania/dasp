@@ -175,19 +175,34 @@ OPTIMIZED_HYPERPARAMETERS = {
             'n_estimators': [50, 100, 200],  # 3 values
             'learning_rate': [0.05, 0.1, 0.2],  # 3 values
             'num_leaves': [31, 50, 70],  # 3 values
-            'note': 'Grid size: 3×3×3 = 27 configs - all tiers use same hyperparams'
+            'min_child_samples': [5, 10, 20],  # 3 values - min samples per leaf
+            'subsample': [0.7, 0.8, 1.0],  # 3 values - row sampling
+            'colsample_bytree': [0.7, 0.8, 1.0],  # 3 values - feature sampling
+            'reg_alpha': [0.0, 0.1, 0.5],  # 3 values - L1 regularization
+            'reg_lambda': [0.5, 1.0, 2.0],  # 3 values - L2 regularization
+            'note': 'Grid size: 3×3×3×3×3×3×3×3 = 6561 configs (use tier defaults or subset)'
         },
         'comprehensive': {
             'n_estimators': [50, 100, 200],  # 3 values
             'learning_rate': [0.05, 0.1, 0.2],  # 3 values
             'num_leaves': [31, 50, 70],  # 3 values
-            'note': 'Grid size: 3×3×3 = 27 configs'
+            'min_child_samples': [5, 10, 20],  # 3 values
+            'subsample': [0.7, 0.8, 1.0],  # 3 values
+            'colsample_bytree': [0.7, 0.8, 1.0],  # 3 values
+            'reg_alpha': [0.0, 0.1, 0.5],  # 3 values
+            'reg_lambda': [0.5, 1.0, 2.0],  # 3 values
+            'note': 'Grid size: 3×3×3×3×3×3×3×3 = 6561 configs'
         },
         'quick': {
-            'n_estimators': [50, 100, 200],  # 3 values
-            'learning_rate': [0.05, 0.1, 0.2],  # 3 values
-            'num_leaves': [31, 50, 70],  # 3 values
-            'note': 'Grid size: 3×3×3 = 27 configs - all tiers use same hyperparams'
+            'n_estimators': [100],  # 1 value for speed
+            'learning_rate': [0.1],  # 1 value for speed
+            'num_leaves': [31, 50],  # 2 values
+            'min_child_samples': [5, 10],  # 2 values
+            'subsample': [0.8],  # 1 value for speed
+            'colsample_bytree': [0.8],  # 1 value for speed
+            'reg_alpha': [0.0, 0.1],  # 2 values
+            'reg_lambda': [1.0],  # 1 value for speed
+            'note': 'Grid size: 1×1×2×2×1×1×2×1 = 8 configs - optimized for speed'
         }
     },
 
@@ -266,17 +281,26 @@ OPTIMIZED_HYPERPARAMETERS = {
         'standard': {
             'n_estimators': [100, 200, 500],  # 3 values
             'max_depth': [None, 15, 30],  # 3 values
-            'note': 'Grid size: 3×3 = 9 configs - all tiers use same hyperparams'
+            'min_samples_split': [2, 5, 10],  # 3 values - min samples to split node
+            'min_samples_leaf': [1, 2, 4],  # 3 values - min samples per leaf
+            'max_features': ['sqrt', 'log2', None],  # 3 values - features per split
+            'note': 'Grid size: 3×3×3×3×3 = 243 configs'
         },
         'comprehensive': {
             'n_estimators': [100, 200, 500],  # 3 values
             'max_depth': [None, 15, 30],  # 3 values
-            'note': 'Grid size: 3×3 = 9 configs'
+            'min_samples_split': [2, 5, 10],  # 3 values
+            'min_samples_leaf': [1, 2, 4],  # 3 values
+            'max_features': ['sqrt', 'log2', None],  # 3 values
+            'note': 'Grid size: 3×3×3×3×3 = 243 configs'
         },
         'quick': {
-            'n_estimators': [100, 200, 500],  # 3 values
-            'max_depth': [None, 15, 30],  # 3 values
-            'note': 'Grid size: 3×3 = 9 configs - all tiers use same hyperparams'
+            'n_estimators': [100, 200],  # 2 values for speed
+            'max_depth': [None, 30],  # 2 values
+            'min_samples_split': [2, 5],  # 2 values
+            'min_samples_leaf': [1, 2],  # 2 values
+            'max_features': ['sqrt'],  # 1 value for speed
+            'note': 'Grid size: 2×2×2×2×1 = 16 configs - optimized for speed'
         }
     },
 
@@ -488,9 +512,34 @@ def print_tier_summary():
 # CLASSIFICATION DEFAULTS
 # =============================================================================
 
+# PLS-DA specific parameters (PLS + LogisticRegression pipeline)
+PLS_DA_HYPERPARAMETERS = {
+    'standard': {
+        'pls__n_components': [2, 4, 6, 8, 10, 12, 16, 20, 24, 30, 40, 50],  # PLS components
+        'lr__C': [0.1, 1.0, 10.0],  # LogisticRegression regularization strength
+        'lr__penalty': ['l2'],  # LogisticRegression penalty (l2 is most stable)
+        'lr__solver': ['lbfgs'],  # LogisticRegression solver
+        'note': 'Grid size: 12×3 = 36 configs (lr__penalty and lr__solver usually kept as defaults)'
+    },
+    'comprehensive': {
+        'pls__n_components': [2, 4, 6, 8, 10, 12, 16, 20, 24, 30, 40, 50],  # PLS components
+        'lr__C': [0.01, 0.1, 1.0, 10.0, 100.0],  # Wider range for regularization
+        'lr__penalty': ['l2'],  # LogisticRegression penalty
+        'lr__solver': ['lbfgs'],  # LogisticRegression solver
+        'note': 'Grid size: 12×5 = 60 configs'
+    },
+    'quick': {
+        'pls__n_components': [2, 4, 6, 8, 10],  # Fewer components for speed
+        'lr__C': [1.0, 10.0],  # Just 2 values for speed
+        'lr__penalty': ['l2'],  # LogisticRegression penalty
+        'lr__solver': ['lbfgs'],  # LogisticRegression solver
+        'note': 'Grid size: 5×2 = 10 configs - optimized for speed'
+    }
+}
+
 # For classification, use similar structure but adapted
 CLASSIFICATION_HYPERPARAMETERS = {
-    'PLS-DA': OPTIMIZED_HYPERPARAMETERS['PLS'],  # Same as PLS
+    'PLS-DA': PLS_DA_HYPERPARAMETERS,  # Now has its own with LogisticRegression params
     'SVM': OPTIMIZED_HYPERPARAMETERS['SVR'],  # Same as SVR
     'XGBoost': OPTIMIZED_HYPERPARAMETERS['XGBoost'],  # Same hyperparams
     'LightGBM': OPTIMIZED_HYPERPARAMETERS['LightGBM'],  # Same hyperparams
