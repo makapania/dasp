@@ -1,0 +1,199 @@
+# DASP - Data-driven Automated Spectral Predict
+
+## Project Overview
+DASP is an automated spectral modeling tool for chemometrics and spectroscopy analysis. It ingests spectral data (CSV, ASD, SPC, JCAMP, vendor formats) along with reference data, tests multiple preprocessing and model combinations via cross-validation, and ranks them by a simplicity-aware composite score.
+
+**Main GUI:** `spectral_predict_gui_optimized.py` (tkinter-based desktop application)
+
+## Technology Stack
+- **Language:** Python 3.8+
+- **GUI:** tkinter with tksheet for high-performance data tables
+- **ML/Data:** scikit-learn, numpy, pandas, xgboost, lightgbm, catboost
+- **Spectroscopy:** specdal (ASD), spc-io (SPC), jcamp (JCAMP-DX)
+- **Plotting:** matplotlib
+- **Testing:** pytest
+
+## Key Capabilities
+- **Input Formats:** CSV (wide/long), ASD (ASCII/binary), SPC, JCAMP-DX, Bruker OPUS (.0-.9), PerkinElmer (.sp), Agilent (.asd)
+- **Task Types:** Both regression and classification with auto-detection
+- **Preprocessing:** Raw, SNV, SG derivatives (1st/2nd order), combined methods
+- **Models:** PLS, Ridge, Lasso, ElasticNet, RandomForest, XGBoost, LightGBM, CatBoost, MLP, SVM, NeuralBoosted (ensemble)
+- **Variable Selection:** Feature importance, SPA, UVE, UVE-SPA hybrid, iPLS
+- **Model Tiers:** Quick, Standard, Comprehensive, Experimental (task-specific model sets)
+- **Validation:** K-fold CV, calibration/validation splits (Kennard-Stone, SPXY)
+- **Outputs:** Ranked CSV results, Markdown reports, .dasp model files
+
+## Project Structure
+```
+dasp/
+├── spectral_predict_gui_optimized.py  # Main GUI application (~6500 lines)
+├── src/spectral_predict/              # Core library
+│   ├── search.py                      # Model search engine with CV
+│   ├── models.py                      # Model definitions and grids
+│   ├── model_config.py                # Model tier configurations
+│   ├── preprocess.py                  # Preprocessing pipelines
+│   ├── scoring.py                     # Composite score ranking
+│   ├── model_io.py                    # Save/load .dasp model files
+│   ├── io.py                          # File format readers (~2700 lines)
+│   ├── outlier_detection.py          # Outlier detection algorithms
+│   ├── ensemble.py                    # Ensemble model implementations
+│   ├── variable_selection.py          # SPA, UVE, iPLS implementations
+│   └── readers/                       # Vendor-specific format readers
+│       ├── agilent_reader.py          # Agilent ASD format
+│       ├── opus_reader.py             # Bruker OPUS format
+│       └── perkinelmer_reader.py      # PerkinElmer format
+├── tests/                             # Unit and integration tests
+├── example/                           # Example data and demo scripts
+├── docs/                              # Technical documentation
+├── archive/                           # Archived implementation summaries
+└── r_validation_scripts/              # Cross-validation with R implementations
+
+Essential docs in root:
+├── README.md                          # Quick start and overview
+├── START_HERE.md                      # Comprehensive guide (last updated Nov 4, 2025)
+└── CHANGELOG.md                       # Version history
+```
+
+## Architecture Highlights
+
+### GUI Tabs (7 tabs)
+1. **Import & Preview** - Load spectral data, task type selection (auto/regression/classification)
+2. **Data Quality** - Outlier detection, PCA visualization, Y distribution
+3. **Analysis Configuration** - Model/preprocessing selection, validation splits, variable selection
+4. **Analysis Progress** - Real-time progress monitoring
+5. **Results Review** - Ranked results table with composite scoring
+6. **Custom Model Development** - Refine individual models with CV
+7. **Model Prediction** - Load .dasp models and predict on new data
+
+### Core Pipeline
+```
+Data Import → Preprocessing Grid → Feature Selection → Model Grid → CV Evaluation → Composite Scoring → Ranking
+```
+
+### Composite Score Formula
+```
+Score = z(primary_metric) + λ₁(model_complexity) + λ₂(var_count) + λ₃(lv_count) + λ₄(preproc_complexity)
+```
+Lower score = better model (balances performance with simplicity)
+
+### Model Tiers (Task-Specific)
+- **Regression Quick:** PLS, Ridge, LightGBM (3 models)
+- **Classification Quick:** PLS-DA, LightGBM, RandomForest (3 models)
+- **Standard/Comprehensive:** Expanded model sets with gradient boosting
+- **Experimental:** All available models including experimental ones
+
+### File Format Support
+- **CSV:** Wide format (samples × wavelengths) or long format with flexible column detection
+- **ASD:** Agilent ASCII and binary formats via specdal
+- **SPC:** Thermo Galactic SPC format via spc-io
+- **JCAMP-DX:** JCAMP format via jcamp library
+- **OPUS:** Bruker OPUS binary format (.0-.9 files)
+- **PerkinElmer:** .sp format
+- **Excel:** .xlsx files for reference data
+
+## Development Guidelines
+
+### Code Style
+- Follow PEP 8
+- Use descriptive variable names (no single letters except i, j for loops)
+- Add docstrings to all functions
+- Keep functions focused (single responsibility)
+- Use type hints where beneficial
+
+### Important Conventions
+- **Preprocessing codes:** "raw", "snv", "sg1", "sg2", "deriv_snv", "snv_deriv"
+- **Model short names:** "PLS", "Ridge", "Lasso", "RandomForest", "XGBoost", "LightGBM", "CatBoost", "MLP", "SVM", "NeuralBoosted"
+- **Variable selection tags:** "topN_importance", "topN_spa", "topN_uve", "topN_uve_spa", "interval_ipls"
+- **Derivative order:** 1 or 2 (stored in preprocessing metadata)
+- **Window size:** 7, 19, or custom (for Savitzky-Golay filters)
+
+### Critical Implementation Details
+1. **Label Encoding:** Classification models auto-encode text labels to integers, stored in model metadata
+2. **Preprocessing Persistence:** Preprocessing parameters stored in model JSON for exact reproduction
+3. **Cross-Validation:** Stratified K-fold for classification, standard K-fold for regression
+4. **Validation Sets:** Properly excluded from CV in both search and model development tabs
+5. **File Extension Matching:** Case-insensitive with flexible matching (handles spaces, different extensions)
+
+### Testing
+- Unit tests in `tests/` directory
+- Integration tests for file readers: `test_io_*.py`
+- Model validation tests: `test_model_*.py`
+- Run with: `pytest tests/ -v`
+
+## Common Tasks
+
+### Adding a New Model
+1. Add model class/config to `src/spectral_predict/models.py`
+2. Register in `MODEL_REGISTRY` (model_registry.py)
+3. Add to appropriate tier in `model_config.py` (REGRESSION_TIERS or CLASSIFICATION_TIERS)
+4. Update GUI checkboxes in `spectral_predict_gui_optimized.py` (lines ~850-1100)
+5. Add tests to `tests/test_new_models.py`
+
+### Adding a New File Format
+1. Create reader in `src/spectral_predict/readers/your_format_reader.py`
+2. Add detection logic to `src/spectral_predict/io.py` in `read_spectral_data()`
+3. Update format dropdown in GUI (line ~550)
+4. Add tests to `tests/test_io_vendor_formats.py`
+
+### Adding a New Preprocessing Method
+1. Implement in `src/spectral_predict/preprocess.py`
+2. Add to `PREPROCESSING_METHODS` dict
+3. Update GUI checkboxes (lines ~750-850)
+4. Add complexity weight to `scoring.py` if needed
+
+### Debugging Tips
+- **Console output:** GUI prints debug info to console (run from terminal to see)
+- **Model metadata:** Check .dasp file JSON for preprocessing/model parameters
+- **Validation:** Use "Export preprocessed data CSV" to verify preprocessing
+- **Cross-check with R:** Use `r_validation_scripts/` for algorithm validation
+
+## Recent Major Changes (Nov 2024 - Jan 2025)
+- ✅ UI modernization with Japanese-inspired theme
+- ✅ Comprehensive file format support (OPUS, PerkinElmer, JCAMP, SPC)
+- ✅ Fixed critical ranking bug in composite scoring
+- ✅ Added classification support with task type selector
+- ✅ Model tier system with task-specific configurations
+- ✅ All 5 variable selection methods fully implemented
+- ✅ Validation set exclusion fix in Model Development tab
+- ✅ NeuralBoosted ensemble model with optimized learning rate
+
+## Known Limitations
+- Multi-label classification not supported (only multi-class)
+- Ordinal encoding not implemented (treats all classes as nominal)
+- ROC curves require predict_proba() support
+- PCA color palette limited to 9 distinct colors for classification
+- Windows-optimized (some paths may need adjustment for Linux/Mac)
+
+## Environment Setup
+```bash
+git clone https://github.com/makapania/dasp.git
+cd dasp
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+pip install -e .[dev]
+```
+
+## Launch Application
+```bash
+# Windows
+RUN_SPECTRAL_PREDICT.bat
+
+# Or directly
+python spectral_predict_gui_optimized.py
+```
+
+## Additional Resources
+- **START_HERE.md** - Comprehensive guide with recent fixes
+- **docs/MACHINE_LEARNING_MODELS.md** - Detailed model documentation
+- **example/README.md** - Quick start example with bone collagen data
+- **archive/2025-11/** - Historical implementation summaries
+
+## Notes for AI Assistants
+- GUI code is monolithic (~6500 lines) but well-structured with clear sections
+- Be careful with line numbers when editing - use Read tool first
+- Test files should go in `tests/` directory, not root
+- Archive completed implementation docs to `archive/YYYY-MM/`
+- Maintain backward compatibility with existing .dasp model files
+- Follow existing code patterns for consistency
+- Always check for validation set exclusion when modifying CV code
+- File format readers should handle vendor-specific quirks gracefully
