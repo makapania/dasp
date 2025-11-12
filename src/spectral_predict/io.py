@@ -106,12 +106,12 @@ def read_csv_spectra(path):
 
 def read_reference_csv(path, id_column):
     """
-    Read reference CSV with target variables.
+    Read reference file (CSV or Excel) with target variables.
 
     Parameters
     ----------
     path : str or Path
-        Path to reference CSV
+        Path to reference file (CSV or Excel)
     id_column : str
         Column name to use as index (e.g., 'sample_id', 'filename')
 
@@ -121,7 +121,12 @@ def read_reference_csv(path, id_column):
         DataFrame indexed by id_column
     """
     path = Path(path)
-    df = pd.read_csv(path)
+
+    # Detect file type and read accordingly
+    if path.suffix.lower() in ['.xlsx', '.xls']:
+        df = pd.read_excel(path)
+    else:
+        df = pd.read_csv(path)
 
     if id_column not in df.columns:
         raise ValueError(f"Column '{id_column}' not found in {path}. Available: {list(df.columns)}")
@@ -131,11 +136,11 @@ def read_reference_csv(path, id_column):
     if duplicates.any():
         dup_ids = df.loc[duplicates, id_column].unique()
         n_dups = duplicates.sum()
-        print(f"\n⚠️ WARNING: Found {n_dups} duplicate sample IDs in reference CSV!")
+        print(f"\n⚠️ WARNING: Found {n_dups} duplicate sample IDs in reference file!")
         print(f"Duplicate IDs: {list(dup_ids[:10])}")
         if len(dup_ids) > 10:
             print(f"... and {len(dup_ids) - 10} more")
-        print("\nKeeping FIRST occurrence of each duplicate. Please check your CSV file.\n")
+        print("\nKeeping FIRST occurrence of each duplicate. Please check your file.\n")
 
         # Keep only first occurrence of each ID
         df = df[~duplicates]

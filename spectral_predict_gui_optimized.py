@@ -3397,8 +3397,9 @@ class SpectralPredictApp:
         # Auto-detect file type
         # Priority: ASD > CSV > SPC
 
-        # Check for ASD files
-        asd_files = list(path.glob("*.asd"))
+        # Check for ASD files (case insensitive, includes .sig format)
+        asd_files = (list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
+                     list(path.glob("*.sig")) + list(path.glob("*.SIG")))
         if asd_files:
             self.detected_type = "asd"
             self.detection_status.config(
@@ -3442,8 +3443,8 @@ class SpectralPredictApp:
                 # No popup needed - status label guides user
             return
 
-        # Check for SPC files (GRAMS/Thermo Galactic)
-        spc_files = list(path.glob("*.spc"))
+        # Check for SPC files (GRAMS/Thermo Galactic) - case insensitive
+        spc_files = list(path.glob("*.spc")) + list(path.glob("*.SPC"))
         if spc_files:
             self.detected_type = "spc"
             self.detection_status.config(
@@ -3508,22 +3509,46 @@ class SpectralPredictApp:
                 )
             return
 
-        # Check for Excel files
-        xlsx_files = list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
-        if xlsx_files:
-            if len(xlsx_files) == 1:
-                # Single Excel file - use as spectral data
-                self.spectral_data_path.set(str(xlsx_files[0]))
-                self.detected_type = "excel"
+        # Check for Bruker OPUS files (.0, .1, .2, etc.)
+        opus_files = []
+        for i in range(100):  # Check .0 through .99
+            opus_files.extend(list(path.glob(f"*.{i}")))
+        if opus_files:
+            self.detected_type = "opus"
+            self.detection_status.config(
+                text=f"✓ Detected {len(opus_files)} Bruker OPUS files",
+                foreground=self.colors['success']
+            )
+
+            # Auto-detect reference CSV/Excel
+            csv_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(csv_files) == 1:
+                self.reference_file.set(str(csv_files[0]))
+                self._auto_detect_columns()
+            elif len(csv_files) > 1:
                 self.detection_status.config(
-                    text="✓ Detected Excel spectra file - select reference CSV below",
-                    foreground=self.colors['success']
+                    text=f"✓ Detected {len(opus_files)} OPUS files - {len(csv_files)} reference files found, select manually",
+                    foreground=self.colors['accent']
                 )
-            else:
-                # Multiple Excel files - need user to clarify
-                self.detected_type = "excel"
+            return
+
+        # Check for PerkinElmer files (.sp)
+        sp_files = list(path.glob("*.sp")) + list(path.glob("*.SP"))
+        if sp_files:
+            self.detected_type = "perkinelmer"
+            self.detection_status.config(
+                text=f"✓ Detected {len(sp_files)} PerkinElmer files",
+                foreground=self.colors['success']
+            )
+
+            # Auto-detect reference CSV/Excel
+            csv_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(csv_files) == 1:
+                self.reference_file.set(str(csv_files[0]))
+                self._auto_detect_columns()
+            elif len(csv_files) > 1:
                 self.detection_status.config(
-                    text=f"⚠ Found {len(xlsx_files)} Excel files - select files manually",
+                    text=f"✓ Detected {len(sp_files)} PerkinElmer files - {len(csv_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3597,6 +3622,37 @@ class SpectralPredictApp:
 
             return
 
+        # Check for Excel files (fallback if not combined format)
+        xlsx_files = list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+        if xlsx_files:
+            if len(xlsx_files) == 1:
+                # Single Excel file - use as spectral data (requires separate reference)
+                self.spectral_data_path.set(str(xlsx_files[0]))
+                self.detected_type = "excel"
+                self.detection_status.config(
+                    text="✓ Detected Excel spectra file - select reference file below",
+                    foreground=self.colors['success']
+                )
+
+                # Auto-detect reference file (CSV or Excel)
+                ref_files = list(path.glob("*.csv")) + [f for f in (list(path.glob("*.xlsx")) + list(path.glob("*.xls"))) if f not in xlsx_files]
+                if len(ref_files) == 1:
+                    self.reference_file.set(str(ref_files[0]))
+                    self._auto_detect_columns()
+                elif len(ref_files) > 1:
+                    self.detection_status.config(
+                        text=f"✓ Detected Excel spectra - {len(ref_files)} reference files found, select manually",
+                        foreground=self.colors['accent']
+                    )
+            else:
+                # Multiple Excel files - need user to clarify
+                self.detected_type = "excel"
+                self.detection_status.config(
+                    text=f"⚠ Found {len(xlsx_files)} Excel files - select files manually",
+                    foreground=self.colors['accent']
+                )
+            return
+
         # No supported files found
         self.detected_type = None
         self.detection_status.config(
@@ -3604,22 +3660,36 @@ class SpectralPredictApp:
             foreground=self.colors['warning']
         )
         messagebox.showwarning("No Spectral Data",
-            "No supported spectral files found in this directory.\n\nSupported formats:\n• .asd (ASD files)\n• .csv (CSV spectral data)\n• .xlsx/.xls (Excel files)\n• .spc (GRAMS/Thermo Galactic)\n• Combined CSV/TXT/Excel (single file with all spectra + targets)")
+            "No supported spectral files found in this directory.\n\nSupported formats:\n• .asd (ASD files)\n• .csv (CSV spectral data)\n• .xlsx/.xls (Excel files)\n• .spc (GRAMS/Thermo Galactic)\n• .jdx/.dx (JCAMP-DX files)\n• .dpt/.dat/.asc (ASCII text files)\n• .0/.1/.2/etc (Bruker OPUS files)\n• .sp (PerkinElmer files)\n• Combined CSV/TXT/Excel (single file with all spectra + targets)")
 
     def _browse_reference_file(self):
-        """Browse for reference CSV file."""
-        filename = filedialog.askopenfilename(title="Select Reference CSV", filetypes=[("CSV files", "*.csv")])
+        """Browse for reference file (CSV or Excel)."""
+        filename = filedialog.askopenfilename(
+            title="Select Reference File",
+            filetypes=[
+                ("Supported files", "*.csv;*.xlsx;*.xls"),
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx;*.xls"),
+                ("All files", "*.*")
+            ]
+        )
         if filename:
             self.reference_file.set(filename)
             self._auto_detect_columns()
 
     def _auto_detect_columns(self):
-        """Auto-detect column names from reference CSV."""
+        """Auto-detect column names from reference file (CSV or Excel)."""
         if not self.reference_file.get():
             return
 
         try:
-            df = pd.read_csv(self.reference_file.get(), nrows=5)
+            # Detect file type and read accordingly
+            ref_path = self.reference_file.get()
+            if ref_path.lower().endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(ref_path, nrows=5)
+            else:
+                df = pd.read_csv(ref_path, nrows=5)
+
             columns = list(df.columns)
 
             # Update comboboxes
@@ -3962,6 +4032,76 @@ class SpectralPredictApp:
                 # Load reference data
                 if not self.reference_file.get():
                     messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    return
+
+                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                # Align data and get alignment info
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref,
+                    self.spectral_file_column.get(),
+                    self.target_column.get(),
+                    return_alignment_info=True
+                )
+
+                # Show alignment report to user
+                self._show_alignment_report(alignment_info)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = ref
+
+            elif self.detected_type == "opus":
+                from spectral_predict.io import read_opus_dir
+
+                X, metadata = read_opus_dir(self.spectral_data_path.get())
+
+                # Store data type detection results
+                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.type_confidence = metadata.get('type_confidence', 0.0)
+                self.type_detection_method = metadata.get('detection_method', 'unknown')
+                self.data_has_been_converted = False
+
+                # Load reference data
+                if not self.reference_file.get():
+                    messagebox.showwarning("Missing Input", "Please select reference file")
+                    return
+
+                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                # Align data and get alignment info
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref,
+                    self.spectral_file_column.get(),
+                    self.target_column.get(),
+                    return_alignment_info=True
+                )
+
+                # Show alignment report to user
+                self._show_alignment_report(alignment_info)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = ref
+
+            elif self.detected_type == "perkinelmer":
+                from spectral_predict.io import read_perkinelmer_dir
+
+                X, metadata = read_perkinelmer_dir(self.spectral_data_path.get())
+
+                # Store data type detection results
+                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
+                self.type_confidence = metadata.get('type_confidence', 0.0)
+                self.type_detection_method = metadata.get('detection_method', 'unknown')
+                self.data_has_been_converted = False
+
+                # Load reference data
+                if not self.reference_file.get():
+                    messagebox.showwarning("Missing Input", "Please select reference file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())

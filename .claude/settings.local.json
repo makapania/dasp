@@ -54,7 +54,10 @@
       "Bash(\".venv/Scripts/python.exe\" test_ranking_fix.py)",
       "Bash(IMPLEMENTATION_SUMMARY.md)",
       "Bash(\".venv/Scripts/python.exe\" -m py_compile src/spectral_predict/scoring.py)",
-      "Bash(\".venv/Scripts/python.exe\" test_chime.py)"
+      "Bash(\".venv/Scripts/python.exe\" test_chime.py)",
+      "Bash(cat:*)",
+      "Bash(pip show:*)",
+      "Bash(mkdir:*)"
     ],
     "deny": [],
     "ask": []
