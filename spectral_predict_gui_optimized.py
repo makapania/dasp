@@ -315,22 +315,45 @@ class SpectralPredictApp:
         self.window_custom = tk.StringVar(value="")  # Custom window size
 
         # Advanced model options (NeuralBoosted)
-        self.n_estimators_50 = tk.BooleanVar(value=False)
-        self.n_estimators_100 = tk.BooleanVar(value=True)  # Default
+        self.n_estimators_100 = tk.BooleanVar(value=True)  # Default ⭐
+        self.n_estimators_150 = tk.BooleanVar(value=True)  # Default ⭐
+        self.n_estimators_200 = tk.BooleanVar(value=True)  # Default ⭐
         self.n_estimators_custom = tk.StringVar(value="")  # Custom value
         self.lr_005 = tk.BooleanVar(value=False)
         self.lr_01 = tk.BooleanVar(value=True)  # Default
         self.lr_02 = tk.BooleanVar(value=True)  # Default
         self.lr_03 = tk.BooleanVar(value=True)  # Default - OPTIMAL per empirical analysis
+        # NeuralBoosted hidden layer size
+        self.nb_hidden_layer_3 = tk.BooleanVar(value=True)  # 3 neurons ⭐
+        self.nb_hidden_layer_5 = tk.BooleanVar(value=True)  # 5 neurons ⭐
+        self.nb_hidden_layer_custom = tk.StringVar(value="")  # Custom value
+        # NeuralBoosted activation function
+        self.nb_activation_tanh = tk.BooleanVar(value=True)  # tanh ⭐
+        self.nb_activation_identity = tk.BooleanVar(value=True)  # identity ⭐
 
         # Random Forest options
-        self.rf_n_trees_100 = tk.BooleanVar(value=True)  # Default
-        self.rf_n_trees_200 = tk.BooleanVar(value=False)
-        self.rf_n_trees_500 = tk.BooleanVar(value=False)
+        self.rf_n_trees_100 = tk.BooleanVar(value=True)  # Default ⭐
+        self.rf_n_trees_200 = tk.BooleanVar(value=True)  # ⭐
+        self.rf_n_trees_500 = tk.BooleanVar(value=True)  # ⭐
         self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
-        self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth
-        self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
+        self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth ⭐
+        self.rf_max_depth_15 = tk.BooleanVar(value=True)     # max_depth=15 ⭐
+        self.rf_max_depth_30 = tk.BooleanVar(value=True)     # max_depth=30 ⭐
         self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
+        # RandomForest min_samples_split
+        self.rf_min_samples_split_2 = tk.BooleanVar(value=True)   # 2 ⭐
+        self.rf_min_samples_split_5 = tk.BooleanVar(value=True)   # 5 ⭐
+        self.rf_min_samples_split_10 = tk.BooleanVar(value=True)  # 10 ⭐
+        self.rf_min_samples_split_custom = tk.StringVar(value="")
+        # RandomForest min_samples_leaf
+        self.rf_min_samples_leaf_1 = tk.BooleanVar(value=True)  # 1 ⭐
+        self.rf_min_samples_leaf_2 = tk.BooleanVar(value=True)  # 2 ⭐
+        self.rf_min_samples_leaf_4 = tk.BooleanVar(value=True)  # 4 ⭐
+        self.rf_min_samples_leaf_custom = tk.StringVar(value="")
+        # RandomForest max_features
+        self.rf_max_features_sqrt = tk.BooleanVar(value=True)   # sqrt ⭐
+        self.rf_max_features_log2 = tk.BooleanVar(value=True)   # log2 ⭐
+        self.rf_max_features_none = tk.BooleanVar(value=True)   # None (all features) ⭐
 
         # Ridge Regression alpha options (default: all checked per models.py)
         self.ridge_alpha_0001 = tk.BooleanVar(value=True)   # 0.001
@@ -387,15 +410,18 @@ class SpectralPredictApp:
 
         # ElasticNet Hyperparameters
         # alpha (regularization strength)
+        self.elasticnet_alpha_0001 = tk.BooleanVar(value=True)  # 0.001 ⭐ standard
         self.elasticnet_alpha_001 = tk.BooleanVar(value=True)   # 0.01 ⭐ standard
         self.elasticnet_alpha_01 = tk.BooleanVar(value=True)    # 0.1 ⭐ standard
         self.elasticnet_alpha_10 = tk.BooleanVar(value=True)    # 1.0 ⭐ standard
         self.elasticnet_alpha_custom = tk.StringVar(value="")
 
         # l1_ratio (L1 vs L2 mix: 0=Ridge, 1=Lasso)
+        self.elasticnet_l1_ratio_01 = tk.BooleanVar(value=True)  # 0.1 ⭐ standard
         self.elasticnet_l1_ratio_03 = tk.BooleanVar(value=True)  # 0.3 ⭐ standard
         self.elasticnet_l1_ratio_05 = tk.BooleanVar(value=True)  # 0.5 ⭐ standard (balanced)
         self.elasticnet_l1_ratio_07 = tk.BooleanVar(value=True)  # 0.7 ⭐ standard
+        self.elasticnet_l1_ratio_09 = tk.BooleanVar(value=True)  # 0.9 ⭐ standard
         self.elasticnet_l1_ratio_custom = tk.StringVar(value="")
 
         # LightGBM Hyperparameters
@@ -412,6 +438,36 @@ class SpectralPredictApp:
         self.lightgbm_num_leaves_31 = tk.BooleanVar(value=True)  # 31 ⭐ standard (default)
         self.lightgbm_num_leaves_50 = tk.BooleanVar(value=True)  # 50 ⭐ standard
         self.lightgbm_num_leaves_custom = tk.StringVar(value="")
+
+        # min_child_samples (minimum samples per leaf)
+        self.lightgbm_min_child_samples_5 = tk.BooleanVar(value=True)   # 5 ⭐
+        self.lightgbm_min_child_samples_10 = tk.BooleanVar(value=True)  # 10 ⭐
+        self.lightgbm_min_child_samples_20 = tk.BooleanVar(value=True)  # 20 ⭐
+        self.lightgbm_min_child_samples_custom = tk.StringVar(value="")
+
+        # subsample (row sampling ratio)
+        self.lightgbm_subsample_07 = tk.BooleanVar(value=True)  # 0.7 ⭐
+        self.lightgbm_subsample_08 = tk.BooleanVar(value=True)  # 0.8 ⭐
+        self.lightgbm_subsample_10 = tk.BooleanVar(value=True)  # 1.0 ⭐
+        self.lightgbm_subsample_custom = tk.StringVar(value="")
+
+        # colsample_bytree (feature sampling ratio)
+        self.lightgbm_colsample_07 = tk.BooleanVar(value=True)  # 0.7 ⭐
+        self.lightgbm_colsample_08 = tk.BooleanVar(value=True)  # 0.8 ⭐
+        self.lightgbm_colsample_10 = tk.BooleanVar(value=True)  # 1.0 ⭐
+        self.lightgbm_colsample_custom = tk.StringVar(value="")
+
+        # reg_alpha (L1 regularization)
+        self.lightgbm_reg_alpha_00 = tk.BooleanVar(value=True)  # 0.0 ⭐
+        self.lightgbm_reg_alpha_01 = tk.BooleanVar(value=True)  # 0.1 ⭐
+        self.lightgbm_reg_alpha_05 = tk.BooleanVar(value=True)  # 0.5 ⭐
+        self.lightgbm_reg_alpha_custom = tk.StringVar(value="")
+
+        # reg_lambda (L2 regularization)
+        self.lightgbm_reg_lambda_05 = tk.BooleanVar(value=True)  # 0.5 ⭐
+        self.lightgbm_reg_lambda_10 = tk.BooleanVar(value=True)  # 1.0 ⭐
+        self.lightgbm_reg_lambda_20 = tk.BooleanVar(value=True)  # 2.0 ⭐
+        self.lightgbm_reg_lambda_custom = tk.StringVar(value="")
 
         # CatBoost Hyperparameters
         # iterations (equivalent to n_estimators)
@@ -434,6 +490,7 @@ class SpectralPredictApp:
         self.svr_kernel_linear = tk.BooleanVar(value=True)  # Linear ⭐ standard
 
         # C (regularization parameter)
+        self.svr_C_01 = tk.BooleanVar(value=True)   # 0.1 ⭐ standard
         self.svr_C_10 = tk.BooleanVar(value=True)   # 1.0 ⭐ standard
         self.svr_C_100 = tk.BooleanVar(value=True)  # 10.0 ⭐ standard
         self.svr_C_custom = tk.StringVar(value="")
@@ -450,12 +507,20 @@ class SpectralPredictApp:
         self.mlp_hidden_custom = tk.StringVar(value="")      # e.g., "100,50,25"
 
         # alpha (L2 regularization penalty)
+        self.mlp_alpha_1e4 = tk.BooleanVar(value=True)  # 0.0001 ⭐ standard
         self.mlp_alpha_1e3 = tk.BooleanVar(value=True)  # 0.001 ⭐ standard
         self.mlp_alpha_custom = tk.StringVar(value="")
 
         # learning_rate_init (initial learning rate)
         self.mlp_lr_init_1e3 = tk.BooleanVar(value=True)  # 0.001 ⭐ standard
         self.mlp_lr_init_custom = tk.StringVar(value="")
+
+        # PLS-DA LogisticRegression Hyperparameters
+        # C (inverse of regularization strength for LogisticRegression classifier)
+        self.plsda_lr_C_01 = tk.BooleanVar(value=True)   # 0.1 ⭐
+        self.plsda_lr_C_10 = tk.BooleanVar(value=True)   # 1.0 ⭐
+        self.plsda_lr_C_100 = tk.BooleanVar(value=True)  # 10.0 ⭐
+        self.plsda_lr_C_custom = tk.StringVar(value="")
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -2385,11 +2450,12 @@ class SpectralPredictApp:
         ttk.Label(advanced_content, text="n_estimators (boosting rounds):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
         nest_frame = ttk.Frame(advanced_content)
         nest_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
-        ttk.Checkbutton(nest_frame, text="50", variable=self.n_estimators_50).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(nest_frame, text="100 ⭐", variable=self.n_estimators_100).grid(row=0, column=1, padx=5)
-        ttk.Label(nest_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
-        ttk.Entry(nest_frame, textvariable=self.n_estimators_custom, width=10).grid(row=0, column=3, padx=5)
-        ttk.Label(nest_frame, text="(default: 100 only)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        ttk.Checkbutton(nest_frame, text="100 ⭐", variable=self.n_estimators_100).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(nest_frame, text="150 ⭐", variable=self.n_estimators_150).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(nest_frame, text="200 ⭐", variable=self.n_estimators_200).grid(row=0, column=2, padx=5)
+        ttk.Label(nest_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(nest_frame, textvariable=self.n_estimators_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(nest_frame, text="(default: 100, 150, 200)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # Learning rate options
         ttk.Label(advanced_content, text="Learning rates:", style='Subheading.TLabel').grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
@@ -2401,9 +2467,27 @@ class SpectralPredictApp:
         ttk.Checkbutton(lr_frame, text="0.3 ⭐", variable=self.lr_03).grid(row=0, column=3, padx=5)
         ttk.Label(lr_frame, text="(default: 0.1, 0.2, 0.3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
+        # Hidden layer size options
+        ttk.Label(advanced_content, text="Hidden layer size (neurons in hidden layer):", style='Subheading.TLabel').grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        hidden_frame = ttk.Frame(advanced_content)
+        hidden_frame.grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Checkbutton(hidden_frame, text="3 ⭐", variable=self.nb_hidden_layer_3).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(hidden_frame, text="5 ⭐", variable=self.nb_hidden_layer_5).grid(row=0, column=1, padx=5)
+        ttk.Label(hidden_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(hidden_frame, textvariable=self.nb_hidden_layer_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(hidden_frame, text="(default: 3, 5)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # Activation function options
+        ttk.Label(advanced_content, text="Activation function:", style='Subheading.TLabel').grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        activation_frame = ttk.Frame(advanced_content)
+        activation_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Checkbutton(activation_frame, text="tanh ⭐", variable=self.nb_activation_tanh).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(activation_frame, text="identity ⭐", variable=self.nb_activation_identity).grid(row=0, column=1, padx=5)
+        ttk.Label(activation_frame, text="(default: tanh, identity)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
         # Info label
         ttk.Label(advanced_content, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # Random Forest Hyperparameters - collapsible
         rf_section, rf_content = self._create_collapsible_section(content_frame,
@@ -2427,11 +2511,11 @@ class SpectralPredictApp:
         rf_trees_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(rf_trees_frame, text="100 ⭐", variable=self.rf_n_trees_100).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(rf_trees_frame, text="200", variable=self.rf_n_trees_200).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(rf_trees_frame, text="500", variable=self.rf_n_trees_500).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="200 ⭐", variable=self.rf_n_trees_200).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="500 ⭐", variable=self.rf_n_trees_500).grid(row=0, column=2, padx=5)
         ttk.Label(rf_trees_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
         ttk.Entry(rf_trees_frame, textvariable=self.rf_n_trees_custom, width=8).grid(row=0, column=4, padx=5)
-        ttk.Label(rf_trees_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        ttk.Label(rf_trees_frame, text="(default: 100, 200, 500)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # Info label
         ttk.Label(rf_content_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
@@ -2443,14 +2527,61 @@ class SpectralPredictApp:
         rf_depth_frame.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(rf_depth_frame, text="None (unlimited) ⭐", variable=self.rf_max_depth_none).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(rf_depth_frame, text="30 ⭐", variable=self.rf_max_depth_30).grid(row=0, column=1, padx=5)
-        ttk.Label(rf_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
-        ttk.Entry(rf_depth_frame, textvariable=self.rf_max_depth_custom, width=8).grid(row=0, column=3, padx=5)
-        ttk.Label(rf_depth_frame, text="(default: None, 30)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        ttk.Checkbutton(rf_depth_frame, text="15 ⭐", variable=self.rf_max_depth_15).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_depth_frame, text="30 ⭐", variable=self.rf_max_depth_30).grid(row=0, column=2, padx=5)
+        ttk.Label(rf_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(rf_depth_frame, textvariable=self.rf_max_depth_custom, width=8).grid(row=0, column=4, padx=5)
+        ttk.Label(rf_depth_frame, text="(default: None, 15, 30)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # Info label for max_depth
         ttk.Label(rf_content_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # Minimum Samples Split (min_samples_split) options
+        ttk.Label(rf_content_frame, text="Min Samples Split (min_samples_split):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        rf_min_split_frame = ttk.Frame(rf_content_frame)
+        rf_min_split_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(rf_min_split_frame, text="2 ⭐", variable=self.rf_min_samples_split_2).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_min_split_frame, text="5 ⭐", variable=self.rf_min_samples_split_5).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_min_split_frame, text="10 ⭐", variable=self.rf_min_samples_split_10).grid(row=0, column=2, padx=5)
+        ttk.Label(rf_min_split_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(rf_min_split_frame, textvariable=self.rf_min_samples_split_custom, width=8).grid(row=0, column=4, padx=5)
+        ttk.Label(rf_min_split_frame, text="(default: 2, 5, 10)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # Info label for min_samples_split
+        ttk.Label(rf_content_frame, text="💡 Min samples required to split a node. Higher values prevent overfitting.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+
+        # Minimum Samples Leaf (min_samples_leaf) options
+        ttk.Label(rf_content_frame, text="Min Samples Leaf (min_samples_leaf):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        rf_min_leaf_frame = ttk.Frame(rf_content_frame)
+        rf_min_leaf_frame.grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(rf_min_leaf_frame, text="1 ⭐", variable=self.rf_min_samples_leaf_1).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_min_leaf_frame, text="2 ⭐", variable=self.rf_min_samples_leaf_2).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_min_leaf_frame, text="4 ⭐", variable=self.rf_min_samples_leaf_4).grid(row=0, column=2, padx=5)
+        ttk.Label(rf_min_leaf_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(rf_min_leaf_frame, textvariable=self.rf_min_samples_leaf_custom, width=8).grid(row=0, column=4, padx=5)
+        ttk.Label(rf_min_leaf_frame, text="(default: 1, 2, 4)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # Info label for min_samples_leaf
+        ttk.Label(rf_content_frame, text="💡 Min samples required at a leaf node. Higher values smooth the model.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+
+        # Max Features (max_features) options
+        ttk.Label(rf_content_frame, text="Max Features (max_features):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        rf_max_features_frame = ttk.Frame(rf_content_frame)
+        rf_max_features_frame.grid(row=13, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(rf_max_features_frame, text="sqrt ⭐", variable=self.rf_max_features_sqrt).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_max_features_frame, text="log2 ⭐", variable=self.rf_max_features_log2).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_max_features_frame, text="None (all) ⭐", variable=self.rf_max_features_none).grid(row=0, column=2, padx=5)
+        ttk.Label(rf_max_features_frame, text="(default: sqrt, log2, None)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        # Info label for max_features
+        ttk.Label(rf_content_frame, text="💡 Features to consider for splits. sqrt/log2 add randomness, None uses all features.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Ridge Regression Hyperparameters - collapsible
         ridge_section, ridge_content = self._create_collapsible_section(content_frame,
@@ -2633,6 +2764,108 @@ class SpectralPredictApp:
         ttk.Label(xgb_reg_lambda_frame, text="(comprehensive tier only)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         ttk.Label(xgb_content_frame, text="💡 L2 penalty reduces weight magnitudes. Use with L1 for combined regularization (ElasticNet-style).",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # LightGBM Hyperparameters - collapsible
+        lightgbm_section, lightgbm_content = self._create_collapsible_section(content_frame,
+                                                                               "LightGBM Hyperparameters",
+                                                                               expanded=False)
+        lightgbm_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        lightgbm_card_outer, lightgbm_frame = self._create_card(lightgbm_content,
+                                                                subtitle="Fast gradient boosting with comprehensive tuning")
+        lightgbm_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout
+        lightgbm_content_frame = ttk.Frame(lightgbm_frame)
+        lightgbm_content_frame.pack(fill='both', expand=True)
+
+        # n_estimators
+        ttk.Label(lightgbm_content_frame, text="Number of Boosting Rounds (n_estimators):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        lgb_n_est_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_n_est_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_n_est_frame, text="100 ⭐", variable=self.lightgbm_n_estimators_100).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_n_est_frame, text="200 ⭐", variable=self.lightgbm_n_estimators_200).grid(row=0, column=1, padx=5)
+        ttk.Label(lgb_n_est_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(lgb_n_est_frame, textvariable=self.lightgbm_n_estimators_custom, width=10).grid(row=0, column=3, padx=5)
+
+        # learning_rate
+        ttk.Label(lightgbm_content_frame, text="Learning Rate:", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_lr_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_lr_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_lr_frame, text="0.1 ⭐", variable=self.lightgbm_lr_01).grid(row=0, column=0, padx=5)
+        ttk.Label(lgb_lr_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
+        ttk.Entry(lgb_lr_frame, textvariable=self.lightgbm_lr_custom, width=10).grid(row=0, column=2, padx=5)
+
+        # num_leaves
+        ttk.Label(lightgbm_content_frame, text="Number of Leaves (num_leaves):", style='Subheading.TLabel').grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_leaves_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_leaves_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_leaves_frame, text="31 ⭐", variable=self.lightgbm_num_leaves_31).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_leaves_frame, text="50 ⭐", variable=self.lightgbm_num_leaves_50).grid(row=0, column=1, padx=5)
+        ttk.Label(lgb_leaves_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(lgb_leaves_frame, textvariable=self.lightgbm_num_leaves_custom, width=10).grid(row=0, column=3, padx=5)
+
+        # min_child_samples
+        ttk.Label(lightgbm_content_frame, text="Min Child Samples (min_child_samples):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_min_child_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_min_child_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_min_child_frame, text="5 ⭐", variable=self.lightgbm_min_child_samples_5).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_min_child_frame, text="10 ⭐", variable=self.lightgbm_min_child_samples_10).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgb_min_child_frame, text="20 ⭐", variable=self.lightgbm_min_child_samples_20).grid(row=0, column=2, padx=5)
+        ttk.Label(lgb_min_child_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgb_min_child_frame, textvariable=self.lightgbm_min_child_samples_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lightgbm_content_frame, text="💡 Min samples in a leaf. Higher values prevent overfitting.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # subsample
+        ttk.Label(lightgbm_content_frame, text="Row Sampling Ratio (subsample):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_subsample_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_subsample_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_subsample_frame, text="0.7 ⭐", variable=self.lightgbm_subsample_07).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_subsample_frame, text="0.8 ⭐", variable=self.lightgbm_subsample_08).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgb_subsample_frame, text="1.0 ⭐", variable=self.lightgbm_subsample_10).grid(row=0, column=2, padx=5)
+        ttk.Label(lgb_subsample_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgb_subsample_frame, textvariable=self.lightgbm_subsample_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lightgbm_content_frame, text="💡 Fraction of samples to use per tree. Lower values prevent overfitting.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # colsample_bytree
+        ttk.Label(lightgbm_content_frame, text="Feature Sampling Ratio (colsample_bytree):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_colsample_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_colsample_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_colsample_frame, text="0.7 ⭐", variable=self.lightgbm_colsample_07).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_colsample_frame, text="0.8 ⭐", variable=self.lightgbm_colsample_08).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgb_colsample_frame, text="1.0 ⭐", variable=self.lightgbm_colsample_10).grid(row=0, column=2, padx=5)
+        ttk.Label(lgb_colsample_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgb_colsample_frame, textvariable=self.lightgbm_colsample_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lightgbm_content_frame, text="💡 Fraction of features to use per tree. Critical for high-dimensional data.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # reg_alpha
+        ttk.Label(lightgbm_content_frame, text="L1 Regularization (reg_alpha):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_reg_alpha_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_reg_alpha_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_reg_alpha_frame, text="0.0 ⭐", variable=self.lightgbm_reg_alpha_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_reg_alpha_frame, text="0.1 ⭐", variable=self.lightgbm_reg_alpha_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgb_reg_alpha_frame, text="0.5 ⭐", variable=self.lightgbm_reg_alpha_05).grid(row=0, column=2, padx=5)
+        ttk.Label(lgb_reg_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgb_reg_alpha_frame, textvariable=self.lightgbm_reg_alpha_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lightgbm_content_frame, text="💡 L1 penalty for feature selection. Higher = sparser model.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # reg_lambda
+        ttk.Label(lightgbm_content_frame, text="L2 Regularization (reg_lambda):", style='Subheading.TLabel').grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgb_reg_lambda_frame = ttk.Frame(lightgbm_content_frame)
+        lgb_reg_lambda_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lgb_reg_lambda_frame, text="0.5 ⭐", variable=self.lightgbm_reg_lambda_05).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgb_reg_lambda_frame, text="1.0 ⭐", variable=self.lightgbm_reg_lambda_10).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgb_reg_lambda_frame, text="2.0 ⭐", variable=self.lightgbm_reg_lambda_20).grid(row=0, column=2, padx=5)
+        ttk.Label(lgb_reg_lambda_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgb_reg_lambda_frame, textvariable=self.lightgbm_reg_lambda_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lightgbm_content_frame, text="💡 L2 penalty reduces weight magnitudes. Prevents overfitting.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # CSV export checkbox
@@ -6019,12 +6252,14 @@ class SpectralPredictApp:
             if not window_sizes:
                 window_sizes = [17]
 
-            # Collect n_estimators options
+            # Collect n_estimators options (NeuralBoosted)
             n_estimators_list = []
-            if self.n_estimators_50.get():
-                n_estimators_list.append(50)
             if self.n_estimators_100.get():
                 n_estimators_list.append(100)
+            if self.n_estimators_150.get():
+                n_estimators_list.append(150)
+            if self.n_estimators_200.get():
+                n_estimators_list.append(200)
 
             # Add custom n_estimators
             if self.n_estimators_custom.get().strip():
@@ -6052,6 +6287,31 @@ class SpectralPredictApp:
             # Default to [0.1, 0.2, 0.3] if none selected (0.3 is empirically optimal)
             if not learning_rates:
                 learning_rates = [0.1, 0.2, 0.3]
+
+            # Collect NeuralBoosted hidden_layer_size options
+            nb_hidden_layer_sizes = []
+            if self.nb_hidden_layer_3.get():
+                nb_hidden_layer_sizes.append(3)
+            if self.nb_hidden_layer_5.get():
+                nb_hidden_layer_sizes.append(5)
+            if self.nb_hidden_layer_custom.get().strip():
+                try:
+                    custom_hidden = int(self.nb_hidden_layer_custom.get().strip())
+                    if custom_hidden > 0 and custom_hidden not in nb_hidden_layer_sizes:
+                        nb_hidden_layer_sizes.append(custom_hidden)
+                except ValueError:
+                    self._log_progress(f"Warning: Invalid custom hidden_layer_size ignored: {self.nb_hidden_layer_custom.get()}")
+            if not nb_hidden_layer_sizes:
+                nb_hidden_layer_sizes = [3, 5]
+
+            # Collect NeuralBoosted activation function options
+            nb_activations = []
+            if self.nb_activation_tanh.get():
+                nb_activations.append('tanh')
+            if self.nb_activation_identity.get():
+                nb_activations.append('identity')
+            if not nb_activations:
+                nb_activations = ['tanh', 'identity']
 
             # Collect Random Forest n_estimators (number of trees)
             rf_n_trees_list = []
@@ -6085,6 +6345,8 @@ class SpectralPredictApp:
             # Collect from checkboxes
             if self.rf_max_depth_none.get():
                 rf_max_depth_list.append(None)
+            if self.rf_max_depth_15.get():
+                rf_max_depth_list.append(15)
             if self.rf_max_depth_30.get():
                 rf_max_depth_list.append(30)
 
@@ -6110,6 +6372,55 @@ class SpectralPredictApp:
 
             # Sort for consistent ordering (None sorts first)
             rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
+
+            # Collect Random Forest min_samples_split
+            rf_min_samples_split_list = []
+            if self.rf_min_samples_split_2.get():
+                rf_min_samples_split_list.append(2)
+            if self.rf_min_samples_split_5.get():
+                rf_min_samples_split_list.append(5)
+            if self.rf_min_samples_split_10.get():
+                rf_min_samples_split_list.append(10)
+            if self.rf_min_samples_split_custom.get().strip():
+                try:
+                    custom_val = int(self.rf_min_samples_split_custom.get().strip())
+                    if custom_val > 0 and custom_val not in rf_min_samples_split_list:
+                        rf_min_samples_split_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom RF min_samples_split '{self.rf_min_samples_split_custom.get()}', ignoring")
+            if not rf_min_samples_split_list:
+                rf_min_samples_split_list = [2, 5, 10]
+            rf_min_samples_split_list = sorted(rf_min_samples_split_list)
+
+            # Collect Random Forest min_samples_leaf
+            rf_min_samples_leaf_list = []
+            if self.rf_min_samples_leaf_1.get():
+                rf_min_samples_leaf_list.append(1)
+            if self.rf_min_samples_leaf_2.get():
+                rf_min_samples_leaf_list.append(2)
+            if self.rf_min_samples_leaf_4.get():
+                rf_min_samples_leaf_list.append(4)
+            if self.rf_min_samples_leaf_custom.get().strip():
+                try:
+                    custom_val = int(self.rf_min_samples_leaf_custom.get().strip())
+                    if custom_val > 0 and custom_val not in rf_min_samples_leaf_list:
+                        rf_min_samples_leaf_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom RF min_samples_leaf '{self.rf_min_samples_leaf_custom.get()}', ignoring")
+            if not rf_min_samples_leaf_list:
+                rf_min_samples_leaf_list = [1, 2, 4]
+            rf_min_samples_leaf_list = sorted(rf_min_samples_leaf_list)
+
+            # Collect Random Forest max_features
+            rf_max_features_list = []
+            if self.rf_max_features_sqrt.get():
+                rf_max_features_list.append('sqrt')
+            if self.rf_max_features_log2.get():
+                rf_max_features_list.append('log2')
+            if self.rf_max_features_none.get():
+                rf_max_features_list.append(None)
+            if not rf_max_features_list:
+                rf_max_features_list = ['sqrt', 'log2', None]
 
             # Collect Ridge alpha values
             ridge_alphas_list = []
@@ -6463,8 +6774,13 @@ class SpectralPredictApp:
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,
                 learning_rates=learning_rates,
+                nb_hidden_layer_sizes=nb_hidden_layer_sizes,
+                nb_activations=nb_activations,
                 rf_n_trees_list=rf_n_trees_list,
                 rf_max_depth_list=rf_max_depth_list,
+                rf_min_samples_split_list=rf_min_samples_split_list,
+                rf_min_samples_leaf_list=rf_min_samples_leaf_list,
+                rf_max_features_list=rf_max_features_list,
                 ridge_alphas_list=ridge_alphas_list,
                 lasso_alphas_list=lasso_alphas_list,
                 xgb_n_estimators_list=xgb_n_estimators_list,
