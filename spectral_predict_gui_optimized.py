@@ -7737,6 +7737,141 @@ class SpectralPredictApp:
 
         return True
 
+    def _estimate_grid_size(self, param_dict):
+        """
+        Calculate total grid size from parameter dictionary.
+
+        Args:
+            param_dict: Dict of {param_name: [value_list]}
+
+        Returns:
+            int: Total number of configurations (product of all list lengths)
+
+        Example:
+            {'n_estimators': [100, 200], 'max_depth': [10, 20, 30]}
+            -> 2 * 3 = 6 configurations
+        """
+        if not param_dict:
+            return 1
+
+        total_size = 1
+
+        for param_name, param_values in param_dict.items():
+            # Handle nested parameter structures (e.g., PLS-DA with two-stage models)
+            if isinstance(param_values, dict):
+                # Recursively calculate size for nested dictionaries
+                nested_size = self._estimate_grid_size(param_values)
+                total_size *= nested_size
+            elif isinstance(param_values, list):
+                # Empty lists count as 1 (default value will be used)
+                if len(param_values) == 0:
+                    list_size = 1
+                else:
+                    list_size = len(param_values)
+                total_size *= list_size
+            else:
+                # Single values (None, int, float, str) count as 1
+                total_size *= 1
+
+        return total_size
+
+    def _validate_parameter_bounds(self, param_name, values, min_val=None,
+                                   max_val=None, allowed_types=None):
+        """
+        Validate parameter values are within acceptable bounds.
+
+        Args:
+            param_name: Parameter name for error messages
+            values: List of values to validate
+            min_val: Minimum allowed value (optional)
+            max_val: Maximum allowed value (optional)
+            allowed_types: List of allowed types (optional)
+
+        Returns:
+            tuple: (is_valid: bool, error_message: str or None)
+
+        Example:
+            _validate_parameter_bounds('n_estimators', [50, 100, 200],
+                                       min_val=1, max_val=10000)
+            -> (True, None)
+
+            _validate_parameter_bounds('n_estimators', [0, -5], min_val=1)
+            -> (False, "n_estimators values must be >= 1")
+        """
+        # Handle non-list inputs
+        if not isinstance(values, list):
+            values = [values]
+
+        # Skip validation for empty lists
+        if len(values) == 0:
+            return (True, None)
+
+        # Type checking
+        if allowed_types is not None:
+            for value in values:
+                # None is a special case - it's often allowed
+                if value is None:
+                    continue
+
+                value_type = type(value)
+                if value_type not in allowed_types:
+                    type_names = ', '.join([t.__name__ for t in allowed_types])
+                    return (False, f"{param_name} must be of type(s): {type_names}. Got {value_type.__name__}.")
+
+        # Range validation (only for numeric types)
+        for value in values:
+            # Skip None values for range checking
+            if value is None:
+                continue
+
+            # Check if value is numeric
+            if not isinstance(value, (int, float)):
+                continue
+
+            if min_val is not None and value < min_val:
+                return (False, f"{param_name} values must be >= {min_val}. Got {value}.")
+
+            if max_val is not None and value > max_val:
+                return (False, f"{param_name} values must be <= {max_val}. Got {value}.")
+
+        return (True, None)
+
+    def _check_grid_size_warning(self, grid_size, threshold=1000):
+        """
+        Check if grid size exceeds warning threshold.
+
+        Args:
+            grid_size: Estimated number of configurations
+            threshold: Warning threshold (default: 1000)
+
+        Returns:
+            tuple: (show_warning: bool, warning_message: str or None)
+        """
+        if grid_size < 100:
+            # No warning needed
+            return (False, None)
+
+        elif grid_size < 1000:
+            # Info message
+            message = (f"Grid search will evaluate {grid_size} configurations.\n"
+                      f"This should complete in a reasonable time.")
+            return (True, message)
+
+        elif grid_size < 10000:
+            # Warning message
+            message = (f"Grid search will evaluate {grid_size} configurations.\n"
+                      f"This may take a considerable amount of time.\n"
+                      f"Consider reducing the parameter grid size.")
+            return (True, message)
+
+        else:
+            # Strong warning message
+            message = (f"WARNING: Grid search will evaluate {grid_size} configurations!\n"
+                      f"This will likely take a very long time to complete.\n"
+                      f"It is strongly recommended to reduce the parameter grid size.\n"
+                      f"Consider using random search or Bayesian optimization instead.")
+            return (True, message)
+
     def _load_model_for_refinement(self, config):
         """Load a model configuration into the Model Development tab."""
         # Validate data availability
@@ -9495,6 +9630,356 @@ Configuration:
         # Remove duplicates and sort
         selected = sorted(list(set(selected)))
         return selected
+
+    def _parse_range_specification(self, spec_string, param_name="parameter", is_float=False):
+        """
+        Parse flexible range specifications for hyperparameters.
+
+        Supports:
+        - Single values: "150" → [150]
+        - Lists: "50, 100, 200" → [50, 100, 200]
+        - Ranges: "50-200 step 50" → [50, 100, 150, 200]
+        - Mixed: "10, 50-100 step 25, 200" → [10, 50, 75, 100, 200]
+        - None values: "None, 10, 20" → [None, 10, 20]
+        - Float values: "0.01, 0.1, 1.0" → [0.01, 0.1, 1.0]
+        - String values: "relu, tanh, sigmoid" → ['relu', 'tanh', 'sigmoid']
+
+        Args:
+            spec_string: String specification to parse
+            param_name: Parameter name for error messages (default: "parameter")
+            is_float: If True, parse as floats; if False, parse as ints (default: False)
+
+        Returns:
+            list: Parsed values (sorted, unique, appropriate type)
+
+        Raises:
+            ValueError: On invalid syntax or unparseable values
+        """
+        # Handle empty/whitespace-only strings
+        if not spec_string or not spec_string.strip():
+            return []
+
+        spec_string = spec_string.strip()
+        values = []
+        has_strings = False
+
+        # Split by commas to handle mixed formats
+        segments = [seg.strip() for seg in spec_string.split(',')]
+
+        for segment in segments:
+            if not segment:
+                continue
+
+            try:
+                # Check if this is a range specification with "step"
+                if ' step ' in segment.lower():
+                    # Parse range: "start-end step increment"
+                    parts = segment.lower().split(' step ')
+                    if len(parts) != 2:
+                        raise ValueError(f"Invalid range syntax in '{segment}'. Expected format: 'start-end step increment'")
+
+                    range_part = parts[0].strip()
+                    step_part = parts[1].strip()
+
+                    # Parse the range bounds
+                    if '-' not in range_part:
+                        raise ValueError(f"Invalid range syntax in '{segment}'. Expected 'start-end' before 'step'")
+
+                    # Handle negative numbers in range
+                    # Split by '-' but be careful with negative numbers
+                    range_components = range_part.split('-')
+
+                    # Filter out empty strings (from leading minus signs)
+                    range_components = [c for c in range_components if c]
+
+                    if len(range_components) < 2:
+                        raise ValueError(f"Invalid range syntax in '{segment}'. Expected 'start-end step increment'")
+
+                    # If we have more than 2 components, we might have negative numbers
+                    if len(range_components) == 2:
+                        start_str, end_str = range_components
+                    elif len(range_components) == 3:
+                        # Could be "-5-10" (negative start) or "5--10" (negative end)
+                        if range_part.startswith('-'):
+                            start_str = '-' + range_components[0]
+                            end_str = range_components[1]
+                        else:
+                            start_str = range_components[0]
+                            end_str = '-' + range_components[1]
+                    elif len(range_components) == 4:
+                        # Both negative: "-5--10"
+                        start_str = '-' + range_components[0]
+                        end_str = '-' + range_components[1]
+                    else:
+                        raise ValueError(f"Invalid range syntax in '{segment}'")
+
+                    # Parse the numeric values
+                    try:
+                        if is_float:
+                            start = float(start_str)
+                            end = float(end_str)
+                            step = float(step_part)
+                        else:
+                            start = int(start_str)
+                            end = int(end_str)
+                            step = int(step_part)
+                    except ValueError as e:
+                        raise ValueError(f"Could not parse numeric values in '{segment}': {e}")
+
+                    # Validate step
+                    if step == 0:
+                        raise ValueError(f"Step cannot be zero in '{segment}'")
+
+                    if step < 0:
+                        raise ValueError(f"Step must be positive in '{segment}' (found {step})")
+
+                    # Generate range values
+                    if start <= end:
+                        current = start
+                        while current <= end:
+                            values.append(current)
+                            if is_float:
+                                # Use round to avoid floating point precision issues
+                                current = round(current + step, 10)
+                            else:
+                                current = current + step
+                    else:
+                        # Descending range
+                        current = start
+                        while current >= end:
+                            values.append(current)
+                            if is_float:
+                                current = round(current - step, 10)
+                            else:
+                                current = current - step
+
+                # Check if it's None
+                elif segment.lower() == 'none':
+                    values.append(None)
+
+                # Check if it's a string value (contains letters and is not "None")
+                elif any(c.isalpha() for c in segment) and segment.lower() != 'none':
+                    # String value - keep as is
+                    values.append(segment)
+                    has_strings = True
+
+                # Try to parse as numeric value
+                else:
+                    try:
+                        if is_float:
+                            values.append(float(segment))
+                        else:
+                            values.append(int(segment))
+                    except ValueError:
+                        raise ValueError(f"Could not parse '{segment}' as {'float' if is_float else 'int'} for {param_name}")
+
+            except ValueError as e:
+                # Re-raise with parameter context
+                raise ValueError(f"Error parsing {param_name} specification: {e}")
+
+        # Remove duplicates while preserving None values
+        if has_strings:
+            # For string values, preserve order and remove duplicates
+            seen = set()
+            unique_values = []
+            for v in values:
+                if v not in seen:
+                    seen.add(v)
+                    unique_values.append(v)
+            return unique_values
+        else:
+            # For numeric values, sort and remove duplicates
+            # Separate None from numeric values
+            none_values = [v for v in values if v is None]
+            numeric_values = [v for v in values if v is not None]
+
+            # Remove duplicates and sort numeric values
+            numeric_values = sorted(list(set(numeric_values)))
+
+            # Combine: None values first, then sorted numeric values
+            result = (none_values[:1] if none_values else []) + numeric_values
+            return result
+
+    def _create_parameter_grid_control(self, parent, param_name, param_label,
+                                       checkbox_values, default_checked=None,
+                                       is_float=False, allow_string_values=False,
+                                       help_text=None):
+        """
+        Create unified hyperparameter control with checkboxes + custom entry.
+
+        Args:
+            parent: Parent widget (Frame or LabelFrame)
+            param_name: Parameter name (e.g., 'n_estimators')
+            param_label: Display label (e.g., 'Number of Trees')
+            checkbox_values: List of common values to show as checkboxes
+            default_checked: List of values to check by default (optional)
+            is_float: If True, parse custom entry as floats
+            allow_string_values: If True, allow non-numeric values
+            help_text: Tooltip text (optional)
+
+        Returns:
+            dict: {
+                'checkboxes': {value: BooleanVar},
+                'custom_entry': StringVar,
+                'frame': Frame,
+                'label': Label
+            }
+        """
+        # Create main container frame
+        control_frame = tk.Frame(parent, bg=self.colors['card_bg'])
+        control_frame.pack(fill='x', padx=5, pady=5)
+
+        # Create header row with label and custom entry
+        header_frame = tk.Frame(control_frame, bg=self.colors['card_bg'])
+        header_frame.pack(fill='x', pady=(0, 5))
+
+        # Label on left
+        label = ttk.Label(header_frame, text=param_label,
+                         font=('Arial', 10, 'bold'))
+        label.pack(side='left', padx=(0, 10))
+
+        # Add help tooltip if provided
+        if help_text:
+            try:
+                from tktooltip import ToolTip
+                ToolTip(label, msg=help_text, delay=0.5)
+            except ImportError:
+                pass  # Tooltip library not available
+
+        # Custom entry on right
+        custom_var = tk.StringVar()
+        custom_entry = ttk.Entry(header_frame, textvariable=custom_var, width=30)
+        custom_entry.pack(side='right')
+
+        # Add placeholder text
+        placeholder = "e.g., 10, 50-200 step 50, 500"
+        custom_entry.insert(0, placeholder)
+        custom_entry.config(foreground='gray')
+
+        def on_entry_focus_in(event):
+            if custom_var.get() == placeholder:
+                custom_entry.delete(0, 'end')
+                custom_entry.config(foreground=self.colors['text'])
+
+        def on_entry_focus_out(event):
+            if not custom_var.get():
+                custom_entry.insert(0, placeholder)
+                custom_entry.config(foreground='gray')
+
+        custom_entry.bind('<FocusIn>', on_entry_focus_in)
+        custom_entry.bind('<FocusOut>', on_entry_focus_out)
+
+        # Create checkbox row
+        checkbox_frame = tk.Frame(control_frame, bg=self.colors['card_bg'])
+        checkbox_frame.pack(fill='x')
+
+        # Create checkboxes for common values
+        checkbox_vars = {}
+        for i, value in enumerate(checkbox_values):
+            var = tk.BooleanVar()
+
+            # Check if this value should be checked by default
+            if default_checked and value in default_checked:
+                var.set(True)
+
+            # Create checkbox with appropriate label
+            if value is None:
+                label_text = "None"
+            elif isinstance(value, str):
+                label_text = str(value)
+            elif is_float:
+                label_text = f"{value:.3g}"  # Smart float formatting
+            else:
+                label_text = str(value)
+
+            cb = ttk.Checkbutton(checkbox_frame, text=label_text,
+                               variable=var, style='TCheckbutton')
+            cb.pack(side='left', padx=5)
+
+            checkbox_vars[value] = var
+
+        # Return control dict
+        return {
+            'checkboxes': checkbox_vars,
+            'custom_entry': custom_var,
+            'frame': control_frame,
+            'label': label,
+            'entry_widget': custom_entry,
+            'placeholder': placeholder
+        }
+
+    def _extract_parameter_values(self, control_dict, param_name, is_float=False,
+                                  allow_string_values=False):
+        """
+        Extract final parameter list from control dict.
+
+        Combines checked checkbox values + parsed custom entry values.
+
+        Args:
+            control_dict: Dict returned by _create_parameter_grid_control
+            param_name: Parameter name for error messages
+            is_float: If True, expect floats
+            allow_string_values: If True, allow string values
+
+        Returns:
+            list: Sorted, unique parameter values
+
+        Raises:
+            ValueError: If parsing fails
+        """
+        values = []
+
+        # Step 1: Collect checked checkbox values
+        checkboxes = control_dict.get('checkboxes', {})
+        for value, var in checkboxes.items():
+            if var.get():  # If checkbox is checked
+                values.append(value)
+
+        # Step 2: Parse custom entry
+        custom_var = control_dict.get('custom_entry')
+        if custom_var:
+            custom_text = custom_var.get().strip()
+
+            # Skip if it's the placeholder text
+            placeholder = control_dict.get('placeholder', '')
+            if custom_text and custom_text != placeholder:
+                try:
+                    # Use the existing _parse_range_specification method
+                    parsed_values = self._parse_range_specification(
+                        custom_text,
+                        param_name=param_name,
+                        is_float=is_float
+                    )
+                    values.extend(parsed_values)
+                except ValueError as e:
+                    # Re-raise with more context
+                    raise ValueError(f"Error parsing custom values for {param_name}: {e}")
+
+        # Step 3: Validate that we have at least one value
+        if not values:
+            raise ValueError(f"No values specified for {param_name}. Please select at least one checkbox or enter custom values.")
+
+        # Step 4: Remove duplicates and sort
+        if allow_string_values or any(isinstance(v, str) for v in values):
+            # For string values, preserve order and remove duplicates
+            seen = set()
+            unique_values = []
+            for v in values:
+                if v not in seen:
+                    seen.add(v)
+                    unique_values.append(v)
+            return unique_values
+        else:
+            # For numeric values, separate None from numeric values
+            none_values = [v for v in values if v is None]
+            numeric_values = [v for v in values if v is not None]
+
+            # Remove duplicates and sort numeric values
+            numeric_values = sorted(list(set(numeric_values)))
+
+            # Combine: None values first, then sorted numeric values
+            result = (none_values[:1] if none_values else []) + numeric_values
+            return result
 
     def _preview_wavelength_selection(self):
         """Preview the wavelength selection with a plot."""
