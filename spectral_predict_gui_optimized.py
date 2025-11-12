@@ -1550,7 +1550,7 @@ class SpectralPredictApp:
         input_row += 1
 
         # Reference file
-        ttk.Label(input_frame, text="Reference CSV:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
+        ttk.Label(input_frame, text="Reference CSV/Excel:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
         ttk.Entry(input_frame, textvariable=self.reference_file, width=60).grid(row=input_row, column=1, padx=10)
         ttk.Button(input_frame, text="Browse...", command=self._browse_reference_file, style='Modern.TButton').grid(row=input_row, column=2)
         input_row += 1
@@ -3407,16 +3407,16 @@ class SpectralPredictApp:
                 foreground=self.colors['success']
             )
 
-            # Auto-detect reference CSV
-            csv_files = list(path.glob("*.csv"))
-            if len(csv_files) == 1:
-                self.reference_file.set(str(csv_files[0]))
+            # Auto-detect reference CSV/Excel
+            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
                 # No popup needed - status label shows detection
-            elif len(csv_files) > 1:
+            elif len(ref_files) > 1:
                 # Update status to guide user - no popup needed
                 self.detection_status.config(
-                    text=f"✓ Detected {len(asd_files)} ASD files - {len(csv_files)} CSVs found, select reference manually",
+                    text=f"✓ Detected {len(asd_files)} ASD files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3452,16 +3452,16 @@ class SpectralPredictApp:
                 foreground=self.colors['success']
             )
 
-            # Auto-detect reference CSV
-            csv_files = list(path.glob("*.csv"))
-            if len(csv_files) == 1:
-                self.reference_file.set(str(csv_files[0]))
+            # Auto-detect reference CSV/Excel
+            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
                 # No popup needed - status label shows detection
-            elif len(csv_files) > 1:
+            elif len(ref_files) > 1:
                 # Update status to guide user - no popup needed
                 self.detection_status.config(
-                    text=f"✓ Detected {len(spc_files)} SPC files - {len(csv_files)} CSVs found, select reference manually",
+                    text=f"✓ Detected {len(spc_files)} SPC files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3475,14 +3475,14 @@ class SpectralPredictApp:
                 foreground=self.colors['success']
             )
 
-            # Auto-detect reference CSV
-            csv_files = list(path.glob("*.csv"))
-            if len(csv_files) == 1:
-                self.reference_file.set(str(csv_files[0]))
+            # Auto-detect reference CSV/Excel
+            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
-            elif len(csv_files) > 1:
+            elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(jcamp_files)} JCAMP-DX files - {len(csv_files)} CSVs found, select reference manually",
+                    text=f"✓ Detected {len(jcamp_files)} JCAMP-DX files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3497,14 +3497,14 @@ class SpectralPredictApp:
                 foreground=self.colors['success']
             )
 
-            # Auto-detect reference CSV
-            csv_files = list(path.glob("*.csv"))
-            if len(csv_files) == 1:
-                self.reference_file.set(str(csv_files[0]))
+            # Auto-detect reference CSV/Excel
+            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
-            elif len(csv_files) > 1:
+            elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(ascii_files)} ASCII files - {len(csv_files)} CSVs found, select reference manually",
+                    text=f"✓ Detected {len(ascii_files)} ASCII files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3521,13 +3521,13 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            csv_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
-            if len(csv_files) == 1:
-                self.reference_file.set(str(csv_files[0]))
+            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
-            elif len(csv_files) > 1:
+            elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(opus_files)} OPUS files - {len(csv_files)} reference files found, select manually",
+                    text=f"✓ Detected {len(opus_files)} OPUS files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3542,13 +3542,13 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            csv_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
-            if len(csv_files) == 1:
-                self.reference_file.set(str(csv_files[0]))
+            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
-            elif len(csv_files) > 1:
+            elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(sp_files)} PerkinElmer files - {len(csv_files)} reference files found, select manually",
+                    text=f"✓ Detected {len(sp_files)} PerkinElmer files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -3895,7 +3895,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -3928,7 +3928,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -3961,7 +3961,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -3996,7 +3996,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -4031,7 +4031,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -4066,7 +4066,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -4101,7 +4101,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
@@ -4136,7 +4136,7 @@ class SpectralPredictApp:
 
                 # Load reference data
                 if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV file")
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
                     return
 
                 ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
