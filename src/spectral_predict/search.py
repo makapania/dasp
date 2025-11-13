@@ -21,15 +21,30 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=5,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
+               pls_max_iter_list=None, pls_tol_list=None,
                rf_n_trees_list=None, rf_max_depth_list=None,
-               ridge_alphas_list=None, lasso_alphas_list=None,
+               rf_min_samples_split_list=None, rf_min_samples_leaf_list=None,
+               rf_max_features_list=None, rf_bootstrap_list=None,
+               rf_max_leaf_nodes_list=None, rf_min_impurity_decrease_list=None,
+               ridge_alphas_list=None, ridge_solver_list=None, ridge_tol_list=None,
+               lasso_alphas_list=None, lasso_selection_list=None, lasso_tol_list=None,
                xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
                xgb_subsample=None, xgb_colsample_bytree=None, xgb_reg_alpha=None, xgb_reg_lambda=None,
+               xgb_min_child_weight_list=None, xgb_gamma_list=None,
                elasticnet_alphas_list=None, elasticnet_l1_ratios=None,
+               elasticnet_selection_list=None, elasticnet_tol_list=None,
                lightgbm_n_estimators_list=None, lightgbm_learning_rates=None, lightgbm_num_leaves_list=None,
+               lightgbm_max_depth_list=None, lightgbm_min_child_samples_list=None,
+               lightgbm_subsample_list=None, lightgbm_colsample_bytree_list=None,
+               lightgbm_reg_alpha_list=None, lightgbm_reg_lambda_list=None,
                catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
+               catboost_l2_leaf_reg_list=None, catboost_border_count_list=None,
+               catboost_bagging_temperature_list=None, catboost_random_strength_list=None,
                svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
+               svr_epsilon_list=None, svr_degree_list=None, svr_coef0_list=None, svr_shrinking_list=None,
                mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
+               mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
+               mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
                enable_variable_subsets=True, variable_counts=None,
                enable_region_subsets=True, n_top_regions=5, progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
@@ -179,21 +194,49 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
     # tier for tiered defaults, and enabled_models for custom model selection)
     model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
                                    n_estimators_list=n_estimators_list, learning_rates=learning_rates,
+                                   pls_max_iter_list=pls_max_iter_list, pls_tol_list=pls_tol_list,
                                    rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list,
-                                   ridge_alphas_list=ridge_alphas_list, lasso_alphas_list=lasso_alphas_list,
+                                   rf_min_samples_split_list=rf_min_samples_split_list,
+                                   rf_min_samples_leaf_list=rf_min_samples_leaf_list,
+                                   rf_max_features_list=rf_max_features_list,
+                                   rf_bootstrap_list=rf_bootstrap_list,
+                                   rf_max_leaf_nodes_list=rf_max_leaf_nodes_list,
+                                   rf_min_impurity_decrease_list=rf_min_impurity_decrease_list,
+                                   ridge_alphas_list=ridge_alphas_list, ridge_solver_list=ridge_solver_list,
+                                   ridge_tol_list=ridge_tol_list,
+                                   lasso_alphas_list=lasso_alphas_list, lasso_selection_list=lasso_selection_list,
+                                   lasso_tol_list=lasso_tol_list,
                                    xgb_n_estimators_list=xgb_n_estimators_list, xgb_learning_rates=xgb_learning_rates,
                                    xgb_max_depths=xgb_max_depths, xgb_subsample=xgb_subsample,
                                    xgb_colsample_bytree=xgb_colsample_bytree, xgb_reg_alpha=xgb_reg_alpha,
                                    xgb_reg_lambda=xgb_reg_lambda,
+                                   xgb_min_child_weight_list=xgb_min_child_weight_list, xgb_gamma_list=xgb_gamma_list,
                                    elasticnet_alphas_list=elasticnet_alphas_list, elasticnet_l1_ratios=elasticnet_l1_ratios,
+                                   elasticnet_selection_list=elasticnet_selection_list, elasticnet_tol_list=elasticnet_tol_list,
                                    lightgbm_n_estimators_list=lightgbm_n_estimators_list,
                                    lightgbm_learning_rates=lightgbm_learning_rates,
                                    lightgbm_num_leaves_list=lightgbm_num_leaves_list,
+                                   lightgbm_max_depth_list=lightgbm_max_depth_list,
+                                   lightgbm_min_child_samples_list=lightgbm_min_child_samples_list,
+                                   lightgbm_subsample_list=lightgbm_subsample_list,
+                                   lightgbm_colsample_bytree_list=lightgbm_colsample_bytree_list,
+                                   lightgbm_reg_alpha_list=lightgbm_reg_alpha_list,
+                                   lightgbm_reg_lambda_list=lightgbm_reg_lambda_list,
                                    catboost_iterations_list=catboost_iterations_list,
                                    catboost_learning_rates=catboost_learning_rates, catboost_depths=catboost_depths,
+                                   catboost_l2_leaf_reg_list=catboost_l2_leaf_reg_list,
+                                   catboost_border_count_list=catboost_border_count_list,
+                                   catboost_bagging_temperature_list=catboost_bagging_temperature_list,
+                                   catboost_random_strength_list=catboost_random_strength_list,
                                    svr_kernels=svr_kernels, svr_C_list=svr_C_list, svr_gamma_list=svr_gamma_list,
+                                   svr_epsilon_list=svr_epsilon_list, svr_degree_list=svr_degree_list,
+                                   svr_coef0_list=svr_coef0_list, svr_shrinking_list=svr_shrinking_list,
                                    mlp_hidden_layer_sizes_list=mlp_hidden_layer_sizes_list,
                                    mlp_alphas_list=mlp_alphas_list, mlp_learning_rate_inits=mlp_learning_rate_inits,
+                                   mlp_activation_list=mlp_activation_list, mlp_solver_list=mlp_solver_list,
+                                   mlp_batch_size_list=mlp_batch_size_list,
+                                   mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
+                                   mlp_momentum_list=mlp_momentum_list,
                                    tier=tier, enabled_models=enabled_models)
 
     # Filter models if models_to_test is specified
@@ -814,14 +857,94 @@ def _run_single_config(
         mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
         regional_rmse = None  # Not applicable for classification
 
+    # Extract top important variables/wavelengths
+    # Refit on full data to get feature importances
+    # IMPORTANT: Do this BEFORE building result dict so we can capture complete params
+    if supports_feature_importance(model_name):
+        try:
+            # Refit the pipeline on full data
+            pipe.fit(X, y)
+
+            # Get the fitted model from pipeline
+            fitted_model = (
+                pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
+            )
+
+            # FIX: Capture ALL parameters for XGBoost, LightGBM, and CatBoost
+            # This fixes the R² reproducibility issue by ensuring ALL parameters are saved
+            if model_name in ["XGBoost", "LightGBM", "CatBoost"]:
+                print(f"\n{'='*80}")
+                print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
+                print(f"{'='*80}")
+                try:
+                    all_params = fitted_model.get_params()
+                    print(f"ALL {model_name} parameters after training:")
+                    for key in sorted(all_params.keys()):
+                        print(f"  {key}: {all_params[key]}")
+                    print(f"\nOld params dict (incomplete - only grid search params):")
+                    print(f"  {params}")
+
+                    # CRITICAL FIX: Replace params with complete parameter set
+                    # Filter out non-serializable parameters
+                    filtered_params = {}
+                    for key, value in all_params.items():
+                        # Skip callables and complex objects
+                        if callable(value) or hasattr(value, '__dict__'):
+                            continue
+                        # Include all serializable values (including None, bool, int, float, str, etc.)
+                        try:
+                            # Test if value can be converted to string and back
+                            str(value)
+                            filtered_params[key] = value
+                        except:
+                            # Skip non-serializable values
+                            continue
+
+                    params = filtered_params  # Replace params with complete set
+
+                    print(f"\nNew params dict (complete - ALL parameters):")
+                    print(f"  {params}")
+                    print(f"{'='*80}\n")
+                except Exception as e:
+                    print(f"ERROR capturing {model_name} params: {e}\n")
+                    print(f"Continuing with original params dict\n")
+
+            # Also capture params for NeuralBoosted to ensure reproducibility
+            # Note: NeuralBoosted with early_stopping may show small variance (±0.01-0.02)
+            # due to validation split context differences between CV folds and full dataset
+            elif model_name == "NeuralBoosted":
+                try:
+                    all_params = fitted_model.get_params()
+                    filtered_params = {}
+                    for key, value in all_params.items():
+                        if not callable(value) and not hasattr(value, '__dict__'):
+                            try:
+                                str(value)
+                                filtered_params[key] = value
+                            except:
+                                continue
+                    params = filtered_params
+
+                    # Add warning if early stopping is enabled
+                    if filtered_params.get('early_stopping', False):
+                        print(f"\nNote: NeuralBoosted uses early_stopping=True. "
+                              f"R² scores may vary slightly (±0.01-0.02) between "
+                              f"Results and Development tabs due to validation split differences.\n")
+                except Exception as e:
+                    print(f"Warning: Could not capture complete NeuralBoosted params: {e}")
+
+        except Exception as e:
+            # If parameter capture fails, continue with original params
+            print(f"Warning: Could not fit model for parameter capture: {e}")
+
     # Extract LVs (for PLS models)
     lvs = params.get("n_components", np.nan)
 
-    # Build result dictionary
+    # Build result dictionary AFTER capturing complete params
     result = {
         "Task": task_type,
         "Model": model_name,
-        "Params": str(params),
+        "Params": str(params),  # Now includes complete parameter set
         "Preprocess": preprocess_cfg["name"],
         "Deriv": preprocess_cfg["deriv"],
         "Window": preprocess_cfg["window"],
@@ -842,50 +965,13 @@ def _run_single_config(
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc
 
-    # Extract top important variables/wavelengths
-    # Refit on full data to get feature importances
+    # Continue with feature importance extraction if model was already fitted above
     if supports_feature_importance(model_name):
         try:
-            # Refit the pipeline on full data
-            pipe.fit(X, y)
-
-            # Get the fitted model from pipeline
+            # Model already fitted above, get fitted_model reference
             fitted_model = (
                 pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
             )
-
-            # FIX: Capture ALL parameters for XGBoost and LightGBM
-            # This fixes the R² reproducibility issue by ensuring ALL parameters are saved
-            if model_name in ["XGBoost", "LightGBM"]:
-                print(f"\n{'='*80}")
-                print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
-                print(f"{'='*80}")
-                try:
-                    all_params = fitted_model.get_params()
-                    print(f"ALL {model_name} parameters after training:")
-                    for key in sorted(all_params.keys()):
-                        print(f"  {key}: {all_params[key]}")
-                    print(f"\nOld params dict (incomplete - only grid search params):")
-                    print(f"  {params}")
-
-                    # CRITICAL FIX: Replace params with complete parameter set
-                    # Filter out non-serializable parameters and None values
-                    filtered_params = {}
-                    for key, value in all_params.items():
-                        # Skip parameters that are objects or None (except explicitly set None values)
-                        if value is not None and not callable(value) and not hasattr(value, '__dict__'):
-                            filtered_params[key] = value
-                        elif key in params:  # Keep original grid search params even if None
-                            filtered_params[key] = value
-
-                    params = filtered_params  # Replace params with complete set
-
-                    print(f"\nNew params dict (complete - ALL parameters):")
-                    print(f"  {params}")
-                    print(f"{'='*80}\n")
-                except Exception as e:
-                    print(f"ERROR capturing {model_name} params: {e}\n")
-                    print(f"Continuing with original params dict\n")
 
             # For PLS-DA, get the PLS component
             if model_name == "PLS-DA" and hasattr(pipe, "named_steps"):

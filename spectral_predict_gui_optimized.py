@@ -241,7 +241,7 @@ class SpectralPredictApp:
         self.validation_y = None  # Stored validation target data
 
         # Tier selection
-        self.model_tier = tk.StringVar(value="standard")  # quick, standard, comprehensive, experimental, custom
+        self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
         # Model selection (original models)
@@ -318,6 +318,12 @@ class SpectralPredictApp:
         self.lr_02 = tk.BooleanVar(value=True)  # Default
         self.lr_03 = tk.BooleanVar(value=True)  # Default - OPTIMAL per empirical analysis
 
+        # NeuralBoosted subsample (fraction of samples for each boosting iteration)
+        self.neuralboosted_subsample_05 = tk.BooleanVar(value=False)  # 0.5
+        self.neuralboosted_subsample_07 = tk.BooleanVar(value=False)  # 0.7
+        self.neuralboosted_subsample_085 = tk.BooleanVar(value=False)  # 0.85
+        self.neuralboosted_subsample_10 = tk.BooleanVar(value=True)   # 1.0 ⭐ standard
+
         # Random Forest options
         self.rf_n_trees_100 = tk.BooleanVar(value=True)  # Default
         self.rf_n_trees_200 = tk.BooleanVar(value=False)
@@ -380,6 +386,21 @@ class SpectralPredictApp:
         self.xgb_reg_lambda_50 = tk.BooleanVar(value=False)  # 5.0 comprehensive
         self.xgb_reg_lambda_custom = tk.StringVar(value="")
 
+        # min_child_weight (minimum sum of instance weight in child)
+        self.xgb_min_child_weight_1 = tk.BooleanVar(value=True)  # 1 ⭐ standard
+        self.xgb_min_child_weight_3 = tk.BooleanVar(value=False)  # 3 comprehensive
+        self.xgb_min_child_weight_5 = tk.BooleanVar(value=False)  # 5 comprehensive
+        self.xgb_min_child_weight_7 = tk.BooleanVar(value=False)  # 7 comprehensive
+        self.xgb_min_child_weight_custom = tk.StringVar(value="")
+
+        # gamma (minimum loss reduction for split)
+        self.xgb_gamma_0 = tk.BooleanVar(value=True)  # 0 ⭐ standard
+        self.xgb_gamma_01 = tk.BooleanVar(value=False)  # 0.1 comprehensive
+        self.xgb_gamma_03 = tk.BooleanVar(value=False)  # 0.3 comprehensive
+        self.xgb_gamma_05 = tk.BooleanVar(value=False)  # 0.5 comprehensive
+        self.xgb_gamma_10 = tk.BooleanVar(value=False)  # 1.0 comprehensive
+        self.xgb_gamma_custom = tk.StringVar(value="")
+
         # ElasticNet Hyperparameters
         # alpha (regularization strength)
         self.elasticnet_alpha_001 = tk.BooleanVar(value=True)   # 0.01 ⭐ standard
@@ -393,20 +414,80 @@ class SpectralPredictApp:
         self.elasticnet_l1_ratio_07 = tk.BooleanVar(value=True)  # 0.7 ⭐ standard
         self.elasticnet_l1_ratio_custom = tk.StringVar(value="")
 
+        # PLS Hyperparameters
+        # max_iter (maximum number of iterations)
+        self.pls_max_iter_500 = tk.BooleanVar(value=True)   # 500 ⭐ standard (default)
+        self.pls_max_iter_1000 = tk.BooleanVar(value=False)  # 1000 comprehensive
+        self.pls_max_iter_custom = tk.StringVar(value="")
+
+        # tol (convergence tolerance)
+        self.pls_tol_1e7 = tk.BooleanVar(value=False)  # 1e-7 comprehensive
+        self.pls_tol_1e6 = tk.BooleanVar(value=True)   # 1e-6 ⭐ standard (default)
+        self.pls_tol_1e5 = tk.BooleanVar(value=False)  # 1e-5 comprehensive
+        self.pls_tol_custom = tk.StringVar(value="")
+
         # LightGBM Hyperparameters
         # n_estimators
-        self.lightgbm_n_estimators_100 = tk.BooleanVar(value=True)  # ⭐ standard
-        self.lightgbm_n_estimators_200 = tk.BooleanVar(value=True)  # ⭐ standard
+        self.lightgbm_n_estimators_50 = tk.BooleanVar(value=False)  # 50 comprehensive
+        self.lightgbm_n_estimators_100 = tk.BooleanVar(value=True)  # 100 ⭐ standard
+        self.lightgbm_n_estimators_200 = tk.BooleanVar(value=True)  # 200 ⭐ standard
         self.lightgbm_n_estimators_custom = tk.StringVar(value="")
 
         # learning_rate
+        self.lightgbm_lr_005 = tk.BooleanVar(value=False)  # 0.05 comprehensive
         self.lightgbm_lr_01 = tk.BooleanVar(value=True)  # 0.1 ⭐ standard
+        self.lightgbm_lr_02 = tk.BooleanVar(value=False)  # 0.2 comprehensive
         self.lightgbm_lr_custom = tk.StringVar(value="")
 
         # num_leaves (max number of leaves per tree)
         self.lightgbm_num_leaves_31 = tk.BooleanVar(value=True)  # 31 ⭐ standard (default)
         self.lightgbm_num_leaves_50 = tk.BooleanVar(value=True)  # 50 ⭐ standard
+        self.lightgbm_num_leaves_70 = tk.BooleanVar(value=False)  # 70 comprehensive
         self.lightgbm_num_leaves_custom = tk.StringVar(value="")
+
+        # max_depth (maximum tree depth, -1 = no limit)
+        self.lightgbm_max_depth_m1 = tk.BooleanVar(value=True)  # -1 ⭐ standard (no limit)
+        self.lightgbm_max_depth_5 = tk.BooleanVar(value=False)  # 5
+        self.lightgbm_max_depth_10 = tk.BooleanVar(value=False)  # 10
+        self.lightgbm_max_depth_20 = tk.BooleanVar(value=False)  # 20
+        self.lightgbm_max_depth_50 = tk.BooleanVar(value=False)  # 50
+        self.lightgbm_max_depth_custom = tk.StringVar(value="")
+
+        # min_child_samples (minimum samples required in a leaf)
+        self.lightgbm_min_child_samples_5 = tk.BooleanVar(value=False)  # 5
+        self.lightgbm_min_child_samples_10 = tk.BooleanVar(value=False)  # 10
+        self.lightgbm_min_child_samples_20 = tk.BooleanVar(value=True)  # 20 ⭐ standard
+        self.lightgbm_min_child_samples_50 = tk.BooleanVar(value=False)  # 50
+        self.lightgbm_min_child_samples_100 = tk.BooleanVar(value=False)  # 100
+        self.lightgbm_min_child_samples_custom = tk.StringVar(value="")
+
+        # subsample (fraction of data to use for each tree)
+        self.lightgbm_subsample_05 = tk.BooleanVar(value=False)  # 0.5
+        self.lightgbm_subsample_07 = tk.BooleanVar(value=False)  # 0.7
+        self.lightgbm_subsample_085 = tk.BooleanVar(value=False)  # 0.85
+        self.lightgbm_subsample_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard (no subsampling)
+        self.lightgbm_subsample_custom = tk.StringVar(value="")
+
+        # colsample_bytree (fraction of features to use per tree)
+        self.lightgbm_colsample_bytree_05 = tk.BooleanVar(value=False)  # 0.5
+        self.lightgbm_colsample_bytree_07 = tk.BooleanVar(value=False)  # 0.7
+        self.lightgbm_colsample_bytree_085 = tk.BooleanVar(value=False)  # 0.85
+        self.lightgbm_colsample_bytree_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard (all features)
+        self.lightgbm_colsample_bytree_custom = tk.StringVar(value="")
+
+        # reg_alpha (L1 regularization)
+        self.lightgbm_reg_alpha_00 = tk.BooleanVar(value=True)  # 0.0 ⭐ standard (no L1)
+        self.lightgbm_reg_alpha_01 = tk.BooleanVar(value=False)  # 0.1
+        self.lightgbm_reg_alpha_05 = tk.BooleanVar(value=False)  # 0.5
+        self.lightgbm_reg_alpha_10 = tk.BooleanVar(value=False)  # 1.0
+        self.lightgbm_reg_alpha_custom = tk.StringVar(value="")
+
+        # reg_lambda (L2 regularization)
+        self.lightgbm_reg_lambda_00 = tk.BooleanVar(value=True)  # 0.0 ⭐ standard (no L2)
+        self.lightgbm_reg_lambda_05 = tk.BooleanVar(value=False)  # 0.5
+        self.lightgbm_reg_lambda_10 = tk.BooleanVar(value=False)  # 1.0
+        self.lightgbm_reg_lambda_20 = tk.BooleanVar(value=False)  # 2.0
+        self.lightgbm_reg_lambda_custom = tk.StringVar(value="")
 
         # CatBoost Hyperparameters
         # iterations (equivalent to n_estimators)
@@ -423,6 +504,34 @@ class SpectralPredictApp:
         self.catboost_depth_6 = tk.BooleanVar(value=True)  # 6 ⭐ standard
         self.catboost_depth_custom = tk.StringVar(value="")
 
+        # l2_leaf_reg (L2 leaf regularization)
+        self.catboost_l2_leaf_reg_10 = tk.BooleanVar(value=False)  # 1.0
+        self.catboost_l2_leaf_reg_30 = tk.BooleanVar(value=True)  # 3.0 ⭐ standard
+        self.catboost_l2_leaf_reg_100 = tk.BooleanVar(value=False)  # 10.0
+        self.catboost_l2_leaf_reg_300 = tk.BooleanVar(value=False)  # 30.0
+        self.catboost_l2_leaf_reg_custom = tk.StringVar(value="")
+
+        # border_count (number of splits for numerical features)
+        self.catboost_border_count_32 = tk.BooleanVar(value=False)  # 32
+        self.catboost_border_count_64 = tk.BooleanVar(value=False)  # 64
+        self.catboost_border_count_128 = tk.BooleanVar(value=False)  # 128
+        self.catboost_border_count_254 = tk.BooleanVar(value=True)  # 254 ⭐ standard
+        self.catboost_border_count_custom = tk.StringVar(value="")
+
+        # bagging_temperature (Bayesian bagging intensity)
+        self.catboost_bagging_temperature_00 = tk.BooleanVar(value=False)  # 0.0
+        self.catboost_bagging_temperature_05 = tk.BooleanVar(value=False)  # 0.5
+        self.catboost_bagging_temperature_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard
+        self.catboost_bagging_temperature_30 = tk.BooleanVar(value=False)  # 3.0
+        self.catboost_bagging_temperature_custom = tk.StringVar(value="")
+
+        # random_strength (randomness for scoring splits)
+        self.catboost_random_strength_05 = tk.BooleanVar(value=False)  # 0.5
+        self.catboost_random_strength_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard
+        self.catboost_random_strength_20 = tk.BooleanVar(value=False)  # 2.0
+        self.catboost_random_strength_50 = tk.BooleanVar(value=False)  # 5.0
+        self.catboost_random_strength_custom = tk.StringVar(value="")
+
         # SVR Hyperparameters
         # kernel type
         self.svr_kernel_rbf = tk.BooleanVar(value=True)     # RBF ⭐ standard
@@ -438,6 +547,29 @@ class SpectralPredictApp:
         self.svr_gamma_auto = tk.BooleanVar(value=False)  # 'auto' comprehensive
         self.svr_gamma_custom = tk.StringVar(value="")
 
+        # epsilon (width of epsilon-insensitive tube)
+        self.svr_epsilon_001 = tk.BooleanVar(value=False)  # 0.01
+        self.svr_epsilon_005 = tk.BooleanVar(value=False)  # 0.05
+        self.svr_epsilon_01 = tk.BooleanVar(value=True)    # 0.1 ⭐ standard
+        self.svr_epsilon_02 = tk.BooleanVar(value=False)   # 0.2
+        self.svr_epsilon_05 = tk.BooleanVar(value=False)   # 0.5
+
+        # degree (for polynomial kernel)
+        self.svr_degree_2 = tk.BooleanVar(value=False)
+        self.svr_degree_3 = tk.BooleanVar(value=True)  # 3 ⭐ standard
+        self.svr_degree_4 = tk.BooleanVar(value=False)
+        self.svr_degree_5 = tk.BooleanVar(value=False)
+
+        # coef0 (independent term in kernel function)
+        self.svr_coef0_00 = tk.BooleanVar(value=True)  # 0.0 ⭐ standard
+        self.svr_coef0_05 = tk.BooleanVar(value=False)  # 0.5
+        self.svr_coef0_10 = tk.BooleanVar(value=False)  # 1.0
+        self.svr_coef0_20 = tk.BooleanVar(value=False)  # 2.0
+
+        # shrinking (use shrinking heuristic)
+        self.svr_shrinking_true = tk.BooleanVar(value=True)  # True ⭐ standard
+        self.svr_shrinking_false = tk.BooleanVar(value=False)  # False
+
         # MLP Hyperparameters
         # hidden_layer_sizes (neural network architecture)
         self.mlp_hidden_64 = tk.BooleanVar(value=True)      # (64,) ⭐ standard - 1 layer
@@ -451,6 +583,36 @@ class SpectralPredictApp:
         # learning_rate_init (initial learning rate)
         self.mlp_lr_init_1e3 = tk.BooleanVar(value=True)  # 0.001 ⭐ standard
         self.mlp_lr_init_custom = tk.StringVar(value="")
+
+        # activation function
+        self.mlp_activation_relu = tk.BooleanVar(value=True)  # relu ⭐ standard
+        self.mlp_activation_tanh = tk.BooleanVar(value=False)
+        self.mlp_activation_logistic = tk.BooleanVar(value=False)
+        self.mlp_activation_identity = tk.BooleanVar(value=False)
+
+        # solver (weight optimization)
+        self.mlp_solver_adam = tk.BooleanVar(value=True)  # adam ⭐ standard
+        self.mlp_solver_sgd = tk.BooleanVar(value=False)
+        self.mlp_solver_lbfgs = tk.BooleanVar(value=False)
+
+        # batch_size
+        self.mlp_batch_auto = tk.BooleanVar(value=True)  # 'auto' ⭐ standard
+        self.mlp_batch_32 = tk.BooleanVar(value=False)
+        self.mlp_batch_64 = tk.BooleanVar(value=False)
+        self.mlp_batch_128 = tk.BooleanVar(value=False)
+        self.mlp_batch_256 = tk.BooleanVar(value=False)
+
+        # learning_rate_schedule
+        self.mlp_lr_schedule_constant = tk.BooleanVar(value=True)  # constant ⭐ standard
+        self.mlp_lr_schedule_invscaling = tk.BooleanVar(value=False)
+        self.mlp_lr_schedule_adaptive = tk.BooleanVar(value=False)
+
+        # momentum (for SGD solver)
+        self.mlp_momentum_07 = tk.BooleanVar(value=False)
+        self.mlp_momentum_08 = tk.BooleanVar(value=False)
+        self.mlp_momentum_09 = tk.BooleanVar(value=True)  # 0.9 ⭐ standard
+        self.mlp_momentum_095 = tk.BooleanVar(value=False)
+        self.mlp_momentum_099 = tk.BooleanVar(value=False)
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -788,7 +950,7 @@ class SpectralPredictApp:
 
         # Entry and input styling - stronger borders for better definition
         style.configure('TEntry',
-                       fieldbackground=self.colors['panel'],
+                       fieldbackground=self.colors['card_bg'],
                        foreground=self.colors['text'],
                        borderwidth=2,
                        relief='solid',
@@ -1077,6 +1239,7 @@ class SpectralPredictApp:
                        bg=self.colors['accent'],  # Colored background
                        activeforeground=self.colors['text_inverse'],
                        activebackground=self.colors['accent_dark'],
+                       disabledforeground=self.colors['text_inverse'],  # Keep white text when disabled
                        relief='flat',
                        borderwidth=0,
                        padx=20,
@@ -1504,9 +1667,23 @@ class SpectralPredictApp:
         self.tab1 = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.tab1, text='  📁 Import & Preview  ')
 
+        # Create notebook for subtabs
+        self.import_notebook = ttk.Notebook(self.tab1)
+        self.import_notebook.pack(fill='both', expand=True)
+
+        # Create subtabs
+        self._create_tab1a_data()
+        self._create_tab1b_plots()
+
+    def _create_tab1a_data(self):
+        """Subtab 1A: Data - Data loading and configuration."""
+        # Create subtab frame with scrolling
+        tab1a = ttk.Frame(self.import_notebook, style='TFrame')
+        self.import_notebook.add(tab1a, text='  📂 Data  ')
+
         # Create canvas for scrolling
-        canvas = tk.Canvas(self.tab1, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab1, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(tab1a, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab1a, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab1", canvas))
@@ -1517,10 +1694,6 @@ class SpectralPredictApp:
         scrollbar.pack(side="right", fill="y")
 
         row = 0
-
-        # Title
-        ttk.Label(content_frame, text="Import & Preview", style='Title.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 20))
-        row += 1
 
         # === SECTION 1: Input Data ===
         self._create_section_header(content_frame, "1. Input Data", row=row, columnspan=3)
@@ -1679,19 +1852,25 @@ class SpectralPredictApp:
         ttk.Label(exclusion_subframe, text="(Click spectra in plots to toggle)",
                  style='Caption.TLabel').pack(side=tk.LEFT, padx=10)
 
-        # === Plotting Area ===
-        ttk.Label(content_frame, text="Spectral Plots", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(20, 10))
-        row += 1
+    def _create_tab1b_plots(self):
+        """Subtab 1B: Plots - Spectral visualization."""
+        # Create subtab frame
+        tab1b = ttk.Frame(self.import_notebook, style='TFrame')
+        self.import_notebook.add(tab1b, text='  📊 Plots  ')
+
+        # Main container with padding
+        content_frame = ttk.Frame(tab1b, style='TFrame', padding="30")
+        content_frame.pack(fill='both', expand=True)
 
         # Create sub-notebook for plots
         self.plot_notebook = ttk.Notebook(content_frame)
-        self.plot_notebook.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
-        content_frame.grid_rowconfigure(row, weight=1)
+        self.plot_notebook.pack(fill='both', expand=True, pady=10)
 
         # Placeholder for plots
         placeholder = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(placeholder, text="Load data to see plots")
-        ttk.Label(placeholder, text="Load data to generate spectral plots", style='Caption.TLabel').pack(expand=True)
+        ttk.Label(placeholder, text="Load data in the Data subtab to generate spectral plots",
+                 style='Caption.TLabel').pack(expand=True)
 
     def _create_tab2_data_viewer(self):
         """Tab 2: Data Viewer - Excel-like spreadsheet view with smooth scrolling."""
@@ -1702,9 +1881,6 @@ class SpectralPredictApp:
 
         content_frame = ttk.Frame(self.tab2, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
-
-        # Title
-        ttk.Label(content_frame, text="Data Viewer", style='Title.TLabel').pack(anchor=tk.W, pady=(0, 10))
 
         # Instructions
         instructions = ttk.Label(content_frame,
@@ -1790,10 +1966,6 @@ class SpectralPredictApp:
         scrollbar.pack(side="right", fill="y")
 
         row = 0
-
-        # Title
-        ttk.Label(content_frame, text="Data Quality Check", style='Title.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 20))
-        row += 1
 
         # === SECTION 1: Controls ===
         ttk.Label(content_frame, text="1. Outlier Detection Parameters", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
@@ -1938,10 +2110,9 @@ class SpectralPredictApp:
         self.tab4 = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.tab4, text='  ⚙️ Analysis Configuration  ')
 
-        # Create header with title
+        # Create header with subtitle
         header_frame = ttk.Frame(self.tab4, style='TFrame', padding="20 20 20 10")
         header_frame.pack(fill='x')
-        ttk.Label(header_frame, text="Analysis Configuration", style='Title.TLabel').pack(anchor=tk.W)
         ttk.Label(header_frame, text="Configure all analysis settings organized into logical sections",
                  style='Caption.TLabel').pack(anchor=tk.W, pady=(5, 0))
 
@@ -2256,7 +2427,7 @@ class SpectralPredictApp:
         tier_options_frame.grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=5)
 
         ttk.Radiobutton(tier_options_frame, text="⚡ Quick", variable=self.model_tier, value="quick").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Radiobutton(tier_options_frame, text="⭐ Standard [DEFAULT]", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(tier_options_frame, text="⭐ Standard", variable=self.model_tier, value="standard").grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="🔬 Comprehensive", variable=self.model_tier, value="comprehensive").grid(row=0, column=2, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="🧪 Experimental", variable=self.model_tier, value="experimental").grid(row=0, column=3, sticky=tk.W, padx=5)
         ttk.Radiobutton(tier_options_frame, text="⚙️ Custom", variable=self.model_tier, value="custom").grid(row=0, column=4, sticky=tk.W, padx=5)
@@ -2366,9 +2537,21 @@ class SpectralPredictApp:
         ttk.Checkbutton(lr_frame, text="0.3 ⭐", variable=self.lr_03).grid(row=0, column=3, padx=5)
         ttk.Label(lr_frame, text="(default: 0.1, 0.2, 0.3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
+        # Subsample options
+        ttk.Label(advanced_content, text="Subsample (fraction of samples per iteration):", style='Subheading.TLabel').grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        subsample_frame = ttk.Frame(advanced_content)
+        subsample_frame.grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Checkbutton(subsample_frame, text="0.5", variable=self.neuralboosted_subsample_05).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(subsample_frame, text="0.7", variable=self.neuralboosted_subsample_07).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(subsample_frame, text="0.85", variable=self.neuralboosted_subsample_085).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(subsample_frame, text="1.0 ⭐", variable=self.neuralboosted_subsample_10).grid(row=0, column=3, padx=5)
+        ttk.Label(subsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
         # Info label
         ttk.Label(advanced_content, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        ttk.Label(advanced_content, text="💡 Subsample < 1.0 adds randomness (stochastic gradient boosting) to prevent overfitting",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Random Forest Hyperparameters - collapsible
         rf_section, rf_content = self._create_collapsible_section(content_frame,
@@ -2416,6 +2599,83 @@ class SpectralPredictApp:
         # Info label for max_depth
         ttk.Label(rf_content_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # === NEW PHASE 1 HYPERPARAMETERS ===
+        # Create wrapper frame for pack-based controls (rf_content_frame uses grid)
+        rf_advanced_params_wrapper = ttk.Frame(rf_content_frame)
+        rf_advanced_params_wrapper.grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 0))
+
+        # min_samples_split
+        self.rf_min_samples_split_control = self._create_parameter_grid_control(
+            rf_advanced_params_wrapper,
+            param_name='min_samples_split',
+            param_label='Minimum Samples to Split (min_samples_split):',
+            checkbox_values=[2, 5, 10, 20],
+            default_checked=[2],
+            is_float=False,
+            allow_string_values=False,
+            help_text="Minimum samples required to split an internal node"
+        )
+
+        # min_samples_leaf
+        self.rf_min_samples_leaf_control = self._create_parameter_grid_control(
+            rf_advanced_params_wrapper,
+            param_name='min_samples_leaf',
+            param_label='Minimum Samples in Leaf (min_samples_leaf):',
+            checkbox_values=[1, 2, 4, 8],
+            default_checked=[1],
+            is_float=False,
+            allow_string_values=False,
+            help_text="Minimum samples required in each leaf node"
+        )
+
+        # max_features
+        self.rf_max_features_control = self._create_parameter_grid_control(
+            rf_advanced_params_wrapper,
+            param_name='max_features',
+            param_label='Max Features for Splits (max_features):',
+            checkbox_values=['sqrt', 'log2', None],
+            default_checked=['sqrt'],
+            is_float=False,
+            allow_string_values=True,
+            help_text="sqrt = square root of features, log2 = log2 of features, None = all features"
+        )
+
+        # bootstrap
+        self.rf_bootstrap_control = self._create_parameter_grid_control(
+            rf_advanced_params_wrapper,
+            param_name='bootstrap',
+            param_label='Bootstrap Sampling (bootstrap):',
+            checkbox_values=[True, False],
+            default_checked=[True],
+            is_float=False,
+            allow_string_values=True,
+            help_text="Whether to use bootstrap samples when building trees"
+        )
+
+        # max_leaf_nodes
+        self.rf_max_leaf_nodes_control = self._create_parameter_grid_control(
+            rf_advanced_params_wrapper,
+            param_name='max_leaf_nodes',
+            param_label='Max Leaf Nodes (max_leaf_nodes):',
+            checkbox_values=[None, 10, 50, 100, 500],
+            default_checked=[None],
+            is_float=False,
+            allow_string_values=False,
+            help_text="Limits tree growth, None = unlimited"
+        )
+
+        # min_impurity_decrease
+        self.rf_min_impurity_decrease_control = self._create_parameter_grid_control(
+            rf_advanced_params_wrapper,
+            param_name='min_impurity_decrease',
+            param_label='Min Impurity Decrease (min_impurity_decrease):',
+            checkbox_values=[0.0, 0.01, 0.05, 0.1],
+            default_checked=[0.0],
+            is_float=True,
+            allow_string_values=False,
+            help_text="Minimum impurity decrease required to split a node"
+        )
 
         # Ridge Regression Hyperparameters - collapsible
         ridge_section, ridge_content = self._create_collapsible_section(content_frame,
@@ -2483,6 +2743,97 @@ class SpectralPredictApp:
         # Info label
         ttk.Label(lasso_content_frame, text="💡 Lasso encourages sparse solutions (sets weak coefficients to zero). Higher alpha = more sparsity.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+
+        # ElasticNet Hyperparameters - collapsible
+        elasticnet_section, elasticnet_content = self._create_collapsible_section(content_frame,
+                                                                                   "ElasticNet Hyperparameters",
+                                                                                   expanded=False)
+        elasticnet_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        elasticnet_card_outer, elasticnet_frame = self._create_card(elasticnet_content,
+                                                                     subtitle="Configure alpha and L1/L2 ratio")
+        elasticnet_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout
+        elasticnet_content_frame = ttk.Frame(elasticnet_frame)
+        elasticnet_content_frame.pack(fill='both', expand=True)
+
+        # Alpha (regularization strength) options
+        ttk.Label(elasticnet_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        elasticnet_alpha_frame = ttk.Frame(elasticnet_content_frame)
+        elasticnet_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(elasticnet_alpha_frame, text="0.01 ⭐", variable=self.elasticnet_alpha_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(elasticnet_alpha_frame, text="0.1 ⭐", variable=self.elasticnet_alpha_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(elasticnet_alpha_frame, text="1.0 ⭐", variable=self.elasticnet_alpha_10).grid(row=0, column=2, padx=5)
+        ttk.Label(elasticnet_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(elasticnet_alpha_frame, textvariable=self.elasticnet_alpha_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(elasticnet_alpha_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # L1 ratio options
+        ttk.Label(elasticnet_content_frame, text="L1 Ratio (L1 vs L2 mix):", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        elasticnet_l1_frame = ttk.Frame(elasticnet_content_frame)
+        elasticnet_l1_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(elasticnet_l1_frame, text="0.3 ⭐", variable=self.elasticnet_l1_ratio_03).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(elasticnet_l1_frame, text="0.5 ⭐", variable=self.elasticnet_l1_ratio_05).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(elasticnet_l1_frame, text="0.7 ⭐", variable=self.elasticnet_l1_ratio_07).grid(row=0, column=2, padx=5)
+        ttk.Label(elasticnet_l1_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(elasticnet_l1_frame, textvariable=self.elasticnet_l1_ratio_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(elasticnet_l1_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # Info labels
+        ttk.Label(elasticnet_content_frame, text="💡 ElasticNet combines Ridge (L2) and Lasso (L1) regularization.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+        ttk.Label(elasticnet_content_frame, text="   L1 ratio: 0.0=Ridge only, 0.5=balanced, 1.0=Lasso only",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
+
+        # PLS Hyperparameters - collapsible
+        pls_section, pls_content = self._create_collapsible_section(content_frame,
+                                                                     "PLS Hyperparameters",
+                                                                     expanded=False)
+        pls_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        pls_card_outer, pls_frame = self._create_card(pls_content,
+                                                       subtitle="Configure convergence parameters")
+        pls_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout
+        pls_content_frame = ttk.Frame(pls_frame)
+        pls_content_frame.pack(fill='both', expand=True)
+
+        # max_iter options
+        ttk.Label(pls_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        pls_maxiter_frame = ttk.Frame(pls_content_frame)
+        pls_maxiter_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(pls_maxiter_frame, text="500 ⭐", variable=self.pls_max_iter_500).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(pls_maxiter_frame, text="1000", variable=self.pls_max_iter_1000).grid(row=0, column=1, padx=5)
+        ttk.Label(pls_maxiter_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(pls_maxiter_frame, textvariable=self.pls_max_iter_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(pls_maxiter_frame, text="(default: 500)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # tol options
+        ttk.Label(pls_content_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        pls_tol_frame = ttk.Frame(pls_content_frame)
+        pls_tol_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(pls_tol_frame, text="1e-7", variable=self.pls_tol_1e7).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(pls_tol_frame, text="1e-6 ⭐", variable=self.pls_tol_1e6).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(pls_tol_frame, text="1e-5", variable=self.pls_tol_1e5).grid(row=0, column=2, padx=5)
+        ttk.Label(pls_tol_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(pls_tol_frame, textvariable=self.pls_tol_custom, width=15).grid(row=0, column=4, padx=5)
+        ttk.Label(pls_tol_frame, text="(default: 1e-6)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # Info labels
+        ttk.Label(pls_content_frame, text="💡 max_iter controls convergence speed, tol controls precision.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+        ttk.Label(pls_content_frame, text="   Standard defaults (500, 1e-6) work well for most spectral data.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
 
         # XGBoost Hyperparameters - collapsible
         xgb_section, xgb_content = self._create_collapsible_section(content_frame,
@@ -2599,6 +2950,375 @@ class SpectralPredictApp:
 
         ttk.Label(xgb_content_frame, text="💡 L2 penalty reduces weight magnitudes. Use with L1 for combined regularization (ElasticNet-style).",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # min_child_weight (minimum sum of instance weight in child)
+        ttk.Label(xgb_content_frame, text="Minimum Child Weight (min_child_weight):", style='Subheading.TLabel').grid(row=21, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_min_child_weight_frame = ttk.Frame(xgb_content_frame)
+        xgb_min_child_weight_frame.grid(row=22, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_min_child_weight_frame, text="1 ⭐", variable=self.xgb_min_child_weight_1).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_min_child_weight_frame, text="3", variable=self.xgb_min_child_weight_3).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(xgb_min_child_weight_frame, text="5", variable=self.xgb_min_child_weight_5).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(xgb_min_child_weight_frame, text="7", variable=self.xgb_min_child_weight_7).grid(row=0, column=3, padx=5)
+        ttk.Label(xgb_min_child_weight_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(xgb_min_child_weight_frame, textvariable=self.xgb_min_child_weight_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(xgb_min_child_weight_frame, text="(default: 1)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        ttk.Label(xgb_content_frame, text="💡 Larger values prevent overfitting by requiring more instances per leaf",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=23, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # gamma (minimum loss reduction required for split)
+        ttk.Label(xgb_content_frame, text="Gamma (minimum loss reduction):", style='Subheading.TLabel').grid(row=24, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        xgb_gamma_frame = ttk.Frame(xgb_content_frame)
+        xgb_gamma_frame.grid(row=25, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(xgb_gamma_frame, text="0 ⭐", variable=self.xgb_gamma_0).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(xgb_gamma_frame, text="0.1", variable=self.xgb_gamma_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(xgb_gamma_frame, text="0.3", variable=self.xgb_gamma_03).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(xgb_gamma_frame, text="0.5", variable=self.xgb_gamma_05).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(xgb_gamma_frame, text="1.0", variable=self.xgb_gamma_10).grid(row=0, column=4, padx=5)
+        ttk.Label(xgb_gamma_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(xgb_gamma_frame, textvariable=self.xgb_gamma_custom, width=10).grid(row=0, column=6, padx=5)
+        ttk.Label(xgb_gamma_frame, text="(default: 0)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
+
+        ttk.Label(xgb_content_frame, text="💡 Regularization parameter, higher = more conservative",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=26, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # LightGBM Hyperparameters - collapsible
+        lgbm_section, lgbm_content = self._create_collapsible_section(content_frame,
+                                                                       "LightGBM Hyperparameters (Fast Gradient Boosting)",
+                                                                       expanded=False)
+        lgbm_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        lgbm_card_outer, lgbm_frame = self._create_card(lgbm_content,
+                                                         subtitle="Comprehensive hyperparameter tuning for LightGBM")
+        lgbm_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout (card uses pack internally)
+        lgbm_content_frame = ttk.Frame(lgbm_frame)
+        lgbm_content_frame.pack(fill='both', expand=True)
+
+        # max_depth (maximum tree depth)
+        ttk.Label(lgbm_content_frame, text="Maximum Tree Depth (max_depth):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        lgbm_max_depth_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_max_depth_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_max_depth_frame, text="-1 ⭐", variable=self.lightgbm_max_depth_m1).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_max_depth_frame, text="5", variable=self.lightgbm_max_depth_5).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_max_depth_frame, text="10", variable=self.lightgbm_max_depth_10).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_max_depth_frame, text="20", variable=self.lightgbm_max_depth_20).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(lgbm_max_depth_frame, text="50", variable=self.lightgbm_max_depth_50).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_max_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(lgbm_max_depth_frame, textvariable=self.lightgbm_max_depth_custom, width=10).grid(row=0, column=6, padx=5)
+        ttk.Label(lgbm_max_depth_frame, text="(default: -1)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
+
+        ttk.Label(lgbm_content_frame, text="💡 -1 means no limit",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # min_child_samples (minimum data in one leaf)
+        ttk.Label(lgbm_content_frame, text="Minimum Data in One Leaf (min_child_samples):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_min_child_samples_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_min_child_samples_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="5", variable=self.lightgbm_min_child_samples_5).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="10", variable=self.lightgbm_min_child_samples_10).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="20 ⭐", variable=self.lightgbm_min_child_samples_20).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="50", variable=self.lightgbm_min_child_samples_50).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="100", variable=self.lightgbm_min_child_samples_100).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_min_child_samples_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(lgbm_min_child_samples_frame, textvariable=self.lightgbm_min_child_samples_custom, width=10).grid(row=0, column=6, padx=5)
+        ttk.Label(lgbm_min_child_samples_frame, text="(default: 20)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
+
+        # subsample (row sampling, aka bagging_fraction)
+        ttk.Label(lgbm_content_frame, text="Row Sampling (subsample / bagging_fraction):", style='Subheading.TLabel').grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_subsample_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_subsample_frame.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_subsample_frame, text="0.5", variable=self.lightgbm_subsample_05).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_subsample_frame, text="0.7", variable=self.lightgbm_subsample_07).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_subsample_frame, text="0.85", variable=self.lightgbm_subsample_085).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_subsample_frame, text="1.0 ⭐", variable=self.lightgbm_subsample_10).grid(row=0, column=3, padx=5)
+        ttk.Label(lgbm_subsample_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lgbm_subsample_frame, textvariable=self.lightgbm_subsample_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(lgbm_subsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        ttk.Label(lgbm_content_frame, text="💡 Also called bagging_fraction",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # colsample_bytree (feature sampling, aka feature_fraction)
+        ttk.Label(lgbm_content_frame, text="Feature Sampling (colsample_bytree / feature_fraction):", style='Subheading.TLabel').grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_colsample_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_colsample_frame.grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_colsample_frame, text="0.5", variable=self.lightgbm_colsample_bytree_05).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_colsample_frame, text="0.7", variable=self.lightgbm_colsample_bytree_07).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_colsample_frame, text="0.85", variable=self.lightgbm_colsample_bytree_085).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_colsample_frame, text="1.0 ⭐", variable=self.lightgbm_colsample_bytree_10).grid(row=0, column=3, padx=5)
+        ttk.Label(lgbm_colsample_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lgbm_colsample_frame, textvariable=self.lightgbm_colsample_bytree_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(lgbm_colsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        ttk.Label(lgbm_content_frame, text="💡 Also called feature_fraction",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # reg_alpha (L1 regularization)
+        ttk.Label(lgbm_content_frame, text="L1 Regularization (reg_alpha):", style='Subheading.TLabel').grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_reg_alpha_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_reg_alpha_frame.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.0 ⭐", variable=self.lightgbm_reg_alpha_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.1", variable=self.lightgbm_reg_alpha_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.5", variable=self.lightgbm_reg_alpha_05).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_reg_alpha_frame, text="1.0", variable=self.lightgbm_reg_alpha_10).grid(row=0, column=3, padx=5)
+        ttk.Label(lgbm_reg_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lgbm_reg_alpha_frame, textvariable=self.lightgbm_reg_alpha_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(lgbm_reg_alpha_frame, text="(default: 0.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        # reg_lambda (L2 regularization)
+        ttk.Label(lgbm_content_frame, text="L2 Regularization (reg_lambda):", style='Subheading.TLabel').grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_reg_lambda_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_reg_lambda_frame.grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_reg_lambda_frame, text="0.0 ⭐", variable=self.lightgbm_reg_lambda_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_reg_lambda_frame, text="0.5", variable=self.lightgbm_reg_lambda_05).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_reg_lambda_frame, text="1.0", variable=self.lightgbm_reg_lambda_10).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_reg_lambda_frame, text="2.0", variable=self.lightgbm_reg_lambda_20).grid(row=0, column=3, padx=5)
+        ttk.Label(lgbm_reg_lambda_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lgbm_reg_lambda_frame, textvariable=self.lightgbm_reg_lambda_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(lgbm_reg_lambda_frame, text="(default: 0.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        # CatBoost Hyperparameters - collapsible
+        catboost_section, catboost_content = self._create_collapsible_section(content_frame,
+                                                                               "CatBoost Hyperparameters (Yandex Gradient Boosting)",
+                                                                               expanded=False)
+        catboost_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        catboost_card_outer, catboost_frame = self._create_card(catboost_content,
+                                                                  subtitle="Comprehensive hyperparameter tuning for CatBoost")
+        catboost_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout (card uses pack internally)
+        catboost_content_frame = ttk.Frame(catboost_frame)
+        catboost_content_frame.pack(fill='both', expand=True)
+
+        # l2_leaf_reg (L2 regularization coefficient)
+        ttk.Label(catboost_content_frame, text="L2 Leaf Regularization (l2_leaf_reg):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        catboost_l2_leaf_reg_frame = ttk.Frame(catboost_content_frame)
+        catboost_l2_leaf_reg_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_l2_leaf_reg_frame, text="1.0", variable=self.catboost_l2_leaf_reg_10).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_l2_leaf_reg_frame, text="3.0 ⭐", variable=self.catboost_l2_leaf_reg_30).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(catboost_l2_leaf_reg_frame, text="10.0", variable=self.catboost_l2_leaf_reg_100).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(catboost_l2_leaf_reg_frame, text="30.0", variable=self.catboost_l2_leaf_reg_300).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_l2_leaf_reg_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(catboost_l2_leaf_reg_frame, textvariable=self.catboost_l2_leaf_reg_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(catboost_l2_leaf_reg_frame, text="(default: 3.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        # border_count (number of splits for numerical features)
+        ttk.Label(catboost_content_frame, text="Border Count (border_count):", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_border_count_frame = ttk.Frame(catboost_content_frame)
+        catboost_border_count_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_border_count_frame, text="32", variable=self.catboost_border_count_32).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_border_count_frame, text="64", variable=self.catboost_border_count_64).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(catboost_border_count_frame, text="128", variable=self.catboost_border_count_128).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(catboost_border_count_frame, text="254 ⭐", variable=self.catboost_border_count_254).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_border_count_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(catboost_border_count_frame, textvariable=self.catboost_border_count_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(catboost_border_count_frame, text="(default: 254)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        ttk.Label(catboost_content_frame, text="💡 Higher = more precise but slower",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # bagging_temperature (Bayesian bagging intensity)
+        ttk.Label(catboost_content_frame, text="Bagging Temperature (bagging_temperature):", style='Subheading.TLabel').grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_bagging_temp_frame = ttk.Frame(catboost_content_frame)
+        catboost_bagging_temp_frame.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_bagging_temp_frame, text="0.0", variable=self.catboost_bagging_temperature_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_bagging_temp_frame, text="0.5", variable=self.catboost_bagging_temperature_05).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(catboost_bagging_temp_frame, text="1.0 ⭐", variable=self.catboost_bagging_temperature_10).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(catboost_bagging_temp_frame, text="3.0", variable=self.catboost_bagging_temperature_30).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_bagging_temp_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(catboost_bagging_temp_frame, textvariable=self.catboost_bagging_temperature_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(catboost_bagging_temp_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        ttk.Label(catboost_content_frame, text="💡 Higher = more aggressive sampling",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # random_strength (randomness for scoring splits)
+        ttk.Label(catboost_content_frame, text="Random Strength (random_strength):", style='Subheading.TLabel').grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_random_strength_frame = ttk.Frame(catboost_content_frame)
+        catboost_random_strength_frame.grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_random_strength_frame, text="0.5", variable=self.catboost_random_strength_05).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_random_strength_frame, text="1.0 ⭐", variable=self.catboost_random_strength_10).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(catboost_random_strength_frame, text="2.0", variable=self.catboost_random_strength_20).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(catboost_random_strength_frame, text="5.0", variable=self.catboost_random_strength_50).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_random_strength_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(catboost_random_strength_frame, textvariable=self.catboost_random_strength_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(catboost_random_strength_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        # MLP Hyperparameters - collapsible
+        mlp_section, mlp_content = self._create_collapsible_section(content_frame,
+                                                                    "MLP (Multi-Layer Perceptron) Hyperparameters",
+                                                                    expanded=False)
+        mlp_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        mlp_card_outer, mlp_frame = self._create_card(mlp_content,
+                                                      subtitle="Configure neural network activation, solver, and training parameters")
+        mlp_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout
+        mlp_content_frame = ttk.Frame(mlp_frame)
+        mlp_content_frame.pack(fill='both', expand=True)
+
+        # Activation function
+        ttk.Label(mlp_content_frame, text="Activation Function:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        mlp_activation_frame = ttk.Frame(mlp_content_frame)
+        mlp_activation_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_activation_frame, text="relu ⭐", variable=self.mlp_activation_relu).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mlp_activation_frame, text="tanh", variable=self.mlp_activation_tanh).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mlp_activation_frame, text="logistic", variable=self.mlp_activation_logistic).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(mlp_activation_frame, text="identity", variable=self.mlp_activation_identity).grid(row=0, column=3, padx=5)
+        ttk.Label(mlp_activation_frame, text="(default: relu)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 relu = rectified linear, tanh = hyperbolic tangent",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Solver
+        ttk.Label(mlp_content_frame, text="Weight Optimization Solver:", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_solver_frame = ttk.Frame(mlp_content_frame)
+        mlp_solver_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_solver_frame, text="adam ⭐", variable=self.mlp_solver_adam).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mlp_solver_frame, text="sgd", variable=self.mlp_solver_sgd).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mlp_solver_frame, text="lbfgs", variable=self.mlp_solver_lbfgs).grid(row=0, column=2, padx=5)
+        ttk.Label(mlp_solver_frame, text="(default: adam)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 adam is usually best, sgd allows momentum parameter",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Batch size
+        ttk.Label(mlp_content_frame, text="Batch Size (mini-batches):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_batch_frame = ttk.Frame(mlp_content_frame)
+        mlp_batch_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_batch_frame, text="auto ⭐", variable=self.mlp_batch_auto).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mlp_batch_frame, text="32", variable=self.mlp_batch_32).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mlp_batch_frame, text="64", variable=self.mlp_batch_64).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(mlp_batch_frame, text="128", variable=self.mlp_batch_128).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(mlp_batch_frame, text="256", variable=self.mlp_batch_256).grid(row=0, column=4, padx=5)
+        ttk.Label(mlp_batch_frame, text="(default: auto)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 auto = min(200, n_samples)",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Learning rate schedule
+        ttk.Label(mlp_content_frame, text="Learning Rate Schedule:", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_lr_sched_frame = ttk.Frame(mlp_content_frame)
+        mlp_lr_sched_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_lr_sched_frame, text="constant ⭐", variable=self.mlp_lr_schedule_constant).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mlp_lr_sched_frame, text="invscaling", variable=self.mlp_lr_schedule_invscaling).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mlp_lr_sched_frame, text="adaptive", variable=self.mlp_lr_schedule_adaptive).grid(row=0, column=2, padx=5)
+        ttk.Label(mlp_lr_sched_frame, text="(default: constant)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 constant = fixed rate, adaptive = reduces when loss plateaus",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Momentum (for SGD solver)
+        ttk.Label(mlp_content_frame, text="Momentum (for SGD solver only):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_momentum_frame = ttk.Frame(mlp_content_frame)
+        mlp_momentum_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_momentum_frame, text="0.7", variable=self.mlp_momentum_07).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mlp_momentum_frame, text="0.8", variable=self.mlp_momentum_08).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mlp_momentum_frame, text="0.9 ⭐", variable=self.mlp_momentum_09).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(mlp_momentum_frame, text="0.95", variable=self.mlp_momentum_095).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(mlp_momentum_frame, text="0.99", variable=self.mlp_momentum_099).grid(row=0, column=4, padx=5)
+        ttk.Label(mlp_momentum_frame, text="(default: 0.9)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 Only used when solver='sgd', should be in [0, 1]",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # SVR Hyperparameters - collapsible
+        svr_section, svr_content = self._create_collapsible_section(content_frame,
+                                                                    "SVR (Support Vector Regression) Hyperparameters",
+                                                                    expanded=False)
+        svr_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        row += 1
+
+        # Create card inside collapsible section
+        svr_card_outer, svr_frame = self._create_card(svr_content,
+                                                      subtitle="Configure epsilon, kernel parameters, and regularization")
+        svr_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Create content frame for grid layout
+        svr_content_frame = ttk.Frame(svr_frame)
+        svr_content_frame.pack(fill='both', expand=True)
+
+        # Epsilon
+        ttk.Label(svr_content_frame, text="Epsilon (epsilon-insensitive tube width):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        svr_epsilon_frame = ttk.Frame(svr_content_frame)
+        svr_epsilon_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_epsilon_frame, text="0.01", variable=self.svr_epsilon_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_epsilon_frame, text="0.05", variable=self.svr_epsilon_005).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(svr_epsilon_frame, text="0.1 ⭐", variable=self.svr_epsilon_01).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(svr_epsilon_frame, text="0.2", variable=self.svr_epsilon_02).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(svr_epsilon_frame, text="0.5", variable=self.svr_epsilon_05).grid(row=0, column=4, padx=5)
+        ttk.Label(svr_epsilon_frame, text="(default: 0.1)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 Width of epsilon-insensitive tube",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Degree (for polynomial kernel)
+        ttk.Label(svr_content_frame, text="Degree (for polynomial kernel only):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_degree_frame = ttk.Frame(svr_content_frame)
+        svr_degree_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_degree_frame, text="2", variable=self.svr_degree_2).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_degree_frame, text="3 ⭐", variable=self.svr_degree_3).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(svr_degree_frame, text="4", variable=self.svr_degree_4).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(svr_degree_frame, text="5", variable=self.svr_degree_5).grid(row=0, column=3, padx=5)
+        ttk.Label(svr_degree_frame, text="(default: 3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 Only used with kernel='poly'",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Coef0 (independent term in kernel)
+        ttk.Label(svr_content_frame, text="Coef0 (independent term in kernel function):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_coef0_frame = ttk.Frame(svr_content_frame)
+        svr_coef0_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_coef0_frame, text="0.0 ⭐", variable=self.svr_coef0_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_coef0_frame, text="0.5", variable=self.svr_coef0_05).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(svr_coef0_frame, text="1.0", variable=self.svr_coef0_10).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(svr_coef0_frame, text="2.0", variable=self.svr_coef0_20).grid(row=0, column=3, padx=5)
+        ttk.Label(svr_coef0_frame, text="(default: 0.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 Used with poly and sigmoid kernels",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Shrinking heuristic
+        ttk.Label(svr_content_frame, text="Shrinking Heuristic:", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_shrinking_frame = ttk.Frame(svr_content_frame)
+        svr_shrinking_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_shrinking_frame, text="True ⭐", variable=self.svr_shrinking_true).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_shrinking_frame, text="False", variable=self.svr_shrinking_false).grid(row=0, column=1, padx=5)
+        ttk.Label(svr_shrinking_frame, text="(default: True)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 Can speed up training",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -2822,11 +3542,9 @@ class SpectralPredictApp:
         header_frame = ttk.Frame(content_frame)
         header_frame.pack(fill='x', pady=(0, 20))
 
-        # Left side: Title with animated running figure
+        # Left side: Animated running figure
         title_container = ttk.Frame(header_frame)
         title_container.pack(side='left', anchor=tk.W)
-
-        ttk.Label(title_container, text="Analysis Progress", style='Title.TLabel').pack(side='left')
 
         # Animated running figure
         self.running_figure = self._create_running_figure(title_container, size=40)
@@ -2873,17 +3591,9 @@ class SpectralPredictApp:
         content_frame = ttk.Frame(self.tab6, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
-        # Title
-        ttk.Label(content_frame, text="Analysis Results", style='Title.TLabel').pack(anchor=tk.W, pady=(0, 20))
-
-        # Instructions card
-        instructions_card_outer, instructions_card = self._create_card(content_frame,
-                                                                        subtitle="Click on any result row to load it into the 'Model Development' tab for further tuning.")
-        instructions_card_outer.pack(fill='x', pady=(0, 10), padx=5)
-
         # Create card for results table
         results_card_outer, results_card = self._create_card(content_frame, title="Model Performance Results",
-                                                              subtitle="All tested models ranked by performance")
+                                                              subtitle="All tested models ranked by performance. Click on any result row to load it into the 'Model Development' tab for further tuning.")
         results_card_outer.pack(fill='both', expand=True, pady=10, padx=5)
 
         # Create frame for treeview and scrollbars
@@ -3015,10 +3725,6 @@ class SpectralPredictApp:
 
         row = 0
 
-        # Title
-        ttk.Label(content_frame, text="Model Selection & Loading", style='Title.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
-        row += 1
-
         # Instructions
         ttk.Label(content_frame,
             text="Double-click a result from the Results tab to load it here for refinement, or click 'Reset to Defaults' for fresh development.",
@@ -3054,12 +3760,80 @@ class SpectralPredictApp:
         self.refine_model_info.insert('1.0', "No model selected. Double-click a result in the Results tab to load it here.")
         self.refine_model_info.config(state='disabled')
 
+        # Quick Run Button (for convenience - same as Configuration tab button)
+        row += 1
+        button_frame = tk.Frame(content_frame, bg=self.colors['bg'])
+        button_frame.grid(row=row, column=0, columnspan=2, pady=(15, 10))
+
+        self.refine_run_button_selection = self._create_accent_button(button_frame, text="▶ Run Model",
+                                                                        command=self._run_refined_model, state='disabled')
+        self.refine_run_button_selection.pack(side='left', padx=5)
+
+        ttk.Label(button_frame, text="Tip: Adjust settings in Configuration tab before running",
+                 style='Caption.TLabel').pack(side='left', padx=15)
+
         # Status
+        row += 1
         self.refine_status = ttk.Label(content_frame, text="No model loaded", style='Caption.TLabel')
         self.refine_status.grid(row=row, column=0, columnspan=2, pady=10)
 
+        # === Wavelength Selection === (moved from Features tab)
+        row += 1
+        wl_frame = ttk.LabelFrame(content_frame, text="Wavelength Selection", padding="20")
+        wl_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(20, 10))
+        row += 1
+
+        # Wavelength presets
+        ttk.Label(wl_frame, text="Quick presets:", style='Caption.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        preset_frame = ttk.Frame(wl_frame)
+        preset_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        ttk.Button(preset_frame, text="All", command=lambda: self._apply_wl_preset('all'),
+                   style='Modern.TButton', width=10).pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="NIR Only", command=lambda: self._apply_wl_preset('nir'),
+                   style='Modern.TButton', width=10).pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="Visible", command=lambda: self._apply_wl_preset('visible'),
+                   style='Modern.TButton', width=10).pack(side='left', padx=2)
+        ttk.Button(preset_frame, text="Custom Range...", command=self._custom_range_dialog,
+                   style='Modern.TButton', width=14).pack(side='left', padx=2)
+
+        # Instructions
+        ttk.Label(wl_frame, text="Enter wavelengths as individual values or ranges (e.g., 1920, 1930-1940, 1950)",
+                  style='Caption.TLabel').grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(10, 5))
+
+        # Text box for wavelength specification
+        wl_spec_frame = ttk.Frame(wl_frame)
+        wl_spec_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        self.refine_wl_spec = tk.Text(wl_spec_frame, height=8, width=70, font=('Consolas', 9), wrap=tk.WORD,
+                                      bg=self.colors['panel'], fg=self.colors['text'],
+                                      relief='flat', borderwidth=0,
+                                      selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
+        self.refine_wl_spec.pack(side='left', fill='both', expand=True)
+
+        wl_spec_scrollbar = ttk.Scrollbar(wl_spec_frame, orient='vertical', command=self.refine_wl_spec.yview)
+        wl_spec_scrollbar.pack(side='right', fill='y')
+        self.refine_wl_spec.config(yscrollcommand=wl_spec_scrollbar.set)
+
+        # Button row
+        wl_button_frame = ttk.Frame(wl_frame)
+        wl_button_frame.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+
+        ttk.Button(wl_button_frame, text="Preview Selected Wavelengths",
+                   command=self._preview_wavelength_selection, style='Modern.TButton').pack(side='left', padx=(0, 10))
+
+        # Wavelength count display (real-time)
+        self.refine_wl_count_label = ttk.Label(wl_button_frame, text="Wavelengths: 0 selected",
+                                                style='Caption.TLabel')
+        self.refine_wl_count_label.pack(side='left')
+
+        # Bind update to text widget for real-time feedback
+        self.refine_wl_spec.bind('<KeyRelease>', self._update_wavelength_count)
+
     def _create_tab7b_feature_engineering(self):
         """Subtab 7B: Feature Engineering (wavelengths, preprocessing)."""
+        # REMOVED: Features subtab content moved to Selection and Configuration tabs
+        return
         tab7b = ttk.Frame(self.model_dev_notebook, style='TFrame')
         self.model_dev_notebook.add(tab7b, text='  🔬 Features  ')
 
@@ -3076,10 +3850,6 @@ class SpectralPredictApp:
         scrollbar.pack(side="right", fill="y")
 
         row = 0
-
-        # Title
-        ttk.Label(content_frame, text="Feature Engineering", style='Title.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
-        row += 1
 
         # Instructions
         ttk.Label(content_frame,
@@ -3184,15 +3954,37 @@ class SpectralPredictApp:
 
         row = 0
 
-        # Title
-        ttk.Label(content_frame, text="Model Configuration", style='Title.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
-        row += 1
-
         # Instructions
         ttk.Label(content_frame,
             text="Configure model type, task, and training parameters before running your refined model.",
             style='Caption.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
         row += 1
+
+        # === Preprocessing Configuration === (moved from Features tab)
+        preprocess_frame = ttk.LabelFrame(content_frame, text="Preprocessing Configuration", padding="20")
+        preprocess_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Preprocessing Method
+        ttk.Label(preprocess_frame, text="Preprocessing Method:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        self.refine_preprocess = tk.StringVar(value='raw')
+        preprocess_combo = ttk.Combobox(preprocess_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+        preprocess_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives",
+                  style='Caption.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(5, 10))
+
+        # Window size (for derivatives)
+        ttk.Label(preprocess_frame, text="Window Size (for derivatives):", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(10, 5))
+        self.refine_window = tk.IntVar(value=17)
+        self.refine_window_custom = tk.StringVar(value="")
+        window_frame = ttk.Frame(preprocess_frame)
+        window_frame.grid(row=4, column=0, sticky=tk.W, pady=5)
+        for w in [7, 11, 17, 19]:
+            ttk.Radiobutton(window_frame, text=f"{w}", variable=self.refine_window, value=w).pack(side='left', padx=5)
+        ttk.Label(window_frame, text="Custom:", style='TLabel').pack(side='left', padx=(15, 5))
+        ttk.Entry(window_frame, textvariable=self.refine_window_custom, width=8).pack(side='left', padx=5)
 
         # === Model Selection ===
         model_frame = ttk.LabelFrame(content_frame, text="Model Selection", padding="20")
@@ -3252,7 +4044,7 @@ class SpectralPredictApp:
         button_frame = tk.Frame(exec_frame, bg=self.colors['bg'])
         button_frame.grid(row=1, column=0, sticky='w', pady=10)
 
-        self.refine_run_button = self._create_accent_button(button_frame, text="▶ Run Refined Model",
+        self.refine_run_button = self._create_accent_button(button_frame, text="▶ Run Model",
                                                              command=self._run_refined_model, state='disabled')
         self.refine_run_button.pack(side='left', padx=(0, 10))
 
@@ -3283,16 +4075,6 @@ class SpectralPredictApp:
         scrollbar.pack(side="right", fill="y")
 
         row = 0
-
-        # Title
-        ttk.Label(content_frame, text="Results & Diagnostics", style='Title.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
-        row += 1
-
-        # Instructions
-        ttk.Label(content_frame,
-            text="View performance metrics, prediction plots, and diagnostic information for your refined model.",
-            style='Caption.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
-        row += 1
 
         # === Performance Metrics ===
         ttk.Label(content_frame, text="Performance Metrics", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
@@ -6228,6 +7010,116 @@ class SpectralPredictApp:
             # Sort for consistent ordering
             lasso_alphas_list = sorted(lasso_alphas_list)
 
+            # Collect ElasticNet alpha values
+            elasticnet_alphas_list = []
+            if self.elasticnet_alpha_001.get():
+                elasticnet_alphas_list.append(0.01)
+            if self.elasticnet_alpha_01.get():
+                elasticnet_alphas_list.append(0.1)
+            if self.elasticnet_alpha_10.get():
+                elasticnet_alphas_list.append(1.0)
+
+            # Add custom alpha if provided
+            custom_elasticnet_alpha = self.elasticnet_alpha_custom.get().strip()
+            if custom_elasticnet_alpha:
+                try:
+                    custom_val = float(custom_elasticnet_alpha)
+                    if custom_val > 0 and custom_val not in elasticnet_alphas_list:
+                        elasticnet_alphas_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom ElasticNet alpha '{custom_elasticnet_alpha}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom ElasticNet alpha '{custom_elasticnet_alpha}', ignoring")
+
+            # Default to [0.01, 0.1, 1.0] if none selected
+            if not elasticnet_alphas_list:
+                elasticnet_alphas_list = [0.01, 0.1, 1.0]
+
+            # Sort for consistent ordering
+            elasticnet_alphas_list = sorted(elasticnet_alphas_list)
+
+            # Collect ElasticNet l1_ratio values
+            elasticnet_l1_ratios_list = []
+            if self.elasticnet_l1_ratio_03.get():
+                elasticnet_l1_ratios_list.append(0.3)
+            if self.elasticnet_l1_ratio_05.get():
+                elasticnet_l1_ratios_list.append(0.5)
+            if self.elasticnet_l1_ratio_07.get():
+                elasticnet_l1_ratios_list.append(0.7)
+
+            # Add custom l1_ratio if provided
+            custom_elasticnet_l1 = self.elasticnet_l1_ratio_custom.get().strip()
+            if custom_elasticnet_l1:
+                try:
+                    custom_val = float(custom_elasticnet_l1)
+                    if 0 < custom_val <= 1 and custom_val not in elasticnet_l1_ratios_list:
+                        elasticnet_l1_ratios_list.append(custom_val)
+                    elif custom_val <= 0 or custom_val > 1:
+                        print(f"WARNING: Invalid custom ElasticNet l1_ratio '{custom_elasticnet_l1}' (must be 0 < l1_ratio <= 1), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom ElasticNet l1_ratio '{custom_elasticnet_l1}', ignoring")
+
+            # Default to [0.3, 0.5, 0.7] if none selected
+            if not elasticnet_l1_ratios_list:
+                elasticnet_l1_ratios_list = [0.3, 0.5, 0.7]
+
+            # Sort for consistent ordering
+            elasticnet_l1_ratios_list = sorted(elasticnet_l1_ratios_list)
+
+            # Collect PLS max_iter values
+            pls_max_iters_list = []
+            if self.pls_max_iter_500.get():
+                pls_max_iters_list.append(500)
+            if self.pls_max_iter_1000.get():
+                pls_max_iters_list.append(1000)
+
+            # Add custom max_iter if provided
+            custom_pls_maxiter = self.pls_max_iter_custom.get().strip()
+            if custom_pls_maxiter:
+                try:
+                    custom_val = int(custom_pls_maxiter)
+                    if custom_val > 0 and custom_val not in pls_max_iters_list:
+                        pls_max_iters_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom PLS max_iter '{custom_pls_maxiter}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom PLS max_iter '{custom_pls_maxiter}', ignoring")
+
+            # Default to [500] if none selected
+            if not pls_max_iters_list:
+                pls_max_iters_list = [500]
+
+            # Sort for consistent ordering
+            pls_max_iters_list = sorted(pls_max_iters_list)
+
+            # Collect PLS tol values
+            pls_tols_list = []
+            if self.pls_tol_1e7.get():
+                pls_tols_list.append(1e-7)
+            if self.pls_tol_1e6.get():
+                pls_tols_list.append(1e-6)
+            if self.pls_tol_1e5.get():
+                pls_tols_list.append(1e-5)
+
+            # Add custom tol if provided
+            custom_pls_tol = self.pls_tol_custom.get().strip()
+            if custom_pls_tol:
+                try:
+                    custom_val = float(custom_pls_tol)
+                    if custom_val > 0 and custom_val not in pls_tols_list:
+                        pls_tols_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom PLS tol '{custom_pls_tol}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom PLS tol '{custom_pls_tol}', ignoring")
+
+            # Default to [1e-6] if none selected
+            if not pls_tols_list:
+                pls_tols_list = [1e-6]
+
+            # Sort for consistent ordering
+            pls_tols_list = sorted(pls_tols_list)
+
             # Collect XGBoost hyperparameters
             # n_estimators
             xgb_n_estimators_list = []
@@ -6386,6 +7278,383 @@ class SpectralPredictApp:
             else:
                 xgb_reg_lambda = sorted(xgb_reg_lambda)
 
+            # min_child_weight
+            xgb_min_child_weight = []
+            if self.xgb_min_child_weight_1.get():
+                xgb_min_child_weight.append(1)
+            if self.xgb_min_child_weight_3.get():
+                xgb_min_child_weight.append(3)
+            if self.xgb_min_child_weight_5.get():
+                xgb_min_child_weight.append(5)
+            if self.xgb_min_child_weight_7.get():
+                xgb_min_child_weight.append(7)
+
+            custom_xgb_min_child_weight = self.xgb_min_child_weight_custom.get().strip()
+            if custom_xgb_min_child_weight:
+                try:
+                    custom_val = int(custom_xgb_min_child_weight)
+                    if custom_val > 0 and custom_val not in xgb_min_child_weight:
+                        xgb_min_child_weight.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost min_child_weight '{custom_xgb_min_child_weight}', ignoring")
+
+            if not xgb_min_child_weight:
+                xgb_min_child_weight = None
+            else:
+                xgb_min_child_weight = sorted(xgb_min_child_weight)
+
+            # gamma
+            xgb_gamma = []
+            if self.xgb_gamma_0.get():
+                xgb_gamma.append(0.0)
+            if self.xgb_gamma_01.get():
+                xgb_gamma.append(0.1)
+            if self.xgb_gamma_03.get():
+                xgb_gamma.append(0.3)
+            if self.xgb_gamma_05.get():
+                xgb_gamma.append(0.5)
+            if self.xgb_gamma_10.get():
+                xgb_gamma.append(1.0)
+
+            custom_xgb_gamma = self.xgb_gamma_custom.get().strip()
+            if custom_xgb_gamma:
+                try:
+                    custom_val = float(custom_xgb_gamma)
+                    if custom_val >= 0 and custom_val not in xgb_gamma:
+                        xgb_gamma.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom XGBoost gamma '{custom_xgb_gamma}', ignoring")
+
+            if not xgb_gamma:
+                xgb_gamma = None
+            else:
+                xgb_gamma = sorted(xgb_gamma)
+
+            # Collect LightGBM hyperparameters (Sprint 1)
+            # n_estimators
+            lightgbm_n_estimators_list = []
+            if self.lightgbm_n_estimators_50.get():
+                lightgbm_n_estimators_list.append(50)
+            if self.lightgbm_n_estimators_100.get():
+                lightgbm_n_estimators_list.append(100)
+            if self.lightgbm_n_estimators_200.get():
+                lightgbm_n_estimators_list.append(200)
+
+            custom_lgbm_n_estimators = self.lightgbm_n_estimators_custom.get().strip()
+            if custom_lgbm_n_estimators:
+                try:
+                    custom_val = int(custom_lgbm_n_estimators)
+                    if custom_val > 0 and custom_val not in lightgbm_n_estimators_list:
+                        lightgbm_n_estimators_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM n_estimators '{custom_lgbm_n_estimators}', ignoring")
+
+            if not lightgbm_n_estimators_list:
+                lightgbm_n_estimators_list = None
+            else:
+                lightgbm_n_estimators_list = sorted(lightgbm_n_estimators_list)
+
+            # learning_rate
+            lightgbm_learning_rates = []
+            if self.lightgbm_lr_005.get():
+                lightgbm_learning_rates.append(0.05)
+            if self.lightgbm_lr_01.get():
+                lightgbm_learning_rates.append(0.1)
+            if self.lightgbm_lr_02.get():
+                lightgbm_learning_rates.append(0.2)
+
+            custom_lgbm_lr = self.lightgbm_lr_custom.get().strip()
+            if custom_lgbm_lr:
+                try:
+                    custom_val = float(custom_lgbm_lr)
+                    if 0 < custom_val <= 1.0 and custom_val not in lightgbm_learning_rates:
+                        lightgbm_learning_rates.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM learning_rate '{custom_lgbm_lr}', ignoring")
+
+            if not lightgbm_learning_rates:
+                lightgbm_learning_rates = None
+            else:
+                lightgbm_learning_rates = sorted(lightgbm_learning_rates)
+
+            # num_leaves
+            lightgbm_num_leaves_list = []
+            if self.lightgbm_num_leaves_31.get():
+                lightgbm_num_leaves_list.append(31)
+            if self.lightgbm_num_leaves_50.get():
+                lightgbm_num_leaves_list.append(50)
+            if self.lightgbm_num_leaves_70.get():
+                lightgbm_num_leaves_list.append(70)
+
+            custom_lgbm_num_leaves = self.lightgbm_num_leaves_custom.get().strip()
+            if custom_lgbm_num_leaves:
+                try:
+                    custom_val = int(custom_lgbm_num_leaves)
+                    if custom_val > 1 and custom_val not in lightgbm_num_leaves_list:
+                        lightgbm_num_leaves_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM num_leaves '{custom_lgbm_num_leaves}', ignoring")
+
+            if not lightgbm_num_leaves_list:
+                lightgbm_num_leaves_list = None
+            else:
+                lightgbm_num_leaves_list = sorted(lightgbm_num_leaves_list)
+
+            # max_depth
+            lightgbm_max_depth_list = []
+            if self.lightgbm_max_depth_m1.get():
+                lightgbm_max_depth_list.append(-1)
+            if self.lightgbm_max_depth_5.get():
+                lightgbm_max_depth_list.append(5)
+            if self.lightgbm_max_depth_10.get():
+                lightgbm_max_depth_list.append(10)
+            if self.lightgbm_max_depth_20.get():
+                lightgbm_max_depth_list.append(20)
+            if self.lightgbm_max_depth_50.get():
+                lightgbm_max_depth_list.append(50)
+
+            custom_lgbm_max_depth = self.lightgbm_max_depth_custom.get().strip()
+            if custom_lgbm_max_depth:
+                try:
+                    custom_val = int(custom_lgbm_max_depth)
+                    if custom_val not in lightgbm_max_depth_list:
+                        lightgbm_max_depth_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM max_depth '{custom_lgbm_max_depth}', ignoring")
+
+            if not lightgbm_max_depth_list:
+                lightgbm_max_depth_list = None
+            else:
+                lightgbm_max_depth_list = sorted(lightgbm_max_depth_list)
+
+            # min_child_samples
+            lightgbm_min_child_samples_list = []
+            if self.lightgbm_min_child_samples_5.get():
+                lightgbm_min_child_samples_list.append(5)
+            if self.lightgbm_min_child_samples_10.get():
+                lightgbm_min_child_samples_list.append(10)
+            if self.lightgbm_min_child_samples_20.get():
+                lightgbm_min_child_samples_list.append(20)
+            if self.lightgbm_min_child_samples_50.get():
+                lightgbm_min_child_samples_list.append(50)
+            if self.lightgbm_min_child_samples_100.get():
+                lightgbm_min_child_samples_list.append(100)
+
+            custom_lgbm_min_child_samples = self.lightgbm_min_child_samples_custom.get().strip()
+            if custom_lgbm_min_child_samples:
+                try:
+                    custom_val = int(custom_lgbm_min_child_samples)
+                    if custom_val > 0 and custom_val not in lightgbm_min_child_samples_list:
+                        lightgbm_min_child_samples_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM min_child_samples '{custom_lgbm_min_child_samples}', ignoring")
+
+            if not lightgbm_min_child_samples_list:
+                lightgbm_min_child_samples_list = None
+            else:
+                lightgbm_min_child_samples_list = sorted(lightgbm_min_child_samples_list)
+
+            # subsample
+            lightgbm_subsample_list = []
+            if self.lightgbm_subsample_05.get():
+                lightgbm_subsample_list.append(0.5)
+            if self.lightgbm_subsample_07.get():
+                lightgbm_subsample_list.append(0.7)
+            if self.lightgbm_subsample_085.get():
+                lightgbm_subsample_list.append(0.85)
+            if self.lightgbm_subsample_10.get():
+                lightgbm_subsample_list.append(1.0)
+
+            custom_lgbm_subsample = self.lightgbm_subsample_custom.get().strip()
+            if custom_lgbm_subsample:
+                try:
+                    custom_val = float(custom_lgbm_subsample)
+                    if 0 < custom_val <= 1.0 and custom_val not in lightgbm_subsample_list:
+                        lightgbm_subsample_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM subsample '{custom_lgbm_subsample}', ignoring")
+
+            if not lightgbm_subsample_list:
+                lightgbm_subsample_list = None
+            else:
+                lightgbm_subsample_list = sorted(lightgbm_subsample_list)
+
+            # colsample_bytree
+            lightgbm_colsample_bytree_list = []
+            if self.lightgbm_colsample_bytree_05.get():
+                lightgbm_colsample_bytree_list.append(0.5)
+            if self.lightgbm_colsample_bytree_07.get():
+                lightgbm_colsample_bytree_list.append(0.7)
+            if self.lightgbm_colsample_bytree_085.get():
+                lightgbm_colsample_bytree_list.append(0.85)
+            if self.lightgbm_colsample_bytree_10.get():
+                lightgbm_colsample_bytree_list.append(1.0)
+
+            custom_lgbm_colsample = self.lightgbm_colsample_bytree_custom.get().strip()
+            if custom_lgbm_colsample:
+                try:
+                    custom_val = float(custom_lgbm_colsample)
+                    if 0 < custom_val <= 1.0 and custom_val not in lightgbm_colsample_bytree_list:
+                        lightgbm_colsample_bytree_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM colsample_bytree '{custom_lgbm_colsample}', ignoring")
+
+            if not lightgbm_colsample_bytree_list:
+                lightgbm_colsample_bytree_list = None
+            else:
+                lightgbm_colsample_bytree_list = sorted(lightgbm_colsample_bytree_list)
+
+            # reg_alpha
+            lightgbm_reg_alpha_list = []
+            if self.lightgbm_reg_alpha_00.get():
+                lightgbm_reg_alpha_list.append(0.0)
+            if self.lightgbm_reg_alpha_01.get():
+                lightgbm_reg_alpha_list.append(0.1)
+            if self.lightgbm_reg_alpha_05.get():
+                lightgbm_reg_alpha_list.append(0.5)
+            if self.lightgbm_reg_alpha_10.get():
+                lightgbm_reg_alpha_list.append(1.0)
+
+            custom_lgbm_reg_alpha = self.lightgbm_reg_alpha_custom.get().strip()
+            if custom_lgbm_reg_alpha:
+                try:
+                    custom_val = float(custom_lgbm_reg_alpha)
+                    if custom_val >= 0 and custom_val not in lightgbm_reg_alpha_list:
+                        lightgbm_reg_alpha_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM reg_alpha '{custom_lgbm_reg_alpha}', ignoring")
+
+            if not lightgbm_reg_alpha_list:
+                lightgbm_reg_alpha_list = None
+            else:
+                lightgbm_reg_alpha_list = sorted(lightgbm_reg_alpha_list)
+
+            # reg_lambda
+            lightgbm_reg_lambda_list = []
+            if self.lightgbm_reg_lambda_00.get():
+                lightgbm_reg_lambda_list.append(0.0)
+            if self.lightgbm_reg_lambda_05.get():
+                lightgbm_reg_lambda_list.append(0.5)
+            if self.lightgbm_reg_lambda_10.get():
+                lightgbm_reg_lambda_list.append(1.0)
+            if self.lightgbm_reg_lambda_20.get():
+                lightgbm_reg_lambda_list.append(2.0)
+
+            custom_lgbm_reg_lambda = self.lightgbm_reg_lambda_custom.get().strip()
+            if custom_lgbm_reg_lambda:
+                try:
+                    custom_val = float(custom_lgbm_reg_lambda)
+                    if custom_val >= 0 and custom_val not in lightgbm_reg_lambda_list:
+                        lightgbm_reg_lambda_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom LightGBM reg_lambda '{custom_lgbm_reg_lambda}', ignoring")
+
+            if not lightgbm_reg_lambda_list:
+                lightgbm_reg_lambda_list = None
+            else:
+                lightgbm_reg_lambda_list = sorted(lightgbm_reg_lambda_list)
+
+            # Collect CatBoost hyperparameters (NEW PHASE 1)
+            # l2_leaf_reg
+            catboost_l2_leaf_reg_list = []
+            if self.catboost_l2_leaf_reg_10.get():
+                catboost_l2_leaf_reg_list.append(1.0)
+            if self.catboost_l2_leaf_reg_30.get():
+                catboost_l2_leaf_reg_list.append(3.0)
+            if self.catboost_l2_leaf_reg_100.get():
+                catboost_l2_leaf_reg_list.append(10.0)
+            if self.catboost_l2_leaf_reg_300.get():
+                catboost_l2_leaf_reg_list.append(30.0)
+
+            custom_cb_l2_leaf_reg = self.catboost_l2_leaf_reg_custom.get().strip()
+            if custom_cb_l2_leaf_reg:
+                try:
+                    custom_val = float(custom_cb_l2_leaf_reg)
+                    if custom_val >= 0 and custom_val not in catboost_l2_leaf_reg_list:
+                        catboost_l2_leaf_reg_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost l2_leaf_reg '{custom_cb_l2_leaf_reg}', ignoring")
+
+            if not catboost_l2_leaf_reg_list:
+                catboost_l2_leaf_reg_list = None
+            else:
+                catboost_l2_leaf_reg_list = sorted(catboost_l2_leaf_reg_list)
+
+            # border_count
+            catboost_border_count_list = []
+            if self.catboost_border_count_32.get():
+                catboost_border_count_list.append(32)
+            if self.catboost_border_count_64.get():
+                catboost_border_count_list.append(64)
+            if self.catboost_border_count_128.get():
+                catboost_border_count_list.append(128)
+            if self.catboost_border_count_254.get():
+                catboost_border_count_list.append(254)
+
+            custom_cb_border_count = self.catboost_border_count_custom.get().strip()
+            if custom_cb_border_count:
+                try:
+                    custom_val = int(custom_cb_border_count)
+                    if custom_val > 0 and custom_val not in catboost_border_count_list:
+                        catboost_border_count_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost border_count '{custom_cb_border_count}', ignoring")
+
+            if not catboost_border_count_list:
+                catboost_border_count_list = None
+            else:
+                catboost_border_count_list = sorted(catboost_border_count_list)
+
+            # bagging_temperature
+            catboost_bagging_temperature_list = []
+            if self.catboost_bagging_temperature_00.get():
+                catboost_bagging_temperature_list.append(0.0)
+            if self.catboost_bagging_temperature_05.get():
+                catboost_bagging_temperature_list.append(0.5)
+            if self.catboost_bagging_temperature_10.get():
+                catboost_bagging_temperature_list.append(1.0)
+            if self.catboost_bagging_temperature_30.get():
+                catboost_bagging_temperature_list.append(3.0)
+
+            custom_cb_bagging_temp = self.catboost_bagging_temperature_custom.get().strip()
+            if custom_cb_bagging_temp:
+                try:
+                    custom_val = float(custom_cb_bagging_temp)
+                    if custom_val >= 0 and custom_val not in catboost_bagging_temperature_list:
+                        catboost_bagging_temperature_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost bagging_temperature '{custom_cb_bagging_temp}', ignoring")
+
+            if not catboost_bagging_temperature_list:
+                catboost_bagging_temperature_list = None
+            else:
+                catboost_bagging_temperature_list = sorted(catboost_bagging_temperature_list)
+
+            # random_strength
+            catboost_random_strength_list = []
+            if self.catboost_random_strength_05.get():
+                catboost_random_strength_list.append(0.5)
+            if self.catboost_random_strength_10.get():
+                catboost_random_strength_list.append(1.0)
+            if self.catboost_random_strength_20.get():
+                catboost_random_strength_list.append(2.0)
+            if self.catboost_random_strength_50.get():
+                catboost_random_strength_list.append(5.0)
+
+            custom_cb_random_strength = self.catboost_random_strength_custom.get().strip()
+            if custom_cb_random_strength:
+                try:
+                    custom_val = float(custom_cb_random_strength)
+                    if custom_val >= 0 and custom_val not in catboost_random_strength_list:
+                        catboost_random_strength_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost random_strength '{custom_cb_random_strength}', ignoring")
+
+            if not catboost_random_strength_list:
+                catboost_random_strength_list = None
+            else:
+                catboost_random_strength_list = sorted(catboost_random_strength_list)
+
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
             self._log_progress(f"{'='*70}")
@@ -6522,6 +7791,10 @@ class SpectralPredictApp:
                 rf_max_depth_list=rf_max_depth_list,
                 ridge_alphas_list=ridge_alphas_list,
                 lasso_alphas_list=lasso_alphas_list,
+                elasticnet_alphas_list=elasticnet_alphas_list,
+                elasticnet_l1_ratios=elasticnet_l1_ratios_list,
+                pls_max_iter_list=pls_max_iters_list,
+                pls_tol_list=pls_tols_list,
                 xgb_n_estimators_list=xgb_n_estimators_list,
                 xgb_learning_rates=xgb_learning_rates,
                 xgb_max_depths=xgb_max_depths,
@@ -6529,6 +7802,21 @@ class SpectralPredictApp:
                 xgb_colsample_bytree=xgb_colsample_bytree,
                 xgb_reg_alpha=xgb_reg_alpha,
                 xgb_reg_lambda=xgb_reg_lambda,
+                xgb_min_child_weight_list=xgb_min_child_weight,
+                xgb_gamma_list=xgb_gamma,
+                lightgbm_n_estimators_list=lightgbm_n_estimators_list,
+                lightgbm_learning_rates=lightgbm_learning_rates,
+                lightgbm_num_leaves_list=lightgbm_num_leaves_list,
+                lightgbm_max_depth_list=lightgbm_max_depth_list,
+                lightgbm_min_child_samples_list=lightgbm_min_child_samples_list,
+                lightgbm_subsample_list=lightgbm_subsample_list,
+                lightgbm_colsample_bytree_list=lightgbm_colsample_bytree_list,
+                lightgbm_reg_alpha_list=lightgbm_reg_alpha_list,
+                lightgbm_reg_lambda_list=lightgbm_reg_lambda_list,
+                catboost_l2_leaf_reg_list=catboost_l2_leaf_reg_list,
+                catboost_border_count_list=catboost_border_count_list,
+                catboost_bagging_temperature_list=catboost_bagging_temperature_list,
+                catboost_random_strength_list=catboost_random_strength_list,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
@@ -7135,6 +8423,9 @@ class SpectralPredictApp:
         # Switch to the Model Development tab
         self.notebook.select(6)  # Tab 7 (index 6)
 
+        # Always switch to Selection subtab (first subtab) when loading a model
+        self.model_dev_notebook.select(0)  # Selection subtab
+
     def _populate_ensemble_results(self):
         """Populate the ensemble results table with trained ensemble performance."""
         if not hasattr(self, 'ensemble_results') or self.ensemble_results is None or len(self.ensemble_results) == 0:
@@ -7701,8 +8992,9 @@ class SpectralPredictApp:
         self.refine_mode_label.config(text="Mode: Fresh Development (Defaults Loaded)")
         self.refine_status.config(text="Ready to develop custom model")
 
-        # Enable the run button
+        # Enable the run buttons (both Configuration and Selection tabs)
         self.refine_run_button.config(state='normal')
+        self.refine_run_button_selection.config(state='normal')
 
         # Update the wavelength count display
         self._update_wavelength_count()
@@ -8095,8 +9387,9 @@ Performance (Classification):
         if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']:
             self.refine_preprocess.set(gui_preprocess)
 
-        # Enable the run button
+        # Enable the run buttons (both Configuration and Selection tabs)
         self.refine_run_button.config(state='normal')
+        self.refine_run_button_selection.config(state='normal')
         self.refine_status.config(text=f"Loaded: {config.get('Model', 'N/A')} | {config.get('Preprocess', 'N/A')}")
 
         # Update mode label to indicate loaded from results
@@ -8846,8 +10139,9 @@ F1 Score:  {f1:.4f}
         if not self._validate_refinement_parameters():
             return
 
-        # Disable button during execution
+        # Disable buttons during execution (both Configuration and Selection tabs)
         self.refine_run_button.config(state='disabled')
+        self.refine_run_button_selection.config(state='disabled')
         self.refine_status.config(text="Running refined model...")
 
         # Run in thread
@@ -9093,9 +10387,51 @@ F1 Score:  {f1:.4f}
                                 print(f"  {key}: {after_params[key]}")
                             print(f"\nParams loaded from CSV:")
                             print(f"  {params_from_search}")
+
+                            # VALIDATION: Check for parameter mismatches
+                            param_mismatches = []
+                            params_not_loaded = []
+
+                            # Check if loaded params match actual params
+                            for key, expected_val in params_from_search.items():
+                                actual_val = after_params.get(key)
+                                if actual_val != expected_val:
+                                    param_mismatches.append(
+                                        f"  - {key}: expected={expected_val}, got={actual_val}"
+                                    )
+
+                            # Check for important params that weren't in saved params
+                            important_params = ['n_estimators', 'learning_rate', 'max_depth',
+                                              'subsample', 'colsample_bytree', 'reg_alpha',
+                                              'reg_lambda', 'random_state', 'tree_method']
+                            for key in important_params:
+                                if key not in params_from_search and key in after_params:
+                                    params_not_loaded.append(
+                                        f"  - {key}: using default={after_params[key]}"
+                                    )
+
+                            if param_mismatches:
+                                print(f"\n⚠️  WARNING: Parameter mismatches detected!")
+                                for mismatch in param_mismatches:
+                                    print(mismatch)
+                                print(f"⚠️  This may cause R² differences from Results tab!")
+
+                            if params_not_loaded:
+                                print(f"\n⚠️  WARNING: Some important parameters not in saved results!")
+                                for missing in params_not_loaded:
+                                    print(missing)
+                                print(f"⚠️  This may cause R² differences from Results tab!")
+
                             print(f"{'='*80}\n")
                         except Exception as e:
                             print(f"ERROR capturing after params: {e}\n")
+
+                    # Add warning for NeuralBoosted
+                    elif model_name == "NeuralBoosted":
+                        if params_from_search.get('early_stopping', False):
+                            print(f"\n⚠️  NOTE: NeuralBoosted with early_stopping=True")
+                            print(f"   R² may vary slightly (±0.01-0.02) from Results tab due to")
+                            print(f"   validation split differences between CV and full dataset.\n")
 
                 except Exception as e:
                     print(f"WARNING: Failed to apply saved parameters {params_from_search}: {e}")
@@ -9266,6 +10602,32 @@ F1 Score:  {f1:.4f}
                         r2_diff_value = results['r2_mean'] - loaded_r2_value
                         r2_diff = f"{r2_diff_value:+.4f}"
 
+                # Add reproducibility notes for sensitive models
+                reproducibility_note = ""
+                if model_name in ["XGBoost", "LightGBM", "CatBoost"]:
+                    # Check if there's a significant difference
+                    if r2_diff != "N/A" and loaded_r2 != "N/A":
+                        abs_diff = abs(results['r2_mean'] - float(loaded_r2))
+                        if abs_diff > 0.001:
+                            reproducibility_note = f"""
+⚠️  REPRODUCIBILITY NOTE ({model_name}):
+  Small differences are expected if parameter capture was incomplete.
+  Expected variance: ±0.001 to ±0.005
+  Your difference: {abs_diff:.4f}
+  {'✓ Within expected range' if abs_diff <= 0.01 else '⚠️  Larger than expected - check parameter capture'}
+"""
+                elif model_name == "NeuralBoosted":
+                    if r2_diff != "N/A" and loaded_r2 != "N/A":
+                        abs_diff = abs(results['r2_mean'] - float(loaded_r2))
+                        reproducibility_note = f"""
+ℹ️  REPRODUCIBILITY NOTE (NeuralBoosted):
+  With early_stopping=True, some variance is expected due to
+  validation split differences between CV folds and full dataset.
+  Expected variance: ±0.01 to ±0.02
+  Your difference: {abs_diff:.4f}
+  {'✓ Within expected range' if abs_diff <= 0.03 else '⚠️  Larger than expected - investigate'}
+"""
+
                 results_text = f"""Refined Model Results:
 
 Cross-Validation Performance ({self.refine_folds.get()} folds):
@@ -9277,7 +10639,7 @@ COMPARISON TO LOADED MODEL:
   Original R² (from Results tab): {loaded_r2}
   Refined R² (just computed):     {results['r2_mean']:.4f}
   Difference:                     {r2_diff}
-
+{reproducibility_note}
 Configuration:
   Model: {model_name}
   Task Type: {task_type}
@@ -9380,6 +10742,9 @@ Configuration:
             # Update UI
             self.root.after(0, lambda: self._update_refined_results(results_text))
 
+            # Switch to Results subtab to show the results
+            self.root.after(0, lambda: self.model_dev_notebook.select(2))  # Results subtab (index 2, Features removed)
+
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
@@ -9393,8 +10758,9 @@ Configuration:
         self.refine_results_text.insert('1.0', results_text)
         self.refine_results_text.config(state='disabled')
 
-        # Re-enable buttons
+        # Re-enable buttons (both Configuration and Selection tabs)
         self.refine_run_button.config(state='normal')
+        self.refine_run_button_selection.config(state='normal')
 
         if is_error:
             self.refine_status.config(text="✗ Error running refined model")
@@ -10142,9 +11508,23 @@ Configuration:
         self.tab8 = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.tab8, text='  🔮 Model Prediction  ')
 
+        # Create notebook for subtabs
+        self.prediction_notebook = ttk.Notebook(self.tab8)
+        self.prediction_notebook.pack(fill='both', expand=True)
+
+        # Create subtabs
+        self._create_tab8a_setup()
+        self._create_tab8b_results()
+
+    def _create_tab8a_setup(self):
+        """Subtab 8A: Setup - Load models and data, configure predictions."""
+        # Create subtab frame with scrolling
+        tab8a = ttk.Frame(self.prediction_notebook, style='TFrame')
+        self.prediction_notebook.add(tab8a, text='  ⚙️ Setup  ')
+
         # Create scrollable content
-        canvas = tk.Canvas(self.tab8, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab8, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(tab8a, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab8a, orient="vertical", command=canvas.yview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab8", canvas))
@@ -10155,11 +11535,6 @@ Configuration:
         scrollbar.pack(side="right", fill="y")
 
         row = 0
-
-        # Title
-        ttk.Label(content_frame, text="Model Prediction", style='Title.TLabel').grid(
-            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
-        row += 1
 
         # Instructions
         ttk.Label(content_frame,
@@ -10269,8 +11644,28 @@ Configuration:
         self.pred_status = ttk.Label(step3_frame, text="Ready", style='Caption.TLabel')
         self.pred_status.grid(row=2, column=0, columnspan=2)
 
-        # === Step 4: View Results ===
-        step4_frame = ttk.LabelFrame(content_frame, text="Step 4: View Predictions", padding="20")
+    def _create_tab8b_results(self):
+        """Subtab 8B: Results - View prediction results and statistics."""
+        # Create subtab frame
+        tab8b = ttk.Frame(self.prediction_notebook, style='TFrame')
+        self.prediction_notebook.add(tab8b, text='  📊 Results  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab8b, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab8b, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab8b", canvas))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # === View Results ===
+        step4_frame = ttk.LabelFrame(content_frame, text="Prediction Results", padding="20")
         step4_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=20, pady=10)
         content_frame.grid_rowconfigure(row, weight=1)
         row += 1
@@ -11479,14 +12874,14 @@ Configuration:
         section_a.pack(fill='x', pady=(0, 15))
 
         # Instrument ID
-        id_frame = ttk.Frame(section_a, style='TFrame')
+        id_frame = ttk.Frame(section_a)
         id_frame.pack(fill='x', pady=5)
         ttk.Label(id_frame, text="Instrument ID:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
         self.inst_id_entry = ttk.Entry(id_frame, width=30)
         self.inst_id_entry.pack(side='left')
 
         # Data directory
-        dir_frame = ttk.Frame(section_a, style='TFrame')
+        dir_frame = ttk.Frame(section_a)
         dir_frame.pack(fill='x', pady=5)
         ttk.Label(dir_frame, text="Data Directory:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
         self.inst_data_path = tk.StringVar()
@@ -11526,7 +12921,7 @@ Configuration:
         self.inst_registry_tree.pack(fill='both', expand=True)
 
         # Registry buttons
-        reg_btn_frame = ttk.Frame(section_c, style='TFrame')
+        reg_btn_frame = ttk.Frame(section_c)
         reg_btn_frame.pack(fill='x', pady=(10, 0))
 
         ttk.Button(reg_btn_frame, text="Save Registry",
@@ -12991,7 +14386,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ttk.Label(section_a, text="Load a trained PLS/PCR model (the 'master' instrument) for calibration transfer:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
 
-        load_model_frame = ttk.Frame(section_a, style='TFrame')
+        load_model_frame = ttk.Frame(section_a)
         load_model_frame.pack(fill='x')
 
         self.ct_master_model_path_var = tk.StringVar()
@@ -13022,7 +14417,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
 
         # Instrument selection grid
-        inst_grid = ttk.Frame(section_b, style='TFrame')
+        inst_grid = ttk.Frame(section_b)
         inst_grid.pack(fill='x', pady=(0, 10))
 
         ttk.Label(inst_grid, text="Master Instrument:", style='CardLabel.TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10))
@@ -13039,14 +14434,14 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                   command=self._refresh_ct_instrument_combos, style='Modern.TButton').grid(row=0, column=4, padx=(20, 0))
 
         # Load paired spectra from TWO separate directories
-        load_spectra_frame = ttk.Frame(section_b, style='TFrame')
+        load_spectra_frame = ttk.Frame(section_b)
         load_spectra_frame.pack(fill='x', pady=(10, 0))
 
         ttk.Label(load_spectra_frame, text="Standardization Spectra Directories (one per instrument):",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
         # Master spectra directory
-        master_dir_frame = ttk.Frame(load_spectra_frame, style='TFrame')
+        master_dir_frame = ttk.Frame(load_spectra_frame)
         master_dir_frame.pack(fill='x', pady=(0, 5))
 
         ttk.Label(master_dir_frame, text="Master Spectra:", style='CardLabel.TLabel', width=15).pack(side='left')
@@ -13058,7 +14453,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                   command=self._browse_ct_master_spectra_dir, style='Modern.TButton').pack(side='left')
 
         # Slave spectra directory
-        slave_dir_frame = ttk.Frame(load_spectra_frame, style='TFrame')
+        slave_dir_frame = ttk.Frame(load_spectra_frame)
         slave_dir_frame.pack(fill='x', pady=(0, 10))
 
         ttk.Label(slave_dir_frame, text="Slave Spectra:", style='CardLabel.TLabel', width=15).pack(side='left')
@@ -13091,7 +14486,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
 
         # Method selection and parameters
-        method_frame = ttk.Frame(section_c, style='TFrame')
+        method_frame = ttk.Frame(section_c)
         method_frame.pack(fill='x', pady=(0, 10))
 
         ttk.Label(method_frame, text="Transfer Method:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
@@ -13102,7 +14497,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                        variable=self.ct_method_var, value='pds').pack(side='left')
 
         # Parameters
-        params_frame = ttk.Frame(section_c, style='TFrame')
+        params_frame = ttk.Frame(section_c)
         params_frame.pack(fill='x', pady=(0, 10))
 
         ttk.Label(params_frame, text="DS Ridge Lambda:", style='CardLabel.TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10))
@@ -13129,7 +14524,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         self.ct_transfer_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
 
         # Save transfer model
-        save_tm_frame = ttk.Frame(section_c, style='TFrame')
+        save_tm_frame = ttk.Frame(section_c)
         save_tm_frame.pack(fill='x', pady=(10, 0))
 
         ttk.Button(save_tm_frame, text="Save Transfer Model...",
@@ -13146,7 +14541,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                  text="Use equalization to combine multi-instrument datasets into a common domain:",
                  style='TLabel').pack(anchor='w', pady=(0, 10))
 
-        eq_button_frame = ttk.Frame(section_d, style='TFrame')
+        eq_button_frame = ttk.Frame(section_d)
         eq_button_frame.pack(fill='x')
 
         ttk.Button(eq_button_frame, text="Load Multi-Instrument Dataset...",
@@ -13177,7 +14572,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                  style='TLabel').pack(anchor='w', pady=(0, 10))
 
         # Load transfer model for prediction
-        load_tm_frame = ttk.Frame(section_e, style='TFrame')
+        load_tm_frame = ttk.Frame(section_e)
         load_tm_frame.pack(fill='x', pady=(0, 10))
 
         self.ct_pred_tm_path_var = tk.StringVar()
@@ -13190,13 +14585,13 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                   command=self._load_ct_pred_transfer_model, style='Modern.TButton').pack(side='left')
 
         # Load new slave spectra
-        load_new_spectra_frame = ttk.Frame(section_e, style='TFrame')
+        load_new_spectra_frame = ttk.Frame(section_e)
         load_new_spectra_frame.pack(fill='x', pady=(10, 0))
 
         ttk.Label(load_new_spectra_frame, text="New Slave Spectra Directory:",
                  style='TLabel').pack(anchor='w', pady=(0, 5))
 
-        new_spectra_entry_frame = ttk.Frame(load_new_spectra_frame, style='TFrame')
+        new_spectra_entry_frame = ttk.Frame(load_new_spectra_frame)
         new_spectra_entry_frame.pack(fill='x')
 
         self.ct_new_slave_dir_var = tk.StringVar()
