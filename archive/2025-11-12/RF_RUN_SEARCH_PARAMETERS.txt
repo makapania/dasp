@@ -1,0 +1,36 @@
+=============================================================================
+RF PARAMETER PASSING TO run_search() - CODE TO INSERT
+=============================================================================
+
+LOCATION: spectral_predict_gui_optimized.py, around line 7344
+INSERT AFTER: rf_max_depth_list=rf_max_depth_list,
+INSERT BEFORE: ridge_alphas_list=ridge_alphas_list,
+
+CURRENT CODE (line 7344-7345):
+-------------------------------
+                rf_max_depth_list=rf_max_depth_list,
+                ridge_alphas_list=ridge_alphas_list,
+
+UPDATED CODE:
+-------------
+                rf_max_depth_list=rf_max_depth_list,
+                rf_min_samples_split_list=rf_min_samples_split_list,
+                rf_min_samples_leaf_list=rf_min_samples_leaf_list,
+                rf_max_features_list=rf_max_features_list,
+                rf_bootstrap_list=rf_bootstrap_list,
+                rf_max_leaf_nodes_list=rf_max_leaf_nodes_list,
+                rf_min_impurity_decrease_list=rf_min_impurity_decrease_list,
+                ridge_alphas_list=ridge_alphas_list,
+
+=============================================================================
+
+LINES TO INSERT (6 lines):
+--------------------------
+                rf_min_samples_split_list=rf_min_samples_split_list,
+                rf_min_samples_leaf_list=rf_min_samples_leaf_list,
+                rf_max_features_list=rf_max_features_list,
+                rf_bootstrap_list=rf_bootstrap_list,
+                rf_max_leaf_nodes_list=rf_max_leaf_nodes_list,
+                rf_min_impurity_decrease_list=rf_min_impurity_decrease_list,
+
+=============================================================================

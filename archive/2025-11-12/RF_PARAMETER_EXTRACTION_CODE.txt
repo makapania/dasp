@@ -1,0 +1,74 @@
+=============================================================================
+RF PARAMETER EXTRACTION CODE - TO BE INSERTED INTO _run_analysis() METHOD
+=============================================================================
+
+LOCATION: Insert this code after line ~6681 in spectral_predict_gui_optimized.py
+AFTER: rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
+BEFORE: # Collect Ridge alpha values
+
+CODE TO INSERT:
+---------------
+
+            # === Extract NEW PHASE 1 RF HYPERPARAMETERS ===
+
+            # Extract min_samples_split
+            rf_min_samples_split_list = self._extract_parameter_values(
+                self.rf_min_samples_split_control,
+                param_name='min_samples_split',
+                is_float=False,
+                allow_string_values=False
+            )
+            if not rf_min_samples_split_list:
+                rf_min_samples_split_list = [2]  # Default
+
+            # Extract min_samples_leaf
+            rf_min_samples_leaf_list = self._extract_parameter_values(
+                self.rf_min_samples_leaf_control,
+                param_name='min_samples_leaf',
+                is_float=False,
+                allow_string_values=False
+            )
+            if not rf_min_samples_leaf_list:
+                rf_min_samples_leaf_list = [1]  # Default
+
+            # Extract max_features
+            rf_max_features_list = self._extract_parameter_values(
+                self.rf_max_features_control,
+                param_name='max_features',
+                is_float=False,
+                allow_string_values=True
+            )
+            if not rf_max_features_list:
+                rf_max_features_list = ['sqrt']  # Default
+
+            # Extract bootstrap
+            rf_bootstrap_list = self._extract_parameter_values(
+                self.rf_bootstrap_control,
+                param_name='bootstrap',
+                is_float=False,
+                allow_string_values=True
+            )
+            if not rf_bootstrap_list:
+                rf_bootstrap_list = [True]  # Default
+
+            # Extract max_leaf_nodes
+            rf_max_leaf_nodes_list = self._extract_parameter_values(
+                self.rf_max_leaf_nodes_control,
+                param_name='max_leaf_nodes',
+                is_float=False,
+                allow_string_values=False
+            )
+            if not rf_max_leaf_nodes_list:
+                rf_max_leaf_nodes_list = [None]  # Default
+
+            # Extract min_impurity_decrease
+            rf_min_impurity_decrease_list = self._extract_parameter_values(
+                self.rf_min_impurity_decrease_control,
+                param_name='min_impurity_decrease',
+                is_float=True,
+                allow_string_values=False
+            )
+            if not rf_min_impurity_decrease_list:
+                rf_min_impurity_decrease_list = [0.0]  # Default
+
+=============================================================================
