@@ -107,10 +107,11 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return XGBRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
-                max_depth=6,
-                subsample=0.8,  # Better default for spectroscopy (correlated samples)
-                colsample_bytree=0.8,  # Better default for 2000+ features (tree diversity)
-                reg_alpha=0.1,  # L1 regularization for implicit feature selection
+                max_depth=6,  # XGBoost default (original working value)
+                subsample=0.8,  # Original working value for spectroscopy
+                colsample_bytree=0.8,  # Original working value for high-dim data
+                reg_alpha=0.1,  # Light L1 regularization for feature selection
+                reg_lambda=1.0,  # XGBoost default L2 regularization
                 tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
                 n_jobs=-1,
@@ -121,13 +122,13 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return LGBMRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
-                num_leaves=15,  # Reduced for small datasets (was 31)
-                max_depth=-1,  # No limit (controlled by num_leaves)
-                min_child_samples=5,  # Reduced for small datasets (was 20)
-                subsample=0.8,  # Row sampling like XGBoost
-                colsample_bytree=0.8,  # Feature sampling for high-dimensional data
-                reg_alpha=0.1,  # L1 regularization
-                reg_lambda=1.0,  # L2 regularization
+                num_leaves=31,  # LightGBM default
+                max_depth=-1,  # No depth limit (controlled by num_leaves)
+                min_child_samples=20,  # Minimum samples per leaf
+                subsample=0.8,  # Row sampling to prevent overfitting (like XGBoost)
+                colsample_bytree=0.8,  # Feature sampling for high-dim data (like XGBoost)
+                reg_alpha=0.1,  # L1 regularization for feature selection (like XGBoost)
+                reg_lambda=1.0,  # L2 regularization to prevent overfitting (like XGBoost)
                 random_state=42,
                 n_jobs=-1,
                 verbosity=-1
@@ -221,15 +222,32 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
 
 def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
-                    n_estimators_list=None, learning_rates=None, rf_n_trees_list=None,
-                    rf_max_depth_list=None, ridge_alphas_list=None, lasso_alphas_list=None,
+                    n_estimators_list=None, learning_rates=None,
+                    pls_max_iter_list=None, pls_tol_list=None,
+                    rf_n_trees_list=None,
+                    rf_max_depth_list=None, rf_min_samples_split_list=None,
+                    rf_min_samples_leaf_list=None, rf_max_features_list=None,
+                    rf_bootstrap_list=None, rf_max_leaf_nodes_list=None,
+                    rf_min_impurity_decrease_list=None,
+                    ridge_alphas_list=None, ridge_solver_list=None, ridge_tol_list=None,
+                    lasso_alphas_list=None, lasso_selection_list=None, lasso_tol_list=None,
                     xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
                     xgb_subsample=None, xgb_colsample_bytree=None, xgb_reg_alpha=None, xgb_reg_lambda=None,
+                    xgb_min_child_weight_list=None, xgb_gamma_list=None,
                     elasticnet_alphas_list=None, elasticnet_l1_ratios=None,
+                    elasticnet_selection_list=None, elasticnet_tol_list=None,
                     lightgbm_n_estimators_list=None, lightgbm_learning_rates=None, lightgbm_num_leaves_list=None,
+                    lightgbm_max_depth_list=None, lightgbm_min_child_samples_list=None,
+                    lightgbm_subsample_list=None, lightgbm_colsample_bytree_list=None,
+                    lightgbm_reg_alpha_list=None, lightgbm_reg_lambda_list=None,
                     catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
+                    catboost_l2_leaf_reg_list=None, catboost_border_count_list=None,
+                    catboost_bagging_temperature_list=None, catboost_random_strength_list=None,
                     svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
+                    svr_epsilon_list=None, svr_degree_list=None, svr_coef0_list=None, svr_shrinking_list=None,
                     mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
+                    mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
+                    mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
                     tier='standard', enabled_models=None):
     """
     Get model grids for hyperparameter search with tiered defaults.
@@ -300,16 +318,46 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if rf_max_depth_list is None:
         rf_config = get_hyperparameters('RandomForest', tier)
         rf_max_depth_list = rf_config.get('max_depth', [None, 30])
+    if rf_min_samples_split_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_min_samples_split_list = rf_config.get('min_samples_split', [2])
+    if rf_min_samples_leaf_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_min_samples_leaf_list = rf_config.get('min_samples_leaf', [1])
+    if rf_max_features_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_max_features_list = rf_config.get('max_features', ['sqrt'])
+    if rf_bootstrap_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_bootstrap_list = rf_config.get('bootstrap', [True])
+    if rf_max_leaf_nodes_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_max_leaf_nodes_list = rf_config.get('max_leaf_nodes', [None])
+    if rf_min_impurity_decrease_list is None:
+        rf_config = get_hyperparameters('RandomForest', tier)
+        rf_min_impurity_decrease_list = rf_config.get('min_impurity_decrease', [0.0])
 
     # Ridge defaults (tier-aware)
     if ridge_alphas_list is None:
         ridge_config = get_hyperparameters('Ridge', tier)
         ridge_alphas_list = ridge_config.get('alpha', [0.01, 0.1, 1.0, 10.0])
+    if ridge_solver_list is None:
+        ridge_config = get_hyperparameters('Ridge', tier)
+        ridge_solver_list = ridge_config.get('solver', ['auto'])
+    if ridge_tol_list is None:
+        ridge_config = get_hyperparameters('Ridge', tier)
+        ridge_tol_list = ridge_config.get('tol', [1e-4])
 
     # Lasso defaults (tier-aware)
     if lasso_alphas_list is None:
         lasso_config = get_hyperparameters('Lasso', tier)
         lasso_alphas_list = lasso_config.get('alpha', [0.01, 0.1, 1.0])
+    if lasso_selection_list is None:
+        lasso_config = get_hyperparameters('Lasso', tier)
+        lasso_selection_list = lasso_config.get('selection', ['cyclic'])
+    if lasso_tol_list is None:
+        lasso_config = get_hyperparameters('Lasso', tier)
+        lasso_tol_list = lasso_config.get('tol', [1e-4])
 
     # XGBoost defaults (tier-aware)
     if xgb_n_estimators_list is None:
@@ -333,6 +381,12 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if xgb_reg_lambda is None:
         xgb_config = get_hyperparameters('XGBoost', tier)
         xgb_reg_lambda = xgb_config.get('reg_lambda', [1.0])  # Default if not in tier
+    if xgb_min_child_weight_list is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_min_child_weight_list = xgb_config.get('min_child_weight', [1])
+    if xgb_gamma_list is None:
+        xgb_config = get_hyperparameters('XGBoost', tier)
+        xgb_gamma_list = xgb_config.get('gamma', [0])
 
     # ElasticNet defaults (tier-aware)
     if elasticnet_alphas_list is None:
@@ -341,6 +395,12 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if elasticnet_l1_ratios is None:
         en_config = get_hyperparameters('ElasticNet', tier)
         elasticnet_l1_ratios = en_config.get('l1_ratio', [0.3, 0.5, 0.7])
+    if elasticnet_selection_list is None:
+        en_config = get_hyperparameters('ElasticNet', tier)
+        elasticnet_selection_list = en_config.get('selection', ['cyclic'])
+    if elasticnet_tol_list is None:
+        en_config = get_hyperparameters('ElasticNet', tier)
+        elasticnet_tol_list = en_config.get('tol', [1e-4])
 
     # LightGBM defaults (tier-aware)
     if lightgbm_n_estimators_list is None:
@@ -352,6 +412,24 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if lightgbm_num_leaves_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
         lightgbm_num_leaves_list = lgbm_config.get('num_leaves', [31, 50])
+    if lightgbm_max_depth_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_max_depth_list = lgbm_config.get('max_depth', [-1])
+    if lightgbm_min_child_samples_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [20])
+    if lightgbm_subsample_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_subsample_list = lgbm_config.get('subsample', [1.0])
+    if lightgbm_colsample_bytree_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_colsample_bytree_list = lgbm_config.get('colsample_bytree', [1.0])
+    if lightgbm_reg_alpha_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_reg_alpha_list = lgbm_config.get('reg_alpha', [0.0])
+    if lightgbm_reg_lambda_list is None:
+        lgbm_config = get_hyperparameters('LightGBM', tier)
+        lightgbm_reg_lambda_list = lgbm_config.get('reg_lambda', [0.0])
 
     # CatBoost defaults (tier-aware)
     if catboost_iterations_list is None:
@@ -363,6 +441,18 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if catboost_depths is None:
         cb_config = get_hyperparameters('CatBoost', tier)
         catboost_depths = cb_config.get('depth', [4, 6])
+    if catboost_l2_leaf_reg_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_l2_leaf_reg_list = cb_config.get('l2_leaf_reg', [3.0])
+    if catboost_border_count_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_border_count_list = cb_config.get('border_count', [128])
+    if catboost_bagging_temperature_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_bagging_temperature_list = cb_config.get('bagging_temperature', [1.0])
+    if catboost_random_strength_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_random_strength_list = cb_config.get('random_strength', [1.0])
 
     # SVR defaults (tier-aware)
     if svr_kernels is None:
@@ -374,6 +464,18 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if svr_gamma_list is None:
         svr_config = get_hyperparameters('SVR', tier)
         svr_gamma_list = svr_config.get('gamma', ['scale'])
+    if svr_epsilon_list is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_epsilon_list = svr_config.get('epsilon', [0.1])
+    if svr_degree_list is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_degree_list = svr_config.get('degree', [3])
+    if svr_coef0_list is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_coef0_list = svr_config.get('coef0', [0.0])
+    if svr_shrinking_list is None:
+        svr_config = get_hyperparameters('SVR', tier)
+        svr_shrinking_list = svr_config.get('shrinking', [True])
 
     # MLP defaults (tier-aware)
     if mlp_hidden_layer_sizes_list is None:
@@ -385,6 +487,21 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if mlp_learning_rate_inits is None:
         mlp_config = get_hyperparameters('MLP', tier)
         mlp_learning_rate_inits = mlp_config.get('learning_rate_init', [1e-3])
+    if mlp_activation_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_activation_list = mlp_config.get('activation', ['relu'])
+    if mlp_solver_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_solver_list = mlp_config.get('solver', ['adam'])
+    if mlp_batch_size_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_batch_size_list = mlp_config.get('batch_size', ['auto'])
+    if mlp_learning_rate_schedule_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_learning_rate_schedule_list = mlp_config.get('learning_rate_schedule', ['constant'])
+    if mlp_momentum_list is None:
+        mlp_config = get_hyperparameters('MLP', tier)
+        mlp_momentum_list = mlp_config.get('momentum', [0.9])
 
     grids = {}
 
@@ -393,36 +510,83 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     pls_max = min(n_features, max_n_components)
     pls_components = list(range(2, pls_max + 1)) if pls_max >= 2 else [2]
 
+    # PLS additional hyperparameters (tier-aware)
+    if pls_max_iter_list is None:
+        pls_config = get_hyperparameters('PLS', tier)
+        pls_max_iter_list = pls_config.get('max_iter', [500])
+    if pls_tol_list is None:
+        pls_config = get_hyperparameters('PLS', tier)
+        pls_tol_list = pls_config.get('tol', [1e-6])
+
     if task_type == "regression":
         # PLS Regression (only if in enabled_models)
         if 'PLS' in enabled_models:
-            grids["PLS"] = [
-                (PLSRegression(n_components=nc, scale=False), {"n_components": nc})
-                for nc in pls_components
-            ]
+            pls_configs = []
+            for nc in pls_components:
+                for max_iter_val in pls_max_iter_list:
+                    for tol_val in pls_tol_list:
+                        pls_configs.append(
+                            (
+                                PLSRegression(
+                                    n_components=nc,
+                                    max_iter=max_iter_val,
+                                    tol=tol_val,
+                                    scale=False
+                                ),
+                                {
+                                    "n_components": nc,
+                                    "max_iter": max_iter_val,
+                                    "tol": tol_val
+                                }
+                            )
+                        )
+            grids["PLS"] = pls_configs
 
         # Ridge Regression (tier-aware)
         if 'Ridge' in enabled_models:
             ridge_configs = []
             for alpha in ridge_alphas_list:
-                ridge_configs.append(
-                    (
-                        Ridge(alpha=alpha, random_state=42),
-                        {"alpha": alpha}
-                    )
-                )
+                for solver_val in ridge_solver_list:
+                    for tol_val in ridge_tol_list:
+                        ridge_configs.append(
+                            (
+                                Ridge(
+                                    alpha=alpha,
+                                    solver=solver_val,
+                                    tol=tol_val,
+                                    random_state=42
+                                ),
+                                {
+                                    "alpha": alpha,
+                                    "solver": solver_val,
+                                    "tol": tol_val
+                                }
+                            )
+                        )
             grids["Ridge"] = ridge_configs
 
         # Lasso Regression (tier-aware)
         if 'Lasso' in enabled_models:
             lasso_configs = []
             for alpha in lasso_alphas_list:
-                lasso_configs.append(
-                    (
-                        Lasso(alpha=alpha, random_state=42, max_iter=max_iter),
-                        {"alpha": alpha}
-                    )
-                )
+                for selection_val in lasso_selection_list:
+                    for tol_val in lasso_tol_list:
+                        lasso_configs.append(
+                            (
+                                Lasso(
+                                    alpha=alpha,
+                                    selection=selection_val,
+                                    tol=tol_val,
+                                    max_iter=max_iter,
+                                    random_state=42
+                                ),
+                                {
+                                    "alpha": alpha,
+                                    "selection": selection_val,
+                                    "tol": tol_val
+                                }
+                            )
+                        )
             grids["Lasso"] = lasso_configs
 
         # ElasticNet Regression (tier-aware with UI overrides)
@@ -430,12 +594,26 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             elasticnet_configs = []
             for alpha in elasticnet_alphas_list:
                 for l1_ratio in elasticnet_l1_ratios:
-                    elasticnet_configs.append(
-                        (
-                            ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42, max_iter=max_iter),
-                            {"alpha": alpha, "l1_ratio": l1_ratio}
-                        )
-                    )
+                    for selection_val in elasticnet_selection_list:
+                        for tol_val in elasticnet_tol_list:
+                            elasticnet_configs.append(
+                                (
+                                    ElasticNet(
+                                        alpha=alpha,
+                                        l1_ratio=l1_ratio,
+                                        selection=selection_val,
+                                        tol=tol_val,
+                                        max_iter=max_iter,
+                                        random_state=42
+                                    ),
+                                    {
+                                        "alpha": alpha,
+                                        "l1_ratio": l1_ratio,
+                                        "selection": selection_val,
+                                        "tol": tol_val
+                                    }
+                                )
+                            )
             grids["ElasticNet"] = elasticnet_configs
 
         # Random Forest (tier-aware)
@@ -443,14 +621,38 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             rf_configs = []
             for n_est in rf_n_trees_list:
                 for max_d in rf_max_depth_list:
-                    rf_configs.append(
-                        (
-                            RandomForestRegressor(
-                                n_estimators=n_est, max_depth=max_d, random_state=42, n_jobs=-1
-                            ),
-                            {"n_estimators": n_est, "max_depth": max_d},
-                        )
-                    )
+                    for min_split in rf_min_samples_split_list:
+                        for min_leaf in rf_min_samples_leaf_list:
+                            for max_feat in rf_max_features_list:
+                                for bootstrap in rf_bootstrap_list:
+                                    for max_leaf_nodes in rf_max_leaf_nodes_list:
+                                        for min_impurity_dec in rf_min_impurity_decrease_list:
+                                            rf_configs.append(
+                                                (
+                                                    RandomForestRegressor(
+                                                        n_estimators=n_est,
+                                                        max_depth=max_d,
+                                                        min_samples_split=min_split,
+                                                        min_samples_leaf=min_leaf,
+                                                        max_features=max_feat,
+                                                        bootstrap=bootstrap,
+                                                        max_leaf_nodes=max_leaf_nodes,
+                                                        min_impurity_decrease=min_impurity_dec,
+                                                        random_state=42,
+                                                        n_jobs=-1
+                                                    ),
+                                                    {
+                                                        "n_estimators": n_est,
+                                                        "max_depth": max_d,
+                                                        "min_samples_split": min_split,
+                                                        "min_samples_leaf": min_leaf,
+                                                        "max_features": max_feat,
+                                                        "bootstrap": bootstrap,
+                                                        "max_leaf_nodes": max_leaf_nodes,
+                                                        "min_impurity_decrease": min_impurity_dec
+                                                    },
+                                                )
+                                            )
             grids["RandomForest"] = rf_configs
 
         # MLP (tier-aware with UI overrides)
@@ -458,24 +660,68 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             mlp_configs = []
             for hidden in mlp_hidden_layer_sizes_list:
                 for alpha in mlp_alphas_list:
-                    for lr in mlp_learning_rate_inits:
-                        mlp_configs.append(
-                            (
-                                MLPRegressor(
-                                    hidden_layer_sizes=hidden,
-                                    alpha=alpha,
-                                    learning_rate_init=lr,
-                                    max_iter=max_iter,
-                                    random_state=42,
-                                    early_stopping=True,
-                                ),
-                                {
-                                    "hidden_layer_sizes": hidden,
-                                    "alpha": alpha,
-                                    "learning_rate_init": lr,
-                                },
-                            )
-                        )
+                    for lr_init in mlp_learning_rate_inits:
+                        for activation in mlp_activation_list:
+                            for solver in mlp_solver_list:
+                                for batch_size in mlp_batch_size_list:
+                                    for lr_schedule in mlp_learning_rate_schedule_list:
+                                        # momentum only applies when solver='sgd'
+                                        if solver == 'sgd':
+                                            for momentum in mlp_momentum_list:
+                                                mlp_configs.append(
+                                                    (
+                                                        MLPRegressor(
+                                                            hidden_layer_sizes=hidden,
+                                                            alpha=alpha,
+                                                            learning_rate_init=lr_init,
+                                                            activation=activation,
+                                                            solver=solver,
+                                                            batch_size=batch_size,
+                                                            learning_rate=lr_schedule,
+                                                            momentum=momentum,
+                                                            max_iter=max_iter,
+                                                            random_state=42,
+                                                            early_stopping=True,
+                                                        ),
+                                                        {
+                                                            "hidden_layer_sizes": hidden,
+                                                            "alpha": alpha,
+                                                            "learning_rate_init": lr_init,
+                                                            "activation": activation,
+                                                            "solver": solver,
+                                                            "batch_size": batch_size,
+                                                            "learning_rate": lr_schedule,
+                                                            "momentum": momentum,
+                                                        },
+                                                    )
+                                                )
+                                        else:
+                                            # For non-sgd solvers, don't include momentum
+                                            mlp_configs.append(
+                                                (
+                                                    MLPRegressor(
+                                                        hidden_layer_sizes=hidden,
+                                                        alpha=alpha,
+                                                        learning_rate_init=lr_init,
+                                                        activation=activation,
+                                                        solver=solver,
+                                                        batch_size=batch_size,
+                                                        learning_rate=lr_schedule,
+                                                        max_iter=max_iter,
+                                                        random_state=42,
+                                                        early_stopping=True,
+                                                    ),
+                                                    {
+                                                        "hidden_layer_sizes": hidden,
+                                                        "alpha": alpha,
+                                                        "learning_rate_init": lr_init,
+                                                        "activation": activation,
+                                                        "solver": solver,
+                                                        "batch_size": batch_size,
+                                                        "learning_rate": lr_schedule,
+                                                    },
+                                                )
+                                            )
             grids["MLP"] = mlp_configs
 
         # Neural Boosted Regression (tier-aware)
@@ -523,21 +769,94 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             svr_configs = []
             for kernel in svr_kernels:
                 for C in svr_Cs:
-                    if kernel == 'rbf':
-                        for gamma in svr_gammas:
-                            svr_configs.append(
-                                (
-                                    SVR(kernel=kernel, C=C, gamma=gamma),
-                                    {"kernel": kernel, "C": C, "gamma": gamma}
+                    for epsilon in svr_epsilon_list:
+                        for shrinking in svr_shrinking_list:
+                            # gamma applies to rbf and poly kernels
+                            if kernel in ['rbf', 'poly']:
+                                for gamma in svr_gammas:
+                                    # degree only applies to poly kernel
+                                    if kernel == 'poly':
+                                        for degree in svr_degree_list:
+                                            for coef0 in svr_coef0_list:
+                                                svr_configs.append(
+                                                    (
+                                                        SVR(
+                                                            kernel=kernel,
+                                                            C=C,
+                                                            epsilon=epsilon,
+                                                            gamma=gamma,
+                                                            degree=degree,
+                                                            coef0=coef0,
+                                                            shrinking=shrinking
+                                                        ),
+                                                        {
+                                                            "kernel": kernel,
+                                                            "C": C,
+                                                            "epsilon": epsilon,
+                                                            "gamma": gamma,
+                                                            "degree": degree,
+                                                            "coef0": coef0,
+                                                            "shrinking": shrinking
+                                                        }
+                                                    )
+                                                )
+                                    else:  # rbf kernel
+                                        svr_configs.append(
+                                            (
+                                                SVR(
+                                                    kernel=kernel,
+                                                    C=C,
+                                                    epsilon=epsilon,
+                                                    gamma=gamma,
+                                                    shrinking=shrinking
+                                                ),
+                                                {
+                                                    "kernel": kernel,
+                                                    "C": C,
+                                                    "epsilon": epsilon,
+                                                    "gamma": gamma,
+                                                    "shrinking": shrinking
+                                                }
+                                            )
+                                        )
+                            elif kernel == 'sigmoid':
+                                # sigmoid uses coef0 but not gamma or degree
+                                for coef0 in svr_coef0_list:
+                                    svr_configs.append(
+                                        (
+                                            SVR(
+                                                kernel=kernel,
+                                                C=C,
+                                                epsilon=epsilon,
+                                                coef0=coef0,
+                                                shrinking=shrinking
+                                            ),
+                                            {
+                                                "kernel": kernel,
+                                                "C": C,
+                                                "epsilon": epsilon,
+                                                "coef0": coef0,
+                                                "shrinking": shrinking
+                                            }
+                                        )
+                                    )
+                            else:  # linear or other kernels
+                                svr_configs.append(
+                                    (
+                                        SVR(
+                                            kernel=kernel,
+                                            C=C,
+                                            epsilon=epsilon,
+                                            shrinking=shrinking
+                                        ),
+                                        {
+                                            "kernel": kernel,
+                                            "C": C,
+                                            "epsilon": epsilon,
+                                            "shrinking": shrinking
+                                        }
+                                    )
                                 )
-                            )
-                    else:
-                        svr_configs.append(
-                            (
-                                SVR(kernel=kernel, C=C),
-                                {"kernel": kernel, "C": C}
-                            )
-                        )
             grids["SVR"] = svr_configs
 
         # XGBoost Regression - tier-aware with UI overrides
@@ -550,33 +869,39 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                             for colsample in xgb_colsample_bytree:
                                 for reg_alpha in xgb_reg_alpha:
                                     for reg_lambda in xgb_reg_lambda:
-                                        xgb_configs.append(
-                                            (
-                                                XGBRegressor(
-                                                    n_estimators=n_est,
-                                                    learning_rate=lr,
-                                                    max_depth=max_depth,
-                                                    subsample=subsample,
-                                                    colsample_bytree=colsample,
-                                                    reg_alpha=reg_alpha,
-                                                    reg_lambda=reg_lambda,
-                                                    tree_method='hist',  # Faster for high-dimensional data
-                                                    random_state=42,
-                                                    n_jobs=-1,
-                                                    verbosity=0
-                                                ),
-                                                {
-                                                    "n_estimators": n_est,
-                                                    "learning_rate": lr,
-                                                    "max_depth": max_depth,
-                                                    "subsample": subsample,
-                                                    "colsample_bytree": colsample,
-                                                    "reg_alpha": reg_alpha,
-                                                    "reg_lambda": reg_lambda,
-                                                    "tree_method": "hist"
-                                                }
-                                            )
-                                        )
+                                        for min_child_weight in xgb_min_child_weight_list:
+                                            for gamma in xgb_gamma_list:
+                                                xgb_configs.append(
+                                                    (
+                                                        XGBRegressor(
+                                                            n_estimators=n_est,
+                                                            learning_rate=lr,
+                                                            max_depth=max_depth,
+                                                            subsample=subsample,
+                                                            colsample_bytree=colsample,
+                                                            reg_alpha=reg_alpha,
+                                                            reg_lambda=reg_lambda,
+                                                            min_child_weight=min_child_weight,
+                                                            gamma=gamma,
+                                                            tree_method='hist',  # Faster for high-dimensional data
+                                                            random_state=42,
+                                                            n_jobs=-1,
+                                                            verbosity=0
+                                                        ),
+                                                        {
+                                                            "n_estimators": n_est,
+                                                            "learning_rate": lr,
+                                                            "max_depth": max_depth,
+                                                            "subsample": subsample,
+                                                            "colsample_bytree": colsample,
+                                                            "reg_alpha": reg_alpha,
+                                                            "reg_lambda": reg_lambda,
+                                                            "min_child_weight": min_child_weight,
+                                                            "gamma": gamma,
+                                                            "tree_method": "hist"
+                                                        }
+                                                    )
+                                                )
             grids["XGBoost"] = xgb_configs
 
         # LightGBM Regression - tier-aware with UI overrides
@@ -585,35 +910,41 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for n_est in lightgbm_n_estimators_list:
                 for lr in lightgbm_learning_rates:
                     for num_leaves in lightgbm_num_leaves_list:
-                        lgbm_configs.append(
-                            (
-                                LGBMRegressor(
-                                    n_estimators=n_est,
-                                    learning_rate=lr,
-                                    num_leaves=num_leaves,
-                                    max_depth=-1,
-                                    min_child_samples=5,
-                                    subsample=0.8,
-                                    colsample_bytree=0.8,
-                                    reg_alpha=0.1,
-                                    reg_lambda=1.0,
-                                    random_state=42,
-                                    n_jobs=-1,
-                                    verbosity=-1
-                                ),
-                                {
-                                    "n_estimators": n_est,
-                                    "learning_rate": lr,
-                                    "num_leaves": num_leaves,
-                                    "max_depth": -1,
-                                    "min_child_samples": 5,
-                                    "subsample": 0.8,
-                                    "colsample_bytree": 0.8,
-                                    "reg_alpha": 0.1,
-                                    "reg_lambda": 1.0
-                                }
-                            )
-                        )
+                        for max_depth in lightgbm_max_depth_list:
+                            for min_child_samples in lightgbm_min_child_samples_list:
+                                for subsample in lightgbm_subsample_list:
+                                    for colsample_bytree in lightgbm_colsample_bytree_list:
+                                        for reg_alpha in lightgbm_reg_alpha_list:
+                                            for reg_lambda in lightgbm_reg_lambda_list:
+                                                lgbm_configs.append(
+                                                    (
+                                                        LGBMRegressor(
+                                                            n_estimators=n_est,
+                                                            learning_rate=lr,
+                                                            num_leaves=num_leaves,
+                                                            max_depth=max_depth,
+                                                            min_child_samples=min_child_samples,
+                                                            subsample=subsample,
+                                                            colsample_bytree=colsample_bytree,
+                                                            reg_alpha=reg_alpha,
+                                                            reg_lambda=reg_lambda,
+                                                            random_state=42,
+                                                            n_jobs=-1,
+                                                            verbosity=-1
+                                                        ),
+                                                        {
+                                                            "n_estimators": n_est,
+                                                            "learning_rate": lr,
+                                                            "num_leaves": num_leaves,
+                                                            "max_depth": max_depth,
+                                                            "min_child_samples": min_child_samples,
+                                                            "subsample": subsample,
+                                                            "colsample_bytree": colsample_bytree,
+                                                            "reg_alpha": reg_alpha,
+                                                            "reg_lambda": reg_lambda
+                                                        }
+                                                    )
+                                                )
             grids["LightGBM"] = lgbm_configs
 
         # CatBoost Regression - tier-aware with UI overrides (optional - requires Visual Studio)
@@ -622,18 +953,34 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for iterations in catboost_iterations_list:
                 for lr in catboost_learning_rates:
                     for depth in catboost_depths:
-                        catboost_configs.append(
-                            (
-                                CatBoostRegressor(
-                                    iterations=iterations,
-                                    learning_rate=lr,
-                                    depth=depth,
-                                    random_state=42,
-                                    verbose=False
-                                ),
-                                {"iterations": iterations, "learning_rate": lr, "depth": depth}
-                            )
-                        )
+                        for l2_leaf_reg in catboost_l2_leaf_reg_list:
+                            for border_count in catboost_border_count_list:
+                                for bagging_temp in catboost_bagging_temperature_list:
+                                    for random_str in catboost_random_strength_list:
+                                        catboost_configs.append(
+                                            (
+                                                CatBoostRegressor(
+                                                    iterations=iterations,
+                                                    learning_rate=lr,
+                                                    depth=depth,
+                                                    l2_leaf_reg=l2_leaf_reg,
+                                                    border_count=border_count,
+                                                    bagging_temperature=bagging_temp,
+                                                    random_strength=random_str,
+                                                    random_state=42,
+                                                    verbose=False
+                                                ),
+                                                {
+                                                    "iterations": iterations,
+                                                    "learning_rate": lr,
+                                                    "depth": depth,
+                                                    "l2_leaf_reg": l2_leaf_reg,
+                                                    "border_count": border_count,
+                                                    "bagging_temperature": bagging_temp,
+                                                    "random_strength": random_str
+                                                }
+                                            )
+                                        )
             grids["CatBoost"] = catboost_configs
         elif 'CatBoost' in enabled_models and not HAS_CATBOOST:
             print("Warning: CatBoost requested but not available. Skipping CatBoost models.")
@@ -641,24 +988,64 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     else:  # classification
         # PLS-DA (PLS + LogisticRegression) - tier-aware
         if 'PLS-DA' in enabled_models or 'PLS' in enabled_models:
-            grids["PLS-DA"] = [
-                (PLSRegression(n_components=nc, scale=False), {"n_components": nc})
-                for nc in pls_components
-            ]
+            pls_da_configs = []
+            for nc in pls_components:
+                for max_iter_val in pls_max_iter_list:
+                    for tol_val in pls_tol_list:
+                        pls_da_configs.append(
+                            (
+                                PLSRegression(
+                                    n_components=nc,
+                                    max_iter=max_iter_val,
+                                    tol=tol_val,
+                                    scale=False
+                                ),
+                                {
+                                    "n_components": nc,
+                                    "max_iter": max_iter_val,
+                                    "tol": tol_val
+                                }
+                            )
+                        )
+            grids["PLS-DA"] = pls_da_configs
 
         # Random Forest Classifier - tier-aware
         if 'RandomForest' in enabled_models:
             rf_configs = []
             for n_est in rf_n_trees_list:
                 for max_d in rf_max_depth_list:
-                    rf_configs.append(
-                        (
-                            RandomForestClassifier(
-                                n_estimators=n_est, max_depth=max_d, random_state=42, n_jobs=-1
-                            ),
-                            {"n_estimators": n_est, "max_depth": max_d},
-                        )
-                    )
+                    for min_split in rf_min_samples_split_list:
+                        for min_leaf in rf_min_samples_leaf_list:
+                            for max_feat in rf_max_features_list:
+                                for bootstrap in rf_bootstrap_list:
+                                    for max_leaf_nodes in rf_max_leaf_nodes_list:
+                                        for min_impurity_dec in rf_min_impurity_decrease_list:
+                                            rf_configs.append(
+                                                (
+                                                    RandomForestClassifier(
+                                                        n_estimators=n_est,
+                                                        max_depth=max_d,
+                                                        min_samples_split=min_split,
+                                                        min_samples_leaf=min_leaf,
+                                                        max_features=max_feat,
+                                                        bootstrap=bootstrap,
+                                                        max_leaf_nodes=max_leaf_nodes,
+                                                        min_impurity_decrease=min_impurity_dec,
+                                                        random_state=42,
+                                                        n_jobs=-1
+                                                    ),
+                                                    {
+                                                        "n_estimators": n_est,
+                                                        "max_depth": max_d,
+                                                        "min_samples_split": min_split,
+                                                        "min_samples_leaf": min_leaf,
+                                                        "max_features": max_feat,
+                                                        "bootstrap": bootstrap,
+                                                        "max_leaf_nodes": max_leaf_nodes,
+                                                        "min_impurity_decrease": min_impurity_dec
+                                                    },
+                                                )
+                                            )
             grids["RandomForest"] = rf_configs
 
         # MLP Classifier - tier-aware with UI overrides
@@ -666,24 +1053,68 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             mlp_configs = []
             for hidden in mlp_hidden_layer_sizes_list:
                 for alpha in mlp_alphas_list:
-                    for lr in mlp_learning_rate_inits:
-                        mlp_configs.append(
-                            (
-                                MLPClassifier(
-                                    hidden_layer_sizes=hidden,
-                                    alpha=alpha,
-                                    learning_rate_init=lr,
-                                    max_iter=max_iter,
-                                    random_state=42,
-                                    early_stopping=True,
-                                ),
-                                {
-                                    "hidden_layer_sizes": hidden,
-                                    "alpha": alpha,
-                                    "learning_rate_init": lr,
-                                },
-                            )
-                        )
+                    for lr_init in mlp_learning_rate_inits:
+                        for activation in mlp_activation_list:
+                            for solver in mlp_solver_list:
+                                for batch_size in mlp_batch_size_list:
+                                    for lr_schedule in mlp_learning_rate_schedule_list:
+                                        # momentum only applies when solver='sgd'
+                                        if solver == 'sgd':
+                                            for momentum in mlp_momentum_list:
+                                                mlp_configs.append(
+                                                    (
+                                                        MLPClassifier(
+                                                            hidden_layer_sizes=hidden,
+                                                            alpha=alpha,
+                                                            learning_rate_init=lr_init,
+                                                            activation=activation,
+                                                            solver=solver,
+                                                            batch_size=batch_size,
+                                                            learning_rate=lr_schedule,
+                                                            momentum=momentum,
+                                                            max_iter=max_iter,
+                                                            random_state=42,
+                                                            early_stopping=True,
+                                                        ),
+                                                        {
+                                                            "hidden_layer_sizes": hidden,
+                                                            "alpha": alpha,
+                                                            "learning_rate_init": lr_init,
+                                                            "activation": activation,
+                                                            "solver": solver,
+                                                            "batch_size": batch_size,
+                                                            "learning_rate": lr_schedule,
+                                                            "momentum": momentum,
+                                                        },
+                                                    )
+                                                )
+                                        else:
+                                            # For non-sgd solvers, don't include momentum
+                                            mlp_configs.append(
+                                                (
+                                                    MLPClassifier(
+                                                        hidden_layer_sizes=hidden,
+                                                        alpha=alpha,
+                                                        learning_rate_init=lr_init,
+                                                        activation=activation,
+                                                        solver=solver,
+                                                        batch_size=batch_size,
+                                                        learning_rate=lr_schedule,
+                                                        max_iter=max_iter,
+                                                        random_state=42,
+                                                        early_stopping=True,
+                                                    ),
+                                                    {
+                                                        "hidden_layer_sizes": hidden,
+                                                        "alpha": alpha,
+                                                        "learning_rate_init": lr_init,
+                                                        "activation": activation,
+                                                        "solver": solver,
+                                                        "batch_size": batch_size,
+                                                        "learning_rate": lr_schedule,
+                                                    },
+                                                )
+                                            )
             grids["MLP"] = mlp_configs
 
         # Support Vector Machine (SVM) for classification - tier-aware
@@ -758,35 +1189,41 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for n_est in lightgbm_n_estimators_list:
                 for lr in lightgbm_learning_rates:
                     for num_leaves in lightgbm_num_leaves_list:
-                        lgbm_configs.append(
-                            (
-                                LGBMClassifier(
-                                    n_estimators=n_est,
-                                    learning_rate=lr,
-                                    num_leaves=num_leaves,
-                                    max_depth=-1,
-                                    min_child_samples=5,
-                                    subsample=0.8,
-                                    colsample_bytree=0.8,
-                                    reg_alpha=0.1,
-                                    reg_lambda=1.0,
-                                    random_state=42,
-                                    n_jobs=-1,
-                                    verbosity=-1
-                                ),
-                                {
-                                    "n_estimators": n_est,
-                                    "learning_rate": lr,
-                                    "num_leaves": num_leaves,
-                                    "max_depth": -1,
-                                    "min_child_samples": 5,
-                                    "subsample": 0.8,
-                                    "colsample_bytree": 0.8,
-                                    "reg_alpha": 0.1,
-                                    "reg_lambda": 1.0
-                                }
-                            )
-                        )
+                        for max_depth in lightgbm_max_depth_list:
+                            for min_child_samples in lightgbm_min_child_samples_list:
+                                for subsample in lightgbm_subsample_list:
+                                    for colsample_bytree in lightgbm_colsample_bytree_list:
+                                        for reg_alpha in lightgbm_reg_alpha_list:
+                                            for reg_lambda in lightgbm_reg_lambda_list:
+                                                lgbm_configs.append(
+                                                    (
+                                                        LGBMClassifier(
+                                                            n_estimators=n_est,
+                                                            learning_rate=lr,
+                                                            num_leaves=num_leaves,
+                                                            max_depth=max_depth,
+                                                            min_child_samples=min_child_samples,
+                                                            subsample=subsample,
+                                                            colsample_bytree=colsample_bytree,
+                                                            reg_alpha=reg_alpha,
+                                                            reg_lambda=reg_lambda,
+                                                            random_state=42,
+                                                            n_jobs=-1,
+                                                            verbosity=-1
+                                                        ),
+                                                        {
+                                                            "n_estimators": n_est,
+                                                            "learning_rate": lr,
+                                                            "num_leaves": num_leaves,
+                                                            "max_depth": max_depth,
+                                                            "min_child_samples": min_child_samples,
+                                                            "subsample": subsample,
+                                                            "colsample_bytree": colsample_bytree,
+                                                            "reg_alpha": reg_alpha,
+                                                            "reg_lambda": reg_lambda
+                                                        }
+                                                    )
+                                                )
             grids["LightGBM"] = lgbm_configs
 
         # CatBoost Classification - tier-aware with UI overrides (optional - requires Visual Studio)

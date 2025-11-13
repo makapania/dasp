@@ -1882,12 +1882,6 @@ class SpectralPredictApp:
         content_frame = ttk.Frame(self.tab2, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
-        # Instructions
-        instructions = ttk.Label(content_frame,
-            text="View imported spectral data with Excel-like scrolling. Scroll with mouse wheel or use arrow keys to navigate.",
-            style='Caption.TLabel')
-        instructions.pack(anchor=tk.W, pady=(0, 10))
-
         # Control panel
         control_frame = ttk.Frame(content_frame)
         control_frame.pack(fill='x', pady=(0, 10))
@@ -2110,12 +2104,6 @@ class SpectralPredictApp:
         self.tab4 = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.tab4, text='  ⚙️ Analysis Configuration  ')
 
-        # Create header with subtitle
-        header_frame = ttk.Frame(self.tab4, style='TFrame', padding="20 20 20 10")
-        header_frame.pack(fill='x')
-        ttk.Label(header_frame, text="Configure all analysis settings organized into logical sections",
-                 style='Caption.TLabel').pack(anchor=tk.W, pady=(5, 0))
-
         # Create nested notebook for subtabs
         self.config_notebook = ttk.Notebook(self.tab4)
         self.config_notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
@@ -2181,22 +2169,12 @@ class SpectralPredictApp:
         ttk.Label(options_frame, text="💡 These penalties affect model ranking. 0 = rank only by R², 10 = strongly prefer simpler models",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
-        # Max PLS components
-        ttk.Label(options_frame, text="Max Latent Variables:").grid(row=6, column=0, sticky=tk.W, pady=(15, 8), padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=2, to=100, textvariable=self.max_n_components, width=12).grid(row=6, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(PLS components)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
-
-        # Max iterations
-        ttk.Label(options_frame, text="Max Iterations:").grid(row=7, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=12).grid(row=7, column=1, sticky=tk.W)
-        ttk.Label(options_frame, text="(for MLP/Neural Boosted)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
-
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=8, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=8, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=6, column=0, sticky=tk.W, pady=(15, 8), padx=(0, 10))
+        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=6, column=1, sticky=tk.W)
 
         # Progress monitor
-        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
         self._create_section_header(content_frame, "Preprocessing Methods", row=row, columnspan=2)
@@ -2547,11 +2525,20 @@ class SpectralPredictApp:
         ttk.Checkbutton(subsample_frame, text="1.0 ⭐", variable=self.neuralboosted_subsample_10).grid(row=0, column=3, padx=5)
         ttk.Label(subsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
-        # Info label
+        # Max Iterations (for neural base learner)
+        ttk.Label(advanced_content, text="Max Iterations (neural base learner):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        nb_maxiter_frame = ttk.Frame(advanced_content)
+        nb_maxiter_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=5)
+
+        ttk.Label(nb_maxiter_frame, text="Max iterations:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
+        ttk.Spinbox(nb_maxiter_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=10).grid(row=0, column=1, padx=5)
+        ttk.Label(nb_maxiter_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        # Info labels
         ttk.Label(advanced_content, text="💡 Selecting more options = more comprehensive analysis but longer runtime",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
         ttk.Label(advanced_content, text="💡 Subsample < 1.0 adds randomness (stochastic gradient boosting) to prevent overfitting",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Random Forest Hyperparameters - collapsible
         rf_section, rf_content = self._create_collapsible_section(content_frame,
@@ -2806,10 +2793,22 @@ class SpectralPredictApp:
         pls_content_frame = ttk.Frame(pls_frame)
         pls_content_frame.pack(fill='both', expand=True)
 
+        # Max Latent Variables (n_components)
+        ttk.Label(pls_content_frame, text="Max Latent Variables (n_components):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        max_comp_frame = ttk.Frame(pls_content_frame)
+        max_comp_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Label(max_comp_frame, text="Max components:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
+        ttk.Spinbox(max_comp_frame, from_=2, to=100, textvariable=self.max_n_components, width=10).grid(row=0, column=1, padx=5)
+        ttk.Label(max_comp_frame, text="(default: 8, determines search range)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        ttk.Label(pls_content_frame, text="💡 Sets the maximum number of PLS/PCR components to evaluate during optimization.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 10))
+
         # max_iter options
-        ttk.Label(pls_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ttk.Label(pls_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
         pls_maxiter_frame = ttk.Frame(pls_content_frame)
-        pls_maxiter_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+        pls_maxiter_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(pls_maxiter_frame, text="500 ⭐", variable=self.pls_max_iter_500).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(pls_maxiter_frame, text="1000", variable=self.pls_max_iter_1000).grid(row=0, column=1, padx=5)
@@ -2818,9 +2817,9 @@ class SpectralPredictApp:
         ttk.Label(pls_maxiter_frame, text="(default: 500)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # tol options
-        ttk.Label(pls_content_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        ttk.Label(pls_content_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
         pls_tol_frame = ttk.Frame(pls_content_frame)
-        pls_tol_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+        pls_tol_frame.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(pls_tol_frame, text="1e-7", variable=self.pls_tol_1e7).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(pls_tol_frame, text="1e-6 ⭐", variable=self.pls_tol_1e6).grid(row=0, column=1, padx=5)
@@ -2831,9 +2830,9 @@ class SpectralPredictApp:
 
         # Info labels
         ttk.Label(pls_content_frame, text="💡 max_iter controls convergence speed, tol controls precision.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
         ttk.Label(pls_content_frame, text="   Standard defaults (500, 1e-6) work well for most spectral data.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
 
         # XGBoost Hyperparameters - collapsible
         xgb_section, xgb_content = self._create_collapsible_section(content_frame,
@@ -3249,6 +3248,18 @@ class SpectralPredictApp:
         ttk.Label(mlp_content_frame, text="💡 Only used when solver='sgd', should be in [0, 1]",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
+        # Max Iterations
+        ttk.Label(mlp_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_maxiter_frame = ttk.Frame(mlp_content_frame)
+        mlp_maxiter_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_maxiter_frame, text="Max iterations:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
+        ttk.Spinbox(mlp_maxiter_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=10).grid(row=0, column=1, padx=5)
+        ttk.Label(mlp_maxiter_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 Maximum number of training iterations. Higher values may improve convergence but increase training time.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
         # SVR Hyperparameters - collapsible
         svr_section, svr_content = self._create_collapsible_section(content_frame,
                                                                     "SVR (Support Vector Regression) Hyperparameters",
@@ -3533,7 +3544,7 @@ class SpectralPredictApp:
     def _create_tab5_progress(self):
         """Tab 5: Analysis Progress - Live progress monitor."""
         self.tab5 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab5, text='  📊 Analysis Progress  ')
+        self.notebook.add(self.tab5, text='  ⏳ Analysis Progress  ')
 
         content_frame = ttk.Frame(self.tab5, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
@@ -8279,6 +8290,12 @@ class SpectralPredictApp:
         for canvas_id in tabs_to_cancel:
             del self._configure_timers[canvas_id]
 
+        # Auto-refresh calibration transfer instruments when switching to that tab (index 9)
+        if current_tab == 9 and self.instrument_profiles:
+            inst_ids = list(self.instrument_profiles.keys())
+            self.ct_master_instrument_combo['values'] = inst_ids
+            self.ct_slave_instrument_combo['values'] = inst_ids
+
     def _show_help(self):
         """Show help dialog."""
         help_text = """Spectral Predict - Quick Start
@@ -13016,6 +13033,10 @@ Configuration:
                 f"Channels: {len(wavelengths)}\n"
                 f"Detail score: {profile.detail_score:.4f}")
 
+            # Clear fields for next entry
+            self.inst_id_entry.delete(0, 'end')
+            self.inst_data_path.set('')
+
         except Exception as e:
             messagebox.showerror("Error",
                 f"Failed to load and characterize instrument:\n{str(e)}")
@@ -13078,11 +13099,21 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             messagebox.showwarning("Warning", "No instruments to save")
             return
 
+        # Create filename with timestamp and instrument names
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        inst_names = "_".join(list(self.instrument_profiles.keys())[:3])  # Use first 3 instrument names
+        if len(self.instrument_profiles) > 3:
+            inst_names += f"_plus{len(self.instrument_profiles)-3}more"
+
+        # Sanitize filename (remove invalid characters)
+        inst_names = "".join(c if c.isalnum() or c in "-_" else "_" for c in inst_names)
+        default_filename = f"instrument_registry_{inst_names}_{timestamp}.json"
+
         filepath = filedialog.asksaveasfilename(
             title="Save Instrument Registry",
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialfile="instrument_registry.json"
+            initialfile=default_filename
         )
 
         if not filepath:
@@ -13770,18 +13801,23 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
-        # VALIDATION: Models Loaded Check
-        if self.ct_master_model_dict is None:
-            messagebox.showerror(
-                "Master Model Not Loaded",
-                "Please load the master model in Section A first."
-            )
-            return
-
+        # VALIDATION: Transfer Model Check
         if self.ct_pred_transfer_model is None:
             messagebox.showerror(
                 "Transfer Model Not Loaded",
-                "Please load or build a transfer model in Section C first."
+                "Please load a transfer model first using the 'Browse Transfer Model' button above.\n\n"
+                "The transfer model contains the calibration transfer mapping between instruments."
+            )
+            return
+
+        # VALIDATION: Master Model Check (needed for prediction)
+        if self.ct_master_model_dict is None:
+            messagebox.showerror(
+                "Master Model Required for Prediction",
+                "To make predictions, you need to load the master model in Section A.\n\n"
+                "The master model is the trained PLS/PCR model that makes the actual predictions.\n\n"
+                "If you only want to transform spectra WITHOUT making predictions, "
+                "use Section F 'File Equalize' instead."
             )
             return
 
@@ -13899,6 +13935,234 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             messagebox.showinfo("Success", f"Predictions exported to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
+
+    # ======================================================================
+    # File Equalize Helper Methods (Section F)
+    # ======================================================================
+
+    def _on_eq_tm_source_changed(self):
+        """Show/hide transfer model file selection based on source selection."""
+        if self.ct_eq_tm_source_var.get() == 'file':
+            self.ct_eq_load_tm_frame.pack(fill='x', pady=(5, 10))
+        else:
+            self.ct_eq_load_tm_frame.pack_forget()
+
+    def _browse_ct_eq_transfer_model(self):
+        """Browse for transfer model .json file for equalization."""
+        filepath = filedialog.askopenfilename(
+            title="Select Transfer Model",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_eq_tm_path_var.set(filepath)
+
+    def _load_ct_eq_transfer_model(self):
+        """Load transfer model from file for equalization."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        filepath = self.ct_eq_tm_path_var.get()
+        if not filepath:
+            messagebox.showwarning("Warning", "Please browse and select a transfer model file")
+            return
+
+        try:
+            from spectral_predict.calibration_transfer import TransferModel
+
+            tm = TransferModel.load(filepath)
+            self.ct_eq_loaded_transfer_model = tm
+
+            info_text = (f"Loaded Transfer Model:\n"
+                        f"  Master: {tm.master_id}\n"
+                        f"  Slave: {tm.slave_id}\n"
+                        f"  Method: {tm.method.upper()}\n"
+                        f"  Wavelengths: {len(tm.wavelengths_common)}")
+
+            self.ct_eq_status_text.config(state='normal')
+            self.ct_eq_status_text.delete('1.0', tk.END)
+            self.ct_eq_status_text.insert('1.0', info_text)
+            self.ct_eq_status_text.config(state='disabled')
+
+            messagebox.showinfo("Success", "Transfer model loaded for equalization")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
+
+    def _browse_ct_eq_input_dir(self):
+        """Browse for input directory containing slave spectra to transform."""
+        directory = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        if directory:
+            self.ct_eq_input_dir_var.set(directory)
+
+    def _browse_ct_eq_output_dir(self):
+        """Browse for output directory for transformed spectra."""
+        directory = filedialog.askdirectory(title="Select Output Directory")
+        if directory:
+            self.ct_eq_output_dir_var.set(directory)
+
+    def _file_equalize_batch(self):
+        """Main File Equalize function: Transform slave spectra and export to files."""
+        if not HAS_CALIBRATION_TRANSFER:
+            messagebox.showerror("Error", "Calibration transfer modules not available")
+            return
+
+        # Get transfer model based on source selection
+        tm_source = self.ct_eq_tm_source_var.get()
+        if tm_source == 'current':
+            transfer_model = self.ct_transfer_model
+            if transfer_model is None:
+                messagebox.showerror("Error",
+                    "No transfer model available. Please build a model in Section C or load from file.")
+                return
+        else:  # 'file'
+            transfer_model = getattr(self, 'ct_eq_loaded_transfer_model', None)
+            if transfer_model is None:
+                messagebox.showerror("Error",
+                    "No transfer model loaded. Please load a transfer model file.")
+                return
+
+        # Get input/output directories
+        input_dir = self.ct_eq_input_dir_var.get()
+        if not input_dir:
+            messagebox.showwarning("Warning", "Please select an input directory containing slave spectra")
+            return
+
+        output_dir = self.ct_eq_output_dir_var.get()
+        if not output_dir:
+            output_dir = input_dir  # Use input directory if output not specified
+
+        # Get output options
+        file_org = self.ct_eq_file_org_var.get()
+        output_format = self.ct_eq_format_var.get()
+
+        try:
+            from spectral_predict.calibration_transfer import apply_ds, apply_pds, resample_to_grid
+            from spectral_predict.io import write_spectra
+            from pathlib import Path
+
+            # Update status
+            self.ct_eq_status_text.config(state='normal')
+            self.ct_eq_status_text.delete('1.0', tk.END)
+            self.ct_eq_status_text.insert('1.0', "Loading slave spectra...\n")
+            self.ct_eq_status_text.config(state='disabled')
+            self.root.update()
+
+            # Load slave spectra
+            wavelengths_slave, X_slave = self._load_spectra_from_directory(input_dir)
+
+            # Get sample IDs from filenames in the directory
+            input_path = Path(input_dir)
+            sample_files = []
+            for ext in ['.asd', '.sig', '.csv', '.xlsx', '.spc', '.txt']:
+                sample_files.extend(list(input_path.glob(f'*{ext}')))
+
+            sample_ids = [f.stem for f in sample_files]
+
+            if len(sample_ids) != X_slave.shape[0]:
+                # Fallback to generic IDs if mismatch
+                sample_ids = [f"spectrum_{i+1:03d}" for i in range(X_slave.shape[0])]
+
+            # Detect input format for auto mode
+            detected_format = 'csv'  # default fallback
+            if sample_files:
+                first_ext = sample_files[0].suffix.lower()
+                format_map = {'.csv': 'csv', '.xlsx': 'excel', '.spc': 'spc',
+                             '.txt': 'ascii', '.jdx': 'jcamp', '.dx': 'jcamp'}
+                detected_format = format_map.get(first_ext, 'csv')
+
+            # Determine actual output format
+            if output_format == 'auto (match input)' or output_format == 'auto':
+                actual_format = detected_format
+            else:
+                actual_format = output_format
+
+            # Update status
+            self.ct_eq_status_text.config(state='normal')
+            self.ct_eq_status_text.insert(tk.END, f"Loaded {X_slave.shape[0]} spectra\n")
+            self.ct_eq_status_text.insert(tk.END, "Resampling to transfer model grid...\n")
+            self.ct_eq_status_text.config(state='disabled')
+            self.root.update()
+
+            # Resample to transfer model's common grid
+            X_slave_resampled = resample_to_grid(X_slave, wavelengths_slave,
+                                                  transfer_model.wavelengths_common)
+
+            # Apply transfer transformation
+            self.ct_eq_status_text.config(state='normal')
+            self.ct_eq_status_text.insert(tk.END, f"Applying {transfer_model.method.upper()} transformation...\n")
+            self.ct_eq_status_text.config(state='disabled')
+            self.root.update()
+
+            if transfer_model.method == 'ds':
+                X_transformed = apply_ds(X_slave_resampled, transfer_model.params['A'])
+            else:  # pds
+                X_transformed = apply_pds(X_slave_resampled,
+                                         transfer_model.params['B'],
+                                         transfer_model.params['window'])
+
+            # Create model name for filename prefix
+            model_name = f"{transfer_model.master_id}_from_{transfer_model.slave_id}_{transfer_model.method}"
+
+            # Create DataFrame with transformed spectra
+            transformed_ids = [f"{model_name}_{sid}" for sid in sample_ids]
+            df_transformed = pd.DataFrame(X_transformed,
+                                         index=transformed_ids,
+                                         columns=transfer_model.wavelengths_common)
+
+            # Export based on file organization choice
+            output_path = Path(output_dir)
+
+            self.ct_eq_status_text.config(state='normal')
+            self.ct_eq_status_text.insert(tk.END, f"Exporting to {actual_format.upper()} format...\n")
+            self.ct_eq_status_text.config(state='disabled')
+            self.root.update()
+
+            if file_org == 'single':
+                # Export all spectra to single file
+                output_file = output_path / f"{model_name}_transformed_spectra"
+                write_spectra(df_transformed, str(output_file), format=actual_format)
+
+                self.ct_eq_status_text.config(state='normal')
+                self.ct_eq_status_text.insert(tk.END,
+                    f"\nSuccess! Exported {len(sample_ids)} transformed spectra to:\n{output_file}.{actual_format}\n")
+                self.ct_eq_status_text.config(state='disabled')
+
+                messagebox.showinfo("Success",
+                    f"Exported {len(sample_ids)} transformed spectra to single file:\n{output_file}.{actual_format}")
+
+            else:  # 'individual'
+                # Export each spectrum to individual file
+                files_created = []
+                for i, (sample_id, transformed_id) in enumerate(zip(sample_ids, transformed_ids)):
+                    # Create single-row DataFrame for this spectrum
+                    df_single = pd.DataFrame(X_transformed[i:i+1, :],
+                                           index=[transformed_id],
+                                           columns=transfer_model.wavelengths_common)
+
+                    output_file = output_path / f"{transformed_id}"
+                    write_spectra(df_single, str(output_file), format=actual_format)
+                    files_created.append(f"{transformed_id}.{actual_format}")
+
+                self.ct_eq_status_text.config(state='normal')
+                self.ct_eq_status_text.insert(tk.END,
+                    f"\nSuccess! Exported {len(files_created)} individual files to:\n{output_path}\n")
+                self.ct_eq_status_text.insert(tk.END,
+                    f"First few files:\n  " + "\n  ".join(files_created[:5]))
+                if len(files_created) > 5:
+                    self.ct_eq_status_text.insert(tk.END, f"\n  ... and {len(files_created)-5} more")
+                self.ct_eq_status_text.insert(tk.END, "\n")
+                self.ct_eq_status_text.config(state='disabled')
+
+                messagebox.showinfo("Success",
+                    f"Exported {len(files_created)} transformed spectra as individual files to:\n{output_path}")
+
+        except Exception as e:
+            self.ct_eq_status_text.config(state='normal')
+            self.ct_eq_status_text.insert(tk.END, f"\nError: {str(e)}\n")
+            self.ct_eq_status_text.config(state='disabled')
+            messagebox.showerror("Error", f"Failed to equalize files:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def _plot_paired_spectra_preview(self, master_id, slave_id):
         """
@@ -14321,8 +14585,11 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
 
         if asd_files:
             # Load ASD files
-            from spectral_predict.data_io import load_asd_directory
-            return load_asd_directory(directory)
+            from spectral_predict.io import read_asd_dir
+            df, metadata = read_asd_dir(directory)
+            wavelengths = df.columns.astype(float).values
+            X = df.values
+            return wavelengths, X
         elif csv_files:
             # Load CSV files (assume first row is wavelengths, each subsequent row is a spectrum)
             all_spectra = []
@@ -14337,8 +14604,11 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             return wavelengths, X
         elif spc_files:
             # Load SPC files
-            from spectral_predict.data_io import load_spc_directory
-            return load_spc_directory(directory)
+            from spectral_predict.io import read_spc_dir
+            df, metadata = read_spc_dir(directory)
+            wavelengths = df.columns.astype(float).values
+            X = df.values
+            return wavelengths, X
         else:
             raise ValueError("No supported spectral files found in directory (ASD, CSV, or SPC)")
 
@@ -14568,8 +14838,12 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         section_e.pack(fill='x', pady=(0, 15))
 
         ttk.Label(section_e,
-                 text="Load new slave spectra, apply calibration transfer, and predict using master model:",
-                 style='TLabel').pack(anchor='w', pady=(0, 10))
+                 text="Load new slave spectra, apply calibration transfer, and predict using master model (requires Section A):",
+                 style='TLabel').pack(anchor='w', pady=(0, 5))
+
+        ttk.Label(section_e,
+                 text="Note: To transform spectra WITHOUT predictions, use Section F 'File Equalize' instead.",
+                 style='Caption.TLabel', foreground='gray').pack(anchor='w', pady=(0, 10))
 
         # Load transfer model for prediction
         load_tm_frame = ttk.Frame(section_e)
@@ -14618,6 +14892,118 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         # Export predictions
         ttk.Button(section_e, text="Export Predictions...",
                   command=self._export_ct_predictions, style='Modern.TButton').pack(pady=(10, 0), anchor='w')
+
+        # ===================================================================
+        # SECTION F: File Equalize - Transform & Export Slave Spectra
+        # ===================================================================
+        section_f = ttk.LabelFrame(main_frame, text="F) File Equalize - Transform & Export Slave Spectra",
+                                  style='Card.TFrame', padding=15)
+        section_f.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(section_f,
+                 text="Transform slave spectra to match master instrument and export transformed files:",
+                 style='TLabel').pack(anchor='w', pady=(0, 10))
+
+        # Transfer model source selector
+        tm_source_frame = ttk.Frame(section_f)
+        tm_source_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(tm_source_frame, text="Transfer Model Source:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+        self.ct_eq_tm_source_var = tk.StringVar(value='current')
+        ttk.Radiobutton(tm_source_frame, text="Use Current Model",
+                       variable=self.ct_eq_tm_source_var, value='current',
+                       command=self._on_eq_tm_source_changed).pack(side='left', padx=(0, 20))
+        ttk.Radiobutton(tm_source_frame, text="Load from File",
+                       variable=self.ct_eq_tm_source_var, value='file',
+                       command=self._on_eq_tm_source_changed).pack(side='left')
+
+        # Load transfer model from file (initially hidden)
+        self.ct_eq_load_tm_frame = ttk.Frame(section_f)
+
+        self.ct_eq_tm_path_var = tk.StringVar()
+        tm_eq_entry = ttk.Entry(self.ct_eq_load_tm_frame, textvariable=self.ct_eq_tm_path_var,
+                               width=60, state='readonly')
+        tm_eq_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(self.ct_eq_load_tm_frame, text="Browse Transfer Model...",
+                  command=self._browse_ct_eq_transfer_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
+        ttk.Button(self.ct_eq_load_tm_frame, text="Load TM",
+                  command=self._load_ct_eq_transfer_model, style='Modern.TButton').pack(side='left')
+
+        # Input directory for slave spectra to transform
+        input_dir_frame = ttk.Frame(section_f)
+        input_dir_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Label(input_dir_frame, text="Slave Spectra to Transform:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        input_browse_frame = ttk.Frame(input_dir_frame)
+        input_browse_frame.pack(fill='x')
+
+        self.ct_eq_input_dir_var = tk.StringVar()
+        input_entry = ttk.Entry(input_browse_frame, textvariable=self.ct_eq_input_dir_var,
+                               width=60, state='readonly')
+        input_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(input_browse_frame, text="Browse Directory...",
+                  command=self._browse_ct_eq_input_dir, style='Modern.TButton').pack(side='left')
+
+        # Output directory
+        output_dir_frame = ttk.Frame(section_f)
+        output_dir_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Label(output_dir_frame, text="Output Directory (leave empty to use same as input):",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        output_browse_frame = ttk.Frame(output_dir_frame)
+        output_browse_frame.pack(fill='x')
+
+        self.ct_eq_output_dir_var = tk.StringVar()
+        output_entry = ttk.Entry(output_browse_frame, textvariable=self.ct_eq_output_dir_var,
+                                width=60)
+        output_entry.pack(side='left', padx=(0, 10))
+
+        ttk.Button(output_browse_frame, text="Browse Directory...",
+                  command=self._browse_ct_eq_output_dir, style='Modern.TButton').pack(side='left', padx=(0, 10))
+        ttk.Button(output_browse_frame, text="Clear (Use Input Dir)",
+                  command=lambda: self.ct_eq_output_dir_var.set(''), style='Modern.TButton').pack(side='left')
+
+        # Output options frame
+        output_opts_frame = ttk.Frame(section_f)
+        output_opts_frame.pack(fill='x', pady=(10, 0))
+
+        # File organization option
+        org_frame = ttk.Frame(output_opts_frame)
+        org_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(org_frame, text="File Organization:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+        self.ct_eq_file_org_var = tk.StringVar(value='individual')
+        ttk.Radiobutton(org_frame, text="Individual files per spectrum",
+                       variable=self.ct_eq_file_org_var, value='individual').pack(side='left', padx=(0, 20))
+        ttk.Radiobutton(org_frame, text="Single file (CSV/Excel)",
+                       variable=self.ct_eq_file_org_var, value='single').pack(side='left')
+
+        # Format selection
+        format_frame = ttk.Frame(output_opts_frame)
+        format_frame.pack(fill='x', pady=(5, 0))
+
+        ttk.Label(format_frame, text="Output Format:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+        self.ct_eq_format_var = tk.StringVar(value='auto')
+        format_combo = ttk.Combobox(format_frame, textvariable=self.ct_eq_format_var,
+                                   state='readonly', width=20,
+                                   values=['auto (match input)', 'csv', 'excel', 'spc', 'jcamp', 'ascii'])
+        format_combo.pack(side='left')
+
+        # File Equalize button
+        self._create_accent_button(section_f, "File Equalize",
+                                    self._file_equalize_batch).pack(pady=(15, 10))
+
+        # Status display
+        self.ct_eq_status_text = tk.Text(section_f, height=6, width=80, state='disabled',
+                                        wrap='word', relief='flat', borderwidth=0,
+                                        bg=self.colors['panel'], fg=self.colors['text'],
+                                        selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
+        self.ct_eq_status_text.pack(fill='x')
 
 
 def main():

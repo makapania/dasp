@@ -325,6 +325,19 @@ def save_instrument_profiles(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Helper function to convert numpy types to Python native types
+    def to_python_type(val):
+        """Convert numpy types to Python native types for JSON serialization."""
+        if val is None:
+            return None
+        if isinstance(val, np.ndarray):
+            return val.tolist()
+        if isinstance(val, (np.integer, np.floating)):
+            return val.item()
+        if isinstance(val, np.bool_):
+            return bool(val)
+        return val
+
     # Convert profiles to JSON-serializable format
     data = {}
     for inst_id, profile in profiles.items():
@@ -334,13 +347,13 @@ def save_instrument_profiles(
             "model": profile.model,
             "description": profile.description,
             "wavelengths": profile.wavelengths.tolist() if profile.wavelengths is not None else None,
-            "delta_lambda_med": profile.delta_lambda_med,
-            "roughness_R": profile.roughness_R,
-            "detail_score": profile.detail_score,
-            "peak_count": profile.peak_count,
-            "avg_peak_fwhm": profile.avg_peak_fwhm,
-            "avg_peak_sharpness": profile.avg_peak_sharpness,
-            "is_interpolated": profile.is_interpolated,
+            "delta_lambda_med": to_python_type(profile.delta_lambda_med),
+            "roughness_R": to_python_type(profile.roughness_R),
+            "detail_score": to_python_type(profile.detail_score),
+            "peak_count": to_python_type(profile.peak_count),
+            "avg_peak_fwhm": to_python_type(profile.avg_peak_fwhm),
+            "avg_peak_sharpness": to_python_type(profile.avg_peak_sharpness),
+            "is_interpolated": to_python_type(profile.is_interpolated),
             "extra": profile.extra,
         }
 
