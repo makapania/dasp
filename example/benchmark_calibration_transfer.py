@@ -6,6 +6,7 @@ Compares performance of all available calibration transfer methods:
 - PDS (Piecewise Direct Standardization)
 - TSR (Transfer Sample Regression / Shenk-Westerhaus)
 - CTAI (Calibration Transfer based on Affine Invariance)
+- NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement)
 
 This script generates synthetic data with known transformations and
 evaluates how well each method recovers the original spectra.
@@ -269,6 +270,51 @@ def benchmark_all_methods(
         print(f"   ✗ Failed: {str(e)}")
         results['CTAI'] = {'success': False, 'error': str(e)}
 
+    # ----- METHOD 5: NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) -----
+    print("\n5. Testing NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement)...")
+    start_time = time.time()
+    try:
+        from spectral_predict.calibration_transfer import estimate_nspfce, apply_nspfce
+
+        # Generate wavelengths for NS-PFCE (required parameter)
+        n_wavelengths = X_master.shape[1]
+        wavelengths = np.linspace(1000, 2500, n_wavelengths)
+
+        # Test with wavelength selection (VCPA-IRIV)
+        nspfce_params = estimate_nspfce(
+            X_master, X_slave, wavelengths,
+            use_wavelength_selection=True,
+            wavelength_selector='vcpa-iriv',
+            max_iterations=100
+        )
+        X_nspfce = apply_nspfce(X_slave, nspfce_params)
+        elapsed = time.time() - start_time
+
+        results['NS-PFCE'] = {
+            'method': 'Non-supervised Parameter-Free Calibration Enhancement',
+            'rmse': evaluate_transfer(X_master, X_slave, X_nspfce, 'rmse'),
+            'mae': evaluate_transfer(X_master, X_slave, X_nspfce, 'mae'),
+            'r2': evaluate_transfer(X_master, X_slave, X_nspfce, 'r2'),
+            'time_seconds': elapsed,
+            'transfer_samples': 0,  # NO samples needed!
+            'iterations': nspfce_params['n_iterations'],
+            'converged': nspfce_params['converged'],
+            'wavelength_selection': True,
+            'n_selected_wavelengths': len(nspfce_params.get('selected_wavelength_indices', [])),
+            'success': True
+        }
+        print(f"   ✓ Completed in {elapsed:.4f}s")
+        print(f"   RMSE: {results['NS-PFCE']['rmse']:.6f}")
+        print(f"   Iterations: {nspfce_params['n_iterations']}")
+        print(f"   Converged: {nspfce_params['converged']}")
+        if nspfce_params.get('selected_wavelength_indices') is not None:
+            n_selected = len(nspfce_params['selected_wavelength_indices'])
+            print(f"   Selected Wavelengths: {n_selected} / {n_wavelengths}")
+
+    except Exception as e:
+        print(f"   ✗ Failed: {str(e)}")
+        results['NS-PFCE'] = {'success': False, 'error': str(e)}
+
     return results
 
 
@@ -305,8 +351,9 @@ def print_summary_table(results):
     print("\nKey findings:")
     print(f"  • Best method: {sorted_methods[0][0]} (RMSE={sorted_methods[0][1]['rmse']:.6f})")
     print(f"  • Fastest method: {min(sorted_methods, key=lambda x: x[1]['time_seconds'])[0]}")
-    print(f"  • No samples needed: CTAI")
+    print(f"  • No samples needed: CTAI, NS-PFCE")
     print(f"  • Fewest samples (12): TSR")
+    print(f"  • Advanced wavelength selection: NS-PFCE")
 
 
 def main():

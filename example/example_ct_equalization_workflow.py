@@ -28,6 +28,8 @@ from spectral_predict.calibration_transfer import (
     apply_tsr,
     estimate_ctai,
     apply_ctai,
+    estimate_nspfce,
+    apply_nspfce,
     save_transfer_model,
     load_transfer_model,
 )
@@ -193,6 +195,47 @@ def demo_backend_workflow():
         wavelengths_common=common_wl,
         params=ctai_params,
         meta={"note": "Synthetic CTAI demo - no standards required!"}
+    )
+
+    # 9d. NEW: Test NS-PFCE (Non-supervised Parameter-Free) - NO transfer samples + wavelength selection!
+    print("\n--- NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) Demo ---")
+    print("NS-PFCE: NO transfer samples + automatic wavelength selection (VCPA-IRIV)!")
+
+    # Estimate NS-PFCE model with wavelength selection
+    nspfce_params = estimate_nspfce(
+        X_A_common, X_B_common, common_wl,
+        use_wavelength_selection=True,
+        wavelength_selector='vcpa-iriv',
+        max_iterations=100
+    )
+    print(f"NS-PFCE model estimated:")
+    print(f"  - Iterations: {nspfce_params['n_iterations']} / 100")
+    print(f"  - Converged: {nspfce_params['converged']}")
+    if nspfce_params.get('selected_wavelength_indices') is not None:
+        n_selected = len(nspfce_params['selected_wavelength_indices'])
+        n_total = len(common_wl)
+        print(f"  - Wavelength selection: {n_selected} / {n_total} ({100*n_selected/n_total:.1f}%)")
+
+    # Apply NS-PFCE
+    X_B_to_A_nspfce = apply_nspfce(X_B_common, nspfce_params)
+    print(f"NS-PFCE transformed spectra shape: {X_B_to_A_nspfce.shape}")
+
+    # Compare all methods
+    rmse_nspfce = np.sqrt(np.mean((X_B_to_A_nspfce - X_A_common) ** 2))
+    print(f"\nMethod Comparison (RMSE):")
+    print(f"  - DS (full): {rmse_ds:.6f}")
+    print(f"  - TSR (12 samples): {rmse_tsr:.6f}")
+    print(f"  - CTAI (0 samples): {rmse_ctai:.6f}")
+    print(f"  - NS-PFCE (0 samples + wavelength selection): {rmse_nspfce:.6f}")
+
+    # Create NS-PFCE TransferModel
+    tm_nspfce = TransferModel(
+        master_id="Instrument_A",
+        slave_id="Instrument_B",
+        method="nspfce",
+        wavelengths_common=common_wl,
+        params=nspfce_params,
+        meta={"note": "Synthetic NS-PFCE demo - no standards + automatic wavelength selection!"}
     )
 
     # 10. Build equalization mappings for multi-instrument dataset

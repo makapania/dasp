@@ -13542,6 +13542,71 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                             f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
                             f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
 
+            elif method == 'nspfce':
+                # Build NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) model
+                from spectral_predict.calibration_transfer import estimate_nspfce, TransferModel
+
+                # Get NS-PFCE parameters
+                use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
+                wavelength_selector = self.ct_nspfce_selector_var.get()
+
+                try:
+                    max_iterations = int(self.ct_nspfce_max_iterations_var.get())
+                    if max_iterations < 10 or max_iterations > 500:
+                        messagebox.showerror(
+                            "Invalid Parameter",
+                            f"NS-PFCE Max Iterations must be between 10 and 500.\nYou entered: {max_iterations}"
+                        )
+                        return
+                except ValueError:
+                    messagebox.showerror("Invalid Parameter", "NS-PFCE Max Iterations must be an integer.")
+                    return
+
+                # Estimate NS-PFCE model
+                nspfce_params = estimate_nspfce(
+                    self.ct_X_master_common,
+                    self.ct_X_slave_common,
+                    self.ct_wavelengths_common,
+                    use_wavelength_selection=use_wavelength_selection,
+                    wavelength_selector=wavelength_selector,
+                    max_iterations=max_iterations
+                )
+
+                self.ct_transfer_model = TransferModel(
+                    master_id=master_id,
+                    slave_id=slave_id,
+                    method='nspfce',
+                    wavelengths_common=self.ct_wavelengths_common,
+                    params=nspfce_params,
+                    meta={
+                        'note': 'NS-PFCE transfer built in GUI',
+                        'use_wavelength_selection': use_wavelength_selection,
+                        'wavelength_selector': wavelength_selector if use_wavelength_selection else 'N/A'
+                    }
+                )
+
+                # Build info text
+                info_lines = [
+                    f"Transfer Method: NS-PFCE (Non-supervised Parameter-Free)",
+                    f"Master: {master_id} → Slave: {slave_id}",
+                    f"Iterations: {nspfce_params['n_iterations']} / {max_iterations}",
+                    f"Converged: {'Yes ✓' if nspfce_params['converged'] else 'No (max iter reached)'}",
+                ]
+
+                if use_wavelength_selection:
+                    n_selected = len(nspfce_params.get('selected_wavelength_indices', []))
+                    n_total = len(self.ct_wavelengths_common)
+                    info_lines.append(f"Wavelength Selection: {wavelength_selector.upper()}")
+                    info_lines.append(f"Selected Wavelengths: {n_selected} / {n_total} ({100*n_selected/n_total:.1f}%)")
+                else:
+                    info_lines.append(f"Wavelength Selection: Not used")
+
+                if nspfce_params['convergence_history']:
+                    final_error = nspfce_params['convergence_history'][-1]
+                    info_lines.append(f"Final RMSE: {final_error:.6f}")
+
+                info_text = "\n".join(info_lines)
+
             # Display transfer model info
             self.ct_transfer_info_text.config(state='normal')
             self.ct_transfer_info_text.delete('1.0', tk.END)
@@ -13934,6 +13999,9 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             elif self.ct_pred_transfer_model.method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
                 X_transferred = apply_ctai(X_slave_common, self.ct_pred_transfer_model.params)
+            elif self.ct_pred_transfer_model.method == 'nspfce':
+                from spectral_predict.calibration_transfer import apply_nspfce
+                X_transferred = apply_nspfce(X_slave_common, self.ct_pred_transfer_model.params)
             else:
                 raise ValueError(f"Unknown transfer method: {self.ct_pred_transfer_model.method}")
 
@@ -14337,6 +14405,18 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                 B = self.ct_transfer_model.params['B']
                 window = self.ct_transfer_model.params['window']
                 X_transferred = apply_pds(self.ct_X_slave_common, B, window)
+            elif method == 'tsr':
+                from spectral_predict.calibration_transfer import apply_tsr
+                X_transferred = apply_tsr(self.ct_X_slave_common, self.ct_transfer_model.params)
+            elif method == 'ctai':
+                from spectral_predict.calibration_transfer import apply_ctai
+                X_transferred = apply_ctai(self.ct_X_slave_common, self.ct_transfer_model.params)
+            elif method == 'nspfce':
+                from spectral_predict.calibration_transfer import apply_nspfce
+                X_transferred = apply_nspfce(self.ct_X_slave_common, self.ct_transfer_model.params)
+            else:
+                # Unsupported method for plotting
+                return
 
             # === Plot 1: Transfer Quality Plot (3 subplots) ===
             fig1 = Figure(figsize=(12, 4))
@@ -14842,6 +14922,8 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                        variable=self.ct_method_var, value='ctai').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="TSR (12-13 Samples)",
                        variable=self.ct_method_var, value='tsr').pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(method_frame, text="NS-PFCE (Advanced)",
+                       variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="DS",
                        variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="PDS",
@@ -14862,6 +14944,21 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ttk.Label(params_frame, text="TSR Transfer Samples:", style='CardLabel.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
         self.ct_tsr_n_samples_var = tk.StringVar(value='12')
         ttk.Entry(params_frame, textvariable=self.ct_tsr_n_samples_var, width=15).grid(row=1, column=1, sticky='w', pady=(5, 0))
+
+        # NS-PFCE parameters
+        self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(params_frame, text="NS-PFCE: Use Wavelength Selection",
+                       variable=self.ct_nspfce_use_wavelength_selection_var).grid(row=2, column=0, columnspan=2, sticky='w', pady=(5, 0))
+
+        ttk.Label(params_frame, text="Wavelength Selector:", style='CardLabel.TLabel').grid(row=2, column=2, sticky='w', padx=(0, 10), pady=(5, 0))
+        self.ct_nspfce_selector_var = tk.StringVar(value='vcpa-iriv')
+        selector_combo = ttk.Combobox(params_frame, textvariable=self.ct_nspfce_selector_var,
+                                     values=['vcpa-iriv', 'cars', 'spa'], state='readonly', width=12)
+        selector_combo.grid(row=2, column=3, sticky='w', pady=(5, 0))
+
+        ttk.Label(params_frame, text="NS-PFCE Max Iterations:", style='CardLabel.TLabel').grid(row=3, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
+        self.ct_nspfce_max_iterations_var = tk.StringVar(value='100')
+        ttk.Entry(params_frame, textvariable=self.ct_nspfce_max_iterations_var, width=15).grid(row=3, column=1, sticky='w', pady=(5, 0))
 
         # Build button
         self._create_accent_button(section_c, "Build Transfer Model",
