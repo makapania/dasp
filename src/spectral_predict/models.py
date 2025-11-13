@@ -420,16 +420,16 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
         lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [20])
     if lightgbm_subsample_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
-        lightgbm_subsample_list = lgbm_config.get('subsample', [1.0])
+        lightgbm_subsample_list = lgbm_config.get('subsample', [0.8])
     if lightgbm_colsample_bytree_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
-        lightgbm_colsample_bytree_list = lgbm_config.get('colsample_bytree', [1.0])
+        lightgbm_colsample_bytree_list = lgbm_config.get('colsample_bytree', [0.8])
     if lightgbm_reg_alpha_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
-        lightgbm_reg_alpha_list = lgbm_config.get('reg_alpha', [0.0])
+        lightgbm_reg_alpha_list = lgbm_config.get('reg_alpha', [0.1])
     if lightgbm_reg_lambda_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
-        lightgbm_reg_lambda_list = lgbm_config.get('reg_lambda', [0.0])
+        lightgbm_reg_lambda_list = lgbm_config.get('reg_lambda', [1.0])
 
     # CatBoost defaults (tier-aware)
     if catboost_iterations_list is None:

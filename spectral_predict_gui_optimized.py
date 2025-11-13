@@ -7679,12 +7679,21 @@ class SpectralPredictApp:
             self._log_progress(f"Models: {', '.join(selected_models)}")
             self._log_progress(f"Preprocessing: {', '.join([k for k, v in preprocessing_methods.items() if v])}")
             self._log_progress(f"Window sizes: {window_sizes}")
-            self._log_progress(f"NeuralBoosted n_estimators: {n_estimators_list}")
-            self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
-            self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
-            self._log_progress(f"RandomForest max_depth: {rf_max_depth_list}")
-            self._log_progress(f"Ridge alphas: {ridge_alphas_list}")
-            self._log_progress(f"Lasso alphas: {lasso_alphas_list}")
+
+            # Only show model-specific parameters if that model is selected
+            if 'NeuralBoosted' in selected_models:
+                self._log_progress(f"NeuralBoosted n_estimators: {n_estimators_list}")
+                self._log_progress(f"NeuralBoosted learning rates: {learning_rates}")
+
+            if 'RandomForest' in selected_models:
+                self._log_progress(f"RandomForest n_trees: {rf_n_trees_list}")
+                self._log_progress(f"RandomForest max_depth: {rf_max_depth_list}")
+
+            if 'Ridge' in selected_models:
+                self._log_progress(f"Ridge alphas: {ridge_alphas_list}")
+
+            if 'Lasso' in selected_models:
+                self._log_progress(f"Lasso alphas: {lasso_alphas_list}")
             self._log_progress(f"\n** SUBSET ANALYSIS SETTINGS **")
             self._log_progress(f"Variable subsets: {'ENABLED' if enable_variable_subsets else 'DISABLED'}")
             self._log_progress(f"  enable_variable_subsets value: {enable_variable_subsets}")
@@ -13034,6 +13043,9 @@ Configuration:
             # Update registry table
             self._update_registry_table()
 
+            # Update calibration transfer registry view
+            self._refresh_ct_registry()
+
             messagebox.showinfo("Success",
                 f"Instrument '{inst_id}' characterized successfully!\n\n"
                 f"Wavelength range: {wavelengths.min():.1f} - {wavelengths.max():.1f} nm\n"
@@ -13148,6 +13160,8 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             profiles = load_instrument_profiles(filepath)
             self.instrument_profiles = profiles
             self._update_registry_table()
+            # Update calibration transfer registry view
+            self._refresh_ct_registry()
             messagebox.showinfo("Success",
                 f"Loaded {len(profiles)} instruments from:\n{filepath}")
         except Exception as e:
@@ -14053,8 +14067,40 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                 f"{method.upper()} transfer model built successfully\n\n"
                 f"Model saved to registry: {model_key}" if master_id and slave_id else
                 f"{method.upper()} transfer model built successfully")
+        except KeyError as e:
+            # Specific handling for missing dictionary keys
+            messagebox.showerror(
+                "Configuration Error",
+                f"Failed to build transfer model - missing expected parameter:\n{str(e)}\n\n"
+                f"This may indicate a version mismatch or incomplete calibration transfer implementation."
+            )
+        except ValueError as e:
+            # Specific handling for validation errors
+            messagebox.showerror(
+                "Data Validation Error",
+                f"Failed to build transfer model due to invalid data:\n{str(e)}\n\n"
+                f"Please check your data for NaN/inf values or ensure data shapes are correct."
+            )
+        except np.linalg.LinAlgError as e:
+            # Specific handling for numerical errors
+            messagebox.showerror(
+                "Numerical Error",
+                f"Failed to build transfer model due to numerical instability:\n{str(e)}\n\n"
+                f"This often occurs with poorly conditioned data. Try:\n"
+                f"- Preprocessing your data (scaling, normalization)\n"
+                f"- Using more samples\n"
+                f"- Checking for duplicate or near-duplicate spectra"
+            )
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to build transfer model:\n{str(e)}")
+            # Generic fallback for unexpected errors
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Transfer model build error:\n{error_details}")  # Log to console
+            messagebox.showerror(
+                "Error",
+                f"Failed to build transfer model:\n{str(e)}\n\n"
+                f"Check the console for detailed traceback."
+            )
 
     def _save_ct_transfer_model(self):
         """Save current transfer model to disk."""
@@ -14703,19 +14749,27 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
 
             if file_org == 'single':
                 # Export all spectra to single file
-                output_file = output_path / f"{model_name}_transformed_spectra"
+                # Get proper extension for the format
+                extension_map = {'csv': '.csv', 'excel': '.xlsx', 'spc': '.spc',
+                               'jcamp': '.jdx', 'ascii': '.txt'}
+                extension = extension_map.get(actual_format, '.csv')
+                output_file = output_path / f"{model_name}_transformed_spectra{extension}"
                 write_spectra(df_transformed, str(output_file), format=actual_format)
 
                 self.ct_eq_status_text.config(state='normal')
                 self.ct_eq_status_text.insert(tk.END,
-                    f"\nSuccess! Exported {len(sample_ids)} transformed spectra to:\n{output_file}.{actual_format}\n")
+                    f"\nSuccess! Exported {len(sample_ids)} transformed spectra to:\n{output_file}\n")
                 self.ct_eq_status_text.config(state='disabled')
 
                 messagebox.showinfo("Success",
-                    f"Exported {len(sample_ids)} transformed spectra to single file:\n{output_file}.{actual_format}")
+                    f"Exported {len(sample_ids)} transformed spectra to single file:\n{output_file}")
 
             else:  # 'individual'
                 # Export each spectrum to individual file
+                # Get proper extension for the format
+                extension_map = {'csv': '.csv', 'excel': '.xlsx', 'spc': '.spc',
+                               'jcamp': '.jdx', 'ascii': '.txt'}
+                extension = extension_map.get(actual_format, '.csv')
                 files_created = []
                 for i, (sample_id, transformed_id) in enumerate(zip(sample_ids, transformed_ids)):
                     # Create single-row DataFrame for this spectrum
@@ -14723,9 +14777,9 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                                            index=[transformed_id],
                                            columns=transfer_model.wavelengths_common)
 
-                    output_file = output_path / f"{transformed_id}"
+                    output_file = output_path / f"{transformed_id}{extension}"
                     write_spectra(df_single, str(output_file), format=actual_format)
-                    files_created.append(f"{transformed_id}.{actual_format}")
+                    files_created.append(f"{transformed_id}{extension}")
 
                 self.ct_eq_status_text.config(state='normal')
                 self.ct_eq_status_text.insert(tk.END,
@@ -15461,9 +15515,9 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                        variable=self.ct_method_var, value='jypls-inv').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="NS-PFCE (Advanced)",
                        variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="DS",
+        ttk.Radiobutton(method_frame, text="Direct Standardization (DS)",
                        variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="PDS",
+        ttk.Radiobutton(method_frame, text="Piecewise DS (PDS)",
                        variable=self.ct_method_var, value='pds').pack(side='left')
 
         # Parameters
