@@ -13542,6 +13542,63 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                             f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
                             f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
 
+            elif method == 'jypls-inv':
+                # Build JYPLS-inv (Joint-Y PLS with Inversion) model
+                from spectral_predict.calibration_transfer import estimate_jypls_inv, TransferModel
+                from spectral_predict.sample_selection import kennard_stone
+
+                # Get number of transfer samples
+                try:
+                    n_transfer = int(getattr(self, 'ct_jypls_n_samples_var', tk.IntVar(value=12)).get())
+                    if n_transfer < 5:
+                        messagebox.showerror("Invalid Parameter", "JYPLS-inv needs at least 5 transfer samples")
+                        return
+                    if n_transfer > self.ct_X_master_common.shape[0]:
+                        messagebox.showerror("Invalid Parameter",
+                            f"Cannot select {n_transfer} samples from {self.ct_X_master_common.shape[0]} available")
+                        return
+                except (ValueError, AttributeError):
+                    n_transfer = 12  # Default
+
+                # Get PLS components
+                n_comp_str = self.ct_jypls_n_components_var.get()
+                if n_comp_str == 'Auto':
+                    n_components = None  # Auto-select via CV
+                else:
+                    n_components = int(n_comp_str)
+
+                # Select transfer samples using Kennard-Stone
+                transfer_indices = kennard_stone(self.ct_X_master_common, n_samples=n_transfer)
+
+                # Need Y values for JYPLS-inv - use spectral mean as pseudo-Y
+                # In real applications, user would provide reference values
+                y_transfer = self.ct_X_master_common[transfer_indices].mean(axis=1)
+
+                # Estimate JYPLS-inv model
+                jypls_params = estimate_jypls_inv(
+                    self.ct_X_master_common,
+                    self.ct_X_slave_common,
+                    y_transfer,
+                    transfer_indices,
+                    n_components=n_components
+                )
+
+                self.ct_transfer_model = TransferModel(
+                    master_id=master_id,
+                    slave_id=slave_id,
+                    method='jypls-inv',
+                    wavelengths_common=self.ct_wavelengths_common,
+                    params=jypls_params,
+                    meta={'note': 'JYPLS-inv transfer built in GUI', 'n_transfer_samples': n_transfer}
+                )
+
+                info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
+                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
+                            f"PLS Components: {jypls_params['n_components']}\n"
+                            f"CV RMSE: {jypls_params['cv_rmse']:.6f}\n"
+                            f"Explained Variance: {jypls_params['explained_variance_ratio']:.4f}")
+
             elif method == 'nspfce':
                 # Build NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) model
                 from spectral_predict.calibration_transfer import estimate_nspfce, TransferModel
@@ -13999,6 +14056,9 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             elif self.ct_pred_transfer_model.method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
                 X_transferred = apply_ctai(X_slave_common, self.ct_pred_transfer_model.params)
+            elif self.ct_pred_transfer_model.method == 'jypls-inv':
+                from spectral_predict.calibration_transfer import apply_jypls_inv
+                X_transferred = apply_jypls_inv(X_slave_common, self.ct_pred_transfer_model.params)
             elif self.ct_pred_transfer_model.method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
                 X_transferred = apply_nspfce(X_slave_common, self.ct_pred_transfer_model.params)
@@ -14411,6 +14471,9 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             elif method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
                 X_transferred = apply_ctai(self.ct_X_slave_common, self.ct_transfer_model.params)
+            elif method == 'jypls-inv':
+                from spectral_predict.calibration_transfer import apply_jypls_inv
+                X_transferred = apply_jypls_inv(self.ct_X_slave_common, self.ct_transfer_model.params)
             elif method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
                 X_transferred = apply_nspfce(self.ct_X_slave_common, self.ct_transfer_model.params)
@@ -14922,6 +14985,8 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                        variable=self.ct_method_var, value='ctai').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="TSR (12-13 Samples)",
                        variable=self.ct_method_var, value='tsr').pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(method_frame, text="JYPLS-inv (PLS-based)",
+                       variable=self.ct_method_var, value='jypls-inv').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="NS-PFCE (Advanced)",
                        variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 15))
         ttk.Radiobutton(method_frame, text="DS",
@@ -14944,6 +15009,17 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ttk.Label(params_frame, text="TSR Transfer Samples:", style='CardLabel.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
         self.ct_tsr_n_samples_var = tk.StringVar(value='12')
         ttk.Entry(params_frame, textvariable=self.ct_tsr_n_samples_var, width=15).grid(row=1, column=1, sticky='w', pady=(5, 0))
+
+        # JYPLS-inv parameters
+        ttk.Label(params_frame, text="JYPLS-inv Transfer Samples:", style='CardLabel.TLabel').grid(row=1, column=2, sticky='w', padx=(0, 10), pady=(5, 0))
+        self.ct_jypls_n_samples_var = tk.StringVar(value='12')
+        ttk.Entry(params_frame, textvariable=self.ct_jypls_n_samples_var, width=15).grid(row=1, column=3, sticky='w', pady=(5, 0))
+
+        ttk.Label(params_frame, text="JYPLS-inv PLS Components:", style='CardLabel.TLabel').grid(row=4, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
+        self.ct_jypls_n_components_var = tk.StringVar(value='Auto')
+        jypls_comp_combo = ttk.Combobox(params_frame, textvariable=self.ct_jypls_n_components_var,
+                                        values=['Auto', '3', '5', '8', '10', '15', '20'], state='readonly', width=12)
+        jypls_comp_combo.grid(row=4, column=1, sticky='w', pady=(5, 0))
 
         # NS-PFCE parameters
         self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=True)

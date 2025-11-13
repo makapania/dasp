@@ -28,6 +28,8 @@ from spectral_predict.calibration_transfer import (
     apply_tsr,
     estimate_ctai,
     apply_ctai,
+    estimate_jypls_inv,
+    apply_jypls_inv,
     estimate_nspfce,
     apply_nspfce,
     save_transfer_model,
@@ -197,6 +199,42 @@ def demo_backend_workflow():
         meta={"note": "Synthetic CTAI demo - no standards required!"}
     )
 
+    # 9c. NEW: Test JYPLS-inv (Joint-Y PLS) - 12 transfer samples + PLS modeling
+    print("\n--- JYPLS-inv (Joint-Y PLS with Inversion) Demo ---")
+    print("JYPLS-inv: Uses PLS modeling with 12-13 selected transfer samples")
+
+    # Select 12 transfer samples using Kennard-Stone
+    jypls_transfer_idx = kennard_stone(X_A_common, n_samples=12)
+    # Generate pseudo-Y values (in practice, these would be reference measurements)
+    y_jypls_transfer = X_A_common[jypls_transfer_idx].mean(axis=1)
+
+    # Estimate JYPLS-inv model with automatic PLS component selection
+    jypls_params = estimate_jypls_inv(
+        X_A_common, X_B_common, y_jypls_transfer, jypls_transfer_idx,
+        n_components=None  # Auto-select via cross-validation
+    )
+    print(f"JYPLS-inv model estimated:")
+    print(f"  - Transfer samples: 12 (Kennard-Stone)")
+    print(f"  - PLS components: {jypls_params['n_components']} (auto-selected)")
+    print(f"  - CV RMSE: {jypls_params['cv_rmse']:.6f}")
+    print(f"  - Explained variance: {jypls_params['explained_variance_ratio']:.4f}")
+
+    # Apply JYPLS-inv
+    X_B_to_A_jypls = apply_jypls_inv(X_B_common, jypls_params)
+    print(f"JYPLS-inv transformed spectra shape: {X_B_to_A_jypls.shape}")
+
+    rmse_jypls = np.sqrt(np.mean((X_B_to_A_jypls - X_A_common) ** 2))
+
+    # Create JYPLS-inv TransferModel
+    tm_jypls = TransferModel(
+        master_id="Instrument_A",
+        slave_id="Instrument_B",
+        method="jypls-inv",
+        wavelengths_common=common_wl,
+        params=jypls_params,
+        meta={"note": "Synthetic JYPLS-inv demo - PLS-based transfer"}
+    )
+
     # 9d. NEW: Test NS-PFCE (Non-supervised Parameter-Free) - NO transfer samples + wavelength selection!
     print("\n--- NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) Demo ---")
     print("NS-PFCE: NO transfer samples + automatic wavelength selection (VCPA-IRIV)!")
@@ -226,6 +264,7 @@ def demo_backend_workflow():
     print(f"  - DS (full): {rmse_ds:.6f}")
     print(f"  - TSR (12 samples): {rmse_tsr:.6f}")
     print(f"  - CTAI (0 samples): {rmse_ctai:.6f}")
+    print(f"  - JYPLS-inv (12 samples + PLS): {rmse_jypls:.6f}")
     print(f"  - NS-PFCE (0 samples + wavelength selection): {rmse_nspfce:.6f}")
 
     # Create NS-PFCE TransferModel

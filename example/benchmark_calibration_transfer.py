@@ -7,6 +7,7 @@ Compares performance of all available calibration transfer methods:
 - TSR (Transfer Sample Regression / Shenk-Westerhaus)
 - CTAI (Calibration Transfer based on Affine Invariance)
 - NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement)
+- JYPLS-inv (Joint-Y PLS with Inversion)
 
 This script generates synthetic data with known transformations and
 evaluates how well each method recovers the original spectra.
@@ -315,6 +316,50 @@ def benchmark_all_methods(
         print(f"   ✗ Failed: {str(e)}")
         results['NS-PFCE'] = {'success': False, 'error': str(e)}
 
+    # ----- METHOD 6: JYPLS-inv (Joint-Y PLS with Inversion) -----
+    print("\n6. Testing JYPLS-inv (Joint-Y PLS with Inversion)...")
+    start_time = time.time()
+    try:
+        from spectral_predict.calibration_transfer import estimate_jypls_inv, apply_jypls_inv
+        from spectral_predict.sample_selection import kennard_stone
+
+        # Select transfer samples (12-13 optimal)
+        n_transfer = 12
+        transfer_idx = kennard_stone(X_master, n_samples=n_transfer)
+
+        # Generate pseudo-Y values for transfer samples (spectral mean)
+        y_transfer = X_master[transfer_idx].mean(axis=1)
+
+        # Estimate JYPLS-inv with auto component selection
+        jypls_params = estimate_jypls_inv(
+            X_master, X_slave, y_transfer, transfer_idx,
+            n_components=None  # Auto-select via CV
+        )
+        X_jypls = apply_jypls_inv(X_slave, jypls_params)
+        elapsed = time.time() - start_time
+
+        results['JYPLS-inv'] = {
+            'method': 'Joint-Y PLS with Inversion',
+            'rmse': evaluate_transfer(X_master, X_slave, X_jypls, 'rmse'),
+            'mae': evaluate_transfer(X_master, X_slave, X_jypls, 'mae'),
+            'r2': evaluate_transfer(X_master, X_slave, X_jypls, 'r2'),
+            'time_seconds': elapsed,
+            'transfer_samples': n_transfer,
+            'n_components': jypls_params['n_components'],
+            'cv_rmse': jypls_params['cv_rmse'],
+            'explained_variance': jypls_params['explained_variance_ratio'],
+            'success': True
+        }
+        print(f"   ✓ Completed in {elapsed:.4f}s")
+        print(f"   RMSE: {results['JYPLS-inv']['rmse']:.6f}")
+        print(f"   PLS Components: {jypls_params['n_components']} (auto-selected)")
+        print(f"   CV RMSE: {jypls_params['cv_rmse']:.6f}")
+        print(f"   Explained Variance: {jypls_params['explained_variance_ratio']:.4f}")
+
+    except Exception as e:
+        print(f"   ✗ Failed: {str(e)}")
+        results['JYPLS-inv'] = {'success': False, 'error': str(e)}
+
     return results
 
 
@@ -352,8 +397,9 @@ def print_summary_table(results):
     print(f"  • Best method: {sorted_methods[0][0]} (RMSE={sorted_methods[0][1]['rmse']:.6f})")
     print(f"  • Fastest method: {min(sorted_methods, key=lambda x: x[1]['time_seconds'])[0]}")
     print(f"  • No samples needed: CTAI, NS-PFCE")
-    print(f"  • Fewest samples (12): TSR")
+    print(f"  • Fewest samples (12-13): TSR, JYPLS-inv")
     print(f"  • Advanced wavelength selection: NS-PFCE")
+    print(f"  • PLS-based transfer: JYPLS-inv")
 
 
 def main():

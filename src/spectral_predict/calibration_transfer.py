@@ -20,7 +20,7 @@ from typing import Dict, Literal, Tuple
 import numpy as np
 
 
-MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce"]
+MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"]
 
 
 @dataclass
@@ -1223,6 +1223,280 @@ def apply_nspfce(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
     return X_transferred
 
 
+def estimate_jypls_inv(
+    X_master: np.ndarray,
+    X_slave: np.ndarray,
+    y_transfer: np.ndarray,
+    transfer_indices: np.ndarray,
+    n_components: int | None = None,
+    cv_folds: int = 5,
+    max_components: int = 20
+) -> Dict:
+    """
+    Estimate JYPLS-inv (Joint-Y PLS with inversion) calibration transfer.
+
+    JYPLS-inv uses a joint PLS model where master and slave transfer samples
+    are combined in an augmented X matrix with shared Y values. The PLS model
+    learns a common latent structure, and the transformation is derived from
+    the PLS components to map slave spectra to master space.
+
+    Parameters
+    ----------
+    X_master : np.ndarray, shape (n_samples, n_wavelengths)
+        Master instrument spectra.
+    X_slave : np.ndarray, shape (n_samples, n_wavelengths)
+        Slave instrument spectra (same samples as X_master).
+    y_transfer : np.ndarray, shape (n_transfer,)
+        Reference values for transfer samples.
+        Used for PLS modeling to find optimal transformation.
+    transfer_indices : np.ndarray, shape (n_transfer,)
+        Indices of transfer samples in X_master and X_slave.
+        Typically 12-13 samples selected by Kennard-Stone or SPXY.
+    n_components : int | None, optional
+        Number of PLS components. If None, determined by cross-validation.
+        Default: None (auto-select).
+    cv_folds : int, optional
+        Number of cross-validation folds for component selection.
+        Default: 5.
+    max_components : int, optional
+        Maximum number of components to try in CV.
+        Default: 20.
+
+    Returns
+    -------
+    params : dict
+        Dictionary containing:
+        - 'transformation_matrix' : np.ndarray, shape (n_wavelengths, n_wavelengths)
+            Matrix B such that X_master ≈ X_slave @ B
+        - 'n_components' : int
+            Number of PLS components used
+        - 'cv_rmse' : float
+            Cross-validation RMSE for component selection
+        - 'transfer_indices' : np.ndarray
+            Indices of transfer samples
+        - 'pls_x_weights' : np.ndarray
+            PLS X weights (for inspection)
+        - 'pls_x_loadings' : np.ndarray
+            PLS X loadings (for inspection)
+        - 'explained_variance_ratio' : float
+            Proportion of X variance explained by PLS components
+
+    Notes
+    -----
+    Algorithm:
+    1. Extract transfer samples from master and slave
+    2. Create augmented X = [X_master_transfer; X_slave_transfer]
+    3. Create augmented Y = [y_transfer; y_transfer] (shared Y)
+    4. Fit PLS(X_aug, Y_aug) with optimal number of components
+    5. Extract separate PLS scores for master (T_m) and slave (T_s)
+    6. Compute transformation: B = W @ (T_s^T T_s)^{-1} @ T_s^T @ T_m @ P^T
+       where W = PLS X-weights, P = PLS X-loadings
+    7. Simplified approach: B derived from PLS regression coefficients
+
+    The transformation maps slave spectra into master space while preserving
+    the PLS latent structure that predicts Y.
+
+    References
+    ----------
+    - Feudale, R. N., et al. (2002). "Transfer of multivariate calibration
+      models: a review." Chemometrics and Intelligent Laboratory Systems, 64(2), 181-192.
+    - Bouveresse, E., & Massart, D. L. (1996). "Improvement of the piecewise
+      direct standardisation procedure for the transfer of NIR spectra for
+      multivariate calibration." Chemometrics and intelligent laboratory systems, 32(2), 201-213.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from spectral_predict.sample_selection import kennard_stone
+    >>>
+    >>> # Simulate master and slave spectra
+    >>> np.random.seed(42)
+    >>> n_samples, n_wavelengths = 100, 200
+    >>> X_master = np.random.randn(n_samples, n_wavelengths)
+    >>> X_slave = 0.95 * X_master + 0.05  # Slave with bias/scale
+    >>> y = 2.0 * X_master[:, 50] - 1.5 * X_master[:, 100] + np.random.randn(n_samples) * 0.1
+    >>>
+    >>> # Select 12 transfer samples with Kennard-Stone
+    >>> transfer_idx = kennard_stone(X_master, n_samples=12)
+    >>> y_transfer = y[transfer_idx]
+    >>>
+    >>> # Estimate JYPLS-inv model
+    >>> params = estimate_jypls_inv(X_master, X_slave, y_transfer, transfer_idx, n_components=5)
+    >>> print(f"PLS Components: {params['n_components']}")
+    >>> print(f"CV RMSE: {params['cv_rmse']:.6f}")
+    >>>
+    >>> # Apply transformation
+    >>> X_transferred = apply_jypls_inv(X_slave, params)
+    >>> rmse_improvement = np.sqrt(np.mean((X_slave - X_master)**2)) / np.sqrt(np.mean((X_transferred - X_master)**2))
+    >>> print(f"RMSE improvement: {rmse_improvement:.2f}x")
+    """
+    try:
+        from sklearn.cross_decomposition import PLSRegression
+        from sklearn.model_selection import cross_val_score
+    except ImportError:
+        raise ImportError("scikit-learn is required for JYPLS-inv. Install with: pip install scikit-learn")
+
+    # Validate inputs
+    if X_master.shape != X_slave.shape:
+        raise ValueError(f"X_master and X_slave must have same shape. Got {X_master.shape} and {X_slave.shape}")
+
+    if len(transfer_indices) != len(y_transfer):
+        raise ValueError(f"Number of transfer_indices ({len(transfer_indices)}) must match y_transfer length ({len(y_transfer)})")
+
+    if len(transfer_indices) < 2:
+        raise ValueError("Need at least 2 transfer samples for JYPLS-inv")
+
+    n_samples, n_wavelengths = X_master.shape
+
+    # Extract transfer samples
+    X_master_transfer = X_master[transfer_indices]
+    X_slave_transfer = X_slave[transfer_indices]
+
+    # Create augmented matrices
+    # X_aug = [X_master_transfer]  <- master samples
+    #         [X_slave_transfer]   <- slave samples (to be mapped to master)
+    X_aug = np.vstack([X_master_transfer, X_slave_transfer])
+
+    # Y_aug = [y_transfer]  <- same Y for master
+    #         [y_transfer]  <- same Y for slave (joint-Y approach)
+    Y_aug = np.concatenate([y_transfer, y_transfer]).reshape(-1, 1)
+
+    # Determine optimal number of PLS components via cross-validation
+    if n_components is None:
+        best_rmse = np.inf
+        best_n = 1
+
+        # Try different numbers of components
+        max_comp = min(max_components, len(transfer_indices) - 1, n_wavelengths)
+
+        for n in range(1, max_comp + 1):
+            pls = PLSRegression(n_components=n, scale=False)
+
+            try:
+                # Cross-validation scores
+                scores = cross_val_score(
+                    pls, X_aug, Y_aug, cv=min(cv_folds, len(transfer_indices)),
+                    scoring='neg_root_mean_squared_error'
+                )
+                avg_rmse = -np.mean(scores)  # Negative because sklearn uses neg_rmse
+
+                if avg_rmse < best_rmse:
+                    best_rmse = avg_rmse
+                    best_n = n
+            except Exception:
+                # If CV fails (e.g., too few samples), use previous best
+                break
+
+        n_components = best_n
+        cv_rmse = best_rmse
+    else:
+        # User specified components
+        cv_rmse = None
+
+    # Validate n_components
+    max_comp = min(len(transfer_indices) - 1, n_wavelengths)
+    if n_components > max_comp:
+        n_components = max_comp
+
+    # Fit final PLS model
+    pls = PLSRegression(n_components=n_components, scale=False)
+    pls.fit(X_aug, Y_aug)
+
+    # Extract PLS scores for master and slave separately
+    T_all = pls.transform(X_aug)  # shape: (2*n_transfer, n_components)
+    n_transfer = len(transfer_indices)
+    T_master = T_all[:n_transfer, :]  # Master scores
+    T_slave = T_all[n_transfer:, :]   # Slave scores
+
+    # Compute transformation matrix
+    # Approach: Find B such that T_master ≈ T_slave in PLS space
+    # Then map back to original space using PLS loadings
+    #
+    # Simplified: Use PLS regression coefficients to build transformation
+    # The PLS model learns: Y_aug = X_aug @ coef
+    # We want to transform slave → master in X space
+    #
+    # Transformation derived from PLS structure:
+    # X_master ≈ X_slave @ B
+    # B is computed using PLS weights (W) and loadings (P)
+    #
+    # Method: Compute transformation in score space, then project back
+    # B = W @ inv(T_slave^T @ T_slave) @ (T_slave^T @ T_master) @ P^T
+    # where W = X-weights, P = X-loadings
+
+    W = pls.x_weights_  # shape: (n_wavelengths, n_components)
+    P = pls.x_loadings_  # shape: (n_wavelengths, n_components)
+
+    # Compute score transformation: T_master = T_slave @ M
+    # M = inv(T_slave^T @ T_slave) @ (T_slave^T @ T_master)
+    T_slave_T = T_slave.T  # (n_components, n_transfer)
+    T_slave_cov = T_slave_T @ T_slave + 1e-6 * np.eye(n_components)  # Regularization
+    T_slave_cov_inv = np.linalg.inv(T_slave_cov)
+    M_scores = T_slave_cov_inv @ (T_slave_T @ T_master)  # (n_components, n_components)
+
+    # Map back to original space
+    # B = W @ M_scores @ P^T
+    transformation_matrix = W @ M_scores @ P.T  # (n_wavelengths, n_wavelengths)
+
+    # Calculate explained variance
+    X_var = np.var(X_aug, axis=0).sum()
+    X_reconstructed = pls.inverse_transform(T_all)
+    X_residual_var = np.var(X_aug - X_reconstructed, axis=0).sum()
+    explained_variance_ratio = 1.0 - (X_residual_var / X_var)
+
+    params = {
+        'transformation_matrix': transformation_matrix,
+        'n_components': n_components,
+        'cv_rmse': cv_rmse if cv_rmse is not None else 0.0,
+        'transfer_indices': transfer_indices,
+        'pls_x_weights': W,
+        'pls_x_loadings': P,
+        'pls_scores_master': T_master,
+        'pls_scores_slave': T_slave,
+        'score_transformation': M_scores,
+        'explained_variance_ratio': explained_variance_ratio,
+        'n_transfer_samples': len(transfer_indices)
+    }
+
+    return params
+
+
+def apply_jypls_inv(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
+    """
+    Apply JYPLS-inv transformation to new slave spectra.
+
+    Parameters
+    ----------
+    X_slave_new : np.ndarray, shape (n_samples, n_wavelengths)
+        New slave spectra to transfer to master domain.
+    params : dict
+        Parameters from estimate_jypls_inv().
+
+    Returns
+    -------
+    X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
+        Transferred spectra in master domain.
+
+    Examples
+    --------
+    >>> # After estimating JYPLS-inv model
+    >>> X_transferred = apply_jypls_inv(X_slave_new, jypls_params)
+    >>> print(f"Transferred shape: {X_transferred.shape}")
+    """
+    B = params['transformation_matrix']
+
+    if X_slave_new.shape[1] != B.shape[0]:
+        raise ValueError(
+            f"X_slave_new has {X_slave_new.shape[1]} wavelengths, "
+            f"but transformation matrix expects {B.shape[0]}"
+        )
+
+    # Apply transformation: X_master ≈ X_slave @ B
+    X_transferred = X_slave_new @ B
+
+    return X_transferred
+
+
 if __name__ == "__main__":
     # Simple self-test
     print("Calibration Transfer Module")
@@ -1233,6 +1507,7 @@ if __name__ == "__main__":
     print("  - TSR (Transfer Sample Regression / Shenk-Westerhaus)")
     print("  - CTAI (Calibration Transfer based on Affine Invariance)")
     print("  - NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement)")
+    print("  - JYPLS-inv (Joint-Y PLS with Inversion)")
     print("=" * 60)
 
     # Quick test of new methods
