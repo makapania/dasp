@@ -24,9 +24,14 @@ from spectral_predict.calibration_transfer import (
     resample_to_grid,
     estimate_ds,
     apply_ds,
+    estimate_tsr,
+    apply_tsr,
+    estimate_ctai,
+    apply_ctai,
     save_transfer_model,
     load_transfer_model,
 )
+from spectral_predict.sample_selection import kennard_stone
 from spectral_predict.equalization import (
     choose_common_grid,
     build_equalization_mapping_for_instrument,
@@ -128,6 +133,67 @@ def demo_backend_workflow():
 
     tm_loaded = load_transfer_model(save_prefix)
     print("Loaded TransferModel:", tm_loaded.master_id, tm_loaded.slave_id, tm_loaded.method)
+
+    # 9b. NEW: Test TSR (Transfer Sample Regression) - requires only 12-13 samples!
+    print("\n--- TSR (Transfer Sample Regression) Demo ---")
+    # Select 12 transfer samples using Kennard-Stone algorithm
+    transfer_indices = kennard_stone(X_A_common, n_samples=12)
+    print(f"Selected {len(transfer_indices)} transfer samples using Kennard-Stone")
+
+    # Estimate TSR model
+    tsr_params = estimate_tsr(X_A_common, X_B_common, transfer_indices)
+    print(f"TSR model estimated - Mean R²: {tsr_params['mean_r_squared']:.4f}")
+
+    # Apply TSR
+    X_B_to_A_tsr = apply_tsr(X_B_common, tsr_params)
+    print(f"TSR transformed spectra shape: {X_B_to_A_tsr.shape}")
+
+    # Compare TSR to DS
+    rmse_ds = np.sqrt(np.mean((X_B_to_A - X_A_common) ** 2))
+    rmse_tsr = np.sqrt(np.mean((X_B_to_A_tsr - X_A_common) ** 2))
+    print(f"Comparison - DS RMSE: {rmse_ds:.6f}, TSR RMSE: {rmse_tsr:.6f}")
+
+    # Create TSR TransferModel
+    tm_tsr = TransferModel(
+        master_id="Instrument_A",
+        slave_id="Instrument_B",
+        method="tsr",
+        wavelengths_common=common_wl,
+        params=tsr_params,
+        meta={"note": "Synthetic TSR demo", "n_transfer_samples": 12}
+    )
+
+    # 9c. NEW: Test CTAI (Affine Invariance) - NO transfer samples needed!
+    print("\n--- CTAI (Affine Invariance) Demo ---")
+    print("CTAI requires NO transfer samples - uses statistical properties!")
+
+    # Estimate CTAI model
+    ctai_params = estimate_ctai(X_A_common, X_B_common)
+    print(f"CTAI model estimated:")
+    print(f"  - Components: {ctai_params['n_components']}")
+    print(f"  - Explained variance: {ctai_params['explained_variance']:.4f}")
+    print(f"  - Reconstruction error: {ctai_params['reconstruction_error']:.6f}")
+
+    # Apply CTAI
+    X_B_to_A_ctai = apply_ctai(X_B_common, ctai_params)
+    print(f"CTAI transformed spectra shape: {X_B_to_A_ctai.shape}")
+
+    # Compare all methods
+    rmse_ctai = np.sqrt(np.mean((X_B_to_A_ctai - X_A_common) ** 2))
+    print(f"\nMethod Comparison (RMSE):")
+    print(f"  - DS (full): {rmse_ds:.6f}")
+    print(f"  - TSR (12 samples): {rmse_tsr:.6f}")
+    print(f"  - CTAI (0 samples): {rmse_ctai:.6f}")
+
+    # Create CTAI TransferModel
+    tm_ctai = TransferModel(
+        master_id="Instrument_A",
+        slave_id="Instrument_B",
+        method="ctai",
+        wavelengths_common=common_wl,
+        params=ctai_params,
+        meta={"note": "Synthetic CTAI demo - no standards required!"}
+    )
 
     # 10. Build equalization mappings for multi-instrument dataset
     spectra_by_instrument = {

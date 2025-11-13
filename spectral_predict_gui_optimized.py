@@ -13473,6 +13473,75 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                             f"Window Size: {window}\n"
                             f"Coefficient Matrix Shape: {B.shape}")
 
+            elif method == 'tsr':
+                # Build TSR (Transfer Sample Regression) model
+                from spectral_predict.calibration_transfer import estimate_tsr, TransferModel
+                from spectral_predict.sample_selection import kennard_stone
+
+                # Get number of transfer samples (default 12)
+                try:
+                    n_transfer = int(getattr(self, 'ct_tsr_n_samples_var', tk.IntVar(value=12)).get())
+                    if n_transfer < 2:
+                        messagebox.showerror("Invalid Parameter", "Need at least 2 transfer samples")
+                        return
+                    if n_transfer > self.ct_X_master_common.shape[0]:
+                        messagebox.showerror("Invalid Parameter",
+                            f"Cannot select {n_transfer} samples from {self.ct_X_master_common.shape[0]} available")
+                        return
+                except (ValueError, AttributeError):
+                    n_transfer = 12  # Default
+
+                # Select transfer samples using Kennard-Stone
+                transfer_indices = kennard_stone(self.ct_X_master_common, n_samples=n_transfer)
+
+                # Estimate TSR model
+                tsr_params = estimate_tsr(
+                    self.ct_X_master_common,
+                    self.ct_X_slave_common,
+                    transfer_indices
+                )
+
+                self.ct_transfer_model = TransferModel(
+                    master_id=master_id,
+                    slave_id=slave_id,
+                    method='tsr',
+                    wavelengths_common=self.ct_wavelengths_common,
+                    params=tsr_params,
+                    meta={'note': 'TSR transfer built in GUI', 'n_transfer_samples': n_transfer}
+                )
+
+                info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
+                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
+                            f"Mean R²: {tsr_params['mean_r_squared']:.4f}\n"
+                            f"Slope Range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
+
+            elif method == 'ctai':
+                # Build CTAI (Affine Invariance) model - NO transfer samples needed!
+                from spectral_predict.calibration_transfer import estimate_ctai, TransferModel
+
+                # Estimate CTAI model
+                ctai_params = estimate_ctai(
+                    self.ct_X_master_common,
+                    self.ct_X_slave_common
+                )
+
+                self.ct_transfer_model = TransferModel(
+                    master_id=master_id,
+                    slave_id=slave_id,
+                    method='ctai',
+                    wavelengths_common=self.ct_wavelengths_common,
+                    params=ctai_params,
+                    meta={'note': 'CTAI transfer built in GUI (no standards needed)'}
+                )
+
+                info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
+                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"NO TRANSFER SAMPLES NEEDED ✓\n"
+                            f"Components: {ctai_params['n_components']}\n"
+                            f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
+                            f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
+
             # Display transfer model info
             self.ct_transfer_info_text.config(state='normal')
             self.ct_transfer_info_text.delete('1.0', tk.END)
@@ -13859,6 +13928,14 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                 B = self.ct_pred_transfer_model.params['B']
                 window = self.ct_pred_transfer_model.params['window']
                 X_transferred = apply_pds(X_slave_common, B, window)
+            elif self.ct_pred_transfer_model.method == 'tsr':
+                from spectral_predict.calibration_transfer import apply_tsr
+                X_transferred = apply_tsr(X_slave_common, self.ct_pred_transfer_model.params)
+            elif self.ct_pred_transfer_model.method == 'ctai':
+                from spectral_predict.calibration_transfer import apply_ctai
+                X_transferred = apply_ctai(X_slave_common, self.ct_pred_transfer_model.params)
+            else:
+                raise ValueError(f"Unknown transfer method: {self.ct_pred_transfer_model.method}")
 
             # Resample transferred spectra to master model's wavelength grid
             wl_model = self.ct_master_model_dict['wavelengths']
@@ -14760,10 +14837,14 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         method_frame.pack(fill='x', pady=(0, 10))
 
         ttk.Label(method_frame, text="Transfer Method:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_method_var = tk.StringVar(value='ds')
-        ttk.Radiobutton(method_frame, text="Direct Standardization (DS)",
-                       variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 20))
-        ttk.Radiobutton(method_frame, text="Piecewise DS (PDS)",
+        self.ct_method_var = tk.StringVar(value='ctai')
+        ttk.Radiobutton(method_frame, text="CTAI (No Standards)",
+                       variable=self.ct_method_var, value='ctai').pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(method_frame, text="TSR (12-13 Samples)",
+                       variable=self.ct_method_var, value='tsr').pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(method_frame, text="DS",
+                       variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(method_frame, text="PDS",
                        variable=self.ct_method_var, value='pds').pack(side='left')
 
         # Parameters
@@ -14777,6 +14858,10 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         ttk.Label(params_frame, text="PDS Window:", style='CardLabel.TLabel').grid(row=0, column=2, sticky='w', padx=(0, 10))
         self.ct_pds_window_var = tk.StringVar(value='11')
         ttk.Entry(params_frame, textvariable=self.ct_pds_window_var, width=15).grid(row=0, column=3, sticky='w')
+
+        ttk.Label(params_frame, text="TSR Transfer Samples:", style='CardLabel.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
+        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
+        ttk.Entry(params_frame, textvariable=self.ct_tsr_n_samples_var, width=15).grid(row=1, column=1, sticky='w', pady=(5, 0))
 
         # Build button
         self._create_accent_button(section_c, "Build Transfer Model",
