@@ -182,6 +182,29 @@ class SpectralPredictApp:
         self.master_data_format = None  # 'csv', 'npy', 'folder', etc.
         self.slave_data_format = None  # 'csv', 'npy', 'folder', etc.
 
+        # Enhanced loading with Y values (for JYPLS-inv)
+        # Master data with Y values
+        self.ct_master_X = None  # pd.DataFrame with sample IDs as index
+        self.ct_master_y = None  # pd.Series with sample IDs as index
+        self.ct_master_wavelengths = None  # np.ndarray of wavelengths
+        self.ct_master_detected_type = None  # 'asd', 'csv', 'spc', etc.
+        self.ct_master_spectra_path_var = tk.StringVar()  # Path to master spectra directory
+        self.ct_master_reference_path_var = tk.StringVar()  # Path to master reference CSV
+        self.ct_master_spectral_file_col_var = tk.StringVar()  # Spectral file column name
+        self.ct_master_id_col_var = tk.StringVar()  # Specimen ID column name
+        self.ct_master_target_col_var = tk.StringVar()  # Target variable column name
+
+        # Slave data with Y values
+        self.ct_slave_X = None  # pd.DataFrame with sample IDs as index
+        self.ct_slave_y = None  # pd.Series with sample IDs as index
+        self.ct_slave_wavelengths = None  # np.ndarray of wavelengths
+        self.ct_slave_detected_type = None  # 'asd', 'csv', 'spc', etc.
+        self.ct_slave_spectra_path_var = tk.StringVar()  # Path to slave spectra directory
+        self.ct_slave_reference_path_var = tk.StringVar()  # Path to slave reference CSV
+        self.ct_slave_spectral_file_col_var = tk.StringVar()  # Spectral file column name
+        self.ct_slave_id_col_var = tk.StringVar()  # Specimen ID column name
+        self.ct_slave_target_col_var = tk.StringVar()  # Target variable column name
+
         # Step 2: Application Mode
         self.application_mode = None  # 'predict' or 'export'
 
@@ -478,9 +501,9 @@ class SpectralPredictApp:
         self.lightgbm_max_depth_custom = tk.StringVar(value="")
 
         # min_child_samples (minimum samples required in a leaf)
-        self.lightgbm_min_child_samples_5 = tk.BooleanVar(value=False)  # 5
+        self.lightgbm_min_child_samples_5 = tk.BooleanVar(value=True)  # 5 ⭐ standard (fixed - was 20)
         self.lightgbm_min_child_samples_10 = tk.BooleanVar(value=False)  # 10
-        self.lightgbm_min_child_samples_20 = tk.BooleanVar(value=True)  # 20 ⭐ standard
+        self.lightgbm_min_child_samples_20 = tk.BooleanVar(value=False)  # 20 (too restrictive for small datasets)
         self.lightgbm_min_child_samples_50 = tk.BooleanVar(value=False)  # 50
         self.lightgbm_min_child_samples_100 = tk.BooleanVar(value=False)  # 100
         self.lightgbm_min_child_samples_custom = tk.StringVar(value="")
@@ -3045,14 +3068,14 @@ class SpectralPredictApp:
         lgbm_min_child_samples_frame = ttk.Frame(lgbm_content_frame)
         lgbm_min_child_samples_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
-        ttk.Checkbutton(lgbm_min_child_samples_frame, text="5", variable=self.lightgbm_min_child_samples_5).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="5 ⭐", variable=self.lightgbm_min_child_samples_5).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(lgbm_min_child_samples_frame, text="10", variable=self.lightgbm_min_child_samples_10).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(lgbm_min_child_samples_frame, text="20 ⭐", variable=self.lightgbm_min_child_samples_20).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_min_child_samples_frame, text="20", variable=self.lightgbm_min_child_samples_20).grid(row=0, column=2, padx=5)
         ttk.Checkbutton(lgbm_min_child_samples_frame, text="50", variable=self.lightgbm_min_child_samples_50).grid(row=0, column=3, padx=5)
         ttk.Checkbutton(lgbm_min_child_samples_frame, text="100", variable=self.lightgbm_min_child_samples_100).grid(row=0, column=4, padx=5)
         ttk.Label(lgbm_min_child_samples_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
         ttk.Entry(lgbm_min_child_samples_frame, textvariable=self.lightgbm_min_child_samples_custom, width=10).grid(row=0, column=6, padx=5)
-        ttk.Label(lgbm_min_child_samples_frame, text="(default: 20)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
+        ttk.Label(lgbm_min_child_samples_frame, text="(default: 5 - fixed for small datasets)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
 
         # subsample (row sampling, aka bagging_fraction)
         ttk.Label(lgbm_content_frame, text="Row Sampling (subsample / bagging_fraction):", style='Subheading.TLabel').grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
@@ -15649,28 +15672,72 @@ Configuration:
         """Update data information display."""
         info_text = ""
 
-        if self.current_master_data is not None:
+        # Check enhanced loading first (with Y values)
+        if self.ct_master_X is not None:
+            info_text += f"Master (with Y values):\n"
+            info_text += f"  Samples: {len(self.ct_master_X)}\n"
+            info_text += f"  Wavelengths: {len(self.ct_master_wavelengths)} "
+            info_text += f"({self.ct_master_wavelengths[0]:.1f} - {self.ct_master_wavelengths[-1]:.1f} nm)\n"
+            if hasattr(self, 'ct_master_target_col_var') and self.ct_master_target_col_var.get():
+                info_text += f"  Target: {self.ct_master_target_col_var.get()}\n"
+            info_text += "\n"
+        elif self.current_master_data is not None:
+            # Fall back to simple loading
             wl_m, X_m = self.current_master_data
             info_text += f"Master: {X_m.shape[0]} samples, {len(wl_m)} wavelengths "
             info_text += f"({wl_m[0]:.1f} - {wl_m[-1]:.1f} nm)\n"
             info_text += f"Format: {self.master_data_format}\n"
+            info_text += "⚠ No Y values loaded (simple loading)\n\n"
 
-        if self.current_slave_data is not None:
+        if self.ct_slave_X is not None:
+            info_text += f"Slave (with Y values):\n"
+            info_text += f"  Samples: {len(self.ct_slave_X)}\n"
+            info_text += f"  Wavelengths: {len(self.ct_slave_wavelengths)} "
+            info_text += f"({self.ct_slave_wavelengths[0]:.1f} - {self.ct_slave_wavelengths[-1]:.1f} nm)\n"
+            if hasattr(self, 'ct_slave_target_col_var') and self.ct_slave_target_col_var.get():
+                info_text += f"  Target: {self.ct_slave_target_col_var.get()}\n"
+            info_text += "\n"
+        elif self.current_slave_data is not None:
             wl_s, X_s = self.current_slave_data
             info_text += f"Slave: {X_s.shape[0]} samples, {len(wl_s)} wavelengths "
             info_text += f"({wl_s[0]:.1f} - {wl_s[-1]:.1f} nm)\n"
             info_text += f"Format: {self.slave_data_format}\n"
+            info_text += "⚠ No Y values loaded (simple loading)\n\n"
 
-        if self.current_master_data is not None and self.current_slave_data is not None:
-            wl_m, X_m = self.current_master_data
-            wl_s, X_s = self.current_slave_data
+        # Check for sample matching (if both enhanced loading used)
+        if self.ct_master_X is not None and self.ct_slave_X is not None:
+            master_ids = set(self.ct_master_X.index)
+            slave_ids = set(self.ct_slave_X.index)
+            common_ids = master_ids & slave_ids
 
-            # Calculate overlap
+            info_text += f"Sample Matching:\n"
+            info_text += f"  Matched samples: {len(common_ids)}\n"
+            if len(common_ids) < len(master_ids):
+                info_text += f"  Only in master: {len(master_ids) - len(common_ids)}\n"
+            if len(common_ids) < len(slave_ids):
+                info_text += f"  Only in slave: {len(slave_ids) - len(common_ids)}\n"
+
+            if len(common_ids) == len(master_ids) == len(slave_ids):
+                info_text += f"  ✓ Perfect match!\n"
+
+        # Calculate wavelength overlap (works for both loading types)
+        wl_m = None
+        wl_s = None
+        if self.ct_master_X is not None:
+            wl_m = self.ct_master_wavelengths
+        elif self.current_master_data is not None:
+            wl_m, _ = self.current_master_data
+
+        if self.ct_slave_X is not None:
+            wl_s = self.ct_slave_wavelengths
+        elif self.current_slave_data is not None:
+            wl_s, _ = self.current_slave_data
+
+        if wl_m is not None and wl_s is not None:
             overlap_start = max(wl_m[0], wl_s[0])
             overlap_end = min(wl_m[-1], wl_s[-1])
             overlap_pct = 100.0 * (overlap_end - overlap_start) / (max(wl_m[-1], wl_s[-1]) - min(wl_m[0], wl_s[0]))
-
-            info_text += f"\nWavelength Overlap: {overlap_start:.1f} - {overlap_end:.1f} nm ({overlap_pct:.1f}%)\n"
+            info_text += f"\nWavelength Overlap: {overlap_start:.1f} - {overlap_end:.1f} nm ({overlap_pct:.1f}%)"
 
         self.ct_data_info_text.config(state='normal')
         self.ct_data_info_text.delete('1.0', tk.END)
@@ -15933,6 +16000,430 @@ Configuration:
 
     # ========================================================================
     # END OF STEP 1 HELPER METHODS
+    # ========================================================================
+
+    # ========================================================================
+    # STEP 1 ENHANCED HELPER METHODS: Load Master/Slave Data with Y Values (for JYPLS-inv)
+    # ========================================================================
+
+    def _browse_master_spectra_with_y(self):
+        """Browse master spectra directory with auto-detection (Import tab pattern)."""
+        from tkinter import filedialog, messagebox
+        from pathlib import Path
+
+        directory = filedialog.askdirectory(title="Select Master Spectra Directory")
+        if not directory:
+            return
+
+        self.ct_master_spectra_path_var.set(directory)
+
+        # Auto-detect file type (priority order)
+        path = Path(directory)
+        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
+        csv_files = list(path.glob("*.csv"))
+        spc_files = list(path.glob("*.spc"))
+
+        if asd_files:
+            self.ct_master_detected_type = "asd"
+            self.ct_master_detection_status.config(
+                text=f"✓ Detected {len(asd_files)} ASD files",
+                foreground=self.colors['success']
+            )
+        elif spc_files:
+            self.ct_master_detected_type = "spc"
+            self.ct_master_detection_status.config(
+                text=f"✓ Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif csv_files:
+            self.ct_master_detected_type = "csv"
+            self.ct_master_detection_status.config(
+                text=f"✓ Detected {len(csv_files)} CSV files",
+                foreground=self.colors['success']
+            )
+        else:
+            self.ct_master_detected_type = None
+            self.ct_master_detection_status.config(
+                text="⚠ No spectral files detected",
+                foreground=self.colors['warning']
+            )
+            return
+
+        # Auto-detect reference CSV/Excel in same folder
+        ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+        # Filter out files that are spectra
+        ref_files = [f for f in ref_files if f not in csv_files]
+
+        if len(ref_files) == 1:
+            self.ct_master_reference_path_var.set(str(ref_files[0]))
+            self._auto_detect_master_columns()
+            messagebox.showinfo("Auto-Detected",
+                f"Auto-detected reference file:\n{ref_files[0].name}")
+
+    def _browse_master_reference(self):
+        """Browse for master reference CSV/Excel file."""
+        from tkinter import filedialog
+
+        filepath = filedialog.askopenfilename(
+            title="Select Master Reference CSV/Excel",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx;*.xls"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_master_reference_path_var.set(filepath)
+            self._auto_detect_master_columns()
+
+    def _auto_detect_master_columns(self):
+        """Auto-detect column mapping from master reference file."""
+        from tkinter import messagebox
+        import pandas as pd
+
+        if not self.ct_master_reference_path_var.get():
+            return
+
+        try:
+            ref_path = self.ct_master_reference_path_var.get()
+            if ref_path.lower().endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(ref_path, nrows=5)
+            else:
+                df = pd.read_csv(ref_path, nrows=5)
+
+            columns = list(df.columns)
+
+            # Update comboboxes
+            self.ct_master_spectral_file_combo['values'] = columns
+            self.ct_master_id_combo['values'] = columns
+            self.ct_master_target_combo['values'] = columns
+
+            # Auto-select if 3+ columns
+            if len(columns) >= 3:
+                self.ct_master_spectral_file_col_var.set(columns[0])
+                self.ct_master_id_col_var.set(columns[1])
+                self.ct_master_target_col_var.set(columns[2])
+            elif len(columns) >= 2:
+                self.ct_master_spectral_file_col_var.set(columns[0])
+                self.ct_master_id_col_var.set(columns[0])
+                self.ct_master_target_col_var.set(columns[1])
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read reference file:\n{str(e)}")
+
+    def _load_master_data_with_y(self):
+        """Load master spectra + reference Y values and align."""
+        from tkinter import messagebox
+        import pandas as pd
+        import numpy as np
+        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir, read_reference_csv, align_xy
+
+        # Validate inputs
+        if not self.ct_master_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select master spectra directory.")
+            return
+
+        if not self.ct_master_reference_path_var.get():
+            messagebox.showwarning("No Reference", "Please browse and select master reference CSV/Excel.")
+            return
+
+        if not self.ct_master_spectral_file_col_var.get():
+            messagebox.showwarning("No Column", "Please select spectral file column.")
+            return
+
+        if not self.ct_master_target_col_var.get():
+            messagebox.showwarning("No Target", "Please select target variable column.")
+            return
+
+        try:
+            # Load spectra based on detected type
+            if self.ct_master_detected_type == 'asd':
+                X, metadata = read_asd_dir(self.ct_master_spectra_path_var.get())
+            elif self.ct_master_detected_type == 'spc':
+                X, metadata = read_spc_dir(self.ct_master_spectra_path_var.get())
+            elif self.ct_master_detected_type == 'csv':
+                X, metadata = read_csv_spectra(self.ct_master_spectra_path_var.get())
+            else:
+                raise ValueError(f"Unsupported file type: {self.ct_master_detected_type}")
+
+            # Load reference
+            ref = read_reference_csv(
+                self.ct_master_reference_path_var.get(),
+                self.ct_master_spectral_file_col_var.get()
+            )
+
+            # Align by sample ID
+            X_aligned, y_aligned, alignment_info = align_xy(
+                X, ref,
+                self.ct_master_spectral_file_col_var.get(),
+                self.ct_master_target_col_var.get(),
+                return_alignment_info=True
+            )
+
+            # Show alignment report if there are issues
+            if alignment_info['unmatched_spectra'] or alignment_info['n_nan_dropped'] > 0:
+                msg = f"Alignment Report:\n\n"
+                msg += f"Matched samples: {len(alignment_info['matched_ids'])}\n"
+                if alignment_info['unmatched_spectra']:
+                    msg += f"Unmatched spectra (no ref): {len(alignment_info['unmatched_spectra'])}\n"
+                if alignment_info['unmatched_reference']:
+                    msg += f"Unmatched references (no spectra): {len(alignment_info['unmatched_reference'])}\n"
+                if alignment_info['n_nan_dropped'] > 0:
+                    msg += f"Dropped (NaN targets): {alignment_info['n_nan_dropped']}\n"
+                if alignment_info['used_fuzzy_matching']:
+                    msg += f"\n⚠ Used fuzzy filename matching"
+                messagebox.showinfo("Alignment Report", msg)
+
+            # Store as DataFrames (keep index with sample IDs)
+            self.ct_master_X = X_aligned
+            self.ct_master_y = y_aligned
+            self.ct_master_wavelengths = X_aligned.columns.astype(float).values
+
+            # Update data info display
+            self._update_data_info()
+
+            messagebox.showinfo("Success",
+                f"Master data loaded successfully!\n\n"
+                f"Samples: {len(X_aligned)}\n"
+                f"Wavelengths: {len(self.ct_master_wavelengths)}\n"
+                f"Target: {self.ct_master_target_col_var.get()}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load master data:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    # Slave data methods (parallel to master)
+
+    def _browse_slave_spectra_with_y(self):
+        """Browse slave spectra directory with auto-detection (Import tab pattern)."""
+        from tkinter import filedialog, messagebox
+        from pathlib import Path
+
+        directory = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        if not directory:
+            return
+
+        self.ct_slave_spectra_path_var.set(directory)
+
+        # Auto-detect file type
+        path = Path(directory)
+        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
+        csv_files = list(path.glob("*.csv"))
+        spc_files = list(path.glob("*.spc"))
+
+        if asd_files:
+            self.ct_slave_detected_type = "asd"
+            self.ct_slave_detection_status.config(
+                text=f"✓ Detected {len(asd_files)} ASD files",
+                foreground=self.colors['success']
+            )
+        elif spc_files:
+            self.ct_slave_detected_type = "spc"
+            self.ct_slave_detection_status.config(
+                text=f"✓ Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif csv_files:
+            self.ct_slave_detected_type = "csv"
+            self.ct_slave_detection_status.config(
+                text=f"✓ Detected {len(csv_files)} CSV files",
+                foreground=self.colors['success']
+            )
+        else:
+            self.ct_slave_detected_type = None
+            self.ct_slave_detection_status.config(
+                text="⚠ No spectral files detected",
+                foreground=self.colors['warning']
+            )
+            return
+
+        # Auto-detect reference CSV/Excel
+        ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+        ref_files = [f for f in ref_files if f not in csv_files]
+
+        if len(ref_files) == 1:
+            self.ct_slave_reference_path_var.set(str(ref_files[0]))
+            self._auto_detect_slave_columns()
+            messagebox.showinfo("Auto-Detected",
+                f"Auto-detected reference file:\n{ref_files[0].name}")
+
+    def _browse_slave_reference(self):
+        """Browse for slave reference CSV/Excel file."""
+        from tkinter import filedialog
+
+        filepath = filedialog.askopenfilename(
+            title="Select Slave Reference CSV/Excel",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx;*.xls"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_slave_reference_path_var.set(filepath)
+            self._auto_detect_slave_columns()
+
+    def _auto_detect_slave_columns(self):
+        """Auto-detect column mapping from slave reference file."""
+        from tkinter import messagebox
+        import pandas as pd
+
+        if not self.ct_slave_reference_path_var.get():
+            return
+
+        try:
+            ref_path = self.ct_slave_reference_path_var.get()
+            if ref_path.lower().endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(ref_path, nrows=5)
+            else:
+                df = pd.read_csv(ref_path, nrows=5)
+
+            columns = list(df.columns)
+
+            # Update comboboxes
+            self.ct_slave_spectral_file_combo['values'] = columns
+            self.ct_slave_id_combo['values'] = columns
+            self.ct_slave_target_combo['values'] = columns
+
+            # Auto-select
+            if len(columns) >= 3:
+                self.ct_slave_spectral_file_col_var.set(columns[0])
+                self.ct_slave_id_col_var.set(columns[1])
+                self.ct_slave_target_col_var.set(columns[2])
+            elif len(columns) >= 2:
+                self.ct_slave_spectral_file_col_var.set(columns[0])
+                self.ct_slave_id_col_var.set(columns[0])
+                self.ct_slave_target_col_var.set(columns[1])
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read reference file:\n{str(e)}")
+
+    def _load_slave_data_with_y(self):
+        """Load slave spectra + reference Y values and align."""
+        from tkinter import messagebox
+        import pandas as pd
+        import numpy as np
+        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir, read_reference_csv, align_xy
+
+        # Validate inputs
+        if not self.ct_slave_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select slave spectra directory.")
+            return
+
+        if not self.ct_slave_reference_path_var.get():
+            messagebox.showwarning("No Reference", "Please browse and select slave reference CSV/Excel.")
+            return
+
+        if not self.ct_slave_spectral_file_col_var.get():
+            messagebox.showwarning("No Column", "Please select spectral file column.")
+            return
+
+        if not self.ct_slave_target_col_var.get():
+            messagebox.showwarning("No Target", "Please select target variable column.")
+            return
+
+        try:
+            # Load spectra based on detected type
+            if self.ct_slave_detected_type == 'asd':
+                X, metadata = read_asd_dir(self.ct_slave_spectra_path_var.get())
+            elif self.ct_slave_detected_type == 'spc':
+                X, metadata = read_spc_dir(self.ct_slave_spectra_path_var.get())
+            elif self.ct_slave_detected_type == 'csv':
+                X, metadata = read_csv_spectra(self.ct_slave_spectra_path_var.get())
+            else:
+                raise ValueError(f"Unsupported file type: {self.ct_slave_detected_type}")
+
+            # Load reference
+            ref = read_reference_csv(
+                self.ct_slave_reference_path_var.get(),
+                self.ct_slave_spectral_file_col_var.get()
+            )
+
+            # Align by sample ID
+            X_aligned, y_aligned, alignment_info = align_xy(
+                X, ref,
+                self.ct_slave_spectral_file_col_var.get(),
+                self.ct_slave_target_col_var.get(),
+                return_alignment_info=True
+            )
+
+            # Show alignment report
+            if alignment_info['unmatched_spectra'] or alignment_info['n_nan_dropped'] > 0:
+                msg = f"Alignment Report:\n\n"
+                msg += f"Matched samples: {len(alignment_info['matched_ids'])}\n"
+                if alignment_info['unmatched_spectra']:
+                    msg += f"Unmatched spectra (no ref): {len(alignment_info['unmatched_spectra'])}\n"
+                if alignment_info['unmatched_reference']:
+                    msg += f"Unmatched references (no spectra): {len(alignment_info['unmatched_reference'])}\n"
+                if alignment_info['n_nan_dropped'] > 0:
+                    msg += f"Dropped (NaN targets): {alignment_info['n_nan_dropped']}\n"
+                if alignment_info['used_fuzzy_matching']:
+                    msg += f"\n⚠ Used fuzzy filename matching"
+                messagebox.showinfo("Alignment Report", msg)
+
+            # Store as DataFrames
+            self.ct_slave_X = X_aligned
+            self.ct_slave_y = y_aligned
+            self.ct_slave_wavelengths = X_aligned.columns.astype(float).values
+
+            # Update data info display
+            self._update_data_info()
+
+            # Validate pairing with master if both loaded
+            if self.ct_master_X is not None:
+                self._validate_master_slave_pairing()
+
+            messagebox.showinfo("Success",
+                f"Slave data loaded successfully!\n\n"
+                f"Samples: {len(X_aligned)}\n"
+                f"Wavelengths: {len(self.ct_slave_wavelengths)}\n"
+                f"Target: {self.ct_slave_target_col_var.get()}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load slave data:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _validate_master_slave_pairing(self):
+        """Validate that master and slave have matching sample IDs."""
+        from tkinter import messagebox
+
+        if self.ct_master_X is None or self.ct_slave_X is None:
+            return False
+
+        master_ids = set(self.ct_master_X.index)
+        slave_ids = set(self.ct_slave_X.index)
+
+        # Find intersection
+        common_ids = master_ids & slave_ids
+
+        if len(common_ids) == 0:
+            messagebox.showerror("No Matching Samples",
+                "Master and slave datasets have NO common sample IDs!\n\n"
+                "JYPLS-inv requires the same samples measured on both instruments.\n\n"
+                "Please check that:\n"
+                "1. Sample IDs match between master and slave reference files\n"
+                "2. Filename matching is correct")
+            return False
+
+        # Warn if not all samples match
+        if len(common_ids) < len(master_ids) or len(common_ids) < len(slave_ids):
+            only_master = master_ids - slave_ids
+            only_slave = slave_ids - master_ids
+
+            msg = f"Partial sample overlap detected:\n\n"
+            msg += f"✓ Matched samples: {len(common_ids)}\n"
+            if only_master:
+                msg += f"⚠ Only in master: {len(only_master)}\n"
+                msg += f"   Examples: {', '.join(list(only_master)[:3])}\n"
+            if only_slave:
+                msg += f"⚠ Only in slave: {len(only_slave)}\n"
+                msg += f"   Examples: {', '.join(list(only_slave)[:3])}\n"
+            msg += f"\nOnly matched samples will be used for JYPLS-inv."
+
+            messagebox.showwarning("Partial Match", msg)
+        else:
+            # Perfect match!
+            messagebox.showinfo("Perfect Match",
+                f"✓ All {len(common_ids)} samples matched between master and slave!")
+
+        return True
+
+    # ========================================================================
+    # END OF ENHANCED STEP 1 HELPER METHODS
     # ========================================================================
 
     # ========================================================================
