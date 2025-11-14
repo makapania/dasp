@@ -221,7 +221,7 @@ OPTIMIZED_HYPERPARAMETERS = {
             'learning_rate': [0.1],  # 1 value (not very sensitive)
             'num_leaves': [31, 50],  # 2 values
             'max_depth': [-1],  # No limit (controlled by num_leaves)
-            'min_child_samples': [10],  # Balanced: 5 too aggressive for large datasets, 20 too conservative for small
+            'min_child_samples': [5],  # Reduced for small datasets (was 20 - caused negative R2)
             'subsample': [0.8],  # Row sampling to prevent overfitting (like XGBoost)
             'colsample_bytree': [0.8],  # Feature sampling for high-dim data (like XGBoost)
             'reg_alpha': [0.1],  # L1 regularization for feature selection (like XGBoost)
@@ -245,7 +245,7 @@ OPTIMIZED_HYPERPARAMETERS = {
             'learning_rate': [0.1],  # 1 value
             'num_leaves': [31],  # 1 value
             'max_depth': [-1],  # No limit (controlled by num_leaves)
-            'min_child_samples': [10],  # Balanced: 5 too aggressive for large datasets, 20 too conservative for small
+            'min_child_samples': [5],  # Reduced for small datasets (was 20 - caused negative R2)
             'subsample': [0.8],  # Row sampling to prevent overfitting (like XGBoost)
             'colsample_bytree': [0.8],  # Feature sampling for high-dim data (like XGBoost)
             'reg_alpha': [0.1],  # L1 regularization for feature selection (like XGBoost)
@@ -587,70 +587,6 @@ def print_tier_summary():
             print(f"  {key}: {value}")
 
     print("\n" + "=" * 70)
-
-
-# =============================================================================
-# EXECUTION PARAMETERS (NOT hyperparameters)
-# =============================================================================
-#
-# These are configuration settings that control execution behavior but are NOT
-# hyperparameters to be tuned. They include:
-# - Computational settings (n_jobs, verbosity)
-# - Algorithm-specific requirements (bagging_freq when subsample < 1.0)
-# - Convergence/stopping criteria (early_stopping, warm_start, solver settings)
-#
-# These values should generally NOT be grid-searched.
-
-EXECUTION_DEFAULTS = {
-    'LightGBM': {
-        'bagging_freq': 1,  # Required when subsample < 1.0 (triggers row subsampling)
-        'verbosity': -1,  # Suppress LightGBM output (-1 = silent, 0 = warning, 1 = info)
-        'n_jobs': -1,  # Use all available CPUs
-    },
-    'XGBoost': {
-        'tree_method': 'hist',  # Histogram-based algorithm (faster for high-dimensional data)
-        'verbosity': 0,  # Suppress XGBoost output (0 = silent, 1 = warning, 2 = info, 3 = debug)
-        'n_jobs': -1,  # Use all available CPUs
-    },
-    'RandomForest': {
-        'n_jobs': -1,  # Use all available CPUs
-    },
-    'MLP': {
-        'early_stopping': True,  # Enable validation-based early stopping (recommended)
-    },
-    'NeuralBoosted': {
-        # Execution settings
-        'early_stopping': True,  # Enable validation-based early stopping (recommended)
-        'validation_fraction': 0.15,  # Fraction of training data for validation (15%)
-        'n_iter_no_change': 10,  # Patience: stop if no improvement for N iterations
-        'alpha': 1e-4,  # L2 regularization penalty for neural network weights
-        'verbose': 0,  # Suppress sklearn MLP output (0 = silent, 1 = iteration messages)
-
-        # Internal solver settings (for the boosting neural networks)
-        'solver': 'lbfgs',  # Best solver for small networks (alternatives: 'sgd', 'adam')
-        'tol': 5e-4,  # Convergence tolerance (optimized based on empirical testing)
-        'warm_start': False,  # Don't reuse previous solution (ensures clean training)
-        'max_iter': 100,  # Reduced from sklearn default (500) - NeuralBoosted converges faster
-    }
-}
-
-
-def get_execution_defaults(model_name):
-    """Get execution defaults for a model.
-
-    These are non-hyperparameter settings that control execution behavior.
-
-    Parameters
-    ----------
-    model_name : str
-        Model name (e.g., 'LightGBM', 'XGBoost')
-
-    Returns
-    -------
-    dict
-        Dictionary of execution settings for the model
-    """
-    return EXECUTION_DEFAULTS.get(model_name, {})
 
 
 # =============================================================================
