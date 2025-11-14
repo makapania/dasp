@@ -474,12 +474,48 @@ Full grid (24 configs): ~60 MB
 
 ### Q: Can I use it for classification?
 
-**A:** Not in v1.0. Classification support planned for v2.0.
+**A:** Yes! As of v2.0, `NeuralBoostedClassifier` supports both binary and multiclass classification.
 
-Currently available:
-- PLS-DA (classification)
-- Random Forest Classifier
-- MLP Classifier
+**Features:**
+- Binary classification using log-loss gradient boosting
+- Multiclass via one-vs-rest strategy
+- User-selectable early stopping metric (accuracy or log-loss)
+- Class weighting for imbalanced datasets ('balanced' or custom)
+- Full sklearn API: `predict()`, `predict_proba()`, `predict_log_proba()`
+
+**Example - Binary Classification:**
+```python
+from spectral_predict.neural_boosted import NeuralBoostedClassifier
+
+model = NeuralBoostedClassifier(
+    n_estimators=50,
+    learning_rate=0.1,
+    hidden_layer_size=5,
+    early_stopping_metric='accuracy',  # or 'log_loss'
+    class_weight='balanced',  # for imbalanced data
+    random_state=42
+)
+
+model.fit(X_train, y_train)
+predictions = model.predict(X_test)
+probabilities = model.predict_proba(X_test)
+```
+
+**Example - Multiclass Classification:**
+```python
+# Same API, automatically uses one-vs-rest for >2 classes
+model = NeuralBoostedClassifier(n_estimators=50, random_state=42)
+model.fit(X_train, y_train)  # y_train has 3+ classes
+
+# Get probabilities for all classes
+proba = model.predict_proba(X_test)  # Shape: (n_samples, n_classes)
+```
+
+**When to use:**
+- High-dimensional spectral classification (many wavelengths, few samples)
+- When you need probability estimates with good calibration
+- Imbalanced datasets (use `class_weight='balanced'`)
+- When Random Forest/XGBoost overfit your small dataset
 
 ### Q: How do I cite this in a paper?
 
