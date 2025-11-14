@@ -2312,6 +2312,11 @@ class SpectralPredictApp:
         self.update_wl_button.pack(side=tk.LEFT, padx=5)
         cfg_row += 1
 
+        # Wavelength recommendation
+        ttk.Label(config_frame, text="💡 Tip: Import full spectrum for best preprocessing results. Refine wavelengths later in Model Selection.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+        cfg_row += 1
+
         # Data Type
         ttk.Label(config_frame, text="Data Type:").grid(row=cfg_row, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 5))
         data_type_subframe = ttk.Frame(config_frame)
