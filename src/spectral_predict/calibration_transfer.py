@@ -709,7 +709,10 @@ def estimate_ctai(
     n_samples_master, n_wavelengths = X_master.shape
     n_samples_slave = X_slave.shape[0]
 
-    # Validation
+    # Enhanced validation with debug logging
+    print("\n=== CTAI Debug Information ===")
+    print(f"  Input shapes: Master {X_master.shape}, Slave {X_slave.shape}")
+
     if X_slave.shape[1] != n_wavelengths:
         raise ValueError(
             f"X_master and X_slave must have same number of wavelengths: "
@@ -721,6 +724,24 @@ def estimate_ctai(
             "Need at least 2 samples in both master and slave datasets"
         )
 
+    # Check for NaN/inf values
+    if np.any(np.isnan(X_master)):
+        n_nan = np.sum(np.isnan(X_master))
+        raise ValueError(f"X_master contains {n_nan} NaN values")
+    if np.any(np.isinf(X_master)):
+        n_inf = np.sum(np.isinf(X_master))
+        raise ValueError(f"X_master contains {n_inf} infinite values")
+    if np.any(np.isnan(X_slave)):
+        n_nan = np.sum(np.isnan(X_slave))
+        raise ValueError(f"X_slave contains {n_nan} NaN values")
+    if np.any(np.isinf(X_slave)):
+        n_inf = np.sum(np.isinf(X_slave))
+        raise ValueError(f"X_slave contains {n_inf} infinite values")
+
+    print(f"  Data validation: PASSED (no NaN/inf values)")
+    print(f"  Master data range: [{np.min(X_master):.6f}, {np.max(X_master):.6f}]")
+    print(f"  Slave data range: [{np.min(X_slave):.6f}, {np.max(X_slave):.6f}]")
+
     # Step 1: Mean-center both datasets
     master_mean = np.mean(X_master, axis=0)
     slave_mean = np.mean(X_slave, axis=0)
@@ -728,76 +749,111 @@ def estimate_ctai(
     X_master_centered = X_master - master_mean
     X_slave_centered = X_slave - slave_mean
 
-    # Step 2: Estimate affine transformation using SVD
-    # We want: X_master_centered ≈ X_slave_centered @ M
-    # Optimal M in least-squares sense: M = (X_slave^T X_slave)^-1 X_slave^T X_master
+    print(f"  Step 1: Mean centering complete")
+    print(f"    Master mean range: [{np.min(master_mean):.6f}, {np.max(master_mean):.6f}]")
+    print(f"    Slave mean range: [{np.min(slave_mean):.6f}, {np.max(slave_mean):.6f}]")
 
-    # Compute cross-covariance matrix
-    # Using all master samples vs all slave samples
-    # This is the key insight: we don't need paired samples!
+    # Step 2: Estimate affine transformation using PCA-regularized regression
+    # We want: X_master ≈ X_slave @ M + T (in data space, not covariance space!)
+    # CTAI's key insight: Use PCA to find low-rank approximation for stability
 
-    # For computational efficiency with possibly different sample sizes,
-    # use SVD-based approach on covariance matrices
+    # Check if we have paired samples
+    have_paired_samples = (n_samples_master == n_samples_slave)
 
-    # Covariance of slave data
-    if n_samples_slave > n_wavelengths:
-        # More samples than features: use standard covariance
-        C_slave = (X_slave_centered.T @ X_slave_centered) / n_samples_slave
-    else:
-        # More features than samples: use regularized approach
-        C_slave = (X_slave_centered.T @ X_slave_centered) / n_samples_slave
-        # Add small regularization for numerical stability
-        C_slave += 1e-6 * np.eye(n_wavelengths)
+    if not have_paired_samples:
+        raise ValueError(
+            f"CTAI requires paired samples (same samples on both instruments).\n"
+            f"Got {n_samples_master} master samples and {n_samples_slave} slave samples.\n"
+            f"For unpaired samples, use TSR, DS, or PDS instead."
+        )
 
-    # Cross-covariance between master and slave
-    # Approximate using statistical properties
-    # Since we don't have paired samples, use spectral similarity
-    C_cross = (X_master_centered.T @ X_master_centered) / n_samples_master
+    print(f"  Detected paired samples ({n_samples_master} samples on both instruments)")
 
-    # SVD of cross-covariance to extract transformation
-    U, S, Vt = svd(C_cross, full_matrices=False)
+    # Step 2a: Perform SVD on mean-centered slave data to find principal directions
+    print(f"  Step 2: Computing SVD of slave data...")
+    try:
+        U_slave, S_slave, Vt_slave = svd(X_slave_centered, full_matrices=False)
+        print(f"    SVD successful: U{U_slave.shape}, S{S_slave.shape}, Vt{Vt_slave.shape}")
+        print(f"    Singular values range: [{np.min(S_slave):.6e}, {np.max(S_slave):.6e}]")
+        if S_slave[-1] > 0:
+            print(f"    Condition number: {S_slave[0]/S_slave[-1]:.2e}")
+    except np.linalg.LinAlgError as e:
+        raise ValueError(f"SVD failed: {e}. Check if data has sufficient variance.")
 
-    # Determine number of components
+    # Step 2b: Determine number of components (for regularization)
     if n_components is None:
         # Auto-select based on explained variance
-        explained_var_cumsum = np.cumsum(S) / np.sum(S)
+        explained_var_cumsum = np.cumsum(S_slave**2) / np.sum(S_slave**2)
         n_components = np.searchsorted(explained_var_cumsum, explained_variance_threshold) + 1
-        n_components = min(n_components, n_wavelengths)
+        n_components = min(n_components, min(n_samples_slave, n_wavelengths))
+        print(f"  Step 3: Auto-selected {n_components} components (threshold={explained_variance_threshold})")
     else:
-        n_components = min(n_components, len(S))
+        n_components = min(n_components, len(S_slave))
+        print(f"  Step 3: Using {n_components} components (user-specified)")
 
-    # Truncate to selected components
-    U_truncated = U[:, :n_components]
-    S_truncated = S[:n_components]
-    Vt_truncated = Vt[:n_components, :]
+    # Step 2c: Project data onto principal components
+    # This is the key: work in reduced-rank space for numerical stability
+    V_truncated = Vt_slave[:n_components, :].T  # Shape: (n_wavelengths, n_components)
+    S_truncated = S_slave[:n_components]
 
-    # Reconstruction with reduced components
-    C_reconstructed = U_truncated @ np.diag(S_truncated) @ Vt_truncated
+    # Project slave and master data onto slave's principal components
+    X_slave_projected = X_slave_centered @ V_truncated  # (n_samples, n_components)
+    X_master_projected = X_master_centered @ V_truncated  # (n_samples, n_components)
 
-    # Estimate transformation matrix M
-    # M transforms from slave to master spectral space
-    # Simple approach: use ratio of covariances
-    try:
-        # Solve for M: C_slave @ M ≈ C_cross
-        M = np.linalg.solve(C_slave, C_reconstructed)
-    except np.linalg.LinAlgError:
-        # If singular, use pseudoinverse
-        M = np.linalg.pinv(C_slave) @ C_reconstructed
+    print(f"  Step 4: Computing transformation in {n_components}-D PC space...")
 
-    # Translation vector is difference in means
-    # After transformation: X_master ≈ (X_slave - slave_mean) @ M + master_mean
-    # Rearranging: X_master ≈ X_slave @ M + (master_mean - slave_mean @ M)
+    # Step 2d: Solve for transformation in reduced space
+    # X_master_proj ≈ X_slave_proj @ M_reduced
+    # This is well-conditioned because we only use significant components
+    M_reduced = np.linalg.lstsq(X_slave_projected, X_master_projected, rcond=None)[0]
+    print(f"    M_reduced shape: {M_reduced.shape} (PCA space transformation)")
+
+    # Step 2e: Transform back to full wavelength space
+    # M_full = V @ M_reduced @ V^T
+    M = V_truncated @ M_reduced @ V_truncated.T
+
+    print(f"    M shape: {M.shape}")
+    print(f"    M range: [{np.min(M):.6f}, {np.max(M):.6f}]")
+    print(f"    M diagonal mean: {np.mean(np.diag(M)):.6f}")
+
+    # Check for NaN/inf in transformation matrix
+    if np.any(np.isnan(M)):
+        raise ValueError(f"Transformation matrix M contains NaN values! This indicates numerical instability.")
+    if np.any(np.isinf(M)):
+        raise ValueError(f"Transformation matrix M contains infinite values! This indicates numerical instability.")
+
+    # Translation vector handles mean differences
+    # T = mean(X_master) - mean(X_slave @ M)
     T = master_mean - slave_mean @ M
+
+    print(f"    T (translation) range: [{np.min(T):.6f}, {np.max(T):.6f}]")
+    print(f"    T mean: {np.mean(T):.6f}")
 
     # Step 3: Validate transformation quality
     # Apply to slave data and compare to master distribution
+    print(f"  Step 5: Validating transformation quality...")
     X_slave_transformed = X_slave @ M + T
+
+    # Check for NaN/inf in transformed data
+    if np.any(np.isnan(X_slave_transformed)):
+        raise ValueError(f"Transformed data contains NaN values! Transformation failed.")
+    if np.any(np.isinf(X_slave_transformed)):
+        raise ValueError(f"Transformed data contains infinite values! Transformation failed.")
+
+    print(f"    Transformed data range: [{np.min(X_slave_transformed):.6f}, {np.max(X_slave_transformed):.6f}]")
+
     X_master_sample = X_master[:min(n_samples_master, n_samples_slave)]
     X_slave_sample = X_slave_transformed[:min(n_samples_master, n_samples_slave)]
 
     reconstruction_error = np.sqrt(np.mean((X_master_sample - X_slave_sample) ** 2))
 
-    explained_variance = np.sum(S_truncated) / np.sum(S) if len(S) > 0 else 1.0
+    explained_variance = np.sum(S_truncated**2) / np.sum(S_slave**2) if len(S_slave) > 0 else 1.0
+
+    print(f"\n  === CTAI Results ===")
+    print(f"  Components: {n_components}")
+    print(f"  Explained Variance: {explained_variance:.4f}")
+    print(f"  Reconstruction RMSE: {reconstruction_error:.6f}")
+    print(f"  ==================\n")
 
     # Compile results
     params = {
@@ -1142,15 +1198,26 @@ def estimate_nspfce(
 
     # Compile results
     params = {
+        # Transformation parameters
         'transformation_matrix': T,
+        'T': T,  # Alias for GUI compatibility
         'offset': offset,
+
+        # Wavelength selection
         'selected_wavelengths': selected_wavelengths,
         'wavelength_selector': wavelength_selector if use_wavelength_selection else None,
-        'convergence_iterations': convergence_iterations,
-        'final_objective': final_objective,
         'use_wavelength_selection': use_wavelength_selection,
         'n_selected_wavelengths': n_selected,
-        'objective_history': objective_history
+
+        # Convergence information (dual naming for backward compatibility)
+        'convergence_iterations': convergence_iterations,
+        'n_iterations': convergence_iterations,  # Alias for GUI compatibility
+        'converged': (convergence_iterations < max_iterations),  # Boolean convergence flag
+        'final_objective': final_objective,
+
+        # History
+        'objective_history': objective_history,
+        'convergence_history': objective_history  # Alias for GUI compatibility
     }
 
     return params
