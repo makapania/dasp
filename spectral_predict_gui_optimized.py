@@ -16787,7 +16787,7 @@ Configuration:
             self.ct_export_predictions_button.config(state='normal')
 
             # Create plots
-            self._plot_prediction_results(y_pred, X_slave, X_transferred)
+            self._plot_ct_prediction_results(y_pred, X_slave, X_transferred)
 
             messagebox.showinfo("Success",
                 f"Prediction workflow completed!\n"
@@ -16797,7 +16797,7 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Error", f"Prediction workflow failed:\n{str(e)}")
 
-    def _plot_prediction_results(self, y_pred, X_slave_original, X_transferred):
+    def _plot_ct_prediction_results(self, y_pred, X_slave_original, X_transferred):
         """Create plots showing prediction results and spectral transformation."""
         if not HAS_MATPLOTLIB:
             return
