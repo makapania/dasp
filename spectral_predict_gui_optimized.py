@@ -15803,7 +15803,10 @@ Configuration:
                 n_samples = int(self.ct_tsr_n_samples_var.get())
                 if n_samples > X_master_common.shape[0]:
                     raise ValueError(f"TSR requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
-                params = estimate_tsr(X_master_common[:n_samples], X_slave_common[:n_samples])
+                # TSR requires transfer_indices: assume all loaded samples are paired
+                transfer_indices = np.arange(n_samples)
+                params = estimate_tsr(X_master_common[:n_samples], X_slave_common[:n_samples],
+                                     transfer_indices)
 
             elif method == 'ctai':
                 params = estimate_ctai(X_master_common, X_slave_common)
@@ -15811,10 +15814,12 @@ Configuration:
             elif method == 'nspfce':
                 max_iter = int(self.ct_nspfce_max_iterations_var.get())
                 use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
-                selector = self.ct_nspfce_selector_var.get() if use_wavelength_selection else None
+                selector_name = self.ct_nspfce_selector_var.get() if use_wavelength_selection else None
 
                 params = estimate_nspfce(X_master_common, X_slave_common, wl_common,
-                                        max_iterations=max_iter, selector=selector)
+                                        use_wavelength_selection=use_wavelength_selection,
+                                        wavelength_selector=selector_name if selector_name else 'vcpa-iriv',
+                                        max_iterations=max_iter)
 
             elif method == 'jypls-inv':
                 n_samples = int(self.ct_jypls_n_samples_var.get())
@@ -15824,7 +15829,19 @@ Configuration:
                 if n_samples > X_master_common.shape[0]:
                     raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
 
+                # JYPLS-inv requires reference Y values for transfer samples
+                # For now, use placeholder zeros - ideally should load from file or user input
+                messagebox.showwarning("JYPLS-inv Limitation",
+                    "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
+                    "Building with placeholder zeros. For accurate results, this method should be "
+                    "used with actual reference values.\n\n"
+                    "Consider using CTAI or NS-PFCE instead, which don't require reference values.")
+
+                y_transfer = np.zeros(n_samples)  # Placeholder
+                transfer_indices = np.arange(n_samples)
+
                 params = estimate_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
+                                           y_transfer, transfer_indices,
                                            n_components=n_components)
 
             else:
