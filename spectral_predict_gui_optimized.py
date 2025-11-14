@@ -2313,7 +2313,7 @@ class SpectralPredictApp:
         cfg_row += 1
 
         # Wavelength recommendation
-        ttk.Label(config_frame, text="💡 Tip: Import full spectrum for best preprocessing results. Refine wavelengths later in Model Selection.",
+        ttk.Label(config_frame, text="💡 Tip: Import full spectrum for best preprocessing results. Refine wavelengths later in Analysis Configuration.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
         cfg_row += 1
 
