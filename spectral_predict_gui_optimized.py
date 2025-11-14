@@ -114,6 +114,465 @@ except ImportError:
     HAS_CALIBRATION_TRANSFER = False
 
 
+# ===== NATIVE TKINTER TOOLTIP CLASS =====
+# No external dependencies required - uses pure tkinter
+class CreateToolTip(object):
+    """
+    Create a tooltip for a given widget.
+    Uses native tkinter - no external packages required.
+    """
+    def __init__(self, widget, text='widget info', delay=500):
+        self.waittime = delay  # milliseconds
+        self.wraplength = 400  # pixels
+        self.widget = widget
+        self.text = text
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+        self.id = None
+        self.tw = None
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(self.waittime, self.showtip)
+
+    def unschedule(self):
+        id = self.id
+        self.id = None
+        if id:
+            self.widget.after_cancel(id)
+
+    def showtip(self, event=None):
+        x = y = 0
+        x, y, cx, cy = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 20
+        # creates a toplevel window
+        self.tw = tk.Toplevel(self.widget)
+        # Leaves only the label and removes the app window
+        self.tw.wm_overrideredirect(True)
+        self.tw.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(self.tw, text=self.text, justify='left',
+                       background="#ffffe0", relief='solid', borderwidth=1,
+                       wraplength=self.wraplength, font=("tahoma", "9", "normal"))
+        label.pack(ipadx=1)
+
+    def hidetip(self):
+        tw = self.tw
+        self.tw = None
+        if tw:
+            tw.destroy()
+
+
+# ===== TOOLTIP CONTENT DICTIONARY =====
+# Centralized repository of tooltip descriptions for models and hyperparameters
+TOOLTIP_CONTENT = {
+    # ===== MODEL DESCRIPTIONS =====
+    'models': {
+        'PLS': (
+            "Partial Least Squares (PLS) is a linear regression method that finds latent variables "
+            "maximizing covariance between spectral data and target values. Excellent for high-dimensional "
+            "data with multicollinearity (correlated wavelengths). Fast, interpretable, and works well "
+            "with more variables than samples. Ideal for quantitative spectroscopy."
+        ),
+        'PLS-DA': (
+            "PLS Discriminant Analysis extends PLS for classification tasks by treating categorical "
+            "labels as continuous variables. Uses latent variables to maximize class separation. "
+            "Effective for spectral classification with multiple correlated features. Returns probability "
+            "scores for each class."
+        ),
+        'Ridge': (
+            "Ridge Regression is linear regression with L2 regularization that shrinks coefficient "
+            "magnitudes toward zero without eliminating any. Prevents overfitting by penalizing large "
+            "coefficients. Good for spectral data with multicollinearity. Controlled by alpha parameter - "
+            "higher alpha = more regularization."
+        ),
+        'Lasso': (
+            "Lasso Regression uses L1 regularization that can shrink coefficients exactly to zero, "
+            "performing automatic feature selection. Creates sparse models by identifying the most "
+            "important wavelengths. Useful when you want to know which specific wavelengths matter most. "
+            "Higher alpha = more sparsity."
+        ),
+        'ElasticNet': (
+            "ElasticNet combines Ridge (L2) and Lasso (L1) regularization, getting benefits of both. "
+            "Can select groups of correlated features (like Lasso) while maintaining stability (like Ridge). "
+            "Controlled by alpha (regularization strength) and l1_ratio (0=Ridge only, 0.5=balanced, 1=Lasso only). "
+            "Excellent for spectral data with highly correlated wavelengths."
+        ),
+        'RandomForest': (
+            "Random Forest builds many decision trees on random subsets of data and features, then "
+            "averages their predictions. Nonlinear, handles outliers well, and resistant to overfitting. "
+            "No assumptions about data distribution. Can capture complex spectral patterns. "
+            "Slower than linear models but very robust and versatile."
+        ),
+        'MLP': (
+            "Multi-Layer Perceptron is a feedforward neural network with hidden layers that can learn "
+            "complex nonlinear relationships. Uses backpropagation for training. Can approximate any "
+            "continuous function given enough neurons. Good for spectral data with nonlinear relationships "
+            "but requires more samples and careful tuning to avoid overfitting."
+        ),
+        'SVR': (
+            "Support Vector Regression finds a hyperplane that best fits the data while allowing "
+            "a margin of tolerance (epsilon). Can use kernels (linear, RBF, poly) to capture nonlinear "
+            "patterns. Effective for small to medium datasets. RBF kernel good for complex spectral patterns. "
+            "Memory-intensive for large datasets."
+        ),
+        'XGBoost': (
+            "XGBoost is gradient boosting that builds trees sequentially, each correcting errors of "
+            "previous trees. Industry-leading performance with built-in regularization (L1/L2). "
+            "Handles missing data, reduces overfitting, and excellent for spectral data. Fast parallel "
+            "processing. Highly tunable with many hyperparameters for optimal performance."
+        ),
+        'LightGBM': (
+            "LightGBM is Microsoft's gradient boosting framework optimized for speed and memory efficiency. "
+            "Uses leaf-wise tree growth (vs level-wise) for faster training. Excellent for large datasets "
+            "with many features (like spectral data). Faster than XGBoost with similar performance. "
+            "Great for high-dimensional spectroscopy applications."
+        ),
+        'CatBoost': (
+            "CatBoost is Yandex's gradient boosting that handles categorical features automatically "
+            "and reduces overfitting with ordered boosting. Very robust with minimal tuning required - "
+            "good default hyperparameters. Slower than LightGBM but often achieves better accuracy out-of-box. "
+            "Note: Requires Visual Studio 2022 Build Tools on Windows."
+        ),
+        'NeuralBoosted': (
+            "Neural Boosted combines gradient boosting with neural networks as base learners instead of "
+            "decision trees. Each boosting round adds a small neural network. Can capture very complex "
+            "nonlinear patterns in spectral data. More powerful than standard tree-based boosting but "
+            "slower to train. Best for complex spectroscopy problems with sufficient data."
+        ),
+    },
+
+    # ===== PREPROCESSING METHOD DESCRIPTIONS =====
+    'preprocessing': {
+        'Raw': (
+            "Raw (no preprocessing) uses the original, unprocessed spectral data exactly as measured. "
+            "No transformations applied. Useful as a baseline comparison to see if preprocessing helps. "
+            "Works well when spectra are already clean and consistent, or when you want to preserve "
+            "absolute intensity information. Start here to establish baseline performance."
+        ),
+        'SNV': (
+            "Standard Normal Variate (SNV) corrects for scatter effects and baseline variations by "
+            "normalizing each spectrum to zero mean and unit variance. Removes multiplicative and "
+            "additive effects from particle size, path length differences, and light scattering. "
+            "Very effective for solid samples and diffuse reflectance spectroscopy. "
+            "One of the most commonly used preprocessing methods in NIR spectroscopy."
+        ),
+        'SG1': (
+            "Savitzky-Golay 1st Derivative calculates the first derivative of spectra using polynomial "
+            "smoothing. Removes baseline offset and linear trends while preserving peak shapes. "
+            "Highlights regions of spectral change and reduces baseline drift effects. Enhances "
+            "differences between spectra. Derivative window size controls smoothing - larger windows = "
+            "more smoothing but may miss fine details."
+        ),
+        'SG2': (
+            "Savitzky-Golay 2nd Derivative calculates the second derivative of spectra. "
+            "Removes both baseline offset and linear drift, and enhances peak shapes by showing "
+            "inflection points and hidden shoulders. Very sensitive to subtle spectral features. "
+            "Provides excellent peak resolution but amplifies noise more than 1st derivative. "
+            "Best for overlapping peaks and complex spectral patterns."
+        ),
+        'deriv_snv': (
+            "Derivative then SNV applies Savitzky-Golay derivative first, followed by SNV normalization. "
+            "This advanced combination removes baseline effects (derivative) then normalizes the "
+            "derivative spectra (SNV). Less common than SNV alone or derivative alone. "
+            "Can be useful for very noisy data or when both scatter correction and baseline removal "
+            "are needed, but may over-process in some cases."
+        ),
+        'window_size': (
+            "Derivative window size controls the Savitzky-Golay smoothing window (must be odd number). "
+            "Smaller windows (7-11) = less smoothing, preserves fine details, more noise. "
+            "Medium windows (13-17) = balanced smoothing, good for most applications (default: 17). "
+            "Larger windows (19-25) = more smoothing, removes noise, may lose sharp features. "
+            "Choose based on your spectral resolution and noise level. Can test multiple values."
+        ),
+    },
+
+    # ===== HYPERPARAMETER DESCRIPTIONS =====
+    'hyperparameters': {
+        # Neural Boosted
+        'neuralboosted_n_estimators': (
+            "Number of boosting rounds (sequential neural networks to train). Each round adds a small "
+            "neural network that corrects errors from previous rounds. More estimators = better fit but "
+            "slower training and risk of overfitting. Typical range: 50-200 for spectral data."
+        ),
+        'neuralboosted_learning_rate': (
+            "Controls step size when updating the model (how much each boosting round contributes). "
+            "Lower values (0.05-0.1) = more conservative, less overfitting, but needs more estimators. "
+            "Higher values (0.2-0.3) = faster learning but risk overfitting. "
+            "Range 0.1-0.3 works well for most spectroscopy applications."
+        ),
+        'neuralboosted_subsample': (
+            "Fraction of training samples used per boosting round. Values <1.0 add randomness "
+            "(stochastic gradient boosting) to prevent overfitting. 1.0 = use all samples (deterministic). "
+            "0.7-0.85 = good balance of randomness and stability. Lower values increase training time."
+        ),
+        'neuralboosted_max_iter': (
+            "Maximum iterations for each neural base learner during training. Controls how long each "
+            "small neural network trains. Higher = better fit per network but slower overall. "
+            "100-200 typically sufficient for spectral features. Reduced from default 500 for speed optimization."
+        ),
+
+        # Random Forest (these already have tooltips, but including here for completeness)
+        'rf_n_estimators': (
+            "Number of decision trees in the forest. More trees = better performance and stability but "
+            "slower training and prediction. Returns typically diminish after 100-200 trees. "
+            "Typical range: 100-500 for spectroscopy. Can use 1000+ if you have time."
+        ),
+        'rf_max_depth': (
+            "Maximum depth each tree can grow. None = unlimited (trees grow until leaves are pure or "
+            "reach min_samples_split). Lower values (10-30) prevent overfitting by limiting tree complexity. "
+            "Higher values or None allow capturing complex patterns but risk overfitting."
+        ),
+
+        # Ridge
+        'ridge_alpha': (
+            "Regularization strength (penalty for large coefficients). Controls the bias-variance tradeoff. "
+            "Lower values (0.001-0.1) = less regularization, closer to ordinary least squares. "
+            "Higher values (1-10+) = more shrinkage, simpler model. Optimal value depends on data complexity "
+            "and noise level. Cross-validation finds the best alpha."
+        ),
+
+        # Lasso
+        'lasso_alpha': (
+            "Regularization strength that controls sparsity (how many coefficients become zero). "
+            "Lower values (0.001-0.01) = keep more wavelengths, less feature selection. "
+            "Higher values (0.1-1+) = aggressive feature selection, very sparse model. "
+            "Useful for identifying the most important wavelengths in your spectra."
+        ),
+
+        # ElasticNet
+        'elasticnet_alpha': (
+            "Overall regularization strength combining L1 and L2 penalties. Similar to Ridge/Lasso alpha. "
+            "Lower = less regularization. Higher = more regularization. Works with l1_ratio to determine "
+            "the mix of L1 (sparsity) vs L2 (coefficient shrinkage). Typical range: 0.01-1.0."
+        ),
+        'elasticnet_l1_ratio': (
+            "Controls the mix of L1 (Lasso) vs L2 (Ridge) regularization. "
+            "0.0 = Ridge only (no feature selection, all wavelengths kept). "
+            "0.5 = balanced mix of L1 and L2. "
+            "1.0 = Lasso only (aggressive feature selection). "
+            "Values 0.3-0.7 often work well for spectral data with correlated features."
+        ),
+
+        # PLS
+        'pls_max_n_components': (
+            "Maximum number of latent variables (components) to evaluate during model optimization. "
+            "PLS extracts these components from spectral data to predict target values. More components "
+            "can capture more variance but risk overfitting. Cross-validation automatically finds the "
+            "optimal number ≤ this maximum. Typical range: 5-20 for spectroscopy."
+        ),
+        'pls_max_iter': (
+            "Maximum iterations for the PLS algorithm to converge when extracting each component. "
+            "PLS uses an iterative algorithm (NIPALS) to find latent variables. Most spectral data "
+            "converges quickly (<100 iterations). 500-1000 is safe for all cases. Higher values "
+            "rarely needed but won't hurt (just ensures convergence)."
+        ),
+        'pls_tol': (
+            "Convergence tolerance for the PLS iterative algorithm. Smaller = more precision but "
+            "longer computation. Algorithm stops when change between iterations < tolerance. "
+            "1e-6 (0.000001) is standard and works well for spectral data. "
+            "1e-7 = higher precision (rarely needed). 1e-5 = faster but less precise."
+        ),
+
+        # XGBoost
+        'xgb_n_estimators': (
+            "Number of boosting rounds (trees) to build sequentially. Each tree corrects errors from "
+            "previous trees. More estimators = better fit but slower and risk overfitting (use with "
+            "lower learning_rate). Typical range: 100-200 for spectral data. "
+            "Can use 500+ with low learning_rate for best performance."
+        ),
+        'xgb_learning_rate': (
+            "Step size shrinkage to prevent overfitting (also called eta). Lower values make model more "
+            "conservative by reducing the contribution of each tree. "
+            "0.01-0.05 = very conservative (use with many trees). "
+            "0.1 = balanced (standard default). "
+            "0.2-0.3 = aggressive (faster but risk overfitting). For spectral data, 0.05-0.1 often optimal."
+        ),
+        'xgb_max_depth': (
+            "Maximum depth for each decision tree. Controls model complexity and overfitting. "
+            "Shallow trees (3-6) = simple patterns, less overfitting, faster. "
+            "Deep trees (9-12) = complex patterns, more overfitting risk. "
+            "For spectroscopy with many features, 3-6 usually optimal. Deeper rarely helps."
+        ),
+        'xgb_subsample': (
+            "Fraction of training samples used for each tree (row sampling). Adds randomness to prevent "
+            "overfitting. 1.0 = use all samples. 0.8 = use 80% (recommended for robustness). "
+            "0.5-0.7 = more aggressive sampling (helps with very noisy data). "
+            "Lower values increase diversity but may need more trees."
+        ),
+        'xgb_colsample_bytree': (
+            "Fraction of features (wavelengths) used for each tree. Critical for high-dimensional spectral "
+            "data (1000+ wavelengths). 1.0 = use all wavelengths. 0.8 = use 80% (recommended). "
+            "0.5-0.7 = aggressive feature sampling (increases tree diversity). "
+            "Helps prevent overfitting when you have thousands of correlated wavelengths."
+        ),
+        'xgb_reg_alpha': (
+            "L1 regularization (Lasso-style) on tree leaf weights. Encourages sparsity in leaf values. "
+            "0 = no L1 penalty (default). 0.1-0.5 = light regularization (recommended for high-dim data). "
+            "1-5 = strong regularization (very sparse model). Helps with feature selection and "
+            "prevents overfitting in spectroscopy with many wavelengths."
+        ),
+        'xgb_reg_lambda': (
+            "L2 regularization (Ridge-style) on tree leaf weights. Smooths leaf values without forcing "
+            "sparsity. 1.0 = default (light regularization). 5-10 = moderate (comprehensive tier). "
+            "Higher values make model more conservative. Combine with reg_alpha for ElasticNet-style "
+            "regularization. Good for noisy spectral data."
+        ),
+        'xgb_min_child_weight': (
+            "Minimum sum of instance weight (hessian) needed in a child node. Controls overfitting by "
+            "requiring minimum data in each leaf. 1 = allow small leaves (risk overfitting). "
+            "3-5 = moderate constraint (balanced). 7-10 = conservative (prevents very specific patterns). "
+            "Larger values good for noisy data or small datasets."
+        ),
+        'xgb_gamma': (
+            "Minimum loss reduction required to make a split. Regularization parameter that makes the "
+            "algorithm more conservative. 0 = split freely (default). 0.1-0.5 = light regularization. "
+            "1-5 = strong regularization (very conservative splitting). "
+            "Higher values prevent overfitting by rejecting weak splits."
+        ),
+
+        # LightGBM
+        'lightgbm_max_depth': (
+            "Maximum tree depth. -1 = no limit (controlled by num_leaves and min_data_in_leaf instead). "
+            "5-10 = shallow to moderate trees. 20-50 = deep trees (may overfit). "
+            "LightGBM uses leaf-wise growth (vs level-wise), so depth matters less than other algorithms. "
+            "-1 with proper num_leaves usually optimal for spectral data."
+        ),
+        'lightgbm_min_child_samples': (
+            "Minimum number of samples required in each leaf node. Controls overfitting by preventing "
+            "very small leaves. 5 = allow small leaves (may overfit on small datasets). "
+            "20-50 = moderate constraint (balanced). 100+ = conservative (smoother model). "
+            "Critical for small spectroscopy datasets - use higher values (20-50)."
+        ),
+        'lightgbm_subsample': (
+            "Fraction of training samples used per tree (also called bagging_fraction). "
+            "1.0 = use all samples. 0.8-0.9 = recommended (adds robustness). "
+            "0.5-0.7 = aggressive sampling (more diversity). "
+            "Speeds up training and prevents overfitting. Must set bagging_freq>0 to activate."
+        ),
+        'lightgbm_colsample_bytree': (
+            "Fraction of features used per tree (also called feature_fraction). Important for spectral "
+            "data with many wavelengths. 1.0 = use all wavelengths. 0.8-0.9 = recommended. "
+            "0.5-0.7 = aggressive feature sampling (increases diversity). "
+            "Helps when you have thousands of correlated spectral features."
+        ),
+        'lightgbm_reg_alpha': (
+            "L1 regularization on leaf weights (Lasso-style). Encourages sparse leaf values. "
+            "0.0 = no L1 penalty (default). 0.1-0.5 = light regularization. "
+            "1-5 = strong regularization. Useful for high-dimensional spectral data to prevent "
+            "overfitting and perform implicit feature selection."
+        ),
+        'lightgbm_reg_lambda': (
+            "L2 regularization on leaf weights (Ridge-style). Smooths leaf values. "
+            "0.0 = no L2 penalty (default). 0.5-1.0 = light regularization. "
+            "2-10 = moderate to strong regularization. Combines with reg_alpha for ElasticNet-style "
+            "regularization. Helps prevent overfitting on noisy spectral data."
+        ),
+
+        # MLP
+        'mlp_activation': (
+            "Activation function for hidden layers. Introduces nonlinearity to learn complex patterns. "
+            "relu = Rectified Linear Unit (max(0,x)) - fast, works well, standard choice. "
+            "tanh = Hyperbolic tangent - smooth, outputs -1 to 1, good for normalized data. "
+            "logistic = Sigmoid (0 to 1) - smooth, slower than relu. "
+            "identity = Linear (no nonlinearity) - rarely useful. relu recommended for most cases."
+        ),
+        'mlp_solver': (
+            "Optimization algorithm for training the neural network weights. "
+            "adam = Adaptive learning rate optimizer - robust, fast, handles sparse gradients well (recommended). "
+            "lbfgs = Quasi-Newton optimizer - good for small datasets, can converge faster. "
+            "sgd = Stochastic Gradient Descent - requires careful learning_rate tuning. "
+            "adam is best choice for spectral data in most cases."
+        ),
+        'mlp_alpha': (
+            "L2 regularization parameter that penalizes large weights to prevent overfitting. "
+            "Smaller values (0.0001-0.001) = less regularization (risk overfitting). "
+            "Moderate values (0.01-0.1) = balanced regularization. "
+            "Larger values (1-10) = strong regularization (may underfit). "
+            "Optimal value depends on dataset size and complexity - tune via cross-validation."
+        ),
+
+        # SVR (need to check what SVR hyperparameters exist in the code)
+        'svr_C': (
+            "Regularization parameter controlling the tradeoff between smooth decision boundary and "
+            "classifying training points correctly. Smaller C = more regularization (smoother, more "
+            "errors allowed). Larger C = less regularization (fit training data closely, may overfit). "
+            "Typical range: 0.1-100. Often tuned on log scale: 0.1, 1, 10, 100."
+        ),
+        'svr_kernel': (
+            "Kernel function transforming data to higher dimensions. "
+            "linear = Linear kernel (no transformation) - fast, good for linearly separable data. "
+            "rbf = Radial Basis Function - captures nonlinear patterns, most versatile, default choice. "
+            "poly = Polynomial - specific nonlinear patterns, less common. "
+            "sigmoid = Similar to neural network activation. rbf recommended for spectral data."
+        ),
+        'svr_gamma': (
+            "Kernel coefficient for rbf, poly, and sigmoid kernels. Defines how far the influence of "
+            "a single training example reaches. Small gamma = far reach (smooth, may underfit). "
+            "Large gamma = close reach (complex decision boundary, may overfit). "
+            "scale = 1/(n_features × X.var()) - good default. auto = 1/n_features. Tune via cross-validation."
+        ),
+
+        # CatBoost
+        'catboost_l2_leaf_reg': (
+            "L2 regularization coefficient for leaf values (also called lambda). Controls overfitting. "
+            "1.0 = light regularization. 3.0 = default (balanced). 10-30 = strong regularization. "
+            "Higher values create smoother models that generalize better but may underfit. "
+            "CatBoost is relatively robust to this parameter."
+        ),
+        'catboost_border_count': (
+            "Number of splits for numerical features (spectral wavelengths). More splits = more precision "
+            "in finding optimal split points but slower training. "
+            "32-64 = fast but less precise. 128 = balanced. 254 = maximum precision (default, recommended). "
+            "For spectroscopy with continuous wavelength data, higher values (128-254) are better."
+        ),
+        'catboost_bagging_temperature': (
+            "Controls intensity of Bayesian bootstrap bagging. Adds randomness to training. "
+            "0.0 = no bagging (deterministic). 1.0 = default (balanced randomness). "
+            "3-10 = aggressive bagging (more diversity). Higher values make each tree more different, "
+            "increasing ensemble diversity but potentially reducing individual tree accuracy."
+        ),
+        'catboost_random_strength': (
+            "Amount of randomness to use for scoring splits. Adds randomness when choosing split points. "
+            "0.0 = deterministic (no randomness). 1.0 = default (balanced). 2-5 = more randomness. "
+            "Higher values prevent overfitting by making split selection less greedy. "
+            "Helps with noisy spectral data by avoiding overly specific patterns."
+        ),
+    },
+
+    # ===== RANKING PENALTIES =====
+    'ranking': {
+        'variable_penalty': (
+            "Controls how much using many wavelengths affects model ranking. Uses cubic scaling "
+            "for gentle impact at low values (exploration-friendly). "
+            "0 = ignore variable count, rank only by performance (R² or Accuracy). "
+            "2 = minimal penalty (~1% impact for using all wavelengths). "
+            "5 = balanced penalty favoring parsimony without dominating performance. "
+            "10 = strong preference for fewer wavelengths. "
+            "Recommended: 2 for exploration, 5-7 for deployment model selection."
+        ),
+        'complexity_penalty': (
+            "Controls how much model complexity (latent variables, tree depth) affects ranking. "
+            "Uses cubic scaling for gentle impact at low values. "
+            "0 = ignore complexity, rank only by performance. "
+            "2 = minimal penalty for complex models. "
+            "5 = balanced penalty preferring simpler models when performance is similar. "
+            "10 = strong preference for simple, interpretable models. "
+            "For PLS: penalizes many components. For trees: penalizes depth/estimators. "
+            "Recommended: 2 for exploration, 5-7 for interpretable models."
+        ),
+    }
+}
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -1702,7 +2161,7 @@ class SpectralPredictApp:
         self._create_tab6_results()
         self._create_tab7_refine_model()
         self._create_tab8_model_prediction()
-        # self._create_tab9_instrument_lab()  # REMOVED - functionality moved to Calibration Transfer
+        self._create_tab9_multi_model_comparison()
         self._create_tab10_calibration_transfer()
 
         # Bind tab change event
@@ -2213,7 +2672,7 @@ class SpectralPredictApp:
         ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10).grid(row=4, column=0, sticky=tk.W, padx=(0, 10))
 
         # Info label explaining the penalty system
-        ttk.Label(options_frame, text="💡 These penalties affect model ranking. 0 = rank only by R², 10 = strongly prefer simpler models",
+        ttk.Label(options_frame, text="💡 Penalties affect ranking gently at low values (exploration-friendly). 0 = rank only by performance, 5 = balanced, 10 = strongly prefer simplicity",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # Output directory
@@ -2236,24 +2695,36 @@ class SpectralPredictApp:
         preprocess_frame = tk.Frame(preprocess_card, bg=self.colors['card_bg'])
         preprocess_frame.pack(fill='both', expand=True)
 
-        ttk.Checkbutton(preprocess_frame, text="✓ Raw (no preprocessing)", variable=self.use_raw).grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.raw_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ Raw (no preprocessing)", variable=self.use_raw)
+        self.raw_checkbox.grid(row=0, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Baseline, unprocessed spectra", style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.raw_checkbox, text=TOOLTIP_CONTENT['preprocessing']['Raw'], delay=500)
 
-        ttk.Checkbutton(preprocess_frame, text="✓ SNV (Standard Normal Variate)", variable=self.use_snv).grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.snv_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ SNV (Standard Normal Variate)", variable=self.use_snv)
+        self.snv_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Scatter correction", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SNV'], delay=500)
 
-        ttk.Checkbutton(preprocess_frame, text="✓ SG1 (1st derivative)", variable=self.use_sg1).grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.sg1_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ SG1 (1st derivative)", variable=self.use_sg1)
+        self.sg1_checkbox.grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Removes baseline drift", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.sg1_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG1'], delay=500)
 
-        ttk.Checkbutton(preprocess_frame, text="✓ SG2 (2nd derivative)", variable=self.use_sg2).grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.sg2_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ SG2 (2nd derivative)", variable=self.use_sg2)
+        self.sg2_checkbox.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.sg2_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG2'], delay=500)
 
         # Advanced: deriv_snv option
-        ttk.Checkbutton(preprocess_frame, text="deriv_snv (advanced)", variable=self.use_deriv_snv).grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.deriv_snv_checkbox = ttk.Checkbutton(preprocess_frame, text="deriv_snv (advanced)", variable=self.use_deriv_snv)
+        self.deriv_snv_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.deriv_snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['deriv_snv'], delay=500)
 
         # Derivative window size settings
-        ttk.Label(preprocess_frame, text="Derivative Window Sizes:", style='Subheading.TLabel').grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+        window_size_label = ttk.Label(preprocess_frame, text="Derivative Window Sizes:", style='Subheading.TLabel')
+        window_size_label.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(window_size_label, text=TOOLTIP_CONTENT['preprocessing']['window_size'], delay=500)
         ttk.Label(preprocess_frame, text="Select one or more (default: 17 only)", style='Caption.TLabel').grid(row=7, column=0, columnspan=2, sticky=tk.W)
 
         window_frame = ttk.Frame(preprocess_frame)
@@ -2478,26 +2949,32 @@ class SpectralPredictApp:
         self.pls_checkbox = ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)", variable=self.use_pls)
         self.pls_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Linear, fast, interpretable", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.pls_checkbox, text=TOOLTIP_CONTENT['models']['PLS'], delay=500)
 
         self.plsda_checkbox = ttk.Checkbutton(models_frame, text="✓ PLS-DA (Discriminant Analysis)", variable=self.use_plsda)
         self.plsda_checkbox.grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="PLS for classification tasks", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.plsda_checkbox, text=TOOLTIP_CONTENT['models']['PLS-DA'], delay=500)
 
         self.ridge_checkbox = ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge)
         self.ridge_checkbox.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L2 regularized linear", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.ridge_checkbox, text=TOOLTIP_CONTENT['models']['Ridge'], delay=500)
 
         self.lasso_checkbox = ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso)
         self.lasso_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L1 regularized, sparse", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.lasso_checkbox, text=TOOLTIP_CONTENT['models']['Lasso'], delay=500)
 
         self.elasticnet_checkbox = ttk.Checkbutton(models_frame, text="✓ ElasticNet 🆕", variable=self.use_elasticnet)
         self.elasticnet_checkbox.grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L1+L2 combined regularization", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.elasticnet_checkbox, text=TOOLTIP_CONTENT['models']['ElasticNet'], delay=500)
 
         self.randomforest_checkbox = ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest)
         self.randomforest_checkbox.grid(row=6, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.randomforest_checkbox, text=TOOLTIP_CONTENT['models']['RandomForest'], delay=500)
 
         # Advanced Models (Column 2)
         ttk.Label(models_frame, text="Advanced Models", style='Subheading.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5), padx=(40, 0))
@@ -2505,10 +2982,12 @@ class SpectralPredictApp:
         self.mlp_checkbox = ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp)
         self.mlp_checkbox.grid(row=1, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=1, column=3, sticky=tk.W, padx=15)
+        CreateToolTip(self.mlp_checkbox, text=TOOLTIP_CONTENT['models']['MLP'], delay=500)
 
         self.svr_checkbox = ttk.Checkbutton(models_frame, text="✓ SVR 🆕", variable=self.use_svr)
         self.svr_checkbox.grid(row=2, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
+        CreateToolTip(self.svr_checkbox, text=TOOLTIP_CONTENT['models']['SVR'], delay=500)
 
         # Gradient Boosting Models (Column 3, spanning bottom)
         ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
@@ -2516,10 +2995,12 @@ class SpectralPredictApp:
         self.xgboost_checkbox = ttk.Checkbutton(models_frame, text="✓ XGBoost", variable=self.use_xgboost)
         self.xgboost_checkbox.grid(row=8, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Industry-leading gradient boosting", style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.xgboost_checkbox, text=TOOLTIP_CONTENT['models']['XGBoost'], delay=500)
 
         self.lightgbm_checkbox = ttk.Checkbutton(models_frame, text="✓ LightGBM", variable=self.use_lightgbm)
         self.lightgbm_checkbox.grid(row=9, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Microsoft's fast gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.lightgbm_checkbox, text=TOOLTIP_CONTENT['models']['LightGBM'], delay=500)
 
         self.catboost_checkbox = ttk.Checkbutton(models_frame, text="✓ CatBoost", variable=self.use_catboost)
         self.catboost_checkbox.grid(row=10, column=0, sticky=tk.W, pady=5)
@@ -2528,10 +3009,12 @@ class SpectralPredictApp:
             ttk.Label(models_frame, text="Requires Visual Studio 2022 Build Tools (not installed)", style='Caption.TLabel', foreground=self.colors['warning']).grid(row=10, column=1, sticky=tk.W, padx=15)
         else:
             ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.catboost_checkbox, text=TOOLTIP_CONTENT['models']['CatBoost'], delay=500)
 
         self.neuralboosted_checkbox = ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted)
         self.neuralboosted_checkbox.grid(row=11, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Gradient boosting with neural networks", style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(self.neuralboosted_checkbox, text=TOOLTIP_CONTENT['models']['NeuralBoosted'], delay=500)
 
         # Store checkbox widget references for enable/disable control based on task type
         self.model_checkbox_widgets = {
@@ -2570,7 +3053,9 @@ class SpectralPredictApp:
         advanced_content.pack(fill='both', expand=True)
 
         # n_estimators options
-        ttk.Label(advanced_content, text="n_estimators (boosting rounds):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
+        nb_n_est_label = ttk.Label(advanced_content, text="n_estimators (boosting rounds):", style='Subheading.TLabel')
+        nb_n_est_label.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(nb_n_est_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_n_estimators'], delay=500)
         nest_frame = ttk.Frame(advanced_content)
         nest_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
         ttk.Checkbutton(nest_frame, text="50", variable=self.n_estimators_50).grid(row=0, column=0, padx=5)
@@ -2580,7 +3065,9 @@ class SpectralPredictApp:
         ttk.Label(nest_frame, text="(default: 100 only)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # Learning rate options
-        ttk.Label(advanced_content, text="Learning rates:", style='Subheading.TLabel').grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        nb_lr_label = ttk.Label(advanced_content, text="Learning rates:", style='Subheading.TLabel')
+        nb_lr_label.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(nb_lr_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_learning_rate'], delay=500)
         lr_frame = ttk.Frame(advanced_content)
         lr_frame.grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=5)
         ttk.Checkbutton(lr_frame, text="0.05", variable=self.lr_005).grid(row=0, column=0, padx=5)
@@ -2590,7 +3077,9 @@ class SpectralPredictApp:
         ttk.Label(lr_frame, text="(default: 0.1, 0.2, 0.3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # Subsample options
-        ttk.Label(advanced_content, text="Subsample (fraction of samples per iteration):", style='Subheading.TLabel').grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        nb_subsample_label = ttk.Label(advanced_content, text="Subsample (fraction of samples per iteration):", style='Subheading.TLabel')
+        nb_subsample_label.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(nb_subsample_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_subsample'], delay=500)
         subsample_frame = ttk.Frame(advanced_content)
         subsample_frame.grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=5)
         ttk.Checkbutton(subsample_frame, text="0.5", variable=self.neuralboosted_subsample_05).grid(row=0, column=0, padx=5)
@@ -2600,7 +3089,9 @@ class SpectralPredictApp:
         ttk.Label(subsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # Max Iterations (for neural base learner)
-        ttk.Label(advanced_content, text="Max Iterations (neural base learner):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        nb_maxiter_label = ttk.Label(advanced_content, text="Max Iterations (neural base learner):", style='Subheading.TLabel')
+        nb_maxiter_label.grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(nb_maxiter_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_max_iter'], delay=500)
         nb_maxiter_frame = ttk.Frame(advanced_content)
         nb_maxiter_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=5)
 
@@ -2631,7 +3122,9 @@ class SpectralPredictApp:
         rf_content_frame.pack(fill='both', expand=True)
 
         # n_estimators (number of trees) options
-        ttk.Label(rf_content_frame, text="Number of Trees (n_estimators):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
+        rf_n_est_label = ttk.Label(rf_content_frame, text="Number of Trees (n_estimators):", style='Subheading.TLabel')
+        rf_n_est_label.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(rf_n_est_label, text=TOOLTIP_CONTENT['hyperparameters']['rf_n_estimators'], delay=500)
         rf_trees_frame = ttk.Frame(rf_content_frame)
         rf_trees_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
 
@@ -2647,7 +3140,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # Maximum Tree Depth (max_depth) options
-        ttk.Label(rf_content_frame, text="Maximum Tree Depth (max_depth):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        rf_maxdepth_label = ttk.Label(rf_content_frame, text="Maximum Tree Depth (max_depth):", style='Subheading.TLabel')
+        rf_maxdepth_label.grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(rf_maxdepth_label, text=TOOLTIP_CONTENT['hyperparameters']['rf_max_depth'], delay=500)
         rf_depth_frame = ttk.Frame(rf_content_frame)
         rf_depth_frame.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=5)
 
@@ -2755,7 +3250,9 @@ class SpectralPredictApp:
         ridge_content_frame.pack(fill='both', expand=True)
 
         # Alpha (regularization strength) options
-        ttk.Label(ridge_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ridge_alpha_label = ttk.Label(ridge_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel')
+        ridge_alpha_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        # CreateToolTip(ridge_alpha_label, text="Controls the strength of L2 regularization", delay=500)
         ridge_alpha_frame = ttk.Frame(ridge_content_frame)
         ridge_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -2789,7 +3286,9 @@ class SpectralPredictApp:
         lasso_content_frame.pack(fill='both', expand=True)
 
         # Alpha (regularization strength) options
-        ttk.Label(lasso_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        lasso_alpha_label = ttk.Label(lasso_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel')
+        lasso_alpha_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        # CreateToolTip() - missing parameters
         lasso_alpha_frame = ttk.Frame(lasso_content_frame)
         lasso_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -2822,7 +3321,9 @@ class SpectralPredictApp:
         elasticnet_content_frame.pack(fill='both', expand=True)
 
         # Alpha (regularization strength) options
-        ttk.Label(elasticnet_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        elasticnet_alpha_label = ttk.Label(elasticnet_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel')
+        elasticnet_alpha_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        # CreateToolTip() - missing parameters
         elasticnet_alpha_frame = ttk.Frame(elasticnet_content_frame)
         elasticnet_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -2834,7 +3335,9 @@ class SpectralPredictApp:
         ttk.Label(elasticnet_alpha_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # L1 ratio options
-        ttk.Label(elasticnet_content_frame, text="L1 Ratio (L1 vs L2 mix):", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        elasticnet_l1_label = ttk.Label(elasticnet_content_frame, text="L1 Ratio (L1 vs L2 mix):", style='Subheading.TLabel')
+        elasticnet_l1_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        # CreateToolTip() - missing parameters
         elasticnet_l1_frame = ttk.Frame(elasticnet_content_frame)
         elasticnet_l1_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -2868,7 +3371,9 @@ class SpectralPredictApp:
         pls_content_frame.pack(fill='both', expand=True)
 
         # Max Latent Variables (n_components)
-        ttk.Label(pls_content_frame, text="Max Latent Variables (n_components):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        pls_ncomp_label = ttk.Label(pls_content_frame, text="Max Latent Variables (n_components):", style='Subheading.TLabel')
+        pls_ncomp_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        # CreateToolTip() - missing parameters
         max_comp_frame = ttk.Frame(pls_content_frame)
         max_comp_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -2880,7 +3385,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 10))
 
         # max_iter options
-        ttk.Label(pls_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        pls_maxiter_label = ttk.Label(pls_content_frame, text="Max Iterations:", style='Subheading.TLabel')
+        pls_maxiter_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        # CreateToolTip() - missing parameters
         pls_maxiter_frame = ttk.Frame(pls_content_frame)
         pls_maxiter_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -2891,7 +3398,9 @@ class SpectralPredictApp:
         ttk.Label(pls_maxiter_frame, text="(default: 500)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # tol options
-        ttk.Label(pls_content_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        pls_tol_label = ttk.Label(pls_content_frame, text="Tolerance:", style='Subheading.TLabel')
+        pls_tol_label.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        # CreateToolTip() - missing parameters
         pls_tol_frame = ttk.Frame(pls_content_frame)
         pls_tol_frame.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -4160,6 +4669,15 @@ class SpectralPredictApp:
         scrollbar.pack(side="right", fill="y")
 
         row = 0
+
+        # === Save Model Button ===
+        save_button_frame = tk.Frame(content_frame, bg=self.colors['bg'])
+        save_button_frame.grid(row=row, column=0, columnspan=2, sticky='w', pady=(0, 20))
+
+        self.refine_save_button_results = self._create_accent_button(save_button_frame, text="💾 Save Model",
+                                                                      command=self._save_refined_model, state='disabled')
+        self.refine_save_button_results.pack(side='left')
+        row += 1
 
         # === Performance Metrics ===
         ttk.Label(content_frame, text="Performance Metrics", style='Heading.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
@@ -8440,7 +8958,12 @@ class SpectralPredictApp:
             self.results_sort_reverse = not self.results_sort_reverse
         else:
             self.results_sort_column = col
-            self.results_sort_reverse = False  # Start with ascending
+            # For "higher is better" metrics, default to descending (best first)
+            higher_is_better_cols = ['R2', 'R²', 'Accuracy', 'ROC_AUC', 'F1']
+            if col in higher_is_better_cols:
+                self.results_sort_reverse = True  # Start with descending (best first)
+            else:
+                self.results_sort_reverse = False  # Start with ascending
 
         # Create a copy to sort
         sorted_df = self.results_df.copy()
@@ -10922,11 +11445,13 @@ Configuration:
         if is_error:
             self.refine_status.config(text="✗ Error running refined model")
             self.refine_save_button.config(state='disabled')
+            self.refine_save_button_results.config(state='disabled')
             messagebox.showerror("Error", "Failed to run refined model. See results area for details.")
         else:
             self.refine_status.config(text="✓ Refined model complete")
             # Enable Save Model button after successful run
             self.refine_save_button.config(state='normal')
+            self.refine_save_button_results.config(state='normal')
             # Plot the predictions
             self._plot_refined_predictions()
             # Plot diagnostic plots
@@ -11344,11 +11869,7 @@ Configuration:
 
         # Add help tooltip if provided
         if help_text:
-            try:
-                from tktooltip import ToolTip
-                ToolTip(label, msg=help_text, delay=0.5)
-            except ImportError:
-                pass  # Tooltip library not available
+            CreateToolTip(label, text=help_text, delay=500)
 
         # Custom entry on right
         custom_var = tk.StringVar()
@@ -12330,6 +12851,9 @@ Configuration:
                     text=f"⚠ Complete with warnings: {successful_models} succeeded, {failed} failed."
                 )
             # Predictions complete - status updated
+
+            # Auto-advance to Results tab
+            self.prediction_notebook.select(1)
 
         except Exception as e:
             messagebox.showerror("Prediction Error",
@@ -17311,6 +17835,841 @@ Configuration:
     # END OF SECTION D HELPER METHODS
     # ========================================================================
 
+    # ========================================================================
+    # TAB 9: MULTI-MODEL COMPARISON
+    # ========================================================================
+
+    def _create_tab9_multi_model_comparison(self):
+        """Tab 9: Multi-Model Comparison - Side-by-side analysis of multiple models with conditional flagging."""
+        self.tab9 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab9, text='  🔬 Multi-Model  ')
+
+        # Initialize comparison-specific storage
+        self.comparison_primary_model = None
+        self.comparison_auxiliary_models = []
+        self.comparison_data = None
+        self.comparison_results = None
+        self.comparison_rules = []
+
+        # Create scrollable canvas
+        canvas = tk.Canvas(self.tab9, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
+        main_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        main_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab9", canvas))
+        canvas.create_window((0, 0), window=main_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === STEP 1: Load Models ===
+        step1_frame = ttk.LabelFrame(main_frame, text="Step 1: Load Models", padding="20")
+        step1_frame.pack(fill='x', pady=(0, 15))
+
+        # Primary model section
+        primary_section = ttk.Frame(step1_frame)
+        primary_section.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(primary_section, text="🟢 Primary Model:", style='Subheading.TLabel').pack(anchor='w', pady=(0, 5))
+        ttk.Label(primary_section, text="The main model whose predictions are your primary focus",
+                  style='Caption.TLabel').pack(anchor='w', pady=(0, 5))
+
+        primary_btn_frame = ttk.Frame(primary_section)
+        primary_btn_frame.pack(anchor='w', pady=5)
+        ttk.Button(primary_btn_frame, text="📂 Load Primary Model",
+                   command=self._load_comparison_primary_model, style='Modern.TButton').pack(side='left', padx=(0, 5))
+        ttk.Button(primary_btn_frame, text="🗑️ Clear",
+                   command=self._clear_comparison_primary_model, style='Modern.TButton').pack(side='left')
+
+        # Primary model display
+        self.comparison_primary_text = tk.Text(primary_section, height=4, width=90,
+                                               font=('Consolas', 9),
+                                               bg=self.colors['panel'], fg=self.colors['text'],
+                                               wrap=tk.WORD, state='disabled',
+                                               relief='flat', borderwidth=0,
+                                               selectbackground=self.colors['accent'],
+                                               selectforeground=self.colors['text_inverse'])
+        self.comparison_primary_text.pack(fill='x', pady=5)
+        self._update_comparison_primary_display()
+
+        # Separator
+        ttk.Separator(step1_frame, orient='horizontal').pack(fill='x', pady=10)
+
+        # Auxiliary models section
+        aux_section = ttk.Frame(step1_frame)
+        aux_section.pack(fill='x')
+
+        ttk.Label(aux_section, text="🔵 Auxiliary Models:", style='Subheading.TLabel').pack(anchor='w', pady=(0, 5))
+        ttk.Label(aux_section, text="Additional models for context (e.g., consolidant detection, moisture content)",
+                  style='Caption.TLabel').pack(anchor='w', pady=(0, 5))
+
+        aux_btn_frame = ttk.Frame(aux_section)
+        aux_btn_frame.pack(anchor='w', pady=5)
+        ttk.Button(aux_btn_frame, text="➕ Add Auxiliary Model(s)",
+                   command=self._load_comparison_auxiliary_models, style='Modern.TButton').pack(side='left', padx=(0, 5))
+        ttk.Button(aux_btn_frame, text="🗑️ Clear All",
+                   command=self._clear_comparison_auxiliary_models, style='Modern.TButton').pack(side='left')
+
+        # Auxiliary models display with scrollbar
+        aux_text_frame = ttk.Frame(aux_section)
+        aux_text_frame.pack(fill='x', pady=5)
+
+        self.comparison_auxiliary_text = tk.Text(aux_text_frame, height=6, width=90,
+                                                 font=('Consolas', 9),
+                                                 bg=self.colors['panel'], fg=self.colors['text'],
+                                                 wrap=tk.WORD, state='disabled',
+                                                 relief='flat', borderwidth=0,
+                                                 selectbackground=self.colors['accent'],
+                                                 selectforeground=self.colors['text_inverse'])
+        self.comparison_auxiliary_text.pack(side='left', fill='both', expand=True)
+
+        aux_scrollbar = ttk.Scrollbar(aux_text_frame, orient='vertical',
+                                     command=self.comparison_auxiliary_text.yview)
+        aux_scrollbar.pack(side='right', fill='y')
+        self.comparison_auxiliary_text.config(yscrollcommand=aux_scrollbar.set)
+        self._update_comparison_auxiliary_display()
+
+        # === STEP 2: Load Data ===
+        step2_frame = ttk.LabelFrame(main_frame, text="Step 2: Load Spectra", padding="20")
+        step2_frame.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(step2_frame, text="Data Source:", style='Subheading.TLabel').grid(
+            row=0, column=0, sticky=tk.W, pady=5)
+
+        self.comparison_data_source = tk.StringVar(value='directory')
+        source_frame = ttk.Frame(step2_frame)
+        source_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        ttk.Radiobutton(source_frame, text="Directory (ASD/SPC)",
+                       variable=self.comparison_data_source, value='directory',
+                       command=self._on_comparison_source_change).pack(side='left', padx=5)
+        ttk.Radiobutton(source_frame, text="CSV File",
+                       variable=self.comparison_data_source, value='csv',
+                       command=self._on_comparison_source_change).pack(side='left', padx=5)
+        ttk.Radiobutton(source_frame, text="Use Validation Set 🔬",
+                       variable=self.comparison_data_source, value='validation',
+                       command=self._on_comparison_source_change).pack(side='left', padx=5)
+
+        # Path entry
+        self.comparison_path_label = ttk.Label(step2_frame, text="Path:", style='Caption.TLabel')
+        self.comparison_path_label.grid(row=2, column=0, sticky=tk.W, pady=(10, 5))
+
+        path_entry_frame = ttk.Frame(step2_frame)
+        path_entry_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+
+        self.comparison_data_path = tk.StringVar()
+        ttk.Entry(path_entry_frame, textvariable=self.comparison_data_path,
+                 width=60).pack(side='left', fill='x', expand=True, padx=(0, 10))
+
+        self.comparison_browse_btn = ttk.Button(path_entry_frame, text="Browse",
+                                                command=self._browse_comparison_data, style='Modern.TButton')
+        self.comparison_browse_btn.pack(side='left', padx=(0, 10))
+
+        self.comparison_load_data_btn = ttk.Button(path_entry_frame, text="Load Data",
+                                                   command=self._load_comparison_data, style='Modern.TButton')
+        self.comparison_load_data_btn.pack(side='left')
+
+        # Data status
+        self.comparison_data_status = ttk.Label(step2_frame, text="No data loaded",
+                                               style='Caption.TLabel', foreground='gray')
+        self.comparison_data_status.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        self._on_comparison_source_change()  # Initialize UI state
+
+        # === STEP 3: Conditional Flagging Rules (Optional) ===
+        step3_frame = ttk.LabelFrame(main_frame, text="Step 3: Conditional Flagging Rules (Optional)", padding="20")
+        step3_frame.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(step3_frame, text="Create rules to flag primary predictions based on auxiliary model outputs",
+                  style='Caption.TLabel').pack(anchor='w', pady=(0, 10))
+
+        ttk.Button(step3_frame, text="➕ Add New Rule",
+                   command=self._add_comparison_rule, style='Modern.TButton').pack(anchor='w', pady=5)
+
+        # Rules display
+        rules_frame = ttk.Frame(step3_frame)
+        rules_frame.pack(fill='x', pady=(10, 0))
+
+        self.comparison_rules_text = tk.Text(rules_frame, height=4, width=90,
+                                            font=('Consolas', 9),
+                                            bg=self.colors['panel'], fg=self.colors['text'],
+                                            wrap=tk.WORD, state='disabled',
+                                            relief='flat', borderwidth=0,
+                                            selectbackground=self.colors['accent'],
+                                            selectforeground=self.colors['text_inverse'])
+        self.comparison_rules_text.pack(fill='x')
+        self._update_comparison_rules_display()
+
+        # === STEP 4: Run Comparison ===
+        step4_frame = ttk.LabelFrame(main_frame, text="Step 4: Run Comparison", padding="20")
+        step4_frame.pack(fill='x', pady=(0, 15))
+
+        run_btn_frame = ttk.Frame(step4_frame)
+        run_btn_frame.pack(pady=10)
+
+        self._create_accent_button(run_btn_frame, "🚀 Run Multi-Model Comparison",
+                                   self._run_comparison).pack(side='left', padx=5)
+
+        self.comparison_status = ttk.Label(step4_frame, text="Ready to run comparison",
+                                          style='Caption.TLabel', foreground='gray')
+        self.comparison_status.pack(pady=(10, 0))
+
+        # === STEP 5: Results ===
+        step5_frame = ttk.LabelFrame(main_frame, text="Step 5: Comparison Results", padding="20")
+        step5_frame.pack(fill='both', expand=True, pady=(0, 15))
+
+        # Results table
+        table_frame = ttk.Frame(step5_frame)
+        table_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        # Create treeview for results
+        self.comparison_results_tree = ttk.Treeview(table_frame, show='headings', height=12)
+        self.comparison_results_tree.pack(side='left', fill='both', expand=True)
+
+        results_scrollbar_y = ttk.Scrollbar(table_frame, orient='vertical',
+                                           command=self.comparison_results_tree.yview)
+        results_scrollbar_y.pack(side='right', fill='y')
+        self.comparison_results_tree.configure(yscrollcommand=results_scrollbar_y.set)
+
+        results_scrollbar_x = ttk.Scrollbar(step5_frame, orient='horizontal',
+                                           command=self.comparison_results_tree.xview)
+        results_scrollbar_x.pack(fill='x')
+        self.comparison_results_tree.configure(xscrollcommand=results_scrollbar_x.set)
+
+        # Export button
+        export_btn_frame = ttk.Frame(step5_frame)
+        export_btn_frame.pack(pady=10)
+
+        ttk.Button(export_btn_frame, text="📊 Export Results to Excel",
+                   command=self._export_comparison_results, style='Modern.TButton').pack(side='left', padx=5)
+
+        ttk.Button(export_btn_frame, text="📈 View Comparison Plots",
+                   command=self._show_comparison_plots, style='Modern.TButton').pack(side='left', padx=5)
+
+    # ========================================================================
+    # TAB 9 HELPER METHODS: Multi-Model Comparison
+    # ========================================================================
+
+    def _update_comparison_primary_display(self):
+        """Update the primary model display text widget."""
+        self.comparison_primary_text.config(state='normal')
+        self.comparison_primary_text.delete('1.0', tk.END)
+
+        if self.comparison_primary_model is None:
+            self.comparison_primary_text.insert('1.0', "No primary model loaded")
+        else:
+            model_dict = self.comparison_primary_model
+            metadata = model_dict.get('metadata', {})
+            filename = model_dict.get('filename', 'Unknown')
+
+            # Extract key information
+            model_name = metadata.get('model_name', 'Unknown')
+            target_var = metadata.get('target_variable', 'Unknown')
+            task_type = metadata.get('task_type', 'Unknown')
+            preprocessing = metadata.get('preprocessing', 'Unknown')
+
+            # Get performance metrics
+            perf = metadata.get('performance', {})
+            if task_type == 'regression':
+                r2 = perf.get('R2', 'N/A')
+                rmse = perf.get('RMSE', 'N/A')
+                perf_str = f"R² = {r2:.4f}, RMSE = {rmse:.4f}" if isinstance(r2, (int, float)) else "N/A"
+            else:
+                acc = perf.get('accuracy', 'N/A')
+                perf_str = f"Accuracy = {acc:.4f}" if isinstance(acc, (int, float)) else "N/A"
+
+            text = f"🟢 PRIMARY: {filename}\n"
+            text += f"   Target: {target_var}  |  Model: {model_name}  |  Task: {task_type}\n"
+            text += f"   Preprocessing: {preprocessing}  |  Performance: {perf_str}"
+
+            self.comparison_primary_text.insert('1.0', text)
+
+        self.comparison_primary_text.config(state='disabled')
+
+    def _update_comparison_auxiliary_display(self):
+        """Update the auxiliary models display text widget."""
+        self.comparison_auxiliary_text.config(state='normal')
+        self.comparison_auxiliary_text.delete('1.0', tk.END)
+
+        if not self.comparison_auxiliary_models:
+            self.comparison_auxiliary_text.insert('1.0', "No auxiliary models loaded")
+        else:
+            for i, model_dict in enumerate(self.comparison_auxiliary_models):
+                metadata = model_dict.get('metadata', {})
+                filename = model_dict.get('filename', 'Unknown')
+
+                model_name = metadata.get('model_name', 'Unknown')
+                target_var = metadata.get('target_variable', 'Unknown')
+                task_type = metadata.get('task_type', 'Unknown')
+                preprocessing = metadata.get('preprocessing', 'Unknown')
+
+                perf = metadata.get('performance', {})
+                if task_type == 'regression':
+                    r2 = perf.get('R2', 'N/A')
+                    rmse = perf.get('RMSE', 'N/A')
+                    perf_str = f"R² = {r2:.4f}, RMSE = {rmse:.4f}" if isinstance(r2, (int, float)) else "N/A"
+                else:
+                    acc = perf.get('accuracy', 'N/A')
+                    perf_str = f"Acc = {acc:.4f}" if isinstance(acc, (int, float)) else "N/A"
+
+                text = f"🔵 [{i+1}] {filename}\n"
+                text += f"    Target: {target_var}  |  Model: {model_name}  |  Task: {task_type}\n"
+                text += f"    Preprocessing: {preprocessing}  |  Performance: {perf_str}\n"
+
+                if i < len(self.comparison_auxiliary_models) - 1:
+                    text += "\n"
+
+                self.comparison_auxiliary_text.insert(tk.END, text)
+
+        self.comparison_auxiliary_text.config(state='disabled')
+
+    def _update_comparison_rules_display(self):
+        """Update the conditional flagging rules display."""
+        self.comparison_rules_text.config(state='normal')
+        self.comparison_rules_text.delete('1.0', tk.END)
+
+        if not self.comparison_rules:
+            self.comparison_rules_text.insert('1.0', "No conditional flagging rules defined")
+        else:
+            for i, rule in enumerate(self.comparison_rules):
+                aux_model = rule['auxiliary_model']
+                condition = rule['condition']
+                value = rule['value']
+                flag_text = rule['flag_text']
+
+                text = f"Rule {i+1}: IF {aux_model} {condition} {value} THEN flag as \"{flag_text}\"\n"
+                self.comparison_rules_text.insert(tk.END, text)
+
+        self.comparison_rules_text.config(state='disabled')
+
+    def _load_comparison_primary_model(self):
+        """Load a single primary model for comparison."""
+        from tkinter import filedialog
+
+        filepath = filedialog.askopenfilename(
+            title="Load Primary Model",
+            filetypes=[("DASP Model Files", "*.dasp"), ("All Files", "*.*")],
+            initialdir=self.last_directory if hasattr(self, 'last_directory') else None
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Reuse existing model loading logic from Tab 8
+            from pathlib import Path
+            from src.spectral_predict import model_io
+
+            model_dict = model_io.load_model(filepath)
+            model_dict['filepath'] = filepath
+            model_dict['filename'] = Path(filepath).name
+
+            self.comparison_primary_model = model_dict
+            self._update_comparison_primary_display()
+
+            self.comparison_status.config(text=f"✓ Primary model loaded: {model_dict['filename']}",
+                                         foreground='green')
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load primary model:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _clear_comparison_primary_model(self):
+        """Clear the primary model."""
+        self.comparison_primary_model = None
+        self._update_comparison_primary_display()
+        self.comparison_status.config(text="Primary model cleared", foreground='gray')
+
+    def _load_comparison_auxiliary_models(self):
+        """Load one or more auxiliary models for comparison."""
+        from tkinter import filedialog
+
+        filepaths = filedialog.askopenfilenames(
+            title="Load Auxiliary Model(s)",
+            filetypes=[("DASP Model Files", "*.dasp"), ("All Files", "*.*")],
+            initialdir=self.last_directory if hasattr(self, 'last_directory') else None
+        )
+
+        if not filepaths:
+            return
+
+        try:
+            from pathlib import Path
+            from src.spectral_predict import model_io
+
+            for filepath in filepaths:
+                model_dict = model_io.load_model(filepath)
+                model_dict['filepath'] = filepath
+                model_dict['filename'] = Path(filepath).name
+
+                self.comparison_auxiliary_models.append(model_dict)
+
+            self._update_comparison_auxiliary_display()
+
+            self.comparison_status.config(
+                text=f"✓ Loaded {len(filepaths)} auxiliary model(s). Total: {len(self.comparison_auxiliary_models)}",
+                foreground='green')
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load auxiliary models:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _clear_comparison_auxiliary_models(self):
+        """Clear all auxiliary models."""
+        self.comparison_auxiliary_models = []
+        self._update_comparison_auxiliary_display()
+        self.comparison_status.config(text="Auxiliary models cleared", foreground='gray')
+
+    def _on_comparison_source_change(self):
+        """Handle data source selection changes."""
+        source = self.comparison_data_source.get()
+
+        if source == 'validation':
+            # Disable path controls
+            self.comparison_path_label.config(state='disabled')
+            self.comparison_data_path.set("Using pre-selected validation set from Analysis Configuration")
+            self.comparison_browse_btn.config(state='disabled')
+        else:
+            # Enable path controls
+            self.comparison_path_label.config(state='normal')
+            self.comparison_data_path.set("")
+            self.comparison_browse_btn.config(state='normal')
+
+    def _browse_comparison_data(self):
+        """Browse for comparison data (directory or CSV)."""
+        from tkinter import filedialog
+
+        source = self.comparison_data_source.get()
+
+        if source == 'directory':
+            path = filedialog.askdirectory(title="Select Directory with Spectral Files",
+                                          initialdir=self.last_directory if hasattr(self, 'last_directory') else None)
+        else:  # CSV
+            path = filedialog.askopenfilename(
+                title="Select CSV File",
+                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+                initialdir=self.last_directory if hasattr(self, 'last_directory') else None
+            )
+
+        if path:
+            self.comparison_data_path.set(path)
+
+    def _load_comparison_data(self):
+        """Load data for comparison analysis."""
+        source = self.comparison_data_source.get()
+
+        try:
+            if source == 'validation':
+                # Use validation set from Tab 4
+                if not hasattr(self, 'validation_indices') or self.validation_indices is None:
+                    messagebox.showerror("Error", "No validation set selected. Please configure in Analysis Configuration tab first.")
+                    return
+
+                if not hasattr(self, 'data') or self.data is None:
+                    messagebox.showerror("Error", "No data loaded. Please load data in Import & Preview tab first.")
+                    return
+
+                self.comparison_data = self.data.iloc[self.validation_indices].copy()
+                self.comparison_data_status.config(
+                    text=f"✓ Loaded {len(self.comparison_data)} samples from validation set",
+                    foreground='green')
+
+            elif source == 'directory':
+                # Load spectral files from directory
+                from src.spectral_predict import data_processing
+                import pandas as pd
+
+                directory = self.comparison_data_path.get()
+                if not directory:
+                    messagebox.showerror("Error", "Please select a directory")
+                    return
+
+                # Use existing load_spectra_from_directory logic
+                spectra_dict = data_processing.load_spectra_from_directory(directory)
+
+                if not spectra_dict:
+                    messagebox.showerror("Error", "No spectral files found in directory")
+                    return
+
+                # Convert to DataFrame format
+                self.comparison_data = pd.DataFrame(spectra_dict)
+                self.comparison_data_status.config(
+                    text=f"✓ Loaded {len(self.comparison_data)} spectra from directory",
+                    foreground='green')
+
+            else:  # CSV
+                import pandas as pd
+
+                csv_path = self.comparison_data_path.get()
+                if not csv_path:
+                    messagebox.showerror("Error", "Please select a CSV file")
+                    return
+
+                self.comparison_data = pd.read_csv(csv_path)
+                self.comparison_data_status.config(
+                    text=f"✓ Loaded {len(self.comparison_data)} samples from CSV",
+                    foreground='green')
+
+            self.comparison_status.config(text="Data loaded. Ready to run comparison.", foreground='green')
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load comparison data:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _add_comparison_rule(self):
+        """Open dialog to add a conditional flagging rule."""
+        if not self.comparison_auxiliary_models:
+            messagebox.showinfo("Info", "Please load at least one auxiliary model first")
+            return
+
+        # Create rule dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Conditional Flagging Rule")
+        dialog.geometry("500x300")
+        dialog.configure(bg=self.colors['bg'])
+
+        # Make modal
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill='both', expand=True)
+
+        ttk.Label(main_frame, text="Create a rule to flag primary predictions",
+                  style='Subheading.TLabel').pack(anchor='w', pady=(0, 20))
+
+        # Auxiliary model selection
+        ttk.Label(main_frame, text="If auxiliary model:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        aux_model_var = tk.StringVar()
+        aux_models = [m['metadata'].get('target_variable', m['filename']) for m in self.comparison_auxiliary_models]
+        aux_combo = ttk.Combobox(main_frame, textvariable=aux_model_var, values=aux_models,
+                                 state='readonly', width=40)
+        aux_combo.pack(anchor='w', pady=(0, 15))
+        if aux_models:
+            aux_combo.current(0)
+
+        # Condition selection
+        ttk.Label(main_frame, text="Condition:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        condition_var = tk.StringVar(value='==')
+        condition_frame = ttk.Frame(main_frame)
+        condition_frame.pack(anchor='w', pady=(0, 15))
+
+        conditions = ['==', '!=', '>', '<', '>=', '<=', 'contains']
+        for cond in conditions:
+            ttk.Radiobutton(condition_frame, text=cond, variable=condition_var,
+                          value=cond).pack(side='left', padx=5)
+
+        # Value entry
+        ttk.Label(main_frame, text="Value:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        value_var = tk.StringVar()
+        ttk.Entry(main_frame, textvariable=value_var, width=40).pack(anchor='w', pady=(0, 15))
+
+        # Flag text
+        ttk.Label(main_frame, text="Flag message:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        flag_var = tk.StringVar(value="⚠️ Unreliable")
+        ttk.Entry(main_frame, textvariable=flag_var, width=40).pack(anchor='w', pady=(0, 20))
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(anchor='w')
+
+        def save_rule():
+            if not value_var.get():
+                messagebox.showerror("Error", "Please enter a value")
+                return
+
+            rule = {
+                'auxiliary_model': aux_model_var.get(),
+                'condition': condition_var.get(),
+                'value': value_var.get(),
+                'flag_text': flag_var.get()
+            }
+
+            self.comparison_rules.append(rule)
+            self._update_comparison_rules_display()
+            self.comparison_status.config(text=f"✓ Rule added ({len(self.comparison_rules)} total)",
+                                         foreground='green')
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="Add Rule", command=save_rule,
+                   style='Modern.TButton').pack(side='left', padx=(0, 5))
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy,
+                   style='Modern.TButton').pack(side='left')
+
+    def _run_comparison(self):
+        """Run multi-model comparison with all loaded models."""
+        # Validate inputs
+        if self.comparison_primary_model is None:
+            messagebox.showerror("Error", "Please load a primary model first")
+            return
+
+        if not self.comparison_auxiliary_models:
+            response = messagebox.askyesno("No Auxiliary Models",
+                                          "No auxiliary models loaded. Run with primary model only?")
+            if not response:
+                return
+
+        if self.comparison_data is None:
+            messagebox.showerror("Error", "Please load comparison data first")
+            return
+
+        try:
+            self.comparison_status.config(text="Running comparison...", foreground='orange')
+            self.root.update()
+
+            import pandas as pd
+            from src.spectral_predict import model_io
+
+            # Initialize results DataFrame
+            results = pd.DataFrame()
+            results['Sample'] = self.comparison_data.index if hasattr(self.comparison_data.index, 'tolist') else range(len(self.comparison_data))
+
+            # Run primary model prediction
+            primary_metadata = self.comparison_primary_model['metadata']
+            primary_target = primary_metadata.get('target_variable', 'Primary')
+            primary_model_name = primary_metadata.get('model_name', 'Model')
+            primary_preproc = primary_metadata.get('preprocessing', 'Unknown')
+
+            primary_col_name = f"{primary_target}_{primary_model_name}_{primary_preproc}"
+
+            primary_predictions = model_io.predict_with_model(self.comparison_primary_model, self.comparison_data)
+            results[primary_col_name] = primary_predictions
+
+            # Run auxiliary model predictions
+            aux_col_names = []
+            for aux_model in self.comparison_auxiliary_models:
+                aux_metadata = aux_model['metadata']
+                aux_target = aux_metadata.get('target_variable', 'Auxiliary')
+                aux_model_name = aux_metadata.get('model_name', 'Model')
+                aux_preproc = aux_metadata.get('preprocessing', 'Unknown')
+
+                aux_col_name = f"{aux_target}_{aux_model_name}_{aux_preproc}"
+
+                # Handle duplicate column names
+                counter = 1
+                original_col_name = aux_col_name
+                while aux_col_name in results.columns:
+                    aux_col_name = f"{original_col_name}_{counter}"
+                    counter += 1
+
+                aux_predictions = model_io.predict_with_model(aux_model, self.comparison_data)
+                results[aux_col_name] = aux_predictions
+                aux_col_names.append(aux_col_name)
+
+            # Apply conditional flagging rules
+            if self.comparison_rules:
+                results['Flags'] = ""
+
+                for rule in self.comparison_rules:
+                    aux_model_target = rule['auxiliary_model']
+                    condition = rule['condition']
+                    value = rule['value']
+                    flag_text = rule['flag_text']
+
+                    # Find matching column
+                    matching_cols = [col for col in aux_col_names if aux_model_target in col]
+
+                    if matching_cols:
+                        col = matching_cols[0]
+
+                        # Apply condition
+                        try:
+                            if condition == '==':
+                                mask = results[col].astype(str) == value
+                            elif condition == '!=':
+                                mask = results[col].astype(str) != value
+                            elif condition == 'contains':
+                                mask = results[col].astype(str).str.contains(value, case=False, na=False)
+                            elif condition == '>':
+                                mask = pd.to_numeric(results[col], errors='coerce') > float(value)
+                            elif condition == '<':
+                                mask = pd.to_numeric(results[col], errors='coerce') < float(value)
+                            elif condition == '>=':
+                                mask = pd.to_numeric(results[col], errors='coerce') >= float(value)
+                            elif condition == '<=':
+                                mask = pd.to_numeric(results[col], errors='coerce') <= float(value)
+                            else:
+                                continue
+
+                            # Add flags
+                            results.loc[mask, 'Flags'] = results.loc[mask, 'Flags'].apply(
+                                lambda x: f"{x}; {flag_text}" if x else flag_text
+                            )
+                        except Exception as e:
+                            print(f"Warning: Failed to apply rule for {aux_model_target}: {e}")
+
+            # Store results
+            self.comparison_results = results
+
+            # Display results in treeview
+            self._display_comparison_results()
+
+            self.comparison_status.config(
+                text=f"✓ Comparison complete! {len(results)} samples analyzed.",
+                foreground='green')
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Comparison failed:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.comparison_status.config(text="Comparison failed", foreground='red')
+
+    def _display_comparison_results(self):
+        """Display comparison results in the treeview."""
+        if self.comparison_results is None:
+            return
+
+        # Clear existing columns and data
+        self.comparison_results_tree.delete(*self.comparison_results_tree.get_children())
+
+        # Configure columns
+        columns = list(self.comparison_results.columns)
+        self.comparison_results_tree['columns'] = columns
+
+        # Configure column headings and widths
+        for col in columns:
+            self.comparison_results_tree.heading(col, text=col)
+
+            # Set column width based on content type
+            if col == 'Sample':
+                width = 100
+            elif col == 'Flags':
+                width = 200
+            elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
+                 self.comparison_results[col].dtype == 'object':
+                width = 150
+            else:
+                width = 120
+
+            self.comparison_results_tree.column(col, width=width, anchor='center')
+
+        # Insert data
+        for idx, row in self.comparison_results.iterrows():
+            values = []
+            for col in columns:
+                val = row[col]
+                # Format numeric values
+                if isinstance(val, (int, float)) and not pd.isna(val):
+                    if col != 'Sample':
+                        values.append(f"{val:.4f}")
+                    else:
+                        values.append(str(val))
+                else:
+                    values.append(str(val) if not pd.isna(val) else "")
+
+            # Add tag for flagged rows
+            tags = ()
+            if 'Flags' in columns and row['Flags']:
+                tags = ('flagged',)
+
+            self.comparison_results_tree.insert('', 'end', values=values, tags=tags)
+
+        # Configure tag colors for flagged rows
+        self.comparison_results_tree.tag_configure('flagged', background='#FFF3CD', foreground='#856404')
+
+    def _export_comparison_results(self):
+        """Export comparison results to Excel with multiple sheets."""
+        if self.comparison_results is None:
+            messagebox.showinfo("Info", "No comparison results to export")
+            return
+
+        from tkinter import filedialog
+        from pathlib import Path
+        import pandas as pd
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Comparison Results",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx"), ("CSV Files", "*.csv")],
+            initialdir=self.last_directory if hasattr(self, 'last_directory') else None
+        )
+
+        if not filepath:
+            return
+
+        try:
+            filepath_obj = Path(filepath)
+
+            if filepath_obj.suffix.lower() in ['.xlsx', '.xls']:
+                # Multi-sheet Excel export
+                with pd.ExcelWriter(filepath, engine='xlsxwriter') as writer:
+                    # Sheet 1: Summary (Primary + Flags only)
+                    primary_metadata = self.comparison_primary_model['metadata']
+                    primary_target = primary_metadata.get('target_variable', 'Primary')
+
+                    summary_cols = ['Sample']
+                    primary_cols = [col for col in self.comparison_results.columns if primary_target in col]
+                    summary_cols.extend(primary_cols)
+                    if 'Flags' in self.comparison_results.columns:
+                        summary_cols.append('Flags')
+
+                    self.comparison_results[summary_cols].to_excel(writer, sheet_name='Summary', index=False)
+
+                    # Sheet 2: All Predictions
+                    self.comparison_results.to_excel(writer, sheet_name='All Predictions', index=False)
+
+                    # Sheet 3: Model Metadata
+                    metadata_rows = []
+
+                    # Primary model
+                    pm = self.comparison_primary_model['metadata']
+                    metadata_rows.append({
+                        'Role': 'Primary',
+                        'Filename': self.comparison_primary_model['filename'],
+                        'Target Variable': pm.get('target_variable', 'N/A'),
+                        'Model Type': pm.get('model_name', 'N/A'),
+                        'Task Type': pm.get('task_type', 'N/A'),
+                        'Preprocessing': pm.get('preprocessing', 'N/A'),
+                        'Performance': str(pm.get('performance', {}))
+                    })
+
+                    # Auxiliary models
+                    for i, aux_model in enumerate(self.comparison_auxiliary_models):
+                        am = aux_model['metadata']
+                        metadata_rows.append({
+                            'Role': f'Auxiliary {i+1}',
+                            'Filename': aux_model['filename'],
+                            'Target Variable': am.get('target_variable', 'N/A'),
+                            'Model Type': am.get('model_name', 'N/A'),
+                            'Task Type': am.get('task_type', 'N/A'),
+                            'Preprocessing': am.get('preprocessing', 'N/A'),
+                            'Performance': str(am.get('performance', {}))
+                        })
+
+                    pd.DataFrame(metadata_rows).to_excel(writer, sheet_name='Model Info', index=False)
+
+                    # Sheet 4: Flagging Rules
+                    if self.comparison_rules:
+                        rules_df = pd.DataFrame(self.comparison_rules)
+                        rules_df.to_excel(writer, sheet_name='Flagging Rules', index=False)
+
+                messagebox.showinfo("Success", f"Results exported to Excel:\n{filepath}")
+            else:
+                # CSV export (all predictions only)
+                self.comparison_results.to_csv(filepath, index=False)
+                messagebox.showinfo("Success", f"Results exported to CSV:\n{filepath}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export results:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _show_comparison_plots(self):
+        """Show comparison plots in a new window."""
+        if self.comparison_results is None:
+            messagebox.showinfo("Info", "No comparison results to plot")
+            return
+
+        messagebox.showinfo("Coming Soon", "Comparison plots feature will be implemented in the next update!")
+
     def _create_tab10_calibration_transfer(self):
         """Tab 10: Calibration Transfer - Wizard interface with sections A-D.
 
@@ -17345,16 +18704,6 @@ Configuration:
 
         main_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="30")
         main_frame.pack(fill='both', expand=True)
-
-        # Title
-        title_label = ttk.Label(main_frame, text="Calibration Transfer - 3-Step Wizard",
-                               style='Title.TLabel')
-        title_label.pack(pady=(0, 10))
-
-        desc_label = ttk.Label(main_frame,
-                              text="STEP 1: Get or Build a Transfer Model",
-                              style='Caption.TLabel')
-        desc_label.pack(pady=(0, 20))
 
         # ===================================================================
         # SECTION A: Radio Buttons - Load Existing vs Build New
