@@ -6,6 +6,7 @@ from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.linear_model import LogisticRegression, Ridge, Lasso, ElasticNet
 from sklearn.svm import SVR, SVC
+from sklearn.base import BaseEstimator, TransformerMixin
 from .neural_boosted import NeuralBoostedRegressor
 
 # Import gradient boosting libraries
@@ -28,6 +29,78 @@ from .model_config import (
     get_tier_models,
     get_hyperparameters
 )
+
+
+class PLSTransformer(BaseEstimator, TransformerMixin):
+    """Wrapper for PLSRegression that ensures transform() returns 2D output for classification.
+
+    This fixes the issue where PLSRegression.transform() can return 3D arrays when
+    fitted with 2D y, which breaks downstream classifiers like LogisticRegression.
+    """
+
+    def __init__(self, n_components=2, max_iter=500, tol=1e-6, scale=False):
+        self.n_components = n_components
+        self.max_iter = max_iter
+        self.tol = tol
+        self.scale = scale
+        self.pls_ = None
+
+    def fit(self, X, y):
+        """Fit PLS model, ensuring y is 1D for classification."""
+        self.pls_ = PLSRegression(
+            n_components=self.n_components,
+            max_iter=self.max_iter,
+            tol=self.tol,
+            scale=self.scale
+        )
+        # Ensure y is 1D (sklearn classifiers expect this)
+        y_1d = np.ravel(y) if y.ndim > 1 else y
+        self.pls_.fit(X, y_1d)
+        return self
+
+    def transform(self, X):
+        """Transform X to PLS scores (always returns 2D: n_samples x n_components)."""
+        if self.pls_ is None:
+            raise ValueError("PLSTransformer must be fitted before transform")
+        # Use transform() which returns X_scores (2D)
+        X_scores = self.pls_.transform(X)
+        # Ensure 2D output
+        if X_scores.ndim == 1:
+            X_scores = X_scores.reshape(-1, 1)
+        elif X_scores.ndim > 2:
+            # If somehow 3D, take first output dimension
+            X_scores = X_scores[:, :, 0] if X_scores.shape[2] == 1 else X_scores.reshape(X_scores.shape[0], -1)
+        return X_scores
+
+    def fit_transform(self, X, y):
+        """Fit and transform in one step."""
+        return self.fit(X, y).transform(X)
+
+    def get_params(self, deep=True):
+        """Get parameters for this estimator."""
+        return {
+            'n_components': self.n_components,
+            'max_iter': self.max_iter,
+            'tol': self.tol,
+            'scale': self.scale
+        }
+
+    def set_params(self, **params):
+        """Set parameters for this estimator."""
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+    def __getattr__(self, name):
+        """Forward attribute access to underlying PLS model."""
+        # Avoid infinite recursion for our own attributes
+        if name == 'pls_':
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        # Forward to underlying PLS model if fitted
+        pls = object.__getattribute__(self, 'pls_')
+        if pls is not None:
+            return getattr(pls, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}' (model not fitted)")
 
 
 def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500):
@@ -124,8 +197,9 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 learning_rate=0.1,
                 num_leaves=31,  # LightGBM default
                 max_depth=-1,  # No depth limit (controlled by num_leaves)
-                min_child_samples=20,  # Minimum samples per leaf
+                min_child_samples=5,  # Reduced for small datasets (was 20 - caused negative R2)
                 subsample=0.8,  # Row sampling to prevent overfitting (like XGBoost)
+                bagging_freq=1,  # Required when subsample < 1.0
                 colsample_bytree=0.8,  # Feature sampling for high-dim data (like XGBoost)
                 reg_alpha=0.1,  # L1 regularization for feature selection (like XGBoost)
                 reg_lambda=1.0,  # L2 regularization to prevent overfitting (like XGBoost)
@@ -151,7 +225,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
     else:  # classification
         if model_name in ["PLS-DA", "PLS"]:
             # For classification, PLS is used as a transformer
-            return PLSRegression(n_components=n_components, scale=False)
+            return PLSTransformer(n_components=n_components, scale=False)
 
         elif model_name == "RandomForest":
             return RandomForestClassifier(
@@ -196,6 +270,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 max_depth=-1,  # No limit (controlled by num_leaves)
                 min_child_samples=5,  # Reduced for small datasets (was 20)
                 subsample=0.8,  # Row sampling like XGBoost
+                bagging_freq=1,  # Required when subsample < 1.0
                 colsample_bytree=0.8,  # Feature sampling for high-dimensional data
                 reg_alpha=0.1,  # L1 regularization
                 reg_lambda=1.0,  # L2 regularization
@@ -417,7 +492,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
         lightgbm_max_depth_list = lgbm_config.get('max_depth', [-1])
     if lightgbm_min_child_samples_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
-        lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [20])
+        lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [5])
     if lightgbm_subsample_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
         lightgbm_subsample_list = lgbm_config.get('subsample', [0.8])
@@ -925,6 +1000,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             max_depth=max_depth,
                                                             min_child_samples=min_child_samples,
                                                             subsample=subsample,
+                                                            bagging_freq=1,  # Required when subsample < 1.0
                                                             colsample_bytree=colsample_bytree,
                                                             reg_alpha=reg_alpha,
                                                             reg_lambda=reg_lambda,
@@ -939,6 +1015,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             "max_depth": max_depth,
                                                             "min_child_samples": min_child_samples,
                                                             "subsample": subsample,
+                                                            "bagging_freq": 1,
                                                             "colsample_bytree": colsample_bytree,
                                                             "reg_alpha": reg_alpha,
                                                             "reg_lambda": reg_lambda
@@ -994,7 +1071,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     for tol_val in pls_tol_list:
                         pls_da_configs.append(
                             (
-                                PLSRegression(
+                                PLSTransformer(
                                     n_components=nc,
                                     max_iter=max_iter_val,
                                     tol=tol_val,
@@ -1204,6 +1281,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             max_depth=max_depth,
                                                             min_child_samples=min_child_samples,
                                                             subsample=subsample,
+                                                            bagging_freq=1,  # Required when subsample < 1.0
                                                             colsample_bytree=colsample_bytree,
                                                             reg_alpha=reg_alpha,
                                                             reg_lambda=reg_lambda,
@@ -1218,6 +1296,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             "max_depth": max_depth,
                                                             "min_child_samples": min_child_samples,
                                                             "subsample": subsample,
+                                                            "bagging_freq": 1,
                                                             "colsample_bytree": colsample_bytree,
                                                             "reg_alpha": reg_alpha,
                                                             "reg_lambda": reg_lambda
@@ -1257,7 +1336,7 @@ def compute_vip(pls_model, X, y):
 
     Parameters
     ----------
-    pls_model : PLSRegression
+    pls_model : PLSRegression or PLSTransformer
         Fitted PLS model
     X : array-like
         Training data
@@ -1269,6 +1348,10 @@ def compute_vip(pls_model, X, y):
     vip_scores : ndarray
         VIP score for each variable
     """
+    # Handle PLSTransformer wrapper
+    if isinstance(pls_model, PLSTransformer):
+        pls_model = pls_model.pls_
+
     # Get PLS components
     W = pls_model.x_weights_  # (n_features, n_components)
     T = pls_model.x_scores_  # (n_samples, n_components)

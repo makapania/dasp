@@ -174,8 +174,8 @@ class SpectralPredictApp:
         # Track accent buttons for theme switching
         self.accent_buttons = []  # List of accent buttons created
 
-        # Calibration Transfer Tab (Tab 10) variables - REDESIGNED for 3-step wizard
-        # Step 1: Transfer Model
+        # Calibration Transfer Tab (Tab 10) variables - Redesigned wizard interface
+        # Section A: Transfer Model
         self.current_transfer_model = None  # TransferModel object (loaded or built)
         self.current_master_data = None  # (wavelengths, X) tuple for building model
         self.current_slave_data = None  # (wavelengths, X) tuple for building model
@@ -205,14 +205,14 @@ class SpectralPredictApp:
         self.ct_slave_id_col_var = tk.StringVar()  # Specimen ID column name
         self.ct_slave_target_col_var = tk.StringVar()  # Target variable column name
 
-        # Step 2: Application Mode
+        # Section B: Application Mode
         self.application_mode = None  # 'predict' or 'export'
 
-        # Step 3A: Prediction Workflow
+        # Section C: Prediction Workflow (Mode A)
         self.current_prediction_model = None  # sklearn model for predictions
         self.new_slave_data_predict = None  # New slave data to transform and predict
 
-        # Step 3B: Export Workflow
+        # Section D: Export Workflow (Mode B)
         self.new_slave_data_export = None  # New slave data to transform and export
         self.transformed_spectra = None  # Transformed spectra ready for export
 
@@ -10550,7 +10550,15 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: This preserves derivative context from full spectrum.")
 
                 # 5. Build pipeline with ONLY the model (skip preprocessing - already done!)
-                pipe_steps = [('model', model)]
+                # For PLS-DA, we need PLS + LogisticRegression
+                if model_name == "PLS-DA" and task_type == "classification":
+                    from sklearn.linear_model import LogisticRegression
+                    pipe_steps = [
+                        ('pls', model),
+                        ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                    ]
+                else:
+                    pipe_steps = [('model', model)]
                 pipe = Pipeline(pipe_steps)
 
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing already applied)")
@@ -10567,7 +10575,14 @@ F1 Score:  {f1:.4f}
                     window,
                     polyorder
                 )
-                pipe_steps.append(('model', model))
+
+                # For PLS-DA, we need PLS + LogisticRegression
+                if model_name == "PLS-DA" and task_type == "classification":
+                    from sklearn.linear_model import LogisticRegression
+                    pipe_steps.append(('pls', model))
+                    pipe_steps.append(('lr', LogisticRegression(max_iter=1000, random_state=42)))
+                else:
+                    pipe_steps.append(('model', model))
                 pipe = Pipeline(pipe_steps)
 
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
@@ -10601,8 +10616,12 @@ F1 Score:  {f1:.4f}
                 if hasattr(pipe_fold, 'predict_proba'):
                     y_proba = pipe_fold.predict_proba(X_test)
                     all_y_proba.append(y_proba)
-                elif hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
+                elif 'model' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
                     y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
+                    all_y_proba.append(y_proba)
+                elif 'lr' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
+                    # For PLS-DA, LogisticRegression is named 'lr'
+                    y_proba = pipe_fold.named_steps['lr'].predict_proba(X_test)
                     all_y_proba.append(y_proba)
 
                 if task_type == "regression":
@@ -10760,7 +10779,15 @@ Configuration:
             final_pipe.fit(X_raw, y_array)
 
             # Extract model and preprocessor from pipeline for saving
-            final_model = final_pipe.named_steps['model']
+            # For PLS-DA, save the entire pipeline (PLS + LogisticRegression)
+            if model_name == "PLS-DA" and task_type == "classification":
+                # Save entire PLS-DA pipeline (both PLS and LogisticRegression)
+                final_model = final_pipe
+            elif 'model' in final_pipe.named_steps:
+                final_model = final_pipe.named_steps['model']
+            else:
+                # Fallback: save the entire pipeline
+                final_model = final_pipe
 
             # Build preprocessor from pipeline steps (excluding the model)
             if use_full_spectrum_preprocessing:
@@ -10768,6 +10795,15 @@ Configuration:
                 # We need to save that preprocessor, not create a new one
                 final_preprocessor = prep_pipeline  # Already fitted
                 print("DEBUG: Using full-spectrum preprocessor (already fitted)")
+            elif model_name == "PLS-DA" and task_type == "classification":
+                # For PLS-DA: preprocessing steps are before PLS, PLS+LR are the model
+                if len(pipe_steps) > 2:  # Has preprocessing + PLS + LR
+                    final_preprocessor = Pipeline(pipe_steps[:-2])  # All steps except PLS and LR
+                    final_preprocessor.fit(X_raw)  # Fit on raw data
+                    print("DEBUG: Fitting preprocessor on subset data (PLS-DA)")
+                else:
+                    final_preprocessor = None
+                    print("DEBUG: No preprocessor for PLS-DA (raw data)")
             elif len(pipe_steps) > 1:  # Has preprocessing steps
                 final_preprocessor = Pipeline(pipe_steps[:-1])  # All steps except model
                 final_preprocessor.fit(X_raw)  # Fit on raw data
@@ -14662,10 +14698,10 @@ Configuration:
             self.ct_eq_load_tm_frame.pack_forget()
 
     def _on_mode_selected(self):
-        """Handle application mode selection in Step 2.
+        """Handle application mode selection.
 
         Updates self.application_mode and provides user feedback.
-        Shows/hides Step 3A or Step 3B based on the selected mode.
+        Shows/hides Section C or Section D based on the selected mode.
         """
         mode = self.ct_mode_var.get()
 
@@ -14675,19 +14711,19 @@ Configuration:
         # Provide user feedback
         if mode == 'predict':
             self.ct_mode_status_label.config(
-                text="Mode A selected: Ready to configure prediction workflow (Step 3A)",
+                text="Mode A selected: Ready to configure prediction workflow (Section C)",
                 foreground=self.colors['accent']
             )
-            # Show Step 3A, hide Step 3B
+            # Show Section C, hide Section D
             self.ct_step3a_frame.pack(fill='x', pady=(0, 15))
             self.ct_step3b_frame.pack_forget()
 
         elif mode == 'export':
             self.ct_mode_status_label.config(
-                text="Mode B selected: Ready to configure export workflow (Step 3B)",
+                text="Mode B selected: Ready to configure export workflow (Section D)",
                 foreground=self.colors['accent']
             )
-            # Hide Step 3A, show Step 3B
+            # Hide Section C, show Section D
             self.ct_step3a_frame.pack_forget()
             self.ct_step3b_frame.pack(fill='x', pady=(0, 15))
         else:
@@ -15800,29 +15836,19 @@ Configuration:
         """Build new transfer model from loaded master/slave data."""
         from tkinter import messagebox
 
-        # DEBUG: Confirm method is being called
-        print("DEBUG: _build_transfer_model_new() called")
-        print(f"DEBUG: current_master_data is None? {self.current_master_data is None}")
-        print(f"DEBUG: current_slave_data is None? {self.current_slave_data is None}")
-
         try:
             from spectral_predict.calibration_transfer import (
                 estimate_ds, estimate_pds, estimate_tsr, estimate_ctai, estimate_nspfce, estimate_jypls_inv,
                 TransferModel
             )
-            print("DEBUG: Imports successful")
         except ImportError as e:
-            print(f"DEBUG: Import failed - {e}")
             messagebox.showerror("Import Error", f"Failed to import calibration transfer functions:\n{str(e)}")
             return
 
         # Validate data loaded
         if self.current_master_data is None or self.current_slave_data is None:
-            print("DEBUG: Data validation failed - showing warning")
             messagebox.showwarning("No Data", "Please load both master and slave spectra first.")
             return
-
-        print("DEBUG: Data validation passed, proceeding to build model...")
 
         try:
             wl_master, X_master = self.current_master_data
@@ -15893,23 +15919,71 @@ Configuration:
                 n_comp_str = self.ct_jypls_n_components_var.get()
                 n_components = None if n_comp_str == 'Auto' else int(n_comp_str)
 
-                if n_samples > X_master_common.shape[0]:
-                    raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
+                # Check if enhanced loading was used (with Y values)
+                if self.ct_master_X is not None and self.ct_slave_X is not None and \
+                   self.ct_master_y is not None and self.ct_slave_y is not None:
 
-                # JYPLS-inv requires reference Y values for transfer samples
-                # For now, use placeholder zeros - ideally should load from file or user input
-                messagebox.showwarning("JYPLS-inv Limitation",
-                    "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
-                    "Building with placeholder zeros. For accurate results, this method should be "
-                    "used with actual reference values.\n\n"
-                    "Consider using CTAI or NS-PFCE instead, which don't require reference values.")
+                    # Enhanced loading: Use real Y values
+                    # First, validate master/slave pairing
+                    if not self._validate_master_slave_pairing():
+                        return  # Validation failed, user notified
 
-                y_transfer = np.zeros(n_samples)  # Placeholder
-                transfer_indices = np.arange(n_samples)
+                    # Get common sample IDs
+                    master_ids = set(self.ct_master_X.index)
+                    slave_ids = set(self.ct_slave_X.index)
+                    common_ids = sorted(list(master_ids & slave_ids))
 
-                params = estimate_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
-                                           y_transfer, transfer_indices,
-                                           n_components=n_components)
+                    if len(common_ids) < n_samples:
+                        raise ValueError(f"JYPLS-inv requires {n_samples} transfer samples, "
+                                       f"but only {len(common_ids)} matched samples available.")
+
+                    # Filter to common samples only
+                    X_master_paired = self.ct_master_X.loc[common_ids].values
+                    X_slave_paired = self.ct_slave_X.loc[common_ids].values
+                    y_paired = self.ct_master_y.loc[common_ids].values
+
+                    # Select transfer samples using Kennard-Stone
+                    from spectral_predict.sample_selection import kennard_stone
+                    transfer_indices = kennard_stone(X_master_paired, n_samples=n_samples)
+
+                    # Extract Y values for selected transfer samples (REAL VALUES!)
+                    y_transfer = y_paired[transfer_indices]
+
+                    # Use selected samples for building
+                    X_master_transfer = X_master_paired[transfer_indices]
+                    X_slave_transfer = X_slave_paired[transfer_indices]
+
+                    # Show info about Y values used
+                    y_min, y_max = y_transfer.min(), y_transfer.max()
+                    y_mean, y_std = y_transfer.mean(), y_transfer.std()
+                    messagebox.showinfo("JYPLS-inv Y Values",
+                        f"Using real reference Y values:\n\n"
+                        f"Transfer samples: {n_samples}\n"
+                        f"Y range: {y_min:.3f} - {y_max:.3f}\n"
+                        f"Y mean: {y_mean:.3f} ± {y_std:.3f}\n\n"
+                        f"Selected using Kennard-Stone algorithm.")
+
+                    params = estimate_jypls_inv(X_master_transfer, X_slave_transfer,
+                                               y_transfer, transfer_indices,
+                                               n_components=n_components)
+
+                else:
+                    # Simple loading: Fall back to placeholder (not recommended)
+                    if n_samples > X_master_common.shape[0]:
+                        raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
+
+                    messagebox.showwarning("JYPLS-inv Limitation",
+                        "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
+                        "Building with placeholder zeros because enhanced loading was not used.\n\n"
+                        "For accurate results, use the 'Load Master/Slave Data with Y values' section above.\n"
+                        "Otherwise, consider using CTAI or NS-PFCE instead, which don't require reference values.")
+
+                    y_transfer = np.zeros(n_samples)  # Placeholder
+                    transfer_indices = np.arange(n_samples)
+
+                    params = estimate_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
+                                               y_transfer, transfer_indices,
+                                               n_components=n_components)
 
             else:
                 raise ValueError(f"Unknown method: {method}")
@@ -16761,11 +16835,11 @@ Configuration:
             messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
 
     # ========================================================================
-    # END OF STEP 3A HELPER METHODS
+    # END OF SECTION C HELPER METHODS
     # ========================================================================
 
     # ========================================================================
-    # STEP 3B HELPER METHODS FOR EXPORT WORKFLOW
+    # SECTION D HELPER METHODS FOR EXPORT WORKFLOW
     # ========================================================================
 
     def _browse_export_slave_spectra(self):
@@ -17186,15 +17260,21 @@ Configuration:
             traceback.print_exc()
 
     # ========================================================================
-    # END OF STEP 3B HELPER METHODS
+    # END OF SECTION D HELPER METHODS
     # ========================================================================
 
     def _create_tab10_calibration_transfer(self):
-        """Tab 10: Calibration Transfer - STEP 1 of 3-step wizard.
+        """Tab 10: Calibration Transfer - Wizard interface with sections A-D.
 
-        STEP 1: Get/Build Transfer Model
+        Section A: Get/Build Transfer Model
         - Load existing transfer model (.pkl file)
         - OR build new transfer model from master/slave data
+
+        Section B: Choose Application Mode (Predict or Export)
+
+        Section C: Apply Transfer & Predict (Mode A)
+
+        Section D: Transform & Export Spectra (Mode B)
         """
         self.tab10 = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.tab10, text='  🔄 Calibration Transfer  ')
@@ -17297,52 +17377,142 @@ Configuration:
                                                 style='Card.TFrame', padding=15)
         self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
 
-        # Sub-section A1: Load Data
-        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Slave Data",
+        # Sub-section A1: Load Data (Enhanced for JYPLS-inv support)
+        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Slave Data (with Y values for JYPLS-inv)",
                                      style='Card.TFrame', padding=10)
         data_section.pack(fill='x', pady=(0, 10))
 
-        # Load Master Spectra
-        master_frame = ttk.Frame(data_section)
-        master_frame.pack(fill='x', pady=(0, 10))
+        # ===== MASTER DATA LOADING =====
+        master_section = ttk.LabelFrame(data_section, text="Master Instrument Data",
+                                        style='Card.TFrame', padding=8)
+        master_section.pack(fill='x', pady=(0, 10))
 
-        ttk.Label(master_frame, text="Master Spectra:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+        # Master spectra directory
+        ttk.Label(master_section, text="Spectra Directory:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 3))
 
-        master_browse_frame = ttk.Frame(master_frame)
-        master_browse_frame.pack(fill='x')
+        master_dir_frame = ttk.Frame(master_section)
+        master_dir_frame.pack(fill='x', pady=(0, 5))
 
-        self.ct_master_data_path_var = tk.StringVar()
-        ttk.Entry(master_browse_frame, textvariable=self.ct_master_data_path_var,
-                 width=50, state='readonly').pack(side='left', padx=(0, 10))
+        ttk.Entry(master_dir_frame, textvariable=self.ct_master_spectra_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 5))
+        ttk.Button(master_dir_frame, text="Browse...",
+                  command=self._browse_master_spectra_with_y,
+                  style='Modern.TButton').pack(side='left')
 
-        ttk.Button(master_browse_frame, text="Browse Folder/File...",
-                  command=self._browse_master_spectra,
-                  style='Modern.TButton').pack(side='left', padx=(0, 10))
+        # Detection status
+        self.ct_master_detection_status = ttk.Label(master_section, text="No data selected",
+                                                     foreground=self.colors['text_dim'])
+        self.ct_master_detection_status.pack(anchor='w', pady=(0, 5))
 
-        self._create_accent_button(master_browse_frame, "Load Master Spectra",
-                                   self._load_master_spectra).pack(side='left')
+        # Master reference CSV
+        ttk.Label(master_section, text="Reference CSV/Excel:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(5, 3))
 
-        # Load Slave Spectra
-        slave_frame = ttk.Frame(data_section)
-        slave_frame.pack(fill='x', pady=(0, 10))
+        master_ref_frame = ttk.Frame(master_section)
+        master_ref_frame.pack(fill='x', pady=(0, 5))
 
-        ttk.Label(slave_frame, text="Slave Spectra:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+        ttk.Entry(master_ref_frame, textvariable=self.ct_master_reference_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 5))
+        ttk.Button(master_ref_frame, text="Browse...",
+                  command=self._browse_master_reference,
+                  style='Modern.TButton').pack(side='left')
 
-        slave_browse_frame = ttk.Frame(slave_frame)
-        slave_browse_frame.pack(fill='x')
+        # Column mapping
+        master_cols_label = ttk.Label(master_section, text="Column Mapping:",
+                                      style='CardLabel.TLabel')
+        master_cols_label.pack(anchor='w', pady=(5, 3))
 
-        self.ct_slave_data_path_var = tk.StringVar()
-        ttk.Entry(slave_browse_frame, textvariable=self.ct_slave_data_path_var,
-                 width=50, state='readonly').pack(side='left', padx=(0, 10))
+        master_cols_frame = ttk.Frame(master_section)
+        master_cols_frame.pack(fill='x', pady=(0, 5))
 
-        ttk.Button(slave_browse_frame, text="Browse Folder/File...",
-                  command=self._browse_slave_spectra,
-                  style='Modern.TButton').pack(side='left', padx=(0, 10))
+        ttk.Label(master_cols_frame, text="File:", width=12).pack(side='left')
+        self.ct_master_spectral_file_combo = ttk.Combobox(master_cols_frame,
+            textvariable=self.ct_master_spectral_file_col_var, state='readonly', width=15)
+        self.ct_master_spectral_file_combo.pack(side='left', padx=(0, 10))
 
-        self._create_accent_button(slave_browse_frame, "Load Slave Spectra",
-                                   self._load_slave_spectra).pack(side='left')
+        ttk.Label(master_cols_frame, text="ID:", width=8).pack(side='left')
+        self.ct_master_id_combo = ttk.Combobox(master_cols_frame,
+            textvariable=self.ct_master_id_col_var, state='readonly', width=15)
+        self.ct_master_id_combo.pack(side='left', padx=(0, 10))
+
+        ttk.Label(master_cols_frame, text="Target:", width=8).pack(side='left')
+        self.ct_master_target_combo = ttk.Combobox(master_cols_frame,
+            textvariable=self.ct_master_target_col_var, state='readonly', width=15)
+        self.ct_master_target_combo.pack(side='left')
+
+        # Load button
+        master_load_frame = ttk.Frame(master_section)
+        master_load_frame.pack(fill='x', pady=(5, 0))
+
+        self._create_accent_button(master_load_frame, "Load Master Data",
+                                   self._load_master_data_with_y).pack(side='left')
+
+        # ===== SLAVE DATA LOADING =====
+        slave_section = ttk.LabelFrame(data_section, text="Slave Instrument Data",
+                                       style='Card.TFrame', padding=8)
+        slave_section.pack(fill='x', pady=(10, 0))
+
+        # Slave spectra directory
+        ttk.Label(slave_section, text="Spectra Directory:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 3))
+
+        slave_dir_frame = ttk.Frame(slave_section)
+        slave_dir_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Entry(slave_dir_frame, textvariable=self.ct_slave_spectra_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 5))
+        ttk.Button(slave_dir_frame, text="Browse...",
+                  command=self._browse_slave_spectra_with_y,
+                  style='Modern.TButton').pack(side='left')
+
+        # Detection status
+        self.ct_slave_detection_status = ttk.Label(slave_section, text="No data selected",
+                                                    foreground=self.colors['text_dim'])
+        self.ct_slave_detection_status.pack(anchor='w', pady=(0, 5))
+
+        # Slave reference CSV
+        ttk.Label(slave_section, text="Reference CSV/Excel:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(5, 3))
+
+        slave_ref_frame = ttk.Frame(slave_section)
+        slave_ref_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Entry(slave_ref_frame, textvariable=self.ct_slave_reference_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 5))
+        ttk.Button(slave_ref_frame, text="Browse...",
+                  command=self._browse_slave_reference,
+                  style='Modern.TButton').pack(side='left')
+
+        # Column mapping
+        slave_cols_label = ttk.Label(slave_section, text="Column Mapping:",
+                                     style='CardLabel.TLabel')
+        slave_cols_label.pack(anchor='w', pady=(5, 3))
+
+        slave_cols_frame = ttk.Frame(slave_section)
+        slave_cols_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(slave_cols_frame, text="File:", width=12).pack(side='left')
+        self.ct_slave_spectral_file_combo = ttk.Combobox(slave_cols_frame,
+            textvariable=self.ct_slave_spectral_file_col_var, state='readonly', width=15)
+        self.ct_slave_spectral_file_combo.pack(side='left', padx=(0, 10))
+
+        ttk.Label(slave_cols_frame, text="ID:", width=8).pack(side='left')
+        self.ct_slave_id_combo = ttk.Combobox(slave_cols_frame,
+            textvariable=self.ct_slave_id_col_var, state='readonly', width=15)
+        self.ct_slave_id_combo.pack(side='left', padx=(0, 10))
+
+        ttk.Label(slave_cols_frame, text="Target:", width=8).pack(side='left')
+        self.ct_slave_target_combo = ttk.Combobox(slave_cols_frame,
+            textvariable=self.ct_slave_target_col_var, state='readonly', width=15)
+        self.ct_slave_target_combo.pack(side='left')
+
+        # Load button
+        slave_load_frame = ttk.Frame(slave_section)
+        slave_load_frame.pack(fill='x', pady=(5, 0))
+
+        self._create_accent_button(slave_load_frame, "Load Slave Data",
+                                   self._load_slave_data_with_y).pack(side='left')
 
         # Data info display
         ttk.Label(data_section, text="Data Information:",
@@ -17644,12 +17814,12 @@ Configuration:
         self.ct_predictions_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
 
         # ===================================================================
-        # STEP 3B: Transform & Export Workflow (Mode B)
+        # SECTION D: Transform & Export Workflow (Mode B)
         # ===================================================================
         self.ct_step3b_frame = ttk.LabelFrame(main_frame,
                                               text="D) Transform & Export Spectra (Mode B)",
                                               style='Card.TFrame', padding=15)
-        # Don't pack yet - controlled by mode selection in Step 2
+        # Don't pack yet - controlled by mode selection in Section B
 
         # D1: Load New Slave Data for Export
         export_load_section = ttk.LabelFrame(self.ct_step3b_frame,

@@ -221,7 +221,7 @@ OPTIMIZED_HYPERPARAMETERS = {
             'learning_rate': [0.1],  # 1 value (not very sensitive)
             'num_leaves': [31, 50],  # 2 values
             'max_depth': [-1],  # No limit (controlled by num_leaves)
-            'min_child_samples': [20],  # Minimum samples per leaf
+            'min_child_samples': [5],  # Reduced for small datasets (was 20 - caused negative R2)
             'subsample': [0.8],  # Row sampling to prevent overfitting (like XGBoost)
             'colsample_bytree': [0.8],  # Feature sampling for high-dim data (like XGBoost)
             'reg_alpha': [0.1],  # L1 regularization for feature selection (like XGBoost)
@@ -245,7 +245,7 @@ OPTIMIZED_HYPERPARAMETERS = {
             'learning_rate': [0.1],  # 1 value
             'num_leaves': [31],  # 1 value
             'max_depth': [-1],  # No limit (controlled by num_leaves)
-            'min_child_samples': [20],  # Minimum samples per leaf
+            'min_child_samples': [5],  # Reduced for small datasets (was 20 - caused negative R2)
             'subsample': [0.8],  # Row sampling to prevent overfitting (like XGBoost)
             'colsample_bytree': [0.8],  # Feature sampling for high-dim data (like XGBoost)
             'reg_alpha': [0.1],  # L1 regularization for feature selection (like XGBoost)
