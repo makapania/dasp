@@ -1660,7 +1660,7 @@ class SpectralPredictApp:
         self._create_tab6_results()
         self._create_tab7_refine_model()
         self._create_tab8_model_prediction()
-        self._create_tab9_instrument_lab()
+        # self._create_tab9_instrument_lab()  # REMOVED - functionality moved to Calibration Transfer
         self._create_tab10_calibration_transfer()
 
         # Bind tab change event
@@ -13162,8 +13162,12 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             self._update_registry_table()
             # Update calibration transfer registry view
             self._refresh_ct_registry()
-            messagebox.showinfo("Success",
-                f"Loaded {len(profiles)} instruments from:\n{filepath}")
+            messagebox.showinfo("Registry Loaded",
+                f"Loaded {len(profiles)} instruments from:\n{filepath}\n\n"
+                f"Note: Registry contains metadata only.\n\n"
+                f"To use instruments for Calibration Transfer:\n"
+                f"• Re-characterize each instrument with its spectral data file\n"
+                f"• This loads the actual spectra needed for transfer models")
         except Exception as e:
             messagebox.showerror("Error",
                 f"Failed to load registry:\n{str(e)}")
@@ -13604,20 +13608,49 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
             return
 
         # Check if both instruments have characterization data
+        # First check if instrument is in registry but spectral data not loaded
         if master_id not in self.instrument_spectral_data:
-            messagebox.showerror(
-                "Master Data Not Found",
-                f"No characterization data found for '{master_id}' in Instrument Lab.\n\n"
-                "Please go to the Instrument Lab tab and load & characterize this instrument first."
-            )
+            # Check if it's in the registry (metadata exists but data doesn't)
+            if master_id in self.instrument_profiles:
+                messagebox.showerror(
+                    "Master Spectral Data Not Loaded",
+                    f"Instrument '{master_id}' is in the registry, but spectral data is not loaded.\n\n"
+                    f"This happens when you load a registry JSON file without the actual data files.\n\n"
+                    f"To fix this:\n"
+                    f"1. Go to the Instrument Lab tab\n"
+                    f"2. Enter instrument ID: {master_id}\n"
+                    f"3. Browse and load the original spectral data file\n"
+                    f"4. Click 'Characterize Instrument'\n\n"
+                    f"This will load the spectral data needed for calibration transfer."
+                )
+            else:
+                messagebox.showerror(
+                    "Master Data Not Found",
+                    f"No characterization data found for '{master_id}' in Instrument Lab.\n\n"
+                    "Please go to the Instrument Lab tab and load & characterize this instrument first."
+                )
             return
 
         if slave_id not in self.instrument_spectral_data:
-            messagebox.showerror(
-                "Slave Data Not Found",
-                f"No characterization data found for '{slave_id}' in Instrument Lab.\n\n"
-                "Please go to the Instrument Lab tab and load & characterize this instrument first."
-            )
+            # Check if it's in the registry (metadata exists but data doesn't)
+            if slave_id in self.instrument_profiles:
+                messagebox.showerror(
+                    "Slave Spectral Data Not Loaded",
+                    f"Instrument '{slave_id}' is in the registry, but spectral data is not loaded.\n\n"
+                    f"This happens when you load a registry JSON file without the actual data files.\n\n"
+                    f"To fix this:\n"
+                    f"1. Go to the Instrument Lab tab\n"
+                    f"2. Enter instrument ID: {slave_id}\n"
+                    f"3. Browse and load the original spectral data file\n"
+                    f"4. Click 'Characterize Instrument'\n\n"
+                    f"This will load the spectral data needed for calibration transfer."
+                )
+            else:
+                messagebox.showerror(
+                    "Slave Data Not Found",
+                    f"No characterization data found for '{slave_id}' in Instrument Lab.\n\n"
+                    "Please go to the Instrument Lab tab and load & characterize this instrument first."
+                )
             return
 
         # VALIDATION: Check that master and slave are different
@@ -14914,63 +14947,135 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                 # Unsupported method for plotting
                 return
 
-            # === Plot 1: Transfer Quality Plot (3 subplots) ===
-            fig1 = Figure(figsize=(12, 4))
+            # === Create Tabbed Interface for Raw / 1st Deriv / 2nd Deriv ===
+            from tkinter import ttk
 
-            # Subplot 1: Master spectra
-            ax1 = fig1.add_subplot(131)
-            master_mean = np.mean(self.ct_X_master_common, axis=0)
-            master_std = np.std(self.ct_X_master_common, axis=0)
-            ax1.plot(self.ct_wavelengths_common, master_mean, 'b-', linewidth=2, label='Mean')
-            ax1.fill_between(self.ct_wavelengths_common,
-                           master_mean - master_std,
-                           master_mean + master_std,
-                           alpha=0.3, color='b', label='±1 Std')
-            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
-            ax1.set_title('Master Spectra', fontsize=11, fontweight='bold')
-            ax1.legend(fontsize=8)
-            ax1.grid(True, alpha=0.3)
+            # Create notebook for tabs
+            derivative_notebook = ttk.Notebook(self.ct_transfer_plot_frame)
+            derivative_notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-            # Subplot 2: Slave before transfer
-            ax2 = fig1.add_subplot(132)
-            slave_mean = np.mean(self.ct_X_slave_common, axis=0)
-            slave_std = np.std(self.ct_X_slave_common, axis=0)
-            ax2.plot(self.ct_wavelengths_common, slave_mean, 'r-', linewidth=2, label='Mean')
-            ax2.fill_between(self.ct_wavelengths_common,
-                           slave_mean - slave_std,
-                           slave_mean + slave_std,
-                           alpha=0.3, color='r', label='±1 Std')
-            ax2.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
-            ax2.set_title('Slave Before Transfer', fontsize=11, fontweight='bold')
-            ax2.legend(fontsize=8)
-            ax2.grid(True, alpha=0.3)
+            # Helper function to compute derivatives
+            def compute_derivative(X, wavelengths, deriv_order):
+                """Compute derivative using Savitzky-Golay filter."""
+                from scipy.signal import savgol_filter
+                if deriv_order == 0:
+                    return X
+                # Use window length of 11 and polynomial order 2 (common for NIR)
+                window_length = min(11, len(wavelengths) - 1)
+                if window_length % 2 == 0:
+                    window_length -= 1  # Must be odd
+                if window_length < 5:
+                    window_length = 5
+                X_deriv = np.apply_along_axis(
+                    lambda y: savgol_filter(y, window_length, polyorder=2, deriv=deriv_order),
+                    axis=1, arr=X
+                )
+                return X_deriv
 
-            # Subplot 3: Slave after transfer
-            ax3 = fig1.add_subplot(133)
-            trans_mean = np.mean(X_transferred, axis=0)
-            trans_std = np.std(X_transferred, axis=0)
-            ax3.plot(self.ct_wavelengths_common, trans_mean, 'g-', linewidth=2, label='Mean')
-            ax3.fill_between(self.ct_wavelengths_common,
-                           trans_mean - trans_std,
-                           trans_mean + trans_std,
-                           alpha=0.3, color='g', label='±1 Std')
-            ax3.set_xlabel('Wavelength (nm)', fontsize=10)
-            ax3.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
-            ax3.set_title('Slave After Transfer', fontsize=11, fontweight='bold')
-            ax3.legend(fontsize=8)
-            ax3.grid(True, alpha=0.3)
+            # Helper function to create 3-subplot comparison figure
+            def create_comparison_figure(master_data, slave_data, transferred_data,
+                                        ylabel, title_suffix):
+                """Create figure with Master, Slave Before, Slave After subplots."""
+                fig = Figure(figsize=(12, 4))
 
-            fig1.tight_layout()
+                # Subplot 1: Master
+                ax1 = fig.add_subplot(131)
+                master_mean = np.mean(master_data, axis=0)
+                master_std = np.std(master_data, axis=0)
+                ax1.plot(self.ct_wavelengths_common, master_mean, 'b-', linewidth=2, label='Mean')
+                ax1.fill_between(self.ct_wavelengths_common,
+                               master_mean - master_std,
+                               master_mean + master_std,
+                               alpha=0.3, color='b', label='±1 Std')
+                ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax1.set_ylabel(ylabel, fontsize=10)
+                ax1.set_title(f'Master {title_suffix}', fontsize=11, fontweight='bold')
+                ax1.legend(fontsize=8)
+                ax1.grid(True, alpha=0.3)
 
-            # Embed plot 1
-            canvas1 = FigureCanvasTkAgg(fig1, self.ct_transfer_plot_frame)
-            canvas1.draw()
-            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                # Subplot 2: Slave before transfer
+                ax2 = fig.add_subplot(132)
+                slave_mean = np.mean(slave_data, axis=0)
+                slave_std = np.std(slave_data, axis=0)
+                ax2.plot(self.ct_wavelengths_common, slave_mean, 'r-', linewidth=2, label='Mean')
+                ax2.fill_between(self.ct_wavelengths_common,
+                               slave_mean - slave_std,
+                               slave_mean + slave_std,
+                               alpha=0.3, color='r', label='±1 Std')
+                ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax2.set_ylabel(ylabel, fontsize=10)
+                ax2.set_title(f'Slave Before {title_suffix}', fontsize=11, fontweight='bold')
+                ax2.legend(fontsize=8)
+                ax2.grid(True, alpha=0.3)
 
-            # Add export button for plot 1
-            self._add_plot_export_button(self.ct_transfer_plot_frame, fig1, "transfer_quality")
+                # Subplot 3: Slave after transfer
+                ax3 = fig.add_subplot(133)
+                trans_mean = np.mean(transferred_data, axis=0)
+                trans_std = np.std(transferred_data, axis=0)
+                ax3.plot(self.ct_wavelengths_common, trans_mean, 'g-', linewidth=2, label='Mean')
+                ax3.fill_between(self.ct_wavelengths_common,
+                               trans_mean - trans_std,
+                               trans_mean + trans_std,
+                               alpha=0.3, color='g', label='±1 Std')
+                ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax3.set_ylabel(ylabel, fontsize=10)
+                ax3.set_title(f'Slave After {title_suffix}', fontsize=11, fontweight='bold')
+                ax3.legend(fontsize=8)
+                ax3.grid(True, alpha=0.3)
+
+                fig.tight_layout()
+                return fig
+
+            # Compute all derivatives
+            master_d1 = compute_derivative(self.ct_X_master_common, self.ct_wavelengths_common, 1)
+            slave_d1 = compute_derivative(self.ct_X_slave_common, self.ct_wavelengths_common, 1)
+            transferred_d1 = compute_derivative(X_transferred, self.ct_wavelengths_common, 1)
+
+            master_d2 = compute_derivative(self.ct_X_master_common, self.ct_wavelengths_common, 2)
+            slave_d2 = compute_derivative(self.ct_X_slave_common, self.ct_wavelengths_common, 2)
+            transferred_d2 = compute_derivative(X_transferred, self.ct_wavelengths_common, 2)
+
+            # Tab 1: Raw spectra
+            tab_raw = ttk.Frame(derivative_notebook)
+            derivative_notebook.add(tab_raw, text='Raw Spectra')
+
+            fig_raw = create_comparison_figure(
+                self.ct_X_master_common, self.ct_X_slave_common, X_transferred,
+                self._get_spectral_ylabel(), 'Spectra'
+            )
+
+            canvas_raw = FigureCanvasTkAgg(fig_raw, tab_raw)
+            canvas_raw.draw()
+            canvas_raw.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(tab_raw, fig_raw, "transfer_quality_raw")
+
+            # Tab 2: 1st derivative
+            tab_d1 = ttk.Frame(derivative_notebook)
+            derivative_notebook.add(tab_d1, text='1st Derivative')
+
+            fig_d1 = create_comparison_figure(
+                master_d1, slave_d1, transferred_d1,
+                '1st Derivative', '(1st Derivative)'
+            )
+
+            canvas_d1 = FigureCanvasTkAgg(fig_d1, tab_d1)
+            canvas_d1.draw()
+            canvas_d1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(tab_d1, fig_d1, "transfer_quality_1st_deriv")
+
+            # Tab 3: 2nd derivative
+            tab_d2 = ttk.Frame(derivative_notebook)
+            derivative_notebook.add(tab_d2, text='2nd Derivative')
+
+            fig_d2 = create_comparison_figure(
+                master_d2, slave_d2, transferred_d2,
+                '2nd Derivative', '(2nd Derivative)'
+            )
+
+            canvas_d2 = FigureCanvasTkAgg(fig_d2, tab_d2)
+            canvas_d2.draw()
+            canvas_d2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(tab_d2, fig_d2, "transfer_quality_2nd_deriv")
 
             # === Plot 2: Transfer Scatter Plot ===
             fig2 = Figure(figsize=(7, 6))
