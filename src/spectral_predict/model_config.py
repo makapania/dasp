@@ -58,14 +58,14 @@ CLASSIFICATION_TIERS = {
 
     'comprehensive': {
         'description': 'Advanced classifiers for thorough analysis',
-        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'SVM', 'MLP'],
+        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'SVM', 'MLP', 'NeuralBoosted'],
         'recommended_for': 'Research, publications, thorough method comparison'
     },
 
     'experimental': {
         'description': 'All available classifiers including experimental',
         'models': ['PLS-DA', 'PLS', 'RandomForest', 'LightGBM', 'XGBoost',
-                   'CatBoost', 'SVM', 'MLP'],
+                   'CatBoost', 'SVM', 'MLP', 'NeuralBoosted'],
         'recommended_for': 'Exploration, method comparison, no time constraints'
     }
 }

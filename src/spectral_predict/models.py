@@ -7,7 +7,7 @@ from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.linear_model import LogisticRegression, Ridge, Lasso, ElasticNet
 from sklearn.svm import SVR, SVC
 from sklearn.base import BaseEstimator, TransformerMixin
-from .neural_boosted import NeuralBoostedRegressor
+from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 
 # Import gradient boosting libraries
 from xgboost import XGBRegressor, XGBClassifier
@@ -243,6 +243,22 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 max_iter=max_iter,
                 random_state=42,
                 early_stopping=True
+            )
+
+        elif model_name == "NeuralBoosted":
+            return NeuralBoostedClassifier(
+                n_estimators=100,
+                learning_rate=0.1,
+                hidden_layer_size=5,
+                activation='tanh',
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=10,
+                early_stopping_metric='accuracy',  # User-selectable metric (default: accuracy)
+                class_weight=None,  # Can be 'balanced' for imbalanced datasets
+                alpha=1e-4,
+                random_state=42,
+                verbose=0
             )
 
         elif model_name == "SVM":
@@ -1193,6 +1209,47 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                 )
                                             )
             grids["MLP"] = mlp_configs
+
+        # Neural Boosted Classifier - tier-aware with classification-optimized hyperparameters
+        if 'NeuralBoosted' in enabled_models:
+            nb_config = get_hyperparameters('NeuralBoosted', tier)
+            hidden_sizes = nb_config.get('hidden_layer_size', [3, 5, 8])
+            activations = nb_config.get('activation', ['tanh', 'relu'])
+
+            nbc_configs = []
+            for n_est in n_estimators_list:
+                for lr in learning_rates:
+                    for hidden in hidden_sizes:
+                        for activation in activations:
+                            for early_stopping_metric in ['accuracy', 'log_loss']:
+                                for class_weight in [None, 'balanced']:
+                                    nbc_configs.append(
+                                        (
+                                            NeuralBoostedClassifier(
+                                                n_estimators=n_est,
+                                                learning_rate=lr,
+                                                hidden_layer_size=hidden,
+                                                activation=activation,
+                                                early_stopping=True,
+                                                validation_fraction=0.15,
+                                                n_iter_no_change=10,
+                                                early_stopping_metric=early_stopping_metric,
+                                                class_weight=class_weight,
+                                                alpha=1e-4,
+                                                random_state=42,
+                                                verbose=0
+                                            ),
+                                            {
+                                                "n_estimators": n_est,
+                                                "learning_rate": lr,
+                                                "hidden_layer_size": hidden,
+                                                "activation": activation,
+                                                "early_stopping_metric": early_stopping_metric,
+                                                "class_weight": class_weight
+                                            }
+                                        )
+                                    )
+            grids["NeuralBoosted"] = nbc_configs
 
         # Support Vector Machine (SVM) for classification - tier-aware
         if 'SVM' in enabled_models or 'SVR' in enabled_models:  # SVR config works for SVM too
