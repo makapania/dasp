@@ -789,7 +789,9 @@ class TestClassifierFeatureImportances:
     def test_multiclass_feature_importances(self):
         """Test feature importances for multiclass (averaged across classifiers)."""
         X, y = make_classification(
-            n_samples=150, n_features=20, n_classes=3, random_state=42
+            n_samples=150, n_features=20, n_classes=3,
+            n_informative=15, n_clusters_per_class=1,
+            random_state=42
         )
 
         model = NeuralBoostedClassifier(n_estimators=20, random_state=42, verbose=0)
@@ -807,14 +809,15 @@ class TestClassifierEdgeCases:
 
     def test_small_dataset(self):
         """Test with very small dataset."""
-        X, y = make_classification(n_samples=30, n_features=10, random_state=42)
+        X, y = make_classification(n_samples=18, n_features=10, random_state=42)
 
-        # Should warn but still work
+        # Should warn because validation split will create <20 samples
         with pytest.warns(UserWarning, match="very small"):
             model = NeuralBoostedClassifier(
                 n_estimators=10,
                 learning_rate=0.1,
                 early_stopping=True,
+                validation_fraction=0.2,  # 18 * 0.8 = 14.4 < 20
                 random_state=42,
                 verbose=0
             )
