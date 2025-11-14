@@ -166,15 +166,34 @@ class SpectralPredictApp:
         self.predictions_model_map = {}  # Map column names to model metadata
         self.consensus_info = {}  # Store consensus model details for display
 
-        # Instrument Lab Tab (Tab 9) variables
-        self.instrument_profiles = {}  # Dict of instrument_id -> InstrumentProfile
-        self.current_instrument_data = None  # (wavelengths, spectra) for current instrument
-        self.instrument_spectral_data = {}  # Dict of instrument_id -> (wavelengths, X) - persistent storage
+        # Instrument Lab Tab (Tab 9) variables - REMOVED (functionality moved to Calibration Transfer)
+        # self.instrument_profiles = {}  # Dict of instrument_id -> InstrumentProfile
+        # self.current_instrument_data = None  # (wavelengths, spectra) for current instrument
+        # self.instrument_spectral_data = {}  # Dict of instrument_id -> (wavelengths, X) - persistent storage
 
         # Track accent buttons for theme switching
         self.accent_buttons = []  # List of accent buttons created
 
-        # Calibration Transfer Tab (Tab 10) variables
+        # Calibration Transfer Tab (Tab 10) variables - REDESIGNED for 3-step wizard
+        # Step 1: Transfer Model
+        self.current_transfer_model = None  # TransferModel object (loaded or built)
+        self.current_master_data = None  # (wavelengths, X) tuple for building model
+        self.current_slave_data = None  # (wavelengths, X) tuple for building model
+        self.master_data_format = None  # 'csv', 'npy', 'folder', etc.
+        self.slave_data_format = None  # 'csv', 'npy', 'folder', etc.
+
+        # Step 2: Application Mode
+        self.application_mode = None  # 'predict' or 'export'
+
+        # Step 3A: Prediction Workflow
+        self.current_prediction_model = None  # sklearn model for predictions
+        self.new_slave_data_predict = None  # New slave data to transform and predict
+
+        # Step 3B: Export Workflow
+        self.new_slave_data_export = None  # New slave data to transform and export
+        self.transformed_spectra = None  # Transformed spectra ready for export
+
+        # Legacy variables (kept for backward compatibility with existing methods)
         self.ct_master_model_dict = None  # Loaded master model for predictions
         self.ct_X_master_common = None  # Master spectra on common grid
         self.ct_X_slave_common = None  # Slave spectra on common grid
@@ -12865,232 +12884,236 @@ Configuration:
             messagebox.showerror("Export Error",
                 f"Failed to export predictions:\n{str(e)}")
 
-    def _create_tab9_instrument_lab(self):
-        """Tab 9: Instrument Lab - Instrument characterization and registry."""
-        self.tab9 = ttk.Frame(self.notebook, style='TFrame')
-        self.notebook.add(self.tab9, text='  🔬 Instrument Lab  ')
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _create_tab9_instrument_lab(self):
+    #     """Tab 9: Instrument Lab - Instrument characterization and registry."""
+    #     self.tab9 = ttk.Frame(self.notebook, style='TFrame')
+    #     self.notebook.add(self.tab9, text='  🔬 Instrument Lab  ')
+    #
+    #     # Create scrollable content
+    #     canvas = tk.Canvas(self.tab9, bg=self.colors['bg'], highlightthickness=0)
+    #     scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
+    #     scrollable_frame = ttk.Frame(canvas, style='TFrame')
+    #
+    #     scrollable_frame.bind(
+    #         "<Configure>",
+    #         lambda e: self._debounced_configure_scrollregion("tab8", canvas)
+    #     )
+    #
+    #     canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    #     canvas.configure(yscrollcommand=scrollbar.set)
+    #
+    #     canvas.pack(side="left", fill="both", expand=True)
+    #     scrollbar.pack(side="right", fill="y")
+    #
+    #     main_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="30")
+    #     main_frame.pack(fill='both', expand=True)
+    #
+    #     # Title
+    #     title_label = ttk.Label(main_frame, text="Instrument Lab",
+    #                            style='Title.TLabel')
+    #     title_label.pack(pady=(0, 10))
+    #
+    #     desc_label = ttk.Label(main_frame,
+    #                           text="Characterize instruments and manage instrument registry",
+    #                           style='Caption.TLabel')
+    #     desc_label.pack(pady=(0, 20))
+    #
+    #     # === SECTION A: Load & Characterize Instrument ===
+    #     section_a = ttk.LabelFrame(main_frame, text="Load & Characterize Instrument",
+    #                                padding="15", style='Card.TFrame')
+    #     section_a.pack(fill='x', pady=(0, 15))
+    #
+    #     # Instrument ID
+    #     id_frame = ttk.Frame(section_a)
+    #     id_frame.pack(fill='x', pady=5)
+    #     ttk.Label(id_frame, text="Instrument ID:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+    #     self.inst_id_entry = ttk.Entry(id_frame, width=30)
+    #     self.inst_id_entry.pack(side='left')
+    #
+    #     # Data directory
+    #     dir_frame = ttk.Frame(section_a)
+    #     dir_frame.pack(fill='x', pady=5)
+    #     ttk.Label(dir_frame, text="Data Directory:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+    #     self.inst_data_path = tk.StringVar()
+    #     ttk.Entry(dir_frame, textvariable=self.inst_data_path, width=50).pack(side='left', padx=(0, 10))
+    #     ttk.Button(dir_frame, text="Browse", command=self._browse_instrument_data, style='Modern.TButton').pack(side='left')
+    #
+    #     # Load & Characterize button
+    #     self._create_accent_button(section_a, "Load & Characterize",
+    #                                 self._load_and_characterize_instrument).pack(pady=10)
+    #
+    #     # === SECTION B: Instrument Summary ===
+    #     section_b = ttk.LabelFrame(main_frame, text="Instrument Summary",
+    #                                padding="15", style='Card.TFrame')
+    #     section_b.pack(fill='x', pady=(0, 15))
+    #
+    #     self.inst_summary_text = tk.Text(section_b, height=8, width=80, wrap='word',
+    #                                      bg=self.colors['panel'], fg=self.colors['text'],
+    #                                      relief='flat', borderwidth=0,
+    #                                      selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
+    #     self.inst_summary_text.pack(fill='x')
+    #     self.inst_summary_text.insert('1.0', "No instrument loaded")
+    #     self.inst_summary_text.config(state='disabled')
+    #
+    #     # === SECTION C: Instrument Registry ===
+    #     section_c = ttk.LabelFrame(main_frame, text="Instrument Registry",
+    #                                padding="15", style='Card.TFrame')
+    #     section_c.pack(fill='both', expand=True, pady=(0, 15))
+    #
+    #     # Registry table
+    #     columns = ('ID', 'Vendor', 'Model', 'Δλ_med', 'Roughness', 'Detail Score')
+    #     self.inst_registry_tree = ttk.Treeview(section_c, columns=columns, show='headings', height=10)
+    #
+    #     for col in columns:
+    #         self.inst_registry_tree.heading(col, text=col)
+    #         self.inst_registry_tree.column(col, width=120)
+    #
+    #     self.inst_registry_tree.pack(fill='both', expand=True)
+    #
+    #     # Registry buttons
+    #     reg_btn_frame = ttk.Frame(section_c)
+    #     reg_btn_frame.pack(fill='x', pady=(10, 0))
+    #
+    #     ttk.Button(reg_btn_frame, text="Save Registry",
+    #               command=self._save_instrument_registry, style='Modern.TButton').pack(side='left', padx=5)
+    #     ttk.Button(reg_btn_frame, text="Load Registry",
+    #               command=self._load_instrument_registry, style='Modern.TButton').pack(side='left', padx=5)
+    #     ttk.Button(reg_btn_frame, text="Delete Selected",
+    #               command=self._delete_selected_instrument, style='Modern.TButton').pack(side='left', padx=5)
 
-        # Create scrollable content
-        canvas = tk.Canvas(self.tab9, bg=self.colors['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _browse_instrument_data(self):
+    #     """Browse for instrument data directory."""
+    #     directory = filedialog.askdirectory(title="Select Instrument Data Directory")
+    #     if directory:
+    #         self.inst_data_path.set(directory)
 
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self._debounced_configure_scrollregion("tab8", canvas)
-        )
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _load_and_characterize_instrument(self):
+    #     """Load instrument data and compute characteristics."""
+    #     if not HAS_CALIBRATION_TRANSFER:
+    #         messagebox.showerror("Module Not Available",
+    #             "Calibration transfer modules are not available.")
+    #         return
+    #
+    #     inst_id = self.inst_id_entry.get().strip()
+    #     data_path = self.inst_data_path.get()
+    #
+    #     if not inst_id:
+    #         messagebox.showerror("Error", "Please enter an Instrument ID")
+    #         return
+    #
+    #     if not data_path:
+    #         messagebox.showerror("Error", "Please select a data directory")
+    #         return
+    #
+    #     try:
+    #         # Load spectral data from directory (reuse existing loader logic)
+    #         from spectral_predict.io import (read_asd_dir, read_csv_spectra, read_spc_dir,
+    #                                          read_jcamp_dir, read_ascii_spectra)
+    #
+    #         data_path_obj = Path(data_path)
+    #
+    #         # Try different formats in order
+    #         data = None
+    #
+    #         # Check file types
+    #         asd_files = list(data_path_obj.glob("*.asd"))
+    #         spc_files = list(data_path_obj.glob("*.spc"))
+    #         jcamp_files = list(data_path_obj.glob("*.jdx")) + list(data_path_obj.glob("*.dx"))
+    #         ascii_files = (list(data_path_obj.glob("*.dpt")) + list(data_path_obj.glob("*.dat")) +
+    #                       list(data_path_obj.glob("*.asc")))
+    #
+    #         try:
+    #             if asd_files:
+    #                 data, _ = read_asd_dir(str(data_path_obj))
+    #             elif spc_files:
+    #                 data, _ = read_spc_dir(str(data_path_obj))
+    #             elif jcamp_files:
+    #                 data, _ = read_jcamp_dir(str(data_path_obj))
+    #             elif ascii_files:
+    #                 data, _ = read_ascii_spectra(str(data_path_obj))
+    #             else:
+    #                 # Try CSV format as fallback
+    #                 data, _ = read_csv_spectra(str(data_path_obj))
+    #
+    #             wavelengths = data.columns.astype(float).values
+    #             X = data.values
+    #         except Exception as e:
+    #             raise ValueError(f"Could not load spectral data: {e}")
+    #
+    #         # Characterize instrument
+    #         profile = characterize_instrument(
+    #             instrument_id=inst_id,
+    #             wavelengths=wavelengths,
+    #             spectra=X,
+    #             vendor="",
+    #             model="",
+    #             description=f"Loaded from {data_path}"
+    #         )
+    #
+    #         # Store in registry
+    #         self.instrument_profiles[inst_id] = profile
+    #         self.current_instrument_data = (wavelengths, X)
+    #         # Store spectral data persistently for use in Calibration Transfer
+    #         self.instrument_spectral_data[inst_id] = (wavelengths, X)
+    #
+    #         # Update summary
+    #         self._update_instrument_summary(profile)
+    #
+    #         # Update registry table
+    #         self._update_registry_table()
+    #
+    #         # Update calibration transfer registry view
+    #         self._refresh_ct_registry()
+    #
+    #         messagebox.showinfo("Success",
+    #             f"Instrument '{inst_id}' characterized successfully!\n\n"
+    #             f"Wavelength range: {wavelengths.min():.1f} - {wavelengths.max():.1f} nm\n"
+    #             f"Channels: {len(wavelengths)}\n"
+    #             f"Detail score: {profile.detail_score:.4f}")
+    #
+    #         # Clear fields for next entry
+    #         self.inst_id_entry.delete(0, 'end')
+    #         self.inst_data_path.set('')
+    #
+    #     except Exception as e:
+    #         messagebox.showerror("Error",
+    #             f"Failed to load and characterize instrument:\n{str(e)}")
 
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        main_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="30")
-        main_frame.pack(fill='both', expand=True)
-
-        # Title
-        title_label = ttk.Label(main_frame, text="Instrument Lab",
-                               style='Title.TLabel')
-        title_label.pack(pady=(0, 10))
-
-        desc_label = ttk.Label(main_frame,
-                              text="Characterize instruments and manage instrument registry",
-                              style='Caption.TLabel')
-        desc_label.pack(pady=(0, 20))
-
-        # === SECTION A: Load & Characterize Instrument ===
-        section_a = ttk.LabelFrame(main_frame, text="Load & Characterize Instrument",
-                                   padding="15", style='Card.TFrame')
-        section_a.pack(fill='x', pady=(0, 15))
-
-        # Instrument ID
-        id_frame = ttk.Frame(section_a)
-        id_frame.pack(fill='x', pady=5)
-        ttk.Label(id_frame, text="Instrument ID:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.inst_id_entry = ttk.Entry(id_frame, width=30)
-        self.inst_id_entry.pack(side='left')
-
-        # Data directory
-        dir_frame = ttk.Frame(section_a)
-        dir_frame.pack(fill='x', pady=5)
-        ttk.Label(dir_frame, text="Data Directory:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.inst_data_path = tk.StringVar()
-        ttk.Entry(dir_frame, textvariable=self.inst_data_path, width=50).pack(side='left', padx=(0, 10))
-        ttk.Button(dir_frame, text="Browse", command=self._browse_instrument_data, style='Modern.TButton').pack(side='left')
-
-        # Load & Characterize button
-        self._create_accent_button(section_a, "Load & Characterize",
-                                    self._load_and_characterize_instrument).pack(pady=10)
-
-        # === SECTION B: Instrument Summary ===
-        section_b = ttk.LabelFrame(main_frame, text="Instrument Summary",
-                                   padding="15", style='Card.TFrame')
-        section_b.pack(fill='x', pady=(0, 15))
-
-        self.inst_summary_text = tk.Text(section_b, height=8, width=80, wrap='word',
-                                         bg=self.colors['panel'], fg=self.colors['text'],
-                                         relief='flat', borderwidth=0,
-                                         selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
-        self.inst_summary_text.pack(fill='x')
-        self.inst_summary_text.insert('1.0', "No instrument loaded")
-        self.inst_summary_text.config(state='disabled')
-
-        # === SECTION C: Instrument Registry ===
-        section_c = ttk.LabelFrame(main_frame, text="Instrument Registry",
-                                   padding="15", style='Card.TFrame')
-        section_c.pack(fill='both', expand=True, pady=(0, 15))
-
-        # Registry table
-        columns = ('ID', 'Vendor', 'Model', 'Δλ_med', 'Roughness', 'Detail Score')
-        self.inst_registry_tree = ttk.Treeview(section_c, columns=columns, show='headings', height=10)
-
-        for col in columns:
-            self.inst_registry_tree.heading(col, text=col)
-            self.inst_registry_tree.column(col, width=120)
-
-        self.inst_registry_tree.pack(fill='both', expand=True)
-
-        # Registry buttons
-        reg_btn_frame = ttk.Frame(section_c)
-        reg_btn_frame.pack(fill='x', pady=(10, 0))
-
-        ttk.Button(reg_btn_frame, text="Save Registry",
-                  command=self._save_instrument_registry, style='Modern.TButton').pack(side='left', padx=5)
-        ttk.Button(reg_btn_frame, text="Load Registry",
-                  command=self._load_instrument_registry, style='Modern.TButton').pack(side='left', padx=5)
-        ttk.Button(reg_btn_frame, text="Delete Selected",
-                  command=self._delete_selected_instrument, style='Modern.TButton').pack(side='left', padx=5)
-
-    def _browse_instrument_data(self):
-        """Browse for instrument data directory."""
-        directory = filedialog.askdirectory(title="Select Instrument Data Directory")
-        if directory:
-            self.inst_data_path.set(directory)
-
-    def _load_and_characterize_instrument(self):
-        """Load instrument data and compute characteristics."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Module Not Available",
-                "Calibration transfer modules are not available.")
-            return
-
-        inst_id = self.inst_id_entry.get().strip()
-        data_path = self.inst_data_path.get()
-
-        if not inst_id:
-            messagebox.showerror("Error", "Please enter an Instrument ID")
-            return
-
-        if not data_path:
-            messagebox.showerror("Error", "Please select a data directory")
-            return
-
-        try:
-            # Load spectral data from directory (reuse existing loader logic)
-            from spectral_predict.io import (read_asd_dir, read_csv_spectra, read_spc_dir,
-                                             read_jcamp_dir, read_ascii_spectra)
-
-            data_path_obj = Path(data_path)
-
-            # Try different formats in order
-            data = None
-
-            # Check file types
-            asd_files = list(data_path_obj.glob("*.asd"))
-            spc_files = list(data_path_obj.glob("*.spc"))
-            jcamp_files = list(data_path_obj.glob("*.jdx")) + list(data_path_obj.glob("*.dx"))
-            ascii_files = (list(data_path_obj.glob("*.dpt")) + list(data_path_obj.glob("*.dat")) +
-                          list(data_path_obj.glob("*.asc")))
-
-            try:
-                if asd_files:
-                    data, _ = read_asd_dir(str(data_path_obj))
-                elif spc_files:
-                    data, _ = read_spc_dir(str(data_path_obj))
-                elif jcamp_files:
-                    data, _ = read_jcamp_dir(str(data_path_obj))
-                elif ascii_files:
-                    data, _ = read_ascii_spectra(str(data_path_obj))
-                else:
-                    # Try CSV format as fallback
-                    data, _ = read_csv_spectra(str(data_path_obj))
-
-                wavelengths = data.columns.astype(float).values
-                X = data.values
-            except Exception as e:
-                raise ValueError(f"Could not load spectral data: {e}")
-
-            # Characterize instrument
-            profile = characterize_instrument(
-                instrument_id=inst_id,
-                wavelengths=wavelengths,
-                spectra=X,
-                vendor="",
-                model="",
-                description=f"Loaded from {data_path}"
-            )
-
-            # Store in registry
-            self.instrument_profiles[inst_id] = profile
-            self.current_instrument_data = (wavelengths, X)
-            # Store spectral data persistently for use in Calibration Transfer
-            self.instrument_spectral_data[inst_id] = (wavelengths, X)
-
-            # Update summary
-            self._update_instrument_summary(profile)
-
-            # Update registry table
-            self._update_registry_table()
-
-            # Update calibration transfer registry view
-            self._refresh_ct_registry()
-
-            messagebox.showinfo("Success",
-                f"Instrument '{inst_id}' characterized successfully!\n\n"
-                f"Wavelength range: {wavelengths.min():.1f} - {wavelengths.max():.1f} nm\n"
-                f"Channels: {len(wavelengths)}\n"
-                f"Detail score: {profile.detail_score:.4f}")
-
-            # Clear fields for next entry
-            self.inst_id_entry.delete(0, 'end')
-            self.inst_data_path.set('')
-
-        except Exception as e:
-            messagebox.showerror("Error",
-                f"Failed to load and characterize instrument:\n{str(e)}")
-
-    def _update_instrument_summary(self, profile):
-        """Update the instrument summary text widget."""
-        self.inst_summary_text.config(state='normal')
-        self.inst_summary_text.delete('1.0', 'end')
-
-        # Check if data is interpolated
-        interp_flag = " [INTERPOLATED]" if profile.is_interpolated else ""
-
-        summary = f"""Instrument ID: {profile.instrument_id}{interp_flag}
-Vendor: {profile.vendor or 'N/A'}
-Model: {profile.model or 'N/A'}
-Description: {profile.description or 'N/A'}
-
-Wavelength Range: {profile.wavelengths.min():.1f} - {profile.wavelengths.max():.1f} nm
-Number of Channels: {len(profile.wavelengths)}
-
-Data-Driven Metrics:
-  Median Wavelength Spacing (Δλ_med): {profile.delta_lambda_med:.4f} nm
-  Roughness (R): {profile.roughness_R:.6f}
-  Detail Score (R/Δλ): {profile.detail_score:.4f}
-
-Peak-Based Resolution Metrics:
-  Average Peak Count: {profile.peak_count if profile.peak_count is not None else 'N/A'}
-  Average Peak FWHM: {f'{profile.avg_peak_fwhm:.4f} nm' if profile.avg_peak_fwhm else 'N/A'}
-  Average Peak Sharpness: {f'{profile.avg_peak_sharpness:.4f}' if profile.avg_peak_sharpness else 'N/A'}
-
-Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else "Lower detail/resolution"}
-Note: {"Uniform wavelength spacing detected - data appears interpolated" if profile.is_interpolated else "Non-uniform spacing - likely native measurements"}
-"""
-        self.inst_summary_text.insert('1.0', summary)
-        self.inst_summary_text.config(state='disabled')
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _update_instrument_summary(self, profile):
+    #     """Update the instrument summary text widget."""
+    #     self.inst_summary_text.config(state='normal')
+    #     self.inst_summary_text.delete('1.0', 'end')
+    #
+    #     # Check if data is interpolated
+    #     interp_flag = " [INTERPOLATED]" if profile.is_interpolated else ""
+    #
+    #     summary = f"""Instrument ID: {profile.instrument_id}{interp_flag}
+# Vendor: {profile.vendor or 'N/A'}
+# Model: {profile.model or 'N/A'}
+# Description: {profile.description or 'N/A'}
+#
+# Wavelength Range: {profile.wavelengths.min():.1f} - {profile.wavelengths.max():.1f} nm
+# Number of Channels: {len(profile.wavelengths)}
+#
+# Data-Driven Metrics:
+#   Median Wavelength Spacing (Δλ_med): {profile.delta_lambda_med:.4f} nm
+#   Roughness (R): {profile.roughness_R:.6f}
+#   Detail Score (R/Δλ): {profile.detail_score:.4f}
+#
+# Peak-Based Resolution Metrics:
+#   Average Peak Count: {profile.peak_count if profile.peak_count is not None else 'N/A'}
+#   Average Peak FWHM: {f'{profile.avg_peak_fwhm:.4f} nm' if profile.avg_peak_fwhm else 'N/A'}
+#   Average Peak Sharpness: {f'{profile.avg_peak_sharpness:.4f}' if profile.avg_peak_sharpness else 'N/A'}
+#
+# Interpretation: {"Higher detail/resolution" if profile.detail_score > 0.01 else "Lower detail/resolution"}
+# Note: {"Uniform wavelength spacing detected - data appears interpolated" if profile.is_interpolated else "Non-uniform spacing - likely native measurements"}
+# """
+    #     self.inst_summary_text.insert('1.0', summary)
+    #     self.inst_summary_text.config(state='disabled')
 
     def _update_registry_table(self):
         """Update the instrument registry table."""
@@ -13112,83 +13135,86 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
                     f"{profile.detail_score:.4f}"
                 ))
 
-    def _save_instrument_registry(self):
-        """Save instrument registry to JSON file."""
-        if not self.instrument_profiles:
-            messagebox.showwarning("Warning", "No instruments to save")
-            return
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _save_instrument_registry(self):
+    #     """Save instrument registry to JSON file."""
+    #     if not self.instrument_profiles:
+    #         messagebox.showwarning("Warning", "No instruments to save")
+    #         return
+    #
+    #     # Create filename with timestamp and instrument names
+    #     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #     inst_names = "_".join(list(self.instrument_profiles.keys())[:3])  # Use first 3 instrument names
+    #     if len(self.instrument_profiles) > 3:
+    #         inst_names += f"_plus{len(self.instrument_profiles)-3}more"
+    #
+    #     # Sanitize filename (remove invalid characters)
+    #     inst_names = "".join(c if c.isalnum() or c in "-_" else "_" for c in inst_names)
+    #     default_filename = f"instrument_registry_{inst_names}_{timestamp}.json"
+    #
+    #     filepath = filedialog.asksaveasfilename(
+    #         title="Save Instrument Registry",
+    #         defaultextension=".json",
+    #         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+    #         initialfile=default_filename
+    #     )
+    #
+    #     if not filepath:
+    #         return
+    #
+    #     try:
+    #         save_instrument_profiles(self.instrument_profiles, filepath)
+    #         messagebox.showinfo("Success",
+    #             f"Saved {len(self.instrument_profiles)} instruments to:\n{filepath}")
+    #     except Exception as e:
+    #         messagebox.showerror("Error",
+    #             f"Failed to save registry:\n{str(e)}")
 
-        # Create filename with timestamp and instrument names
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        inst_names = "_".join(list(self.instrument_profiles.keys())[:3])  # Use first 3 instrument names
-        if len(self.instrument_profiles) > 3:
-            inst_names += f"_plus{len(self.instrument_profiles)-3}more"
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _load_instrument_registry(self):
+    #     """Load instrument registry from JSON file."""
+    #     filepath = filedialog.askopenfilename(
+    #         title="Load Instrument Registry",
+    #         filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+    #     )
+    #
+    #     if not filepath:
+    #         return
+    #
+    #     try:
+    #         profiles = load_instrument_profiles(filepath)
+    #         self.instrument_profiles = profiles
+    #         self._update_registry_table()
+    #         # Update calibration transfer registry view
+    #         self._refresh_ct_registry()
+    #         messagebox.showinfo("Registry Loaded",
+    #             f"Loaded {len(profiles)} instruments from:\n{filepath}\n\n"
+    #             f"Note: Registry contains metadata only.\n\n"
+    #             f"To use instruments for Calibration Transfer:\n"
+    #             f"• Re-characterize each instrument with its spectral data file\n"
+    #             f"• This loads the actual spectra needed for transfer models")
+    #     except Exception as e:
+    #         messagebox.showerror("Error",
+    #             f"Failed to load registry:\n{str(e)}")
 
-        # Sanitize filename (remove invalid characters)
-        inst_names = "".join(c if c.isalnum() or c in "-_" else "_" for c in inst_names)
-        default_filename = f"instrument_registry_{inst_names}_{timestamp}.json"
-
-        filepath = filedialog.asksaveasfilename(
-            title="Save Instrument Registry",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialfile=default_filename
-        )
-
-        if not filepath:
-            return
-
-        try:
-            save_instrument_profiles(self.instrument_profiles, filepath)
-            messagebox.showinfo("Success",
-                f"Saved {len(self.instrument_profiles)} instruments to:\n{filepath}")
-        except Exception as e:
-            messagebox.showerror("Error",
-                f"Failed to save registry:\n{str(e)}")
-
-    def _load_instrument_registry(self):
-        """Load instrument registry from JSON file."""
-        filepath = filedialog.askopenfilename(
-            title="Load Instrument Registry",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if not filepath:
-            return
-
-        try:
-            profiles = load_instrument_profiles(filepath)
-            self.instrument_profiles = profiles
-            self._update_registry_table()
-            # Update calibration transfer registry view
-            self._refresh_ct_registry()
-            messagebox.showinfo("Registry Loaded",
-                f"Loaded {len(profiles)} instruments from:\n{filepath}\n\n"
-                f"Note: Registry contains metadata only.\n\n"
-                f"To use instruments for Calibration Transfer:\n"
-                f"• Re-characterize each instrument with its spectral data file\n"
-                f"• This loads the actual spectra needed for transfer models")
-        except Exception as e:
-            messagebox.showerror("Error",
-                f"Failed to load registry:\n{str(e)}")
-
-    def _delete_selected_instrument(self):
-        """Delete selected instrument from registry."""
-        selection = self.inst_registry_tree.selection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select an instrument to delete")
-            return
-
-        # Get instrument ID from selection
-        item = selection[0]
-        values = self.inst_registry_tree.item(item, 'values')
-        inst_id = values[0]
-
-        # Confirm deletion
-        if messagebox.askyesno("Confirm Deletion",
-                              f"Delete instrument '{inst_id}' from registry?"):
-            del self.instrument_profiles[inst_id]
-            self._update_registry_table()
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _delete_selected_instrument(self):
+    #     """Delete selected instrument from registry."""
+    #     selection = self.inst_registry_tree.selection()
+    #     if not selection:
+    #         messagebox.showwarning("Warning", "Please select an instrument to delete")
+    #         return
+    #
+    #     # Get instrument ID from selection
+    #     item = selection[0]
+    #     values = self.inst_registry_tree.item(item, 'values')
+    #     inst_id = values[0]
+    #
+    #     # Confirm deletion
+    #     if messagebox.askyesno("Confirm Deletion",
+    #                           f"Delete instrument '{inst_id}' from registry?"):
+    #         del self.instrument_profiles[inst_id]
+    #         self._update_registry_table()
 
     # ======================================================================
     # TAB 9 HELPER METHODS: Calibration Transfer
@@ -13238,17 +13264,18 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
 
-    def _refresh_ct_instrument_combos(self):
-        """Refresh instrument comboboxes from registry."""
-        if not self.instrument_profiles:
-            messagebox.showinfo("Info", "No instruments in registry. Please use Tab 8 to add instruments.")
-            return
-
-        inst_ids = list(self.instrument_profiles.keys())
-        self.ct_master_instrument_combo['values'] = inst_ids
-        self.ct_slave_instrument_combo['values'] = inst_ids
-
-        messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _refresh_ct_instrument_combos(self):
+    #     """Refresh instrument comboboxes from registry."""
+    #     if not self.instrument_profiles:
+    #         messagebox.showinfo("Info", "No instruments in registry. Please use Tab 8 to add instruments.")
+    #         return
+    #
+    #     inst_ids = list(self.instrument_profiles.keys())
+    #     self.ct_master_instrument_combo['values'] = inst_ids
+    #     self.ct_slave_instrument_combo['values'] = inst_ids
+    #
+    #     messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
 
     def _refresh_ct_registry(self):
         """Refresh the transfer model registry view and instruments list."""
@@ -13594,187 +13621,188 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load spectra:\n{str(e)}")
 
-    def _import_from_instrument_lab(self):
-        """Import paired spectra from Instrument Lab characterization data."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        master_id = self.ct_master_instrument_id.get()
-        slave_id = self.ct_slave_instrument_id.get()
-
-        if not master_id or not slave_id:
-            messagebox.showwarning("Warning", "Please select both master and slave instruments from the dropdowns")
-            return
-
-        # Check if both instruments have characterization data
-        # First check if instrument is in registry but spectral data not loaded
-        if master_id not in self.instrument_spectral_data:
-            # Check if it's in the registry (metadata exists but data doesn't)
-            if master_id in self.instrument_profiles:
-                messagebox.showerror(
-                    "Master Spectral Data Not Loaded",
-                    f"Instrument '{master_id}' is in the registry, but spectral data is not loaded.\n\n"
-                    f"This happens when you load a registry JSON file without the actual data files.\n\n"
-                    f"To fix this:\n"
-                    f"1. Go to the Instrument Lab tab\n"
-                    f"2. Enter instrument ID: {master_id}\n"
-                    f"3. Browse and load the original spectral data file\n"
-                    f"4. Click 'Characterize Instrument'\n\n"
-                    f"This will load the spectral data needed for calibration transfer."
-                )
-            else:
-                messagebox.showerror(
-                    "Master Data Not Found",
-                    f"No characterization data found for '{master_id}' in Instrument Lab.\n\n"
-                    "Please go to the Instrument Lab tab and load & characterize this instrument first."
-                )
-            return
-
-        if slave_id not in self.instrument_spectral_data:
-            # Check if it's in the registry (metadata exists but data doesn't)
-            if slave_id in self.instrument_profiles:
-                messagebox.showerror(
-                    "Slave Spectral Data Not Loaded",
-                    f"Instrument '{slave_id}' is in the registry, but spectral data is not loaded.\n\n"
-                    f"This happens when you load a registry JSON file without the actual data files.\n\n"
-                    f"To fix this:\n"
-                    f"1. Go to the Instrument Lab tab\n"
-                    f"2. Enter instrument ID: {slave_id}\n"
-                    f"3. Browse and load the original spectral data file\n"
-                    f"4. Click 'Characterize Instrument'\n\n"
-                    f"This will load the spectral data needed for calibration transfer."
-                )
-            else:
-                messagebox.showerror(
-                    "Slave Data Not Found",
-                    f"No characterization data found for '{slave_id}' in Instrument Lab.\n\n"
-                    "Please go to the Instrument Lab tab and load & characterize this instrument first."
-                )
-            return
-
-        # VALIDATION: Check that master and slave are different
-        if master_id == slave_id:
-            messagebox.showerror(
-                "Same Instrument Selected",
-                "Master and slave instruments must be different for calibration transfer.\n\n"
-                f"You selected: {master_id} for both master and slave.\n\n"
-                "Please select different instruments."
-            )
-            return
-
-        try:
-            # Import data from Instrument Lab
-            wavelengths_master, X_master = self.instrument_spectral_data[master_id]
-            wavelengths_slave, X_slave = self.instrument_spectral_data[slave_id]
-
-            # Make copies to avoid modifying original data
-            wavelengths_master = wavelengths_master.copy()
-            X_master = X_master.copy()
-            wavelengths_slave = wavelengths_slave.copy()
-            X_slave = X_slave.copy()
-
-            # VALIDATION 1: Sample Count Check
-            if X_master.shape[0] != X_slave.shape[0]:
-                response = messagebox.askyesno(
-                    "Sample Count Mismatch",
-                    f"Master has {X_master.shape[0]} samples, Slave has {X_slave.shape[0]} samples.\n\n"
-                    "For optimal calibration transfer, both instruments should measure the same samples.\n\n"
-                    "Do you want to continue anyway?\n"
-                    "(Will use minimum sample count)"
-                )
-                if not response:
-                    return
-
-                # Use minimum number of samples
-                min_samples = min(X_master.shape[0], X_slave.shape[0])
-                X_master = X_master[:min_samples, :]
-                X_slave = X_slave[:min_samples, :]
-
-            # VALIDATION 2: Minimum Sample Check
-            if X_master.shape[0] < 20:
-                response = messagebox.askokcancel(
-                    "Few Samples",
-                    f"Only {X_master.shape[0]} samples available.\n\n"
-                    "At least 30 samples recommended for robust calibration transfer.\n"
-                    "Results may be unreliable with fewer samples.\n\n"
-                    "Do you want to continue anyway?"
-                )
-                if not response:
-                    return
-
-            # VALIDATION 3: Wavelength Overlap Check
-            from spectral_predict.calibration_transfer import resample_to_grid
-
-            master_range = (wavelengths_master[0], wavelengths_master[-1])
-            slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
-
-            overlap_start = max(master_range[0], slave_range[0])
-            overlap_end = min(master_range[1], slave_range[1])
-
-            if overlap_start >= overlap_end:
-                messagebox.showerror(
-                    "No Wavelength Overlap",
-                    f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
-                    f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n\n"
-                    "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
-                    "Please select instruments with compatible wavelength coverage."
-                )
-                return
-
-            # Use overlap region as common grid
-            master_in_overlap = (wavelengths_master >= overlap_start) & (wavelengths_master <= overlap_end)
-            slave_in_overlap = (wavelengths_slave >= overlap_start) & (wavelengths_slave <= overlap_end)
-
-            common_wl = wavelengths_master[master_in_overlap]
-
-            # Resample slave to master's grid in overlap region
-            X_master_common = X_master[:, master_in_overlap]
-            X_slave_common = resample_to_grid(X_slave, wavelengths_slave, common_wl)
-
-            # Calculate overlap percentage
-            master_span = master_range[1] - master_range[0]
-            slave_span = slave_range[1] - slave_range[0]
-            overlap_span = overlap_end - overlap_start
-            min_overlap_pct = 100 * overlap_span / min(master_span, slave_span)
-
-            if min_overlap_pct < 80:
-                response = messagebox.askokcancel(
-                    "Limited Wavelength Overlap",
-                    f"Wavelength overlap: {min_overlap_pct:.1f}%\n\n"
-                    "Less than 80% overlap may result in suboptimal transfer performance.\n\n"
-                    "Do you want to continue?"
-                )
-                if not response:
-                    return
-
-            # Store for transfer model building
-            self.ct_X_master_common = X_master_common
-            self.ct_X_slave_common = X_slave_common
-            self.ct_wavelengths_common = common_wl
-
-            # Display info
-            info_text = (f"✅ Imported from Instrument Lab\n"
-                        f"Samples: {X_master.shape[0]} paired spectra\n"
-                        f"Common wavelength grid: {common_wl.shape[0]} points ({common_wl.min():.1f}-{common_wl.max():.1f} nm)\n"
-                        f"Wavelength overlap: {min_overlap_pct:.1f}%")
-
-            self.ct_spectra_info_text.config(state='normal')
-            self.ct_spectra_info_text.delete('1.0', tk.END)
-            self.ct_spectra_info_text.insert('1.0', info_text)
-            self.ct_spectra_info_text.config(state='disabled')
-
-            # Show preview plots
-            self._plot_paired_spectra_preview(master_id, slave_id)
-
-            messagebox.showinfo("Success",
-                f"Imported paired spectra from Instrument Lab!\n\n"
-                f"Master: {master_id} ({X_master.shape[0]} samples)\n"
-                f"Slave: {slave_id} ({X_slave.shape[0]} samples)\n\n"
-                "Preview plots displayed. You can now build a transfer model in Section C.")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to import from Instrument Lab:\n{str(e)}")
+    # REMOVED - Instrument Lab functionality deprecated
+    # def _import_from_instrument_lab(self):
+    #     """Import paired spectra from Instrument Lab characterization data."""
+    #     if not HAS_CALIBRATION_TRANSFER:
+    #         messagebox.showerror("Error", "Calibration transfer modules not available")
+    #         return
+    #
+    #     master_id = self.ct_master_instrument_id.get()
+    #     slave_id = self.ct_slave_instrument_id.get()
+    #
+    #     if not master_id or not slave_id:
+    #         messagebox.showwarning("Warning", "Please select both master and slave instruments from the dropdowns")
+    #         return
+    #
+    #     # Check if both instruments have characterization data
+    #     # First check if instrument is in registry but spectral data not loaded
+    #     if master_id not in self.instrument_spectral_data:
+    #         # Check if it's in the registry (metadata exists but data doesn't)
+    #         if master_id in self.instrument_profiles:
+    #             messagebox.showerror(
+    #                 "Master Spectral Data Not Loaded",
+    #                 f"Instrument '{master_id}' is in the registry, but spectral data is not loaded.\n\n"
+    #                 f"This happens when you load a registry JSON file without the actual data files.\n\n"
+    #                 f"To fix this:\n"
+    #                 f"1. Go to the Instrument Lab tab\n"
+    #                 f"2. Enter instrument ID: {master_id}\n"
+    #                 f"3. Browse and load the original spectral data file\n"
+    #                 f"4. Click 'Characterize Instrument'\n\n"
+    #                 f"This will load the spectral data needed for calibration transfer."
+    #             )
+    #         else:
+    #             messagebox.showerror(
+    #                 "Master Data Not Found",
+    #                 f"No characterization data found for '{master_id}' in Instrument Lab.\n\n"
+    #                 "Please go to the Instrument Lab tab and load & characterize this instrument first."
+    #             )
+    #         return
+    #
+    #     if slave_id not in self.instrument_spectral_data:
+    #         # Check if it's in the registry (metadata exists but data doesn't)
+    #         if slave_id in self.instrument_profiles:
+    #             messagebox.showerror(
+    #                 "Slave Spectral Data Not Loaded",
+    #                 f"Instrument '{slave_id}' is in the registry, but spectral data is not loaded.\n\n"
+    #                 f"This happens when you load a registry JSON file without the actual data files.\n\n"
+    #                 f"To fix this:\n"
+    #                 f"1. Go to the Instrument Lab tab\n"
+    #                 f"2. Enter instrument ID: {slave_id}\n"
+    #                 f"3. Browse and load the original spectral data file\n"
+    #                 f"4. Click 'Characterize Instrument'\n\n"
+    #                 f"This will load the spectral data needed for calibration transfer."
+    #             )
+    #         else:
+    #             messagebox.showerror(
+    #                 "Slave Data Not Found",
+    #                 f"No characterization data found for '{slave_id}' in Instrument Lab.\n\n"
+    #                 "Please go to the Instrument Lab tab and load & characterize this instrument first."
+    #             )
+    #         return
+    #
+    #     # VALIDATION: Check that master and slave are different
+    #     if master_id == slave_id:
+    #         messagebox.showerror(
+    #             "Same Instrument Selected",
+    #             "Master and slave instruments must be different for calibration transfer.\n\n"
+    #             f"You selected: {master_id} for both master and slave.\n\n"
+    #             "Please select different instruments."
+    #         )
+    #         return
+    #
+    #     try:
+    #         # Import data from Instrument Lab
+    #         wavelengths_master, X_master = self.instrument_spectral_data[master_id]
+    #         wavelengths_slave, X_slave = self.instrument_spectral_data[slave_id]
+    #
+    #         # Make copies to avoid modifying original data
+    #         wavelengths_master = wavelengths_master.copy()
+    #         X_master = X_master.copy()
+    #         wavelengths_slave = wavelengths_slave.copy()
+    #         X_slave = X_slave.copy()
+    #
+    #         # VALIDATION 1: Sample Count Check
+    #         if X_master.shape[0] != X_slave.shape[0]:
+    #             response = messagebox.askyesno(
+    #                 "Sample Count Mismatch",
+    #                 f"Master has {X_master.shape[0]} samples, Slave has {X_slave.shape[0]} samples.\n\n"
+    #                 "For optimal calibration transfer, both instruments should measure the same samples.\n\n"
+    #                 "Do you want to continue anyway?\n"
+    #                 "(Will use minimum sample count)"
+    #             )
+    #             if not response:
+    #                 return
+    #
+    #             # Use minimum number of samples
+    #             min_samples = min(X_master.shape[0], X_slave.shape[0])
+    #             X_master = X_master[:min_samples, :]
+    #             X_slave = X_slave[:min_samples, :]
+    #
+    #         # VALIDATION 2: Minimum Sample Check
+    #         if X_master.shape[0] < 20:
+    #             response = messagebox.askokcancel(
+    #                 "Few Samples",
+    #                 f"Only {X_master.shape[0]} samples available.\n\n"
+    #                 "At least 30 samples recommended for robust calibration transfer.\n"
+    #                 "Results may be unreliable with fewer samples.\n\n"
+    #                 "Do you want to continue anyway?"
+    #             )
+    #             if not response:
+    #                 return
+    #
+    #         # VALIDATION 3: Wavelength Overlap Check
+    #         from spectral_predict.calibration_transfer import resample_to_grid
+    #
+    #         master_range = (wavelengths_master[0], wavelengths_master[-1])
+    #         slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
+    #
+    #         overlap_start = max(master_range[0], slave_range[0])
+    #         overlap_end = min(master_range[1], slave_range[1])
+    #
+    #         if overlap_start >= overlap_end:
+    #             messagebox.showerror(
+    #                 "No Wavelength Overlap",
+    #                 f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
+    #                 f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n\n"
+    #                 "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
+    #                 "Please select instruments with compatible wavelength coverage."
+    #             )
+    #             return
+    #
+    #         # Use overlap region as common grid
+    #         master_in_overlap = (wavelengths_master >= overlap_start) & (wavelengths_master <= overlap_end)
+    #         slave_in_overlap = (wavelengths_slave >= overlap_start) & (wavelengths_slave <= overlap_end)
+    #
+    #         common_wl = wavelengths_master[master_in_overlap]
+    #
+    #         # Resample slave to master's grid in overlap region
+    #         X_master_common = X_master[:, master_in_overlap]
+    #         X_slave_common = resample_to_grid(X_slave, wavelengths_slave, common_wl)
+    #
+    #         # Calculate overlap percentage
+    #         master_span = master_range[1] - master_range[0]
+    #         slave_span = slave_range[1] - slave_range[0]
+    #         overlap_span = overlap_end - overlap_start
+    #         min_overlap_pct = 100 * overlap_span / min(master_span, slave_span)
+    #
+    #         if min_overlap_pct < 80:
+    #             response = messagebox.askokcancel(
+    #                 "Limited Wavelength Overlap",
+    #                 f"Wavelength overlap: {min_overlap_pct:.1f}%\n\n"
+    #                 "Less than 80% overlap may result in suboptimal transfer performance.\n\n"
+    #                 "Do you want to continue?"
+    #             )
+    #             if not response:
+    #                 return
+    #
+    #         # Store for transfer model building
+    #         self.ct_X_master_common = X_master_common
+    #         self.ct_X_slave_common = X_slave_common
+    #         self.ct_wavelengths_common = common_wl
+    #
+    #         # Display info
+    #         info_text = (f"✅ Imported from Instrument Lab\n"
+    #                     f"Samples: {X_master.shape[0]} paired spectra\n"
+    #                     f"Common wavelength grid: {common_wl.shape[0]} points ({common_wl.min():.1f}-{common_wl.max():.1f} nm)\n"
+    #                     f"Wavelength overlap: {min_overlap_pct:.1f}%")
+    #
+    #         self.ct_spectra_info_text.config(state='normal')
+    #         self.ct_spectra_info_text.delete('1.0', tk.END)
+    #         self.ct_spectra_info_text.insert('1.0', info_text)
+    #         self.ct_spectra_info_text.config(state='disabled')
+    #
+    #         # Show preview plots
+    #         self._plot_paired_spectra_preview(master_id, slave_id)
+    #
+    #         messagebox.showinfo("Success",
+    #             f"Imported paired spectra from Instrument Lab!\n\n"
+    #             f"Master: {master_id} ({X_master.shape[0]} samples)\n"
+    #             f"Slave: {slave_id} ({X_slave.shape[0]} samples)\n\n"
+    #             "Preview plots displayed. You can now build a transfer model in Section C.")
+    #
+    #     except Exception as e:
+    #         messagebox.showerror("Error", f"Failed to import from Instrument Lab:\n{str(e)}")
 
     def _build_ct_transfer_model(self):
         """Build calibration transfer model (DS or PDS)."""
@@ -14610,6 +14638,41 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         else:
             self.ct_eq_load_tm_frame.pack_forget()
 
+    def _on_mode_selected(self):
+        """Handle application mode selection in Step 2.
+
+        Updates self.application_mode and provides user feedback.
+        Shows/hides Step 3A or Step 3B based on the selected mode.
+        """
+        mode = self.ct_mode_var.get()
+
+        # Update application mode
+        self.application_mode = mode
+
+        # Provide user feedback
+        if mode == 'predict':
+            self.ct_mode_status_label.config(
+                text="Mode A selected: Ready to configure prediction workflow (Step 3A)",
+                foreground=self.colors['accent']
+            )
+            # Show Step 3A, hide Step 3B
+            self.ct_step3a_frame.pack(fill='x', pady=(0, 15))
+            self.ct_step3b_frame.pack_forget()
+
+        elif mode == 'export':
+            self.ct_mode_status_label.config(
+                text="Mode B selected: Ready to configure export workflow (Step 3B)",
+                foreground=self.colors['accent']
+            )
+            # Hide Step 3A, show Step 3B
+            self.ct_step3a_frame.pack_forget()
+            self.ct_step3b_frame.pack(fill='x', pady=(0, 15))
+        else:
+            self.ct_mode_status_label.config(text="", foreground='gray')
+            # Hide both sections if no mode selected
+            self.ct_step3a_frame.pack_forget()
+            self.ct_step3b_frame.pack_forget()
+
     def _browse_ct_eq_transfer_model(self):
         """Browse for transfer model .json file for equalization."""
         filepath = filedialog.askopenfilename(
@@ -15370,9 +15433,1199 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         else:
             raise ValueError("No supported spectral files found in directory (ASD, CSV, or SPC)")
 
+    # ========================================================================
+    # STEP 1 HELPER METHODS FOR NEW CALIBRATION TRANSFER WIZARD
+    # ========================================================================
+
+    def _on_step1_mode_changed(self):
+        """Handle radio button change between Load Existing and Build New."""
+        mode = self.ct_step1_mode_var.get()
+
+        if mode == 'load':
+            # Show load frame, hide build frame
+            self.ct_load_existing_frame.pack(fill='x', pady=(0, 15), before=self.ct_build_new_frame)
+            self.ct_build_new_frame.pack_forget()
+        else:
+            # Show build frame, hide load frame
+            self.ct_load_existing_frame.pack_forget()
+            self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
+
+    def _browse_existing_transfer_model(self):
+        """Browse for existing .pkl transfer model file."""
+        from tkinter import filedialog
+        filepath = filedialog.askopenfilename(
+            title="Select Transfer Model File",
+            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_load_model_path_var.set(filepath)
+
+    def _load_existing_transfer_model(self):
+        """Load existing transfer model from .pkl file."""
+        import pickle
+        from tkinter import messagebox
+
+        filepath = self.ct_load_model_path_var.get()
+        if not filepath:
+            messagebox.showwarning("No File", "Please browse and select a transfer model file first.")
+            return
+
+        try:
+            with open(filepath, 'rb') as f:
+                transfer_model_data = pickle.load(f)
+
+            # Extract components
+            self.current_transfer_model = transfer_model_data.get('model')
+            method = transfer_model_data.get('method', 'Unknown')
+            master_id = transfer_model_data.get('master_id', 'N/A')
+            slave_id = transfer_model_data.get('slave_id', 'N/A')
+            date_created = transfer_model_data.get('date_created', 'N/A')
+            wavelengths = transfer_model_data.get('wavelengths_common', None)
+            n_samples = transfer_model_data.get('n_samples', 'N/A')
+
+            # Display model info
+            self._display_transfer_model_info(
+                method, master_id, slave_id, date_created, n_samples, wavelengths
+            )
+
+            messagebox.showinfo("Success", f"Transfer model loaded successfully!\nMethod: {method}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
+
+    def _display_transfer_model_info(self, method, master_id, slave_id, date_created, n_samples, wavelengths):
+        """Display transfer model information in text widget."""
+        info_text = f"Method: {method}\n"
+        info_text += f"Master ID: {master_id}\n"
+        info_text += f"Slave ID: {slave_id}\n"
+        info_text += f"Date Created: {date_created}\n"
+        info_text += f"Training Samples: {n_samples}\n"
+
+        if wavelengths is not None:
+            info_text += f"Wavelength Range: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm ({len(wavelengths)} points)\n"
+
+        # Update the text widget
+        self.ct_loaded_model_info_text.config(state='normal')
+        self.ct_loaded_model_info_text.delete('1.0', tk.END)
+        self.ct_loaded_model_info_text.insert('1.0', info_text)
+        self.ct_loaded_model_info_text.config(state='disabled')
+
+    def _browse_master_spectra(self):
+        """Browse for master spectra folder or file."""
+        from tkinter import filedialog
+        path = filedialog.askdirectory(title="Select Master Spectra Directory")
+        if not path:
+            # Try file selection
+            path = filedialog.askopenfilename(
+                title="Select Master Spectra File",
+                filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
+            )
+        if path:
+            self.ct_master_data_path_var.set(path)
+
+    def _browse_slave_spectra(self):
+        """Browse for slave spectra folder or file."""
+        from tkinter import filedialog
+        path = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        if not path:
+            # Try file selection
+            path = filedialog.askopenfilename(
+                title="Select Slave Spectra File",
+                filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
+            )
+        if path:
+            self.ct_slave_data_path_var.set(path)
+
+    def _detect_data_format(self, filepath):
+        """Detect data format for export matching.
+
+        Returns: 'csv', 'npy', 'folder', 'asd_folder', 'spc_folder'
+        """
+        if os.path.isdir(filepath):
+            # Check folder contents
+            import glob
+            asd_files = glob.glob(os.path.join(filepath, "*.asd"))
+            spc_files = glob.glob(os.path.join(filepath, "*.spc"))
+            csv_files = glob.glob(os.path.join(filepath, "*.csv"))
+
+            if asd_files:
+                return 'asd_folder'
+            elif spc_files:
+                return 'spc_folder'
+            elif csv_files:
+                return 'csv_folder'
+            else:
+                return 'folder'
+        elif filepath.endswith('.csv'):
+            return 'csv'
+        elif filepath.endswith('.npy'):
+            return 'npy'
+        else:
+            return 'unknown'
+
+    def _load_master_spectra(self):
+        """Load master spectra from file or folder."""
+        from tkinter import messagebox
+
+        path = self.ct_master_data_path_var.get()
+        if not path:
+            messagebox.showwarning("No Path", "Please browse and select master spectra first.")
+            return
+
+        try:
+            # Detect format
+            self.master_data_format = self._detect_data_format(path)
+
+            # Load data
+            if os.path.isdir(path):
+                wavelengths, X = self._load_spectra_from_directory(path)
+            elif path.endswith('.npy'):
+                # Load numpy array (assume shape is (n_samples, n_wavelengths))
+                X = np.load(path)
+                wavelengths = np.arange(X.shape[1])  # Placeholder wavelengths
+                messagebox.showinfo("Note", "NPY file loaded. Using placeholder wavelengths (0, 1, 2, ...). "
+                                          "Ensure slave data uses same wavelength grid.")
+            elif path.endswith('.csv'):
+                # Load CSV (assume first row is wavelengths, rest are spectra)
+                df = pd.read_csv(path, header=None)
+                wavelengths = df.iloc[0, :].values.astype(float)
+                X = df.iloc[1:, :].values.astype(float)
+            else:
+                raise ValueError(f"Unsupported file format: {path}")
+
+            # Store data
+            self.current_master_data = (wavelengths, X)
+
+            # Update info display
+            self._update_data_info()
+
+            messagebox.showinfo("Success", f"Master spectra loaded!\n{X.shape[0]} samples, "
+                                         f"{len(wavelengths)} wavelengths")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load master spectra:\n{str(e)}")
+
+    def _load_slave_spectra(self):
+        """Load slave spectra from file or folder."""
+        from tkinter import messagebox
+
+        path = self.ct_slave_data_path_var.get()
+        if not path:
+            messagebox.showwarning("No Path", "Please browse and select slave spectra first.")
+            return
+
+        try:
+            # Detect format
+            self.slave_data_format = self._detect_data_format(path)
+
+            # Load data
+            if os.path.isdir(path):
+                wavelengths, X = self._load_spectra_from_directory(path)
+            elif path.endswith('.npy'):
+                X = np.load(path)
+                wavelengths = np.arange(X.shape[1])
+                messagebox.showinfo("Note", "NPY file loaded. Using placeholder wavelengths (0, 1, 2, ...). "
+                                          "Ensure master data uses same wavelength grid.")
+            elif path.endswith('.csv'):
+                df = pd.read_csv(path, header=None)
+                wavelengths = df.iloc[0, :].values.astype(float)
+                X = df.iloc[1:, :].values.astype(float)
+            else:
+                raise ValueError(f"Unsupported file format: {path}")
+
+            # Store data
+            self.current_slave_data = (wavelengths, X)
+
+            # Update info display
+            self._update_data_info()
+
+            messagebox.showinfo("Success", f"Slave spectra loaded!\n{X.shape[0]} samples, "
+                                         f"{len(wavelengths)} wavelengths")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
+
+    def _update_data_info(self):
+        """Update data information display."""
+        info_text = ""
+
+        if self.current_master_data is not None:
+            wl_m, X_m = self.current_master_data
+            info_text += f"Master: {X_m.shape[0]} samples, {len(wl_m)} wavelengths "
+            info_text += f"({wl_m[0]:.1f} - {wl_m[-1]:.1f} nm)\n"
+            info_text += f"Format: {self.master_data_format}\n"
+
+        if self.current_slave_data is not None:
+            wl_s, X_s = self.current_slave_data
+            info_text += f"Slave: {X_s.shape[0]} samples, {len(wl_s)} wavelengths "
+            info_text += f"({wl_s[0]:.1f} - {wl_s[-1]:.1f} nm)\n"
+            info_text += f"Format: {self.slave_data_format}\n"
+
+        if self.current_master_data is not None and self.current_slave_data is not None:
+            wl_m, X_m = self.current_master_data
+            wl_s, X_s = self.current_slave_data
+
+            # Calculate overlap
+            overlap_start = max(wl_m[0], wl_s[0])
+            overlap_end = min(wl_m[-1], wl_s[-1])
+            overlap_pct = 100.0 * (overlap_end - overlap_start) / (max(wl_m[-1], wl_s[-1]) - min(wl_m[0], wl_s[0]))
+
+            info_text += f"\nWavelength Overlap: {overlap_start:.1f} - {overlap_end:.1f} nm ({overlap_pct:.1f}%)\n"
+
+        self.ct_data_info_text.config(state='normal')
+        self.ct_data_info_text.delete('1.0', tk.END)
+        self.ct_data_info_text.insert('1.0', info_text)
+        self.ct_data_info_text.config(state='disabled')
+
+    def _preview_spectra(self):
+        """Preview master vs slave spectra."""
+        from tkinter import messagebox
+
+        if self.current_master_data is None or self.current_slave_data is None:
+            messagebox.showwarning("No Data", "Please load both master and slave spectra first.")
+            return
+
+        if not HAS_MATPLOTLIB:
+            messagebox.showwarning("No Matplotlib", "Matplotlib not available for plotting.")
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+
+            wl_m, X_m = self.current_master_data
+            wl_s, X_s = self.current_slave_data
+
+            # Create figure with 2 subplots
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+            # Plot master
+            master_mean = np.mean(X_m, axis=0)
+            master_std = np.std(X_m, axis=0)
+            ax1.plot(wl_m, master_mean, 'b-', linewidth=2, label='Mean')
+            ax1.fill_between(wl_m, master_mean - master_std, master_mean + master_std,
+                           alpha=0.3, color='b', label='±1 Std')
+            ax1.set_xlabel('Wavelength (nm)', fontsize=11)
+            ax1.set_ylabel('Intensity', fontsize=11)
+            ax1.set_title(f'Master Spectra\n({X_m.shape[0]} samples)', fontsize=12, fontweight='bold')
+            ax1.legend(loc='best')
+            ax1.grid(True, alpha=0.3)
+
+            # Plot slave
+            slave_mean = np.mean(X_s, axis=0)
+            slave_std = np.std(X_s, axis=0)
+            ax2.plot(wl_s, slave_mean, 'r-', linewidth=2, label='Mean')
+            ax2.fill_between(wl_s, slave_mean - slave_std, slave_mean + slave_std,
+                           alpha=0.3, color='r', label='±1 Std')
+            ax2.set_xlabel('Wavelength (nm)', fontsize=11)
+            ax2.set_ylabel('Intensity', fontsize=11)
+            ax2.set_title(f'Slave Spectra\n({X_s.shape[0]} samples)', fontsize=12, fontweight='bold')
+            ax2.legend(loc='best')
+            ax2.grid(True, alpha=0.3)
+
+            fig.suptitle('Master vs Slave Spectra Preview', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create preview plot:\n{str(e)}")
+
+    def _build_transfer_model_new(self):
+        """Build new transfer model from loaded master/slave data."""
+        from tkinter import messagebox
+        from spectral_predict.calibration_transfer import (
+            build_ds, build_pds, build_tsr, build_ctai, build_nspfce, build_jypls_inv,
+            TransferModel
+        )
+
+        # Validate data loaded
+        if self.current_master_data is None or self.current_slave_data is None:
+            messagebox.showwarning("No Data", "Please load both master and slave spectra first.")
+            return
+
+        try:
+            wl_master, X_master = self.current_master_data
+            wl_slave, X_slave = self.current_slave_data
+
+            # Find common wavelength grid (interpolate if needed)
+            if np.allclose(wl_master, wl_slave):
+                wl_common = wl_master
+                X_master_common = X_master
+                X_slave_common = X_slave
+            else:
+                # Interpolate to common grid (use master wavelengths as reference)
+                from scipy.interpolate import interp1d
+                wl_common = wl_master
+
+                # Interpolate slave to master grid
+                X_slave_common = np.zeros_like(X_master)
+                for i in range(X_slave.shape[0]):
+                    f = interp1d(wl_slave, X_slave[i, :], kind='linear', fill_value='extrapolate')
+                    X_slave_common[i, :] = f(wl_common)
+
+                X_master_common = X_master
+                messagebox.showinfo("Info", "Slave spectra interpolated to master wavelength grid.")
+
+            # Store common grid data
+            self.ct_wavelengths_common = wl_common
+            self.ct_X_master_common = X_master_common
+            self.ct_X_slave_common = X_slave_common
+
+            # Get method and parameters
+            method = self.ct_method_var.get()
+
+            # Build transfer model based on method
+            if method == 'ds':
+                lambda_val = float(self.ct_ds_lambda_var.get())
+                A = build_ds(X_master_common, X_slave_common, ridge_lambda=lambda_val)
+                self.ct_transfer_model = TransferModel(method='ds', params={'A': A})
+
+            elif method == 'pds':
+                window = int(self.ct_pds_window_var.get())
+                B = build_pds(X_master_common, X_slave_common, window=window)
+                self.ct_transfer_model = TransferModel(method='pds', params={'B': B, 'window': window})
+
+            elif method == 'tsr':
+                n_samples = int(self.ct_tsr_n_samples_var.get())
+                if n_samples > X_master_common.shape[0]:
+                    raise ValueError(f"TSR requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
+                params = build_tsr(X_master_common[:n_samples], X_slave_common[:n_samples])
+                self.ct_transfer_model = TransferModel(method='tsr', params=params)
+
+            elif method == 'ctai':
+                params = build_ctai(X_master_common, X_slave_common)
+                self.ct_transfer_model = TransferModel(method='ctai', params=params)
+
+            elif method == 'nspfce':
+                max_iter = int(self.ct_nspfce_max_iterations_var.get())
+                use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
+                selector = self.ct_nspfce_selector_var.get() if use_wavelength_selection else None
+
+                params = build_nspfce(X_master_common, X_slave_common, wl_common,
+                                     max_iterations=max_iter, selector=selector)
+                self.ct_transfer_model = TransferModel(method='nspfce', params=params)
+
+            elif method == 'jypls-inv':
+                n_samples = int(self.ct_jypls_n_samples_var.get())
+                n_comp_str = self.ct_jypls_n_components_var.get()
+                n_components = None if n_comp_str == 'Auto' else int(n_comp_str)
+
+                if n_samples > X_master_common.shape[0]:
+                    raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
+
+                params = build_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
+                                        n_components=n_components)
+                self.ct_transfer_model = TransferModel(method='jypls-inv', params=params)
+
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
+            # Store in current_transfer_model for consistency
+            self.current_transfer_model = self.ct_transfer_model
+
+            # Update info display
+            info_text = f"Transfer Model Built Successfully!\n"
+            info_text += f"Method: {method.upper()}\n"
+            info_text += f"Training Samples: {X_master_common.shape[0]}\n"
+            info_text += f"Wavelength Range: {wl_common[0]:.1f} - {wl_common[-1]:.1f} nm ({len(wl_common)} points)\n"
+
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.insert('1.0', info_text)
+            self.ct_transfer_info_text.config(state='disabled')
+
+            # Enable save button
+            self.ct_save_tm_button.config(state='normal')
+
+            # Plot transfer quality (reuse existing method from lines 14939+)
+            self._plot_transfer_quality(method)
+
+            messagebox.showinfo("Success", f"{method.upper()} transfer model built successfully!")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to build transfer model:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _save_transfer_model(self):
+        """Save transfer model to .pkl file with metadata."""
+        import pickle
+        from datetime import datetime
+        from tkinter import filedialog, messagebox
+
+        if self.ct_transfer_model is None:
+            messagebox.showwarning("No Model", "Please build a transfer model first.")
+            return
+
+        # Ask for save location
+        filepath = filedialog.asksaveasfilename(
+            title="Save Transfer Model",
+            defaultextension=".pkl",
+            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Create metadata dictionary
+            transfer_model_data = {
+                'model': self.ct_transfer_model,
+                'method': self.ct_transfer_model.method,
+                'master_id': 'master',  # Could be customized with a dialog
+                'slave_id': 'slave',    # Could be customized with a dialog
+                'date_created': datetime.now().isoformat(),
+                'wavelengths_common': self.ct_wavelengths_common,
+                'n_samples': self.ct_X_master_common.shape[0],
+                'metadata': {
+                    'master_shape': self.ct_X_master_common.shape,
+                    'slave_shape': self.ct_X_slave_common.shape,
+                    'master_format': self.master_data_format,
+                    'slave_format': self.slave_data_format
+                }
+            }
+
+            # Save to file
+            with open(filepath, 'wb') as f:
+                pickle.dump(transfer_model_data, f)
+
+            messagebox.showinfo("Success", f"Transfer model saved to:\n{filepath}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save transfer model:\n{str(e)}")
+
+    # ========================================================================
+    # END OF STEP 1 HELPER METHODS
+    # ========================================================================
+
+    # ========================================================================
+    # STEP 3A HELPER METHODS: Prediction Workflow
+    # ========================================================================
+
+    def _browse_prediction_model(self):
+        """Browse for prediction model .pkl file."""
+        from tkinter import filedialog
+        filepath = filedialog.askopenfilename(
+            title="Select Prediction Model File",
+            filetypes=[("Pickle files", "*.pkl"), ("DASP Model files", "*.dasp"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_pred_model_path_var.set(filepath)
+
+    def _load_prediction_model(self):
+        """Load sklearn prediction model from .pkl or .dasp file."""
+        import pickle
+        from tkinter import messagebox
+
+        filepath = self.ct_pred_model_path_var.get()
+        if not filepath:
+            messagebox.showwarning("No File", "Please browse and select a prediction model file first.")
+            return
+
+        try:
+            with open(filepath, 'rb') as f:
+                model_data = pickle.load(f)
+
+            # Handle different model formats
+            if isinstance(model_data, dict):
+                # DASP model format
+                self.current_prediction_model = model_data.get('model')
+                model_type = model_data.get('model_type', 'Unknown')
+                target = model_data.get('target_variable', 'Unknown')
+
+                # Extract metrics
+                metrics = model_data.get('performance', {})
+                if 'R2' in metrics:
+                    metric_str = f"R² = {metrics['R2']:.4f}"
+                elif 'Accuracy' in metrics:
+                    metric_str = f"Accuracy = {metrics['Accuracy']:.4f}"
+                else:
+                    metric_str = "No metrics available"
+
+            else:
+                # Raw sklearn model
+                self.current_prediction_model = model_data
+                model_type = type(model_data).__name__
+                target = "Unknown"
+                metric_str = "No metrics available (raw model)"
+
+            # Display model info
+            info_text = f"Model Type: {model_type}\n"
+            info_text += f"Target Variable: {target}\n"
+            info_text += f"Performance: {metric_str}\n"
+            info_text += f"File: {filepath}"
+
+            self.ct_pred_model_info_text.config(state='normal')
+            self.ct_pred_model_info_text.delete('1.0', 'end')
+            self.ct_pred_model_info_text.insert('1.0', info_text)
+            self.ct_pred_model_info_text.config(state='disabled')
+
+            messagebox.showinfo("Success", f"Prediction model loaded successfully!\nModel: {model_type}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load prediction model:\n{str(e)}")
+
+    def _browse_new_slave_data_predict(self):
+        """Browse for new slave spectra for prediction."""
+        from tkinter import filedialog
+        filepath = filedialog.askopenfilename(
+            title="Select New Slave Spectra",
+            filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.ct_pred_slave_path_var.set(filepath)
+
+    def _load_new_slave_data_predict(self):
+        """Load new slave data for prediction workflow."""
+        import numpy as np
+        import pandas as pd
+        from tkinter import messagebox
+
+        filepath = self.ct_pred_slave_path_var.get()
+        if not filepath:
+            messagebox.showwarning("No File", "Please browse and select slave spectra file first.")
+            return
+
+        try:
+            # Load data based on file type
+            if filepath.endswith('.csv'):
+                df = pd.read_csv(filepath)
+                # Assume first column is wavelengths or sample IDs
+                if 'wavelength' in df.columns[0].lower():
+                    wavelengths = df.iloc[:, 0].values
+                    X = df.iloc[:, 1:].values.T  # Transpose to (samples, wavelengths)
+                else:
+                    # First column is sample IDs
+                    wavelengths = np.array([float(col) for col in df.columns[1:]])
+                    X = df.iloc[:, 1:].values
+
+            elif filepath.endswith('.npy'):
+                data = np.load(filepath)
+                if data.ndim == 2:
+                    # Assume shape is (samples, wavelengths)
+                    X = data
+                    wavelengths = np.arange(X.shape[1])  # Generic wavelengths
+                else:
+                    raise ValueError("NumPy array must be 2D (samples, wavelengths)")
+            else:
+                raise ValueError("Unsupported file format. Use .csv or .npy")
+
+            # Validate against transfer model
+            if self.current_transfer_model is None:
+                messagebox.showwarning("Warning",
+                    "No transfer model loaded. Cannot validate wavelength grid.\n"
+                    "Data loaded, but may not be compatible.")
+            else:
+                # Check if wavelengths match transfer model
+                if hasattr(self.current_transfer_model, 'wavelengths_common'):
+                    expected_wl = self.current_transfer_model.wavelengths_common
+                elif self.ct_wavelengths_common is not None:
+                    expected_wl = self.ct_wavelengths_common
+                else:
+                    expected_wl = None
+
+                if expected_wl is not None:
+                    if len(wavelengths) != len(expected_wl):
+                        messagebox.showerror("Error",
+                            f"Wavelength mismatch!\n"
+                            f"Transfer model expects {len(expected_wl)} wavelengths\n"
+                            f"Loaded data has {len(wavelengths)} wavelengths")
+                        return
+
+            # Store data
+            self.new_slave_data_predict = (wavelengths, X)
+
+            # Display info
+            info_text = f"Samples: {X.shape[0]}\n"
+            info_text += f"Wavelengths: {len(wavelengths)} ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
+            info_text += f"File: {filepath}"
+
+            self.ct_pred_slave_info_text.config(state='normal')
+            self.ct_pred_slave_info_text.delete('1.0', 'end')
+            self.ct_pred_slave_info_text.insert('1.0', info_text)
+            self.ct_pred_slave_info_text.config(state='disabled')
+
+            messagebox.showinfo("Success", f"Loaded {X.shape[0]} slave spectra successfully!")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load slave data:\n{str(e)}")
+
+    def _run_prediction_workflow(self):
+        """Run the complete prediction workflow: transform -> predict -> display."""
+        from tkinter import messagebox
+        import numpy as np
+
+        # Validate prerequisites
+        if self.current_transfer_model is None:
+            messagebox.showerror("Error", "Please load or build a transfer model first (Step 1).")
+            return
+
+        if self.current_prediction_model is None:
+            messagebox.showerror("Error", "Please load a prediction model first (C1).")
+            return
+
+        if self.new_slave_data_predict is None:
+            messagebox.showerror("Error", "Please load new slave spectra first (C2).")
+            return
+
+        try:
+            # Step 1: Apply transfer model to new slave data
+            wavelengths, X_slave = self.new_slave_data_predict
+
+            # Transform slave data to master domain
+            X_transferred = self.current_transfer_model.transform(X_slave)
+
+            # Step 2: Use prediction model to predict properties
+            y_pred = self.current_prediction_model.predict(X_transferred)
+
+            # Step 3: Display results
+            # Clear existing results
+            for item in self.ct_predictions_tree.get_children():
+                self.ct_predictions_tree.delete(item)
+
+            # Add predictions to treeview
+            for i, pred in enumerate(y_pred):
+                sample_id = f"Sample_{i+1}"
+                self.ct_predictions_tree.insert('', 'end', values=(sample_id, f"{pred:.4f}"))
+
+            # Store predictions for export
+            self.ct_pred_y_pred = y_pred
+            self.ct_pred_sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
+
+            # Enable export button
+            self.ct_export_predictions_button.config(state='normal')
+
+            # Create plots
+            self._plot_prediction_results(y_pred, X_slave, X_transferred)
+
+            messagebox.showinfo("Success",
+                f"Prediction workflow completed!\n"
+                f"Predicted {len(y_pred)} samples.\n"
+                f"Results displayed below.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Prediction workflow failed:\n{str(e)}")
+
+    def _plot_prediction_results(self, y_pred, X_slave_original, X_transferred):
+        """Create plots showing prediction results and spectral transformation."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Clear existing plots
+        for widget in self.ct_predictions_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Create figure with 2 subplots
+        fig = Figure(figsize=(12, 5), facecolor=self.colors['bg'])
+
+        # Subplot 1: Distribution of predicted values
+        ax1 = fig.add_subplot(121)
+        ax1.hist(y_pred, bins=20, color=self.colors['accent'], alpha=0.7, edgecolor='black')
+        ax1.set_xlabel('Predicted Value', color=self.colors['text'])
+        ax1.set_ylabel('Frequency', color=self.colors['text'])
+        ax1.set_title('Distribution of Predictions', color=self.colors['text'])
+        ax1.set_facecolor(self.colors['panel'])
+        ax1.tick_params(colors=self.colors['text'])
+        for spine in ax1.spines.values():
+            spine.set_edgecolor(self.colors['text'])
+
+        # Subplot 2: Before/After spectra comparison (mean spectra)
+        ax2 = fig.add_subplot(122)
+        mean_slave = X_slave_original.mean(axis=0)
+        mean_transferred = X_transferred.mean(axis=0)
+
+        wavelengths = self.new_slave_data_predict[0]
+        ax2.plot(wavelengths, mean_slave, label='Slave (Before)', color='red', alpha=0.7)
+        ax2.plot(wavelengths, mean_transferred, label='Transferred (After)', color='blue', alpha=0.7)
+        ax2.set_xlabel('Wavelength (nm)', color=self.colors['text'])
+        ax2.set_ylabel('Intensity', color=self.colors['text'])
+        ax2.set_title('Mean Spectra: Before vs After Transfer', color=self.colors['text'])
+        ax2.legend(facecolor=self.colors['panel'], edgecolor=self.colors['text'], labelcolor=self.colors['text'])
+        ax2.set_facecolor(self.colors['panel'])
+        ax2.tick_params(colors=self.colors['text'])
+        for spine in ax2.spines.values():
+            spine.set_edgecolor(self.colors['text'])
+
+        fig.tight_layout()
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, master=self.ct_predictions_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # Add toolbar
+        toolbar = NavigationToolbar2Tk(canvas, self.ct_predictions_plot_frame)
+        toolbar.update()
+
+    def _export_predictions(self):
+        """Export predictions to CSV file."""
+        import pandas as pd
+        from tkinter import filedialog, messagebox
+
+        if self.ct_pred_y_pred is None:
+            messagebox.showwarning("No Predictions", "Please run the prediction workflow first.")
+            return
+
+        # Ask for save location
+        filepath = filedialog.asksaveasfilename(
+            title="Export Predictions",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Create dataframe
+            df = pd.DataFrame({
+                'Sample_ID': self.ct_pred_sample_ids,
+                'Predicted_Value': self.ct_pred_y_pred
+            })
+
+            # Save to CSV
+            df.to_csv(filepath, index=False)
+
+            messagebox.showinfo("Success", f"Predictions exported to:\n{filepath}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
+
+    # ========================================================================
+    # END OF STEP 3A HELPER METHODS
+    # ========================================================================
+
+    # ========================================================================
+    # STEP 3B HELPER METHODS FOR EXPORT WORKFLOW
+    # ========================================================================
+
+    def _browse_export_slave_spectra(self):
+        """Browse for new slave spectra to transform and export."""
+        from tkinter import filedialog
+        path = filedialog.askdirectory(title="Select Slave Spectra Directory for Export")
+        if not path:
+            # Try file selection
+            path = filedialog.askopenfilename(
+                title="Select Slave Spectra File for Export",
+                filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
+            )
+        if path:
+            self.ct_export_slave_path_var.set(path)
+
+    def _load_new_slave_data_export(self):
+        """Load new slave data for transformation and export.
+
+        Loads data, detects format, validates compatibility with transfer model,
+        and displays information to the user.
+        """
+        from tkinter import messagebox
+
+        path = self.ct_export_slave_path_var.get()
+        if not path:
+            messagebox.showwarning("No Path", "Please browse and select slave spectra first.")
+            return
+
+        # Check if transfer model exists
+        if self.current_transfer_model is None and self.ct_transfer_model is None:
+            messagebox.showerror("No Transfer Model",
+                               "Please load or build a transfer model in Step 1 first.")
+            return
+
+        try:
+            # Detect format
+            detected_format = self._detect_data_format(path)
+            self.slave_data_format = detected_format  # Store for export
+
+            # Load data
+            if os.path.isdir(path):
+                wavelengths, X = self._load_spectra_from_directory(path)
+            elif path.endswith('.npy'):
+                X = np.load(path)
+                wavelengths = np.arange(X.shape[1])  # Placeholder wavelengths
+                messagebox.showinfo("Note", "NPY file loaded. Using placeholder wavelengths.")
+            elif path.endswith('.csv'):
+                df = pd.read_csv(path, header=None)
+                wavelengths = df.iloc[0, :].values.astype(float)
+                X = df.iloc[1:, :].values.astype(float)
+            else:
+                raise ValueError(f"Unsupported file format: {path}")
+
+            # Store data
+            self.new_slave_data_export = (wavelengths, X)
+
+            # Validate compatibility with transfer model
+            transfer_model = self.current_transfer_model or self.ct_transfer_model
+            if transfer_model is not None:
+                # Check wavelength compatibility
+                model_wavelengths = getattr(transfer_model, 'wavelengths_common', None)
+                if model_wavelengths is not None:
+                    if len(wavelengths) != len(model_wavelengths):
+                        messagebox.showwarning("Wavelength Mismatch",
+                            f"Warning: Loaded data has {len(wavelengths)} wavelengths, "
+                            f"but transfer model expects {len(model_wavelengths)}. "
+                            f"Resampling may be required.")
+
+            # Display data info
+            info_text = f"Samples: {X.shape[0]}\n"
+            info_text += f"Wavelengths: {len(wavelengths)} points ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
+            info_text += f"Detected Format: {detected_format}"
+
+            self.ct_export_data_info_text.config(state='normal')
+            self.ct_export_data_info_text.delete('1.0', tk.END)
+            self.ct_export_data_info_text.insert('1.0', info_text)
+            self.ct_export_data_info_text.config(state='disabled')
+
+            messagebox.showinfo("Success", f"Loaded {X.shape[0]} slave spectra for export.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
+
+    def _transform_spectra(self):
+        """Apply transfer model to new slave data and show preview.
+
+        Transforms spectra, displays statistics, and shows before/after plots
+        with tabbed derivatives (reusing _plot_transfer_quality pattern).
+        """
+        from tkinter import messagebox
+
+        # Validate inputs
+        if self.new_slave_data_export is None:
+            messagebox.showwarning("No Data", "Please load slave spectra first (Section D1).")
+            return
+
+        transfer_model = self.current_transfer_model or self.ct_transfer_model
+        if transfer_model is None:
+            messagebox.showerror("No Transfer Model",
+                               "Please load or build a transfer model in Step 1 first.")
+            return
+
+        try:
+            wavelengths_slave, X_slave = self.new_slave_data_export
+
+            # Get transfer model wavelengths
+            model_wavelengths = getattr(transfer_model, 'wavelengths_common', None)
+            if model_wavelengths is None:
+                # Use legacy wavelengths if available
+                model_wavelengths = self.ct_wavelengths_common
+
+            # Resample slave data to match transfer model wavelengths if needed
+            if model_wavelengths is not None:
+                if not np.array_equal(wavelengths_slave, model_wavelengths):
+                    from spectral_predict.calibration_transfer import resample_to_grid
+                    X_slave_resampled = resample_to_grid(wavelengths_slave, X_slave, model_wavelengths)
+                else:
+                    X_slave_resampled = X_slave
+            else:
+                X_slave_resampled = X_slave
+                model_wavelengths = wavelengths_slave
+
+            # Apply transfer based on method
+            method = transfer_model.method.lower()
+
+            if method == 'ds':
+                from spectral_predict.calibration_transfer import apply_ds
+                A = transfer_model.params['A']
+                X_transferred = apply_ds(X_slave_resampled, A)
+            elif method == 'pds':
+                from spectral_predict.calibration_transfer import apply_pds
+                B = transfer_model.params['B']
+                window = transfer_model.params['window']
+                X_transferred = apply_pds(X_slave_resampled, B, window)
+            elif method == 'tsr':
+                from spectral_predict.calibration_transfer import apply_tsr
+                X_transferred = apply_tsr(X_slave_resampled, transfer_model.params)
+            elif method == 'ctai':
+                from spectral_predict.calibration_transfer import apply_ctai
+                X_transferred = apply_ctai(X_slave_resampled, transfer_model.params)
+            elif method == 'jypls-inv':
+                from spectral_predict.calibration_transfer import apply_jypls_inv
+                X_transferred = apply_jypls_inv(X_slave_resampled, transfer_model.params)
+            elif method == 'nspfce':
+                from spectral_predict.calibration_transfer import apply_nspfce
+                X_transferred = apply_nspfce(X_slave_resampled, transfer_model.params)
+            else:
+                raise ValueError(f"Unsupported transfer method: {method}")
+
+            # Store transformed spectra
+            self.transformed_spectra = (model_wavelengths, X_transferred)
+
+            # Calculate statistics
+            rmse = np.sqrt(np.mean((X_transferred - X_slave_resampled) ** 2))
+            coverage = 100.0  # All spectra transformed
+
+            # Display statistics
+            stats_text = f"Transformation Complete!\n"
+            stats_text += f"RMSE: {rmse:.6f}\n"
+            stats_text += f"Coverage: {coverage:.1f}% ({X_transferred.shape[0]} samples)"
+
+            self.ct_transform_stats_text.config(state='normal')
+            self.ct_transform_stats_text.delete('1.0', tk.END)
+            self.ct_transform_stats_text.insert('1.0', stats_text)
+            self.ct_transform_stats_text.config(state='disabled')
+
+            # Create before/after plot with tabbed derivatives
+            self._plot_transform_preview(X_slave_resampled, X_transferred, model_wavelengths)
+
+            messagebox.showinfo("Success", "Spectra transformed successfully! Review the preview below.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to transform spectra:\n{str(e)}\n\nDetails: {repr(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _plot_transform_preview(self, X_before, X_after, wavelengths):
+        """Plot before/after transformation preview with tabbed derivatives.
+
+        Similar to _plot_transfer_quality but for export workflow.
+        Shows 2 subplots: Before and After transformation.
+        """
+        if not HAS_MATPLOTLIB:
+            return
+
+        try:
+            # Clear previous plots
+            for widget in self.ct_transform_preview_frame.winfo_children():
+                widget.destroy()
+
+            # Create notebook for tabs
+            from tkinter import ttk
+            derivative_notebook = ttk.Notebook(self.ct_transform_preview_frame)
+            derivative_notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+            # Helper function to compute derivatives
+            def compute_derivative(X, wavelengths_arr, deriv_order):
+                """Compute derivative using Savitzky-Golay filter."""
+                from scipy.signal import savgol_filter
+                if deriv_order == 0:
+                    return X
+                window_length = min(11, len(wavelengths_arr) - 1)
+                if window_length % 2 == 0:
+                    window_length -= 1
+                if window_length < 5:
+                    window_length = 5
+                X_deriv = np.apply_along_axis(
+                    lambda y: savgol_filter(y, window_length, polyorder=2, deriv=deriv_order),
+                    axis=1, arr=X
+                )
+                return X_deriv
+
+            # Helper function to create 2-subplot comparison figure
+            def create_comparison_figure(before_data, after_data, ylabel, title_suffix):
+                """Create figure with Before and After subplots."""
+                fig = Figure(figsize=(10, 4))
+
+                # Subplot 1: Before transformation
+                ax1 = fig.add_subplot(121)
+                before_mean = np.mean(before_data, axis=0)
+                before_std = np.std(before_data, axis=0)
+                ax1.plot(wavelengths, before_mean, 'r-', linewidth=2, label='Mean')
+                ax1.fill_between(wavelengths,
+                               before_mean - before_std,
+                               before_mean + before_std,
+                               alpha=0.3, color='r', label='±1 Std')
+                ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax1.set_ylabel(ylabel, fontsize=10)
+                ax1.set_title(f'Before Transfer {title_suffix}', fontsize=11, fontweight='bold')
+                ax1.legend(fontsize=8)
+                ax1.grid(True, alpha=0.3)
+
+                # Subplot 2: After transformation
+                ax2 = fig.add_subplot(122)
+                after_mean = np.mean(after_data, axis=0)
+                after_std = np.std(after_data, axis=0)
+                ax2.plot(wavelengths, after_mean, 'g-', linewidth=2, label='Mean')
+                ax2.fill_between(wavelengths,
+                               after_mean - after_std,
+                               after_mean + after_std,
+                               alpha=0.3, color='g', label='±1 Std')
+                ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax2.set_ylabel(ylabel, fontsize=10)
+                ax2.set_title(f'After Transfer {title_suffix}', fontsize=11, fontweight='bold')
+                ax2.legend(fontsize=8)
+                ax2.grid(True, alpha=0.3)
+
+                fig.tight_layout()
+                return fig
+
+            # Compute all derivatives
+            before_d1 = compute_derivative(X_before, wavelengths, 1)
+            after_d1 = compute_derivative(X_after, wavelengths, 1)
+
+            before_d2 = compute_derivative(X_before, wavelengths, 2)
+            after_d2 = compute_derivative(X_after, wavelengths, 2)
+
+            # Tab 1: Raw spectra
+            tab_raw = ttk.Frame(derivative_notebook)
+            derivative_notebook.add(tab_raw, text='Raw Spectra')
+
+            fig_raw = create_comparison_figure(
+                X_before, X_after,
+                self._get_spectral_ylabel(), 'Spectra'
+            )
+
+            canvas_raw = FigureCanvasTkAgg(fig_raw, tab_raw)
+            canvas_raw.draw()
+            canvas_raw.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(tab_raw, fig_raw, "transform_preview_raw")
+
+            # Tab 2: 1st derivative
+            tab_d1 = ttk.Frame(derivative_notebook)
+            derivative_notebook.add(tab_d1, text='1st Derivative')
+
+            fig_d1 = create_comparison_figure(
+                before_d1, after_d1,
+                '1st Derivative', '(1st Derivative)'
+            )
+
+            canvas_d1 = FigureCanvasTkAgg(fig_d1, tab_d1)
+            canvas_d1.draw()
+            canvas_d1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(tab_d1, fig_d1, "transform_preview_d1")
+
+            # Tab 3: 2nd derivative
+            tab_d2 = ttk.Frame(derivative_notebook)
+            derivative_notebook.add(tab_d2, text='2nd Derivative')
+
+            fig_d2 = create_comparison_figure(
+                before_d2, after_d2,
+                '2nd Derivative', '(2nd Derivative)'
+            )
+
+            canvas_d2 = FigureCanvasTkAgg(fig_d2, tab_d2)
+            canvas_d2.draw()
+            canvas_d2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(tab_d2, fig_d2, "transform_preview_d2")
+
+        except Exception as e:
+            print(f"Error creating transform preview plot: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _browse_export_output_dir(self):
+        """Browse for output directory to save transformed spectra."""
+        from tkinter import filedialog
+        directory = filedialog.askdirectory(title="Select Output Directory for Transformed Spectra")
+        if directory:
+            self.ct_export_output_dir_var.set(directory)
+
+    def _export_transformed_spectra(self):
+        """Export transformed spectra with automatic format matching.
+
+        Preserves file naming and structure from input based on detected format.
+        Supports: csv, npy, asd_folder, spc_folder, csv_folder formats.
+        """
+        from tkinter import messagebox
+        from pathlib import Path
+
+        # Validate inputs
+        if self.transformed_spectra is None:
+            messagebox.showwarning("No Data", "Please transform spectra first (Section D2).")
+            return
+
+        output_dir = self.ct_export_output_dir_var.get()
+        if not output_dir:
+            messagebox.showwarning("No Output Directory", "Please select an output directory.")
+            return
+
+        try:
+            wavelengths, X_transformed = self.transformed_spectra
+            input_path = self.ct_export_slave_path_var.get()
+            data_format = self.slave_data_format
+
+            # Update status
+            self.ct_export_status_text.config(state='normal')
+            self.ct_export_status_text.delete('1.0', tk.END)
+            self.ct_export_status_text.insert('1.0', f"Exporting {X_transformed.shape[0]} spectra...\n")
+            self.ct_export_status_text.config(state='disabled')
+            self.root.update()
+
+            # Export based on detected format
+            if data_format == 'csv':
+                # Export as single CSV file with wavelengths as header
+                output_path = os.path.join(output_dir, "transformed_spectra.csv")
+                df = pd.DataFrame(X_transformed, columns=wavelengths)
+                df.to_csv(output_path, index=False)
+                status_msg = f"Exported to CSV: {output_path}"
+
+            elif data_format == 'npy':
+                # Export as .npy file
+                output_path = os.path.join(output_dir, "transformed_spectra.npy")
+                np.save(output_path, X_transformed)
+                status_msg = f"Exported to NPY: {output_path}"
+
+            elif data_format in ['asd_folder', 'spc_folder', 'csv_folder']:
+                # Recreate folder structure with transformed data
+                input_path_obj = Path(input_path)
+
+                # Get list of original files to preserve naming
+                import glob
+                if data_format == 'asd_folder':
+                    original_files = sorted(glob.glob(os.path.join(input_path, "*.asd")))
+                    ext = '.asd'
+                elif data_format == 'spc_folder':
+                    original_files = sorted(glob.glob(os.path.join(input_path, "*.spc")))
+                    ext = '.spc'
+                else:  # csv_folder
+                    original_files = sorted(glob.glob(os.path.join(input_path, "*.csv")))
+                    ext = '.csv'
+
+                # Create output directory if it doesn't exist
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Export each spectrum with preserved naming
+                for i, orig_file in enumerate(original_files[:X_transformed.shape[0]]):
+                    if i >= X_transformed.shape[0]:
+                        break
+
+                    orig_name = Path(orig_file).stem
+
+                    if ext == '.csv':
+                        # Export as CSV with wavelengths in first row
+                        output_file = os.path.join(output_dir, f"{orig_name}.csv")
+                        df = pd.DataFrame([wavelengths, X_transformed[i, :]])
+                        df.to_csv(output_file, index=False, header=False)
+                    elif ext == '.npy':
+                        # Export as NPY
+                        output_file = os.path.join(output_dir, f"{orig_name}.npy")
+                        np.save(output_file, X_transformed[i, :])
+                    else:
+                        # For ASD/SPC, export as CSV (since writing binary formats is complex)
+                        output_file = os.path.join(output_dir, f"{orig_name}_transformed.csv")
+                        df = pd.DataFrame([wavelengths, X_transformed[i, :]])
+                        df.to_csv(output_file, index=False, header=False)
+
+                status_msg = f"Exported {X_transformed.shape[0]} files to: {output_dir}"
+
+            else:
+                # Fallback: export as CSV
+                output_path = os.path.join(output_dir, "transformed_spectra.csv")
+                df = pd.DataFrame(X_transformed, columns=wavelengths)
+                df.to_csv(output_path, index=False)
+                status_msg = f"Exported to CSV (fallback): {output_path}"
+
+            # Update status
+            self.ct_export_status_text.config(state='normal')
+            self.ct_export_status_text.delete('1.0', tk.END)
+            self.ct_export_status_text.insert('1.0', status_msg)
+            self.ct_export_status_text.config(state='disabled')
+
+            messagebox.showinfo("Success", f"Export complete!\n\n{status_msg}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export spectra:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    # ========================================================================
+    # END OF STEP 3B HELPER METHODS
+    # ========================================================================
+
     def _create_tab10_calibration_transfer(self):
-        """Tab 10: Calibration Transfer & Equalized Prediction."""
-        # This will be a large implementation - to be continued
+        """Tab 10: Calibration Transfer - STEP 1 of 3-step wizard.
+
+        STEP 1: Get/Build Transfer Model
+        - Load existing transfer model (.pkl file)
+        - OR build new transfer model from master/slave data
+        """
         self.tab10 = ttk.Frame(self.notebook, style='TFrame')
         self.notebook.add(self.tab10, text='  🔄 Calibration Transfer  ')
 
@@ -15383,7 +16636,7 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
 
         scrollable_frame.bind(
             "<Configure>",
-            lambda e: self._debounced_configure_scrollregion("tab9", canvas)
+            lambda e: self._debounced_configure_scrollregion("tab10", canvas)
         )
 
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
@@ -15396,535 +16649,546 @@ Note: {"Uniform wavelength spacing detected - data appears interpolated" if prof
         main_frame.pack(fill='both', expand=True)
 
         # Title
-        title_label = ttk.Label(main_frame, text="Calibration Transfer & Equalized Prediction",
+        title_label = ttk.Label(main_frame, text="Calibration Transfer - 3-Step Wizard",
                                style='Title.TLabel')
         title_label.pack(pady=(0, 10))
 
         desc_label = ttk.Label(main_frame,
-                              text="Build transfer models between instruments and make equalized predictions",
+                              text="STEP 1: Get or Build a Transfer Model",
                               style='Caption.TLabel')
         desc_label.pack(pady=(0, 20))
 
         # ===================================================================
-        # SECTION A: Transfer Model Registry
+        # SECTION A: Radio Buttons - Load Existing vs Build New
         # ===================================================================
-        section_a = ttk.LabelFrame(main_frame, text="A) Transfer Model Registry", style='Card.TFrame', padding=15)
-        section_a.pack(fill='x', pady=(0, 15))
+        mode_frame = ttk.LabelFrame(main_frame, text="A) Choose How to Get Transfer Model",
+                                   style='Card.TFrame', padding=15)
+        mode_frame.pack(fill='x', pady=(0, 15))
 
-        ttk.Label(section_a, text="View and manage your transfer models and instrument characterizations:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
+        self.ct_step1_mode_var = tk.StringVar(value='build')
 
-        # Split into two columns: instruments and transfer models
-        registry_cols = ttk.Frame(section_a)
-        registry_cols.pack(fill='both', expand=True)
+        ttk.Radiobutton(mode_frame, text="Load Existing Transfer Model",
+                       variable=self.ct_step1_mode_var, value='load',
+                       command=self._on_step1_mode_changed).pack(anchor='w', pady=(0, 5))
 
-        # Left column: Instruments from Instrument Lab
-        inst_col = ttk.Frame(registry_cols)
-        inst_col.pack(side='left', fill='both', expand=True, padx=(0, 10))
-
-        ttk.Label(inst_col, text="📊 Available Instruments (from Instrument Lab):",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
-
-        # Listbox for instruments
-        inst_list_frame = ttk.Frame(inst_col)
-        inst_list_frame.pack(fill='both', expand=True)
-
-        inst_scrollbar = ttk.Scrollbar(inst_list_frame, orient='vertical')
-        self.ct_instrument_listbox = tk.Listbox(inst_list_frame, height=6,
-                                                yscrollcommand=inst_scrollbar.set,
-                                                bg=self.colors['panel'], fg=self.colors['text'],
-                                                selectbackground=self.colors['accent'],
-                                                selectforeground=self.colors['text_inverse'],
-                                                font=('Segoe UI', 9))
-        inst_scrollbar.config(command=self.ct_instrument_listbox.yview)
-        self.ct_instrument_listbox.pack(side='left', fill='both', expand=True)
-        inst_scrollbar.pack(side='right', fill='y')
-
-        # Right column: Transfer Models Registry
-        models_col = ttk.Frame(registry_cols)
-        models_col.pack(side='left', fill='both', expand=True)
-
-        ttk.Label(models_col, text="🔄 Built Transfer Models:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
-
-        # Treeview for transfer models
-        tree_frame = ttk.Frame(models_col)
-        tree_frame.pack(fill='both', expand=True)
-
-        tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical')
-        self.ct_registry_tree = ttk.Treeview(tree_frame,
-                                             columns=('master', 'slave', 'method', 'date', 'samples'),
-                                             show='headings', height=6,
-                                             yscrollcommand=tree_scroll.set)
-        tree_scroll.config(command=self.ct_registry_tree.yview)
-
-        self.ct_registry_tree.heading('master', text='Master')
-        self.ct_registry_tree.heading('slave', text='Slave')
-        self.ct_registry_tree.heading('method', text='Method')
-        self.ct_registry_tree.heading('date', text='Date Built')
-        self.ct_registry_tree.heading('samples', text='Samples')
-
-        self.ct_registry_tree.column('master', width=100)
-        self.ct_registry_tree.column('slave', width=100)
-        self.ct_registry_tree.column('method', width=80)
-        self.ct_registry_tree.column('date', width=130)
-        self.ct_registry_tree.column('samples', width=70)
-
-        self.ct_registry_tree.pack(side='left', fill='both', expand=True)
-        tree_scroll.pack(side='right', fill='y')
-
-        # Buttons for registry actions
-        registry_btn_frame = ttk.Frame(section_a)
-        registry_btn_frame.pack(fill='x', pady=(10, 0))
-
-        ttk.Button(registry_btn_frame, text="🔄 Refresh Registry",
-                  command=self._refresh_ct_registry, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(registry_btn_frame, text="📥 Load Selected Model",
-                  command=self._load_model_from_registry, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(registry_btn_frame, text="🗑️ Delete Selected",
-                  command=self._delete_from_registry, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(registry_btn_frame, text="💾 Import Model from File",
-                  command=self._import_model_to_registry, style='Modern.TButton').pack(side='left')
-
-        # Initial populate
-        self._refresh_ct_registry()
+        ttk.Radiobutton(mode_frame, text="Build New Transfer Model",
+                       variable=self.ct_step1_mode_var, value='build',
+                       command=self._on_step1_mode_changed).pack(anchor='w')
 
         # ===================================================================
-        # SECTION B: Build Transfer Model
+        # SECTION B: Load Existing Transfer Model (initially hidden)
         # ===================================================================
-        section_b_new = ttk.LabelFrame(main_frame, text="B) Build Transfer Model", style='Card.TFrame', padding=15)
-        section_b_new.pack(fill='x', pady=(0, 15))
+        self.ct_load_existing_frame = ttk.LabelFrame(main_frame,
+                                                      text="B) Load Existing Transfer Model",
+                                                      style='Card.TFrame', padding=15)
+        # Don't pack yet - controlled by radio button
 
-        ttk.Label(section_b_new, text="Create a new calibration transfer model between instruments:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
+        # Browse for .pkl file
+        load_file_frame = ttk.Frame(self.ct_load_existing_frame)
+        load_file_frame.pack(fill='x', pady=(0, 10))
 
-        # Sub-section: Load Master Model (if needed for some methods)
-        master_model_subsec = ttk.Frame(section_b_new)
-        master_model_subsec.pack(fill='x', pady=(0, 10))
-
-        ttk.Label(master_model_subsec, text="Master Calibration Model (optional - for prediction later):",
+        ttk.Label(load_file_frame, text="Transfer Model File (.pkl):",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        load_model_frame_b = ttk.Frame(master_model_subsec)
-        load_model_frame_b.pack(fill='x')
+        browse_frame = ttk.Frame(load_file_frame)
+        browse_frame.pack(fill='x')
 
-        self.ct_master_model_path_var = tk.StringVar()
-        model_entry_b = ttk.Entry(load_model_frame_b, textvariable=self.ct_master_model_path_var, width=60, state='readonly')
-        model_entry_b.pack(side='left', padx=(0, 10))
+        self.ct_load_model_path_var = tk.StringVar()
+        ttk.Entry(browse_frame, textvariable=self.ct_load_model_path_var,
+                 width=60, state='readonly').pack(side='left', padx=(0, 10))
 
-        ttk.Button(load_model_frame_b, text="Browse Model...",
-                  command=self._browse_ct_master_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        self._create_accent_button(load_model_frame_b, "Load Model",
-                                    self._load_ct_master_model).pack(side='left')
+        ttk.Button(browse_frame, text="Browse...",
+                  command=self._browse_existing_transfer_model,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
 
-        # Model info display
-        self.ct_model_info_text = tk.Text(section_b_new, height=3, width=80, state='disabled',
-                                          wrap='word', relief='flat', borderwidth=0,
-                                          bg=self.colors['panel'], fg=self.colors['text'],
-                                          selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
-        self.ct_model_info_text.pack(fill='x', pady=(5, 10))
+        self._create_accent_button(browse_frame, "Load Transfer Model",
+                                   self._load_existing_transfer_model).pack(side='left')
 
-        # Separator
-        ttk.Separator(section_b_new, orient='horizontal').pack(fill='x', pady=(10, 10))
+        # Display loaded model info
+        ttk.Label(self.ct_load_existing_frame, text="Loaded Model Information:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
 
-        # Sub-section: Select Instruments & Load Paired Spectra
-        ttk.Label(section_b_new,
-                 text="Select master and slave instruments, then load paired standardization spectra:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
+        self.ct_loaded_model_info_text = tk.Text(self.ct_load_existing_frame, height=5, width=80,
+                                                 state='disabled', wrap='word', relief='flat',
+                                                 borderwidth=0, bg=self.colors['panel'],
+                                                 fg=self.colors['text'],
+                                                 selectbackground=self.colors['accent'],
+                                                 selectforeground=self.colors['text_inverse'])
+        self.ct_loaded_model_info_text.pack(fill='x', pady=(0, 10))
 
-        # Instrument selection grid
-        inst_grid = ttk.Frame(section_b_new)
-        inst_grid.pack(fill='x', pady=(0, 10))
-
-        ttk.Label(inst_grid, text="Master Instrument:", style='CardLabel.TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10))
-        self.ct_master_instrument_combo = ttk.Combobox(inst_grid, textvariable=self.ct_master_instrument_id,
-                                                       state='readonly', width=30)
-        self.ct_master_instrument_combo.grid(row=0, column=1, sticky='w', padx=(0, 20))
-
-        ttk.Label(inst_grid, text="Slave Instrument:", style='CardLabel.TLabel').grid(row=0, column=2, sticky='w', padx=(0, 10))
-        self.ct_slave_instrument_combo = ttk.Combobox(inst_grid, textvariable=self.ct_slave_instrument_id,
-                                                      state='readonly', width=30)
-        self.ct_slave_instrument_combo.grid(row=0, column=3, sticky='w')
-
-        ttk.Button(inst_grid, text="Refresh from Registry",
-                  command=self._refresh_ct_instrument_combos, style='Modern.TButton').grid(row=0, column=4, padx=(20, 0))
-
-        # Load paired spectra from TWO separate directories
-        load_spectra_frame = ttk.Frame(section_b_new)
-        load_spectra_frame.pack(fill='x', pady=(10, 0))
-
-        ttk.Label(load_spectra_frame, text="Standardization Spectra Directories (one per instrument):",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
-
-        # Master spectra directory
-        master_dir_frame = ttk.Frame(load_spectra_frame)
-        master_dir_frame.pack(fill='x', pady=(0, 5))
-
-        ttk.Label(master_dir_frame, text="Master Spectra:", style='CardLabel.TLabel', width=15).pack(side='left')
-        self.ct_master_spectra_dir_var = tk.StringVar()
-        master_entry = ttk.Entry(master_dir_frame, textvariable=self.ct_master_spectra_dir_var,
-                                width=50, state='readonly')
-        master_entry.pack(side='left', padx=(0, 10))
-        ttk.Button(master_dir_frame, text="Browse...",
-                  command=self._browse_ct_master_spectra_dir, style='Modern.TButton').pack(side='left')
-
-        # Slave spectra directory
-        slave_dir_frame = ttk.Frame(load_spectra_frame)
-        slave_dir_frame.pack(fill='x', pady=(0, 10))
-
-        ttk.Label(slave_dir_frame, text="Slave Spectra:", style='CardLabel.TLabel', width=15).pack(side='left')
-        self.ct_slave_spectra_dir_var = tk.StringVar()
-        slave_entry = ttk.Entry(slave_dir_frame, textvariable=self.ct_slave_spectra_dir_var,
-                               width=50, state='readonly')
-        slave_entry.pack(side='left', padx=(0, 10))
-        ttk.Button(slave_dir_frame, text="Browse...",
-                  command=self._browse_ct_slave_spectra_dir, style='Modern.TButton').pack(side='left')
-
-        # Load buttons
-        btn_frame = ttk.Frame(load_spectra_frame)
-        btn_frame.pack(fill='x', pady=(5, 0))
-
-        self._create_accent_button(btn_frame, "Load Paired Spectra",
-                                    self._load_ct_paired_spectra).pack(side='left', padx=(0, 10))
-
-        ttk.Label(btn_frame, text=" OR ", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-
-        ttk.Button(btn_frame, text="📥 Import from Instrument Lab",
-                  command=self._import_from_instrument_lab, style='Modern.TButton').pack(side='left')
-
-        # Spectra info
-        self.ct_spectra_info_text = tk.Text(section_b_new, height=3, width=80, state='disabled',
-                                           wrap='word', relief='flat', borderwidth=0,
-                                           bg=self.colors['panel'], fg=self.colors['text'],
-                                           selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
-        self.ct_spectra_info_text.pack(fill='x', pady=(10, 0))
-
-        # Separator before transfer method configuration
-        ttk.Separator(section_b_new, orient='horizontal').pack(fill='x', pady=(15, 10))
-
-        # Sub-section: Configure and Build Transfer Model
-        ttk.Label(section_b_new, text="Configure and build calibration transfer model:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
-
-        # Method selection and parameters
-        method_frame = ttk.Frame(section_b_new)
-        method_frame.pack(fill='x', pady=(0, 10))
-
-        ttk.Label(method_frame, text="Transfer Method:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_method_var = tk.StringVar(value='ctai')
-        ttk.Radiobutton(method_frame, text="CTAI (No Standards)",
-                       variable=self.ct_method_var, value='ctai').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="TSR (12-13 Samples)",
-                       variable=self.ct_method_var, value='tsr').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="JYPLS-inv (PLS-based)",
-                       variable=self.ct_method_var, value='jypls-inv').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="NS-PFCE (Advanced)",
-                       variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="Direct Standardization (DS)",
-                       variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="Piecewise DS (PDS)",
-                       variable=self.ct_method_var, value='pds').pack(side='left')
-
-        # Parameters
-        params_frame = ttk.Frame(section_b_new)
-        params_frame.pack(fill='x', pady=(0, 10))
-
-        ttk.Label(params_frame, text="DS Ridge Lambda:", style='CardLabel.TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10))
-        self.ct_ds_lambda_var = tk.StringVar(value='0.001')
-        ttk.Entry(params_frame, textvariable=self.ct_ds_lambda_var, width=15).grid(row=0, column=1, sticky='w', padx=(0, 30))
-
-        ttk.Label(params_frame, text="PDS Window:", style='CardLabel.TLabel').grid(row=0, column=2, sticky='w', padx=(0, 10))
-        self.ct_pds_window_var = tk.StringVar(value='11')
-        ttk.Entry(params_frame, textvariable=self.ct_pds_window_var, width=15).grid(row=0, column=3, sticky='w')
-
-        ttk.Label(params_frame, text="TSR Transfer Samples:", style='CardLabel.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
-        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
-        ttk.Entry(params_frame, textvariable=self.ct_tsr_n_samples_var, width=15).grid(row=1, column=1, sticky='w', pady=(5, 0))
-
-        # JYPLS-inv parameters
-        ttk.Label(params_frame, text="JYPLS-inv Transfer Samples:", style='CardLabel.TLabel').grid(row=1, column=2, sticky='w', padx=(0, 10), pady=(5, 0))
-        self.ct_jypls_n_samples_var = tk.StringVar(value='12')
-        ttk.Entry(params_frame, textvariable=self.ct_jypls_n_samples_var, width=15).grid(row=1, column=3, sticky='w', pady=(5, 0))
-
-        ttk.Label(params_frame, text="JYPLS-inv PLS Components:", style='CardLabel.TLabel').grid(row=4, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
-        self.ct_jypls_n_components_var = tk.StringVar(value='Auto')
-        jypls_comp_combo = ttk.Combobox(params_frame, textvariable=self.ct_jypls_n_components_var,
-                                        values=['Auto', '3', '5', '8', '10', '15', '20'], state='readonly', width=12)
-        jypls_comp_combo.grid(row=4, column=1, sticky='w', pady=(5, 0))
-
-        # NS-PFCE parameters
-        self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(params_frame, text="NS-PFCE: Use Wavelength Selection",
-                       variable=self.ct_nspfce_use_wavelength_selection_var).grid(row=2, column=0, columnspan=2, sticky='w', pady=(5, 0))
-
-        ttk.Label(params_frame, text="Wavelength Selector:", style='CardLabel.TLabel').grid(row=2, column=2, sticky='w', padx=(0, 10), pady=(5, 0))
-        self.ct_nspfce_selector_var = tk.StringVar(value='vcpa-iriv')
-        selector_combo = ttk.Combobox(params_frame, textvariable=self.ct_nspfce_selector_var,
-                                     values=['vcpa-iriv', 'cars', 'spa'], state='readonly', width=12)
-        selector_combo.grid(row=2, column=3, sticky='w', pady=(5, 0))
-
-        ttk.Label(params_frame, text="NS-PFCE Max Iterations:", style='CardLabel.TLabel').grid(row=3, column=0, sticky='w', padx=(0, 10), pady=(5, 0))
-        self.ct_nspfce_max_iterations_var = tk.StringVar(value='100')
-        ttk.Entry(params_frame, textvariable=self.ct_nspfce_max_iterations_var, width=15).grid(row=3, column=1, sticky='w', pady=(5, 0))
-
-        # Build button
-        self._create_accent_button(section_b_new, "Build Transfer Model",
-                                    self._build_ct_transfer_model).pack(pady=(0, 10))
-
-        # Transfer model info
-        self.ct_transfer_info_text = tk.Text(section_b_new, height=4, width=80, state='disabled',
-                                            wrap='word', relief='flat', borderwidth=0,
-                                            bg=self.colors['panel'], fg=self.colors['text'],
-                                            selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
-        self.ct_transfer_info_text.pack(fill='x')
-
-        # Plot frame for transfer quality visualization
-        self.ct_transfer_plot_frame = ttk.Frame(section_b_new, style='TFrame')
-        self.ct_transfer_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
-
-        # Save transfer model
-        save_tm_frame = ttk.Frame(section_b_new)
-        save_tm_frame.pack(fill='x', pady=(10, 0))
-
-        ttk.Button(save_tm_frame, text="Save Transfer Model...",
-                  command=self._save_ct_transfer_model, style='Modern.TButton').pack(side='left')
+        # Preview plots frame
+        self.ct_loaded_model_plot_frame = ttk.Frame(self.ct_load_existing_frame, style='TFrame')
+        self.ct_loaded_model_plot_frame.pack(fill='both', expand=True)
 
         # ===================================================================
-        # SECTION C: File Transfer (No Prediction)
+        # SECTION C: Build New Transfer Model (initially shown)
         # ===================================================================
-        section_c_new = ttk.LabelFrame(main_frame, text="C) File Transfer (No Prediction)",
-                                      style='Card.TFrame', padding=15)
-        section_c_new.pack(fill='x', pady=(0, 15))
+        self.ct_build_new_frame = ttk.LabelFrame(main_frame, text="C) Build New Transfer Model",
+                                                style='Card.TFrame', padding=15)
+        self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
 
-        ttk.Label(section_c_new,
-                 text="Transform slave spectra to master domain and export (no prediction needed):",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
+        # Sub-section A1: Load Data
+        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Slave Data",
+                                     style='Card.TFrame', padding=10)
+        data_section.pack(fill='x', pady=(0, 10))
 
-        # Transfer model source selector
-        tm_source_frame_c = ttk.Frame(section_c_new)
-        tm_source_frame_c.pack(fill='x', pady=(0, 10))
+        # Load Master Spectra
+        master_frame = ttk.Frame(data_section)
+        master_frame.pack(fill='x', pady=(0, 10))
 
-        ttk.Label(tm_source_frame_c, text="Transfer Model Source:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_eq_tm_source_var = tk.StringVar(value='registry')
-        ttk.Radiobutton(tm_source_frame_c, text="From Registry",
-                       variable=self.ct_eq_tm_source_var, value='registry',
-                       command=self._on_eq_tm_source_changed).pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(tm_source_frame_c, text="Use Current Model (from Section B)",
-                       variable=self.ct_eq_tm_source_var, value='current',
-                       command=self._on_eq_tm_source_changed).pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(tm_source_frame_c, text="Load from File",
-                       variable=self.ct_eq_tm_source_var, value='file',
-                       command=self._on_eq_tm_source_changed).pack(side='left')
-
-        # Registry selection (initially shown)
-        self.ct_eq_registry_frame = ttk.Frame(section_c_new)
-        self.ct_eq_registry_frame.pack(fill='x', pady=(5, 0))
-
-        ttk.Label(self.ct_eq_registry_frame, text="Select from Registry:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_eq_registry_combo_var = tk.StringVar()
-        self.ct_eq_registry_combo = ttk.Combobox(self.ct_eq_registry_frame, textvariable=self.ct_eq_registry_combo_var,
-                                                 state='readonly', width=50)
-        self.ct_eq_registry_combo.pack(side='left', padx=(0, 10))
-        ttk.Button(self.ct_eq_registry_frame, text="Load from Registry",
-                  command=self._load_ct_eq_from_registry, style='Modern.TButton').pack(side='left')
-
-        # Load transfer model from file (initially hidden)
-        self.ct_eq_load_tm_frame = ttk.Frame(section_c_new)
-
-        self.ct_eq_tm_path_var = tk.StringVar()
-        tm_eq_entry = ttk.Entry(self.ct_eq_load_tm_frame, textvariable=self.ct_eq_tm_path_var,
-                               width=60, state='readonly')
-        tm_eq_entry.pack(side='left', padx=(0, 10))
-
-        ttk.Button(self.ct_eq_load_tm_frame, text="Browse Transfer Model...",
-                  command=self._browse_ct_eq_transfer_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(self.ct_eq_load_tm_frame, text="Load TM",
-                  command=self._load_ct_eq_transfer_model, style='Modern.TButton').pack(side='left')
-
-        # Input directory for slave spectra to transform
-        input_dir_frame_c = ttk.Frame(section_c_new)
-        input_dir_frame_c.pack(fill='x', pady=(10, 0))
-
-        ttk.Label(input_dir_frame_c, text="Slave Spectra to Transform:",
+        ttk.Label(master_frame, text="Master Spectra:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        input_browse_frame_c = ttk.Frame(input_dir_frame_c)
-        input_browse_frame_c.pack(fill='x')
+        master_browse_frame = ttk.Frame(master_frame)
+        master_browse_frame.pack(fill='x')
 
-        self.ct_eq_input_dir_var = tk.StringVar()
-        input_entry_c = ttk.Entry(input_browse_frame_c, textvariable=self.ct_eq_input_dir_var,
-                               width=60, state='readonly')
-        input_entry_c.pack(side='left', padx=(0, 10))
+        self.ct_master_data_path_var = tk.StringVar()
+        ttk.Entry(master_browse_frame, textvariable=self.ct_master_data_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
 
-        ttk.Button(input_browse_frame_c, text="Browse Directory...",
-                  command=self._browse_ct_eq_input_dir, style='Modern.TButton').pack(side='left')
+        ttk.Button(master_browse_frame, text="Browse Folder/File...",
+                  command=self._browse_master_spectra,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
 
-        # Output directory
-        output_dir_frame_c = ttk.Frame(section_c_new)
-        output_dir_frame_c.pack(fill='x', pady=(10, 0))
+        self._create_accent_button(master_browse_frame, "Load Master Spectra",
+                                   self._load_master_spectra).pack(side='left')
 
-        ttk.Label(output_dir_frame_c, text="Output Directory (leave empty to use same as input):",
+        # Load Slave Spectra
+        slave_frame = ttk.Frame(data_section)
+        slave_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(slave_frame, text="Slave Spectra:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        output_browse_frame_c = ttk.Frame(output_dir_frame_c)
-        output_browse_frame_c.pack(fill='x')
+        slave_browse_frame = ttk.Frame(slave_frame)
+        slave_browse_frame.pack(fill='x')
 
-        self.ct_eq_output_dir_var = tk.StringVar()
-        output_entry_c = ttk.Entry(output_browse_frame_c, textvariable=self.ct_eq_output_dir_var,
-                                width=60)
-        output_entry_c.pack(side='left', padx=(0, 10))
+        self.ct_slave_data_path_var = tk.StringVar()
+        ttk.Entry(slave_browse_frame, textvariable=self.ct_slave_data_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
 
-        ttk.Button(output_browse_frame_c, text="Browse Directory...",
-                  command=self._browse_ct_eq_output_dir, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(output_browse_frame_c, text="Clear (Use Input Dir)",
-                  command=lambda: self.ct_eq_output_dir_var.set(''), style='Modern.TButton').pack(side='left')
+        ttk.Button(slave_browse_frame, text="Browse Folder/File...",
+                  command=self._browse_slave_spectra,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
 
-        # Output options frame
-        output_opts_frame_c = ttk.Frame(section_c_new)
-        output_opts_frame_c.pack(fill='x', pady=(10, 0))
+        self._create_accent_button(slave_browse_frame, "Load Slave Spectra",
+                                   self._load_slave_spectra).pack(side='left')
 
-        # File organization option
-        org_frame_c = ttk.Frame(output_opts_frame_c)
-        org_frame_c.pack(fill='x', pady=(0, 5))
+        # Data info display
+        ttk.Label(data_section, text="Data Information:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
 
-        ttk.Label(org_frame_c, text="File Organization:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_eq_file_org_var = tk.StringVar(value='individual')
-        ttk.Radiobutton(org_frame_c, text="Individual files per spectrum",
-                       variable=self.ct_eq_file_org_var, value='individual').pack(side='left', padx=(0, 20))
-        ttk.Radiobutton(org_frame_c, text="Single file (CSV/Excel)",
-                       variable=self.ct_eq_file_org_var, value='single').pack(side='left')
-
-        # Format selection
-        format_frame_c = ttk.Frame(output_opts_frame_c)
-        format_frame_c.pack(fill='x', pady=(5, 0))
-
-        ttk.Label(format_frame_c, text="Output Format:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_eq_format_var = tk.StringVar(value='auto')
-        format_combo_c = ttk.Combobox(format_frame_c, textvariable=self.ct_eq_format_var,
-                                   state='readonly', width=20,
-                                   values=['auto (match input)', 'csv', 'excel', 'spc', 'jcamp', 'ascii'])
-        format_combo_c.pack(side='left')
-
-        # File Equalize button
-        self._create_accent_button(section_c_new, "Transform & Export Files",
-                                    self._file_equalize_batch).pack(pady=(15, 10))
-
-        # Status display
-        self.ct_eq_status_text = tk.Text(section_c_new, height=6, width=80, state='disabled',
+        self.ct_data_info_text = tk.Text(data_section, height=4, width=80, state='disabled',
                                         wrap='word', relief='flat', borderwidth=0,
                                         bg=self.colors['panel'], fg=self.colors['text'],
-                                        selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
-        self.ct_eq_status_text.pack(fill='x')
+                                        selectbackground=self.colors['accent'],
+                                        selectforeground=self.colors['text_inverse'])
+        self.ct_data_info_text.pack(fill='x', pady=(0, 10))
 
-        # ===================================================================
-        # SECTION D: Transfer + Prediction
-        # ===================================================================
-        section_d_new = ttk.LabelFrame(main_frame, text="D) Transfer + Prediction",
-                                      style='Card.TFrame', padding=15)
-        section_d_new.pack(fill='x', pady=(0, 15))
+        # Preview button
+        ttk.Button(data_section, text="Preview Master vs Slave Spectra",
+                  command=self._preview_spectra,
+                  style='Modern.TButton').pack(anchor='w')
 
-        ttk.Label(section_d_new,
-                 text="Load slave spectra, apply calibration transfer, and predict using master model:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 10))
+        # Sub-section A2: Configure Method
+        method_section = ttk.LabelFrame(self.ct_build_new_frame, text="A2) Configure Transfer Method",
+                                       style='Card.TFrame', padding=10)
+        method_section.pack(fill='x', pady=(0, 10))
 
-        # Load master model for prediction
-        master_model_frame_d = ttk.Frame(section_d_new)
-        master_model_frame_d.pack(fill='x', pady=(0, 10))
-
-        ttk.Label(master_model_frame_d, text="Master Calibration Model:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
-
-        master_model_entry_frame = ttk.Frame(master_model_frame_d)
-        master_model_entry_frame.pack(fill='x')
-
-        self.ct_pred_master_model_var = tk.StringVar()
-        master_model_entry = ttk.Entry(master_model_entry_frame, textvariable=self.ct_pred_master_model_var,
-                                      width=60, state='readonly')
-        master_model_entry.pack(side='left', padx=(0, 10))
-
-        ttk.Button(master_model_entry_frame, text="Browse Model...",
-                  command=self._browse_ct_pred_master_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(master_model_entry_frame, text="Load Model",
-                  command=self._load_ct_pred_master_model, style='Modern.TButton').pack(side='left')
-
-        # Transfer model selection
-        tm_pred_frame = ttk.Frame(section_d_new)
-        tm_pred_frame.pack(fill='x', pady=(10, 0))
-
-        ttk.Label(tm_pred_frame, text="Transfer Model Source:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
-
-        tm_source_selector_d = ttk.Frame(tm_pred_frame)
-        tm_source_selector_d.pack(fill='x', pady=(5, 0))
-
-        self.ct_pred_tm_source_var = tk.StringVar(value='registry')
-        ttk.Radiobutton(tm_source_selector_d, text="From Registry",
-                       variable=self.ct_pred_tm_source_var, value='registry',
-                       command=self._on_pred_tm_source_changed).pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(tm_source_selector_d, text="Use Current Model (from Section B)",
-                       variable=self.ct_pred_tm_source_var, value='current',
-                       command=self._on_pred_tm_source_changed).pack(side='left', padx=(0, 15))
-        ttk.Radiobutton(tm_source_selector_d, text="Load from File",
-                       variable=self.ct_pred_tm_source_var, value='file',
-                       command=self._on_pred_tm_source_changed).pack(side='left')
-
-        # Registry selection for transfer model
-        self.ct_pred_registry_frame = ttk.Frame(section_d_new)
-        self.ct_pred_registry_frame.pack(fill='x', pady=(5, 0))
-
-        ttk.Label(self.ct_pred_registry_frame, text="Select from Registry:", style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
-        self.ct_pred_registry_combo_var = tk.StringVar()
-        self.ct_pred_registry_combo = ttk.Combobox(self.ct_pred_registry_frame, textvariable=self.ct_pred_registry_combo_var,
-                                                   state='readonly', width=50)
-        self.ct_pred_registry_combo.pack(side='left', padx=(0, 10))
-        ttk.Button(self.ct_pred_registry_frame, text="Load from Registry",
-                  command=self._load_ct_pred_from_registry, style='Modern.TButton').pack(side='left')
-
-        # Load transfer model from file
-        self.ct_pred_load_tm_frame = ttk.Frame(section_d_new)
-
-        self.ct_pred_tm_path_var = tk.StringVar()
-        tm_pred_entry = ttk.Entry(self.ct_pred_load_tm_frame, textvariable=self.ct_pred_tm_path_var,
-                                  width=60, state='readonly')
-        tm_pred_entry.pack(side='left', padx=(0, 10))
-
-        ttk.Button(self.ct_pred_load_tm_frame, text="Browse Transfer Model...",
-                  command=self._browse_ct_pred_transfer_model, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        ttk.Button(self.ct_pred_load_tm_frame, text="Load TM",
-                  command=self._load_ct_pred_transfer_model, style='Modern.TButton').pack(side='left')
-
-        # Load new slave spectra
-        load_new_spectra_frame_d = ttk.Frame(section_d_new)
-        load_new_spectra_frame_d.pack(fill='x', pady=(10, 0))
-
-        ttk.Label(load_new_spectra_frame_d, text="New Slave Spectra Directory:",
+        # Method selection (reuse existing UI pattern lines 15640-15790)
+        ttk.Label(method_section, text="Transfer Method:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        new_spectra_entry_frame_d = ttk.Frame(load_new_spectra_frame_d)
-        new_spectra_entry_frame_d.pack(fill='x')
+        method_buttons_frame = ttk.Frame(method_section)
+        method_buttons_frame.pack(fill='x', pady=(0, 10))
 
-        self.ct_new_slave_dir_var = tk.StringVar()
-        new_slave_entry_d = ttk.Entry(new_spectra_entry_frame_d, textvariable=self.ct_new_slave_dir_var,
-                                   width=60, state='readonly')
-        new_slave_entry_d.pack(side='left', padx=(0, 10))
+        self.ct_method_var = tk.StringVar(value='ctai')
+        ttk.Radiobutton(method_buttons_frame, text="DS",
+                       variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 10))
+        ttk.Radiobutton(method_buttons_frame, text="PDS",
+                       variable=self.ct_method_var, value='pds').pack(side='left', padx=(0, 10))
+        ttk.Radiobutton(method_buttons_frame, text="TSR",
+                       variable=self.ct_method_var, value='tsr').pack(side='left', padx=(0, 10))
+        ttk.Radiobutton(method_buttons_frame, text="CTAI",
+                       variable=self.ct_method_var, value='ctai').pack(side='left', padx=(0, 10))
+        ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
+                       variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 10))
+        ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
+                       variable=self.ct_method_var, value='jypls-inv').pack(side='left')
 
-        ttk.Button(new_spectra_entry_frame_d, text="Browse Directory...",
-                  command=self._browse_ct_new_slave_dir, style='Modern.TButton').pack(side='left', padx=(0, 10))
-        self._create_accent_button(new_spectra_entry_frame_d, "Transfer & Predict",
-                                    self._load_and_predict_ct).pack(side='left')
+        # Method parameters
+        params_frame = ttk.LabelFrame(method_section, text="Method Parameters",
+                                     style='Card.TFrame', padding=5)
+        params_frame.pack(fill='x', pady=(0, 10))
 
-        # Prediction results
-        self.ct_prediction_text = tk.Text(section_d_new, height=6, width=80, state='disabled',
-                                         wrap='word', relief='flat', borderwidth=0,
-                                         bg=self.colors['panel'], fg=self.colors['text'],
-                                         selectbackground=self.colors['accent'], selectforeground=self.colors['text_inverse'])
-        self.ct_prediction_text.pack(fill='x', pady=(10, 0))
+        # Row 1
+        row1 = ttk.Frame(params_frame)
+        row1.pack(fill='x', pady=(0, 5))
 
-        # Plot frame for prediction visualization
-        self.ct_prediction_plot_frame = ttk.Frame(section_d_new, style='TFrame')
-        self.ct_prediction_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
+        ttk.Label(row1, text="DS Lambda:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_ds_lambda_var = tk.StringVar(value='0.001')
+        ttk.Entry(row1, textvariable=self.ct_ds_lambda_var, width=12).pack(side='left', padx=(0, 20))
 
-        # Export predictions
-        ttk.Button(section_d_new, text="Export Predictions...",
-                  command=self._export_ct_predictions, style='Modern.TButton').pack(pady=(10, 0), anchor='w')
+        ttk.Label(row1, text="PDS Window:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_pds_window_var = tk.StringVar(value='11')
+        ttk.Entry(row1, textvariable=self.ct_pds_window_var, width=12).pack(side='left')
+
+        # Row 2
+        row2 = ttk.Frame(params_frame)
+        row2.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(row2, text="TSR Samples:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
+        ttk.Entry(row2, textvariable=self.ct_tsr_n_samples_var, width=12).pack(side='left', padx=(0, 20))
+
+        ttk.Label(row2, text="JYPLS Samples:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_jypls_n_samples_var = tk.StringVar(value='12')
+        ttk.Entry(row2, textvariable=self.ct_jypls_n_samples_var, width=12).pack(side='left')
+
+        # Row 3
+        row3 = ttk.Frame(params_frame)
+        row3.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(row3, text="JYPLS Components:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_jypls_n_components_var = tk.StringVar(value='Auto')
+        ttk.Combobox(row3, textvariable=self.ct_jypls_n_components_var,
+                    values=['Auto', '3', '5', '8', '10', '15', '20'],
+                    state='readonly', width=10).pack(side='left', padx=(0, 20))
+
+        ttk.Label(row3, text="NS-PFCE Max Iter:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_nspfce_max_iterations_var = tk.StringVar(value='100')
+        ttk.Entry(row3, textvariable=self.ct_nspfce_max_iterations_var, width=12).pack(side='left')
+
+        # Row 4
+        row4 = ttk.Frame(params_frame)
+        row4.pack(fill='x')
+
+        self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
+                       variable=self.ct_nspfce_use_wavelength_selection_var).pack(side='left', padx=(0, 20))
+
+        ttk.Label(row4, text="Selector:", style='CardLabel.TLabel').pack(side='left')
+        self.ct_nspfce_selector_var = tk.StringVar(value='vcpa-iriv')
+        ttk.Combobox(row4, textvariable=self.ct_nspfce_selector_var,
+                    values=['vcpa-iriv', 'cars', 'spa'], state='readonly',
+                    width=12).pack(side='left')
+
+        # Build button
+        build_btn_frame = ttk.Frame(self.ct_build_new_frame)
+        build_btn_frame.pack(fill='x', pady=(0, 10))
+
+        self._create_accent_button(build_btn_frame, "Build Transfer Model",
+                                   self._build_transfer_model_new).pack(side='left', padx=(0, 10))
+
+        self.ct_save_tm_button = ttk.Button(build_btn_frame, text="Save Transfer Model...",
+                                           command=self._save_transfer_model,
+                                           style='Modern.TButton', state='disabled')
+        self.ct_save_tm_button.pack(side='left')
+
+        # Transfer model info and plots
+        ttk.Label(self.ct_build_new_frame, text="Transfer Model Information:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        self.ct_transfer_info_text = tk.Text(self.ct_build_new_frame, height=5, width=80,
+                                            state='disabled', wrap='word', relief='flat',
+                                            borderwidth=0, bg=self.colors['panel'],
+                                            fg=self.colors['text'],
+                                            selectbackground=self.colors['accent'],
+                                            selectforeground=self.colors['text_inverse'])
+        self.ct_transfer_info_text.pack(fill='x', pady=(0, 10))
+
+        # Plot frame for transfer quality
+        self.ct_transfer_plot_frame = ttk.Frame(self.ct_build_new_frame, style='TFrame')
+        self.ct_transfer_plot_frame.pack(fill='both', expand=True)
+
+        # ===================================================================
+        # STEP 2: Choose Application Mode
+        # ===================================================================
+        step2_title_label = ttk.Label(main_frame, text="STEP 2: Choose How to Use Transfer Model",
+                                     style='Caption.TLabel')
+        step2_title_label.pack(pady=(20, 10))
+
+        mode_selection_frame = ttk.LabelFrame(main_frame, text="B) Application Mode",
+                                             style='Card.TFrame', padding=15)
+        mode_selection_frame.pack(fill='x', pady=(0, 15))
+
+        self.ct_mode_var = tk.StringVar(value='')
+
+        # Mode A: Predict Properties
+        mode_a_frame = ttk.Frame(mode_selection_frame)
+        mode_a_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Radiobutton(mode_a_frame, text="Mode A: Predict Properties",
+                       variable=self.ct_mode_var, value='predict',
+                       command=self._on_mode_selected).pack(anchor='w', pady=(0, 5))
+
+        ttk.Label(mode_a_frame,
+                 text="Apply transfer to predict properties (e.g., % nitrogen) from new slave data.\nRequires: Master prediction model + new slave data",
+                 style='CardLabel.TLabel', foreground='gray').pack(anchor='w', padx=(25, 0))
+
+        # Mode B: Transform & Export
+        mode_b_frame = ttk.Frame(mode_selection_frame)
+        mode_b_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Radiobutton(mode_b_frame, text="Mode B: Transform & Export",
+                       variable=self.ct_mode_var, value='export',
+                       command=self._on_mode_selected).pack(anchor='w', pady=(0, 5))
+
+        ttk.Label(mode_b_frame,
+                 text="Transform slave spectra to master domain and export files.\nRequires: Only new slave data (NO prediction model needed)",
+                 style='CardLabel.TLabel', foreground='gray').pack(anchor='w', padx=(25, 0))
+
+        # Status label
+        self.ct_mode_status_label = ttk.Label(mode_selection_frame, text="",
+                                             style='CardLabel.TLabel')
+        self.ct_mode_status_label.pack(anchor='w', pady=(10, 0))
+
+        # ===================================================================
+        # STEP 3A: Prediction Workflow (Mode A) - Initially hidden
+        # ===================================================================
+        step3a_title_label = ttk.Label(main_frame, text="STEP 3A: Prediction Workflow",
+                                      style='Caption.TLabel')
+        step3a_title_label.pack(pady=(20, 10))
+
+        self.ct_step3a_frame = ttk.LabelFrame(main_frame, text="C) Apply Transfer & Predict (Mode A)",
+                                             style='Card.TFrame', padding=15)
+        # Don't pack yet - controlled by mode selection
+
+        # C1: Load Master Prediction Model
+        c1_section = ttk.LabelFrame(self.ct_step3a_frame, text="C1) Load Master Prediction Model",
+                                   style='Card.TFrame', padding=10)
+        c1_section.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(c1_section, text="Load a trained prediction model (sklearn .pkl file):",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        model_load_frame = ttk.Frame(c1_section)
+        model_load_frame.pack(fill='x', pady=(0, 10))
+
+        self.ct_pred_model_path_var = tk.StringVar()
+        ttk.Entry(model_load_frame, textvariable=self.ct_pred_model_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
+
+        ttk.Button(model_load_frame, text="Browse...",
+                  command=self._browse_prediction_model,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
+
+        self._create_accent_button(model_load_frame, "Load Model",
+                                   self._load_prediction_model).pack(side='left')
+
+        # Display model info
+        ttk.Label(c1_section, text="Model Information:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        self.ct_pred_model_info_text = tk.Text(c1_section, height=4, width=80,
+                                              state='disabled', wrap='word', relief='flat',
+                                              borderwidth=0, bg=self.colors['panel'],
+                                              fg=self.colors['text'],
+                                              selectbackground=self.colors['accent'],
+                                              selectforeground=self.colors['text_inverse'])
+        self.ct_pred_model_info_text.pack(fill='x', pady=(0, 10))
+
+        # C2: Load New Slave Data
+        c2_section = ttk.LabelFrame(self.ct_step3a_frame, text="C2) Load New Slave Data",
+                                   style='Card.TFrame', padding=10)
+        c2_section.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(c2_section, text="Load new slave spectra for prediction:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        slave_load_frame = ttk.Frame(c2_section)
+        slave_load_frame.pack(fill='x', pady=(0, 10))
+
+        self.ct_pred_slave_path_var = tk.StringVar()
+        ttk.Entry(slave_load_frame, textvariable=self.ct_pred_slave_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
+
+        ttk.Button(slave_load_frame, text="Browse...",
+                  command=self._browse_new_slave_data_predict,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
+
+        self._create_accent_button(slave_load_frame, "Load Slave Spectra",
+                                   self._load_new_slave_data_predict).pack(side='left')
+
+        # Display slave data info
+        ttk.Label(c2_section, text="Slave Data Information:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        self.ct_pred_slave_info_text = tk.Text(c2_section, height=3, width=80,
+                                              state='disabled', wrap='word', relief='flat',
+                                              borderwidth=0, bg=self.colors['panel'],
+                                              fg=self.colors['text'],
+                                              selectbackground=self.colors['accent'],
+                                              selectforeground=self.colors['text_inverse'])
+        self.ct_pred_slave_info_text.pack(fill='x', pady=(0, 10))
+
+        # C3: Run Prediction
+        c3_section = ttk.LabelFrame(self.ct_step3a_frame, text="C3) Run Prediction",
+                                   style='Card.TFrame', padding=10)
+        c3_section.pack(fill='x', pady=(0, 10))
+
+        prediction_btn_frame = ttk.Frame(c3_section)
+        prediction_btn_frame.pack(fill='x', pady=(0, 10))
+
+        self._create_accent_button(prediction_btn_frame, "Run Prediction Workflow",
+                                   self._run_prediction_workflow).pack(side='left', padx=(0, 10))
+
+        self.ct_export_predictions_button = ttk.Button(prediction_btn_frame,
+                                                       text="Export Predictions to CSV...",
+                                                       command=self._export_predictions,
+                                                       style='Modern.TButton', state='disabled')
+        self.ct_export_predictions_button.pack(side='left')
+
+        # Results display
+        ttk.Label(c3_section, text="Prediction Results:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        # Create treeview for results
+        results_tree_frame = ttk.Frame(c3_section)
+        results_tree_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        # Scrollbars for treeview
+        tree_scroll_y = ttk.Scrollbar(results_tree_frame, orient='vertical')
+        tree_scroll_y.pack(side='right', fill='y')
+        tree_scroll_x = ttk.Scrollbar(results_tree_frame, orient='horizontal')
+        tree_scroll_x.pack(side='bottom', fill='x')
+
+        self.ct_predictions_tree = ttk.Treeview(results_tree_frame,
+                                               columns=('sample_id', 'predicted_value'),
+                                               show='headings', height=8,
+                                               yscrollcommand=tree_scroll_y.set,
+                                               xscrollcommand=tree_scroll_x.set)
+
+        tree_scroll_y.config(command=self.ct_predictions_tree.yview)
+        tree_scroll_x.config(command=self.ct_predictions_tree.xview)
+
+        self.ct_predictions_tree.heading('sample_id', text='Sample ID')
+        self.ct_predictions_tree.heading('predicted_value', text='Predicted Value')
+        self.ct_predictions_tree.column('sample_id', width=200, anchor='w')
+        self.ct_predictions_tree.column('predicted_value', width=150, anchor='e')
+
+        self.ct_predictions_tree.pack(fill='both', expand=True)
+
+        # Plot frame for prediction results
+        self.ct_predictions_plot_frame = ttk.Frame(c3_section, style='TFrame')
+        self.ct_predictions_plot_frame.pack(fill='both', expand=True, pady=(10, 0))
+
+        # ===================================================================
+        # STEP 3B: Transform & Export Workflow (Mode B)
+        # ===================================================================
+        self.ct_step3b_frame = ttk.LabelFrame(main_frame,
+                                              text="D) Transform & Export Spectra (Mode B)",
+                                              style='Card.TFrame', padding=15)
+        # Don't pack yet - controlled by mode selection in Step 2
+
+        # D1: Load New Slave Data for Export
+        export_load_section = ttk.LabelFrame(self.ct_step3b_frame,
+                                            text="D1) Load New Slave Data to Transform",
+                                            style='Card.TFrame', padding=10)
+        export_load_section.pack(fill='x', pady=(0, 10))
+
+        # Browse for new slave spectra
+        export_browse_frame = ttk.Frame(export_load_section)
+        export_browse_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(export_browse_frame, text="Slave Spectra to Transform:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        browse_row = ttk.Frame(export_browse_frame)
+        browse_row.pack(fill='x')
+
+        self.ct_export_slave_path_var = tk.StringVar()
+        ttk.Entry(browse_row, textvariable=self.ct_export_slave_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
+
+        ttk.Button(browse_row, text="Browse Folder/File...",
+                  command=self._browse_export_slave_spectra,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
+
+        self._create_accent_button(browse_row, "Load Slave Spectra",
+                                   self._load_new_slave_data_export).pack(side='left')
+
+        # Display loaded data info
+        ttk.Label(export_load_section, text="Loaded Data Information:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        self.ct_export_data_info_text = tk.Text(export_load_section, height=3, width=80,
+                                               state='disabled', wrap='word', relief='flat',
+                                               borderwidth=0, bg=self.colors['panel'],
+                                               fg=self.colors['text'],
+                                               selectbackground=self.colors['accent'],
+                                               selectforeground=self.colors['text_inverse'])
+        self.ct_export_data_info_text.pack(fill='x', pady=(0, 10))
+
+        # D2: Transform Spectra
+        transform_section = ttk.LabelFrame(self.ct_step3b_frame,
+                                          text="D2) Transform Spectra",
+                                          style='Card.TFrame', padding=10)
+        transform_section.pack(fill='x', pady=(0, 10))
+
+        transform_btn_frame = ttk.Frame(transform_section)
+        transform_btn_frame.pack(fill='x', pady=(0, 10))
+
+        self._create_accent_button(transform_btn_frame, "Transform Spectra",
+                                   self._transform_spectra).pack(side='left')
+
+        # Transform statistics display
+        ttk.Label(transform_section, text="Transformation Statistics:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        self.ct_transform_stats_text = tk.Text(transform_section, height=3, width=80,
+                                              state='disabled', wrap='word', relief='flat',
+                                              borderwidth=0, bg=self.colors['panel'],
+                                              fg=self.colors['text'],
+                                              selectbackground=self.colors['accent'],
+                                              selectforeground=self.colors['text_inverse'])
+        self.ct_transform_stats_text.pack(fill='x', pady=(0, 10))
+
+        # Preview plot frame
+        self.ct_transform_preview_frame = ttk.Frame(transform_section, style='TFrame')
+        self.ct_transform_preview_frame.pack(fill='both', expand=True)
+
+        # D3: Export Transformed Spectra
+        export_section = ttk.LabelFrame(self.ct_step3b_frame,
+                                       text="D3) Export Transformed Spectra",
+                                       style='Card.TFrame', padding=10)
+        export_section.pack(fill='x', pady=(0, 10))
+
+        export_btn_frame = ttk.Frame(export_section)
+        export_btn_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(export_btn_frame, text="Output Directory:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
+
+        output_row = ttk.Frame(export_btn_frame)
+        output_row.pack(fill='x', pady=(0, 10))
+
+        self.ct_export_output_dir_var = tk.StringVar()
+        ttk.Entry(output_row, textvariable=self.ct_export_output_dir_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
+
+        ttk.Button(output_row, text="Browse...",
+                  command=self._browse_export_output_dir,
+                  style='Modern.TButton').pack(side='left')
+
+        self._create_accent_button(export_btn_frame, "Export Transformed Spectra",
+                                   self._export_transformed_spectra).pack(side='left')
+
+        # Export status
+        ttk.Label(export_section, text="Export Status:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
+
+        self.ct_export_status_text = tk.Text(export_section, height=2, width=80,
+                                            state='disabled', wrap='word', relief='flat',
+                                            borderwidth=0, bg=self.colors['panel'],
+                                            fg=self.colors['text'],
+                                            selectbackground=self.colors['accent'],
+                                            selectforeground=self.colors['text_inverse'])
+        self.ct_export_status_text.pack(fill='x')
+
+        # Initialize UI state
+        self._on_step1_mode_changed()
+
 
 
 def main():
