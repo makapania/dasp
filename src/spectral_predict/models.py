@@ -27,7 +27,8 @@ except ImportError:
 from .model_config import (
     OPTIMIZED_HYPERPARAMETERS,
     get_tier_models,
-    get_hyperparameters
+    get_hyperparameters,
+    get_execution_defaults
 )
 
 
@@ -102,6 +103,16 @@ class PLSTransformer(BaseEstimator, TransformerMixin):
             return getattr(pls, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}' (model not fitted)")
 
+    def __sklearn_is_fitted__(self):
+        """Check if the transformer is fitted.
+
+        Returns
+        -------
+        bool
+            True if the underlying PLS model is fitted, False otherwise
+        """
+        return self.pls_ is not None and hasattr(self.pls_, 'x_weights_')
+
 
 def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500):
     """
@@ -142,41 +153,41 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42, max_iter=max_iter)
 
         elif model_name == "RandomForest":
+            exec_defaults = get_execution_defaults('RandomForest')
             return RandomForestRegressor(
                 n_estimators=200,
                 max_depth=None,
                 random_state=42,
-                n_jobs=-1
+                **exec_defaults
             )
 
         elif model_name == "MLP":
+            exec_defaults = get_execution_defaults('MLP')
             return MLPRegressor(
                 hidden_layer_sizes=(64,),
                 alpha=1e-3,
                 learning_rate_init=1e-3,
                 max_iter=max_iter,
                 random_state=42,
-                early_stopping=True
+                **exec_defaults
             )
 
         elif model_name == "NeuralBoosted":
+            exec_defaults = get_execution_defaults('NeuralBoosted')
             return NeuralBoostedRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
                 hidden_layer_size=3,
                 activation='tanh',
-                early_stopping=True,
-                validation_fraction=0.15,
-                n_iter_no_change=10,
-                alpha=1e-4,
                 random_state=42,
-                verbose=0
+                **exec_defaults
             )
 
         elif model_name == "SVR":
             return SVR(kernel='rbf', C=1.0, gamma='scale')
 
         elif model_name == "XGBoost":
+            exec_defaults = get_execution_defaults('XGBoost')
             return XGBRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
@@ -185,27 +196,24 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 colsample_bytree=0.8,  # Original working value for high-dim data
                 reg_alpha=0.1,  # Light L1 regularization for feature selection
                 reg_lambda=1.0,  # XGBoost default L2 regularization
-                tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
-                n_jobs=-1,
-                verbosity=0
+                **exec_defaults
             )
 
         elif model_name == "LightGBM":
+            exec_defaults = get_execution_defaults('LightGBM')
             return LGBMRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
                 num_leaves=31,  # LightGBM default
                 max_depth=-1,  # No depth limit (controlled by num_leaves)
-                min_child_samples=5,  # Reduced for small datasets (was 20 - caused negative R2)
+                min_child_samples=10,  # Balanced: 5 too aggressive for large datasets, 20 too conservative for small
                 subsample=0.8,  # Row sampling to prevent overfitting (like XGBoost)
-                bagging_freq=1,  # Required when subsample < 1.0
                 colsample_bytree=0.8,  # Feature sampling for high-dim data (like XGBoost)
                 reg_alpha=0.1,  # L1 regularization for feature selection (like XGBoost)
                 reg_lambda=1.0,  # L2 regularization to prevent overfitting (like XGBoost)
                 random_state=42,
-                n_jobs=-1,
-                verbosity=-1
+                **exec_defaults
             )
 
         elif model_name == "CatBoost":
@@ -228,43 +236,43 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return PLSTransformer(n_components=n_components, scale=False)
 
         elif model_name == "RandomForest":
+            exec_defaults = get_execution_defaults('RandomForest')
             return RandomForestClassifier(
                 n_estimators=200,
                 max_depth=None,
                 random_state=42,
-                n_jobs=-1
+                **exec_defaults
             )
 
         elif model_name == "MLP":
+            exec_defaults = get_execution_defaults('MLP')
             return MLPClassifier(
                 hidden_layer_sizes=(64,),
                 alpha=1e-3,
                 learning_rate_init=1e-3,
                 max_iter=max_iter,
                 random_state=42,
-                early_stopping=True
+                **exec_defaults
             )
 
         elif model_name == "NeuralBoosted":
+            exec_defaults = get_execution_defaults('NeuralBoosted')
             return NeuralBoostedClassifier(
                 n_estimators=100,
                 learning_rate=0.1,
                 hidden_layer_size=5,
                 activation='tanh',
-                early_stopping=True,
-                validation_fraction=0.15,
-                n_iter_no_change=10,
                 early_stopping_metric='accuracy',  # User-selectable metric (default: accuracy)
                 class_weight=None,  # Can be 'balanced' for imbalanced datasets
-                alpha=1e-4,
                 random_state=42,
-                verbose=0
+                **exec_defaults
             )
 
         elif model_name == "SVM":
             return SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=42)
 
         elif model_name == "XGBoost":
+            exec_defaults = get_execution_defaults('XGBoost')
             return XGBClassifier(
                 n_estimators=100,
                 learning_rate=0.1,
@@ -272,27 +280,24 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 subsample=0.8,  # Better default for spectroscopy (correlated samples)
                 colsample_bytree=0.8,  # Better default for 2000+ features (tree diversity)
                 reg_alpha=0.1,  # L1 regularization for implicit feature selection
-                tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
-                n_jobs=-1,
-                verbosity=0
+                **exec_defaults
             )
 
         elif model_name == "LightGBM":
+            exec_defaults = get_execution_defaults('LightGBM')
             return LGBMClassifier(
                 n_estimators=100,
                 learning_rate=0.1,
                 num_leaves=15,  # Reduced for small datasets (was 31)
                 max_depth=-1,  # No limit (controlled by num_leaves)
-                min_child_samples=5,  # Reduced for small datasets (was 20)
+                min_child_samples=10,  # Balanced: 5 too aggressive for large datasets, 20 too conservative for small
                 subsample=0.8,  # Row sampling like XGBoost
-                bagging_freq=1,  # Required when subsample < 1.0
                 colsample_bytree=0.8,  # Feature sampling for high-dimensional data
                 reg_alpha=0.1,  # L1 regularization
                 reg_lambda=1.0,  # L2 regularization
                 random_state=42,
-                n_jobs=-1,
-                verbosity=-1
+                **exec_defaults
             )
 
         elif model_name == "CatBoost":
@@ -508,7 +513,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
         lightgbm_max_depth_list = lgbm_config.get('max_depth', [-1])
     if lightgbm_min_child_samples_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
-        lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [5])
+        lightgbm_min_child_samples_list = lgbm_config.get('min_child_samples', [10])
     if lightgbm_subsample_list is None:
         lgbm_config = get_hyperparameters('LightGBM', tier)
         lightgbm_subsample_list = lgbm_config.get('subsample', [0.8])

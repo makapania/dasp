@@ -39,6 +39,27 @@ class SNV(BaseEstimator, TransformerMixin):
 
         return (X - means) / stds
 
+    def get_feature_names_out(self, input_features=None):
+        """Pass through feature names unchanged.
+
+        Parameters
+        ----------
+        input_features : array-like of str or None
+            Input feature names
+
+        Returns
+        -------
+        feature_names_out : ndarray of str
+            Unchanged feature names
+        """
+        if input_features is None:
+            return None
+        return np.asarray(input_features, dtype=object)
+
+    def __sklearn_is_fitted__(self):
+        """SNV requires no fitting - always ready to transform."""
+        return True
+
 
 class SavgolDerivative(BaseEstimator, TransformerMixin):
     """
@@ -104,6 +125,27 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
         )
 
         return X_deriv
+
+    def get_feature_names_out(self, input_features=None):
+        """Pass through feature names unchanged.
+
+        Parameters
+        ----------
+        input_features : array-like of str or None
+            Input feature names
+
+        Returns
+        -------
+        feature_names_out : ndarray of str
+            Unchanged feature names
+        """
+        if input_features is None:
+            return None
+        return np.asarray(input_features, dtype=object)
+
+    def __sklearn_is_fitted__(self):
+        """Savgol derivative requires no learned parameters - always ready to transform."""
+        return True
 
 
 def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None):
