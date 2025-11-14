@@ -29,6 +29,7 @@ CLASSIFICATION_MODELS = [
     'PLS',           # PLS can also be used for classification
     'RandomForest',  # Ensemble of decision trees
     'MLP',           # Multi-Layer Perceptron
+    'NeuralBoosted', # Custom gradient boosting with neural networks (now supports classification)
     'SVM',           # Support Vector Machine
     'XGBoost',       # Extreme Gradient Boosting
     'LightGBM',      # Light Gradient Boosting Machine
