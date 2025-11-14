@@ -1,9 +1,9 @@
-"""Unit tests for Neural Boosted Regression."""
+"""Unit tests for Neural Boosted Regression and Classification."""
 
 import numpy as np
 import pytest
-from sklearn.datasets import make_regression
-from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.datasets import make_regression, make_classification
+from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 import sys
@@ -11,7 +11,7 @@ from pathlib import Path
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
-from spectral_predict.neural_boosted import NeuralBoostedRegressor
+from spectral_predict.neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 
 
 class TestNeuralBoostedBasic:
@@ -484,6 +484,451 @@ class TestSklearnCompatibility:
         assert cloned.n_estimators == 50
         assert cloned.learning_rate == 0.1
         assert cloned.hidden_layer_size == 3
+
+
+# =============================================================================
+# CLASSIFICATION TESTS
+# =============================================================================
+
+class TestNeuralBoostedClassifierBasic:
+    """Basic classification functionality tests."""
+
+    def test_binary_classification_fit_predict(self):
+        """Test basic binary classification fit and predict."""
+        X, y = make_classification(
+            n_samples=150, n_features=20, n_informative=15,
+            n_redundant=5, n_classes=2, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            early_stopping_metric='accuracy',
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        predictions = model.predict(X)
+
+        assert predictions.shape == y.shape
+        assert len(model.estimators_) <= 20
+        acc = accuracy_score(y, predictions)
+        assert acc > 0.8, f"Accuracy = {acc:.3f}, expected > 0.8"
+
+    def test_multiclass_classification(self):
+        """Test multiclass classification (one-vs-rest strategy)."""
+        X, y = make_classification(
+            n_samples=200, n_features=20, n_informative=15,
+            n_classes=3, n_clusters_per_class=1, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=30,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            early_stopping_metric='accuracy',
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        predictions = model.predict(X)
+
+        assert predictions.shape == y.shape
+        assert len(np.unique(predictions)) == 3
+        assert isinstance(model.n_estimators_, list)
+        assert len(model.n_estimators_) == 3  # One classifier per class
+
+        acc = accuracy_score(y, predictions)
+        assert acc > 0.7, f"Accuracy = {acc:.3f}, expected > 0.7"
+
+    def test_predict_proba_binary(self):
+        """Test predict_proba for binary classification."""
+        X, y = make_classification(
+            n_samples=100, n_features=20, n_classes=2, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        proba = model.predict_proba(X)
+
+        # Check shape
+        assert proba.shape == (100, 2)
+
+        # Check probabilities sum to 1
+        assert np.allclose(proba.sum(axis=1), 1.0), "Probabilities should sum to 1"
+
+        # Check probabilities are in [0, 1]
+        assert np.all(proba >= 0) and np.all(proba <= 1), "Probabilities should be in [0, 1]"
+
+        # Check predictions match argmax of probabilities
+        pred_from_proba = np.argmax(proba, axis=1)
+        pred_direct = model.label_encoder_.transform(model.predict(X))
+        assert np.array_equal(pred_from_proba, pred_direct)
+
+    def test_predict_proba_multiclass(self):
+        """Test predict_proba for multiclass classification."""
+        X, y = make_classification(
+            n_samples=150, n_features=20, n_classes=4,
+            n_informative=15, n_clusters_per_class=1, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=30,
+            learning_rate=0.1,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        proba = model.predict_proba(X)
+
+        # Check shape
+        assert proba.shape == (150, 4)
+
+        # Check probabilities sum to 1
+        assert np.allclose(proba.sum(axis=1), 1.0)
+
+        # Check probabilities are in [0, 1]
+        assert np.all(proba >= 0) and np.all(proba <= 1)
+
+    def test_predict_log_proba(self):
+        """Test predict_log_proba method."""
+        X, y = make_classification(n_samples=100, n_features=20, random_state=42)
+
+        model = NeuralBoostedClassifier(n_estimators=20, random_state=42, verbose=0)
+        model.fit(X, y)
+
+        log_proba = model.predict_log_proba(X)
+        proba = model.predict_proba(X)
+
+        # Check that log_proba = log(proba)
+        assert np.allclose(log_proba, np.log(proba))
+        assert np.all(log_proba <= 0), "Log probabilities should be <= 0"
+
+
+class TestClassifierEarlyStopping:
+    """Test early stopping for classifier."""
+
+    def test_early_stopping_accuracy_metric(self):
+        """Test early stopping with accuracy metric."""
+        X, y = make_classification(
+            n_samples=200, n_features=20, n_classes=2, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=100,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            early_stopping=True,
+            early_stopping_metric='accuracy',
+            n_iter_no_change=10,
+            validation_fraction=0.2,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+
+        # Should stop early
+        assert model.n_estimators_ < 100, f"Expected early stopping, got {model.n_estimators_} estimators"
+
+        # Should have validation scores
+        assert len(model.validation_score_) > 0
+
+    def test_early_stopping_log_loss_metric(self):
+        """Test early stopping with log-loss metric."""
+        X, y = make_classification(
+            n_samples=200, n_features=20, n_classes=2, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=100,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            early_stopping=True,
+            early_stopping_metric='log_loss',
+            n_iter_no_change=10,
+            validation_fraction=0.2,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+
+        # Should stop early
+        assert model.n_estimators_ < 100
+
+        # Validation scores should exist and decrease (lower is better for log_loss)
+        assert len(model.validation_score_) > 0
+
+    def test_no_early_stopping(self):
+        """Test that disabling early stopping uses all estimators."""
+        X, y = make_classification(n_samples=100, n_features=20, random_state=42)
+
+        model = NeuralBoostedClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            early_stopping=False,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+
+        # Should use all estimators
+        assert model.n_estimators_ == 20
+
+
+class TestClassWeighting:
+    """Test class weighting for imbalanced datasets."""
+
+    def test_balanced_class_weight(self):
+        """Test 'balanced' class weighting."""
+        # Create imbalanced dataset
+        X, y = make_classification(
+            n_samples=200, n_features=20, n_classes=2,
+            weights=[0.9, 0.1],  # 90% class 0, 10% class 1
+            random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=30,
+            learning_rate=0.1,
+            class_weight='balanced',
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        predictions = model.predict(X)
+
+        # Check that minority class is predicted
+        unique_preds = np.unique(predictions)
+        assert len(unique_preds) == 2, "Should predict both classes"
+
+        # Accuracy should be reasonable
+        acc = accuracy_score(y, predictions)
+        assert acc > 0.6
+
+    def test_custom_class_weight(self):
+        """Test custom class weights dictionary."""
+        X, y = make_classification(
+            n_samples=200, n_features=20, n_classes=2,
+            weights=[0.8, 0.2],
+            random_state=42
+        )
+
+        # Get unique classes
+        unique_classes = np.unique(y)
+
+        model = NeuralBoostedClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            class_weight={unique_classes[0]: 1.0, unique_classes[1]: 5.0},  # Boost minority class
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        predictions = model.predict(X)
+
+        # Should predict both classes
+        assert len(np.unique(predictions)) == 2
+
+
+class TestClassifierActivations:
+    """Test different activation functions for classifier."""
+
+    @pytest.mark.parametrize("activation", ['tanh', 'relu', 'identity', 'logistic'])
+    def test_activation_functions(self, activation):
+        """Test that all activation functions work."""
+        X, y = make_classification(n_samples=100, n_features=20, random_state=42)
+
+        model = NeuralBoostedClassifier(
+            n_estimators=10,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            activation=activation,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X, y)
+        predictions = model.predict(X)
+
+        assert predictions.shape == y.shape
+        acc = accuracy_score(y, predictions)
+        assert acc > 0.5, f"Activation {activation} failed with accuracy {acc:.3f}"
+
+
+class TestClassifierFeatureImportances:
+    """Test feature importance extraction for classifier."""
+
+    def test_binary_feature_importances(self):
+        """Test feature importances for binary classification."""
+        X, y = make_classification(n_samples=100, n_features=20, random_state=42)
+
+        model = NeuralBoostedClassifier(n_estimators=20, random_state=42, verbose=0)
+        model.fit(X, y)
+
+        importances = model.get_feature_importances()
+
+        assert importances.shape == (20,)
+        assert np.all(importances >= 0), "Importances should be non-negative"
+        assert np.sum(importances) > 0, "At least some features should be important"
+
+    def test_multiclass_feature_importances(self):
+        """Test feature importances for multiclass (averaged across classifiers)."""
+        X, y = make_classification(
+            n_samples=150, n_features=20, n_classes=3, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(n_estimators=20, random_state=42, verbose=0)
+        model.fit(X, y)
+
+        importances = model.get_feature_importances()
+
+        assert importances.shape == (20,)
+        assert np.all(importances >= 0)
+        assert np.sum(importances) > 0
+
+
+class TestClassifierEdgeCases:
+    """Test edge cases and error handling for classifier."""
+
+    def test_small_dataset(self):
+        """Test with very small dataset."""
+        X, y = make_classification(n_samples=30, n_features=10, random_state=42)
+
+        # Should warn but still work
+        with pytest.warns(UserWarning, match="very small"):
+            model = NeuralBoostedClassifier(
+                n_estimators=10,
+                learning_rate=0.1,
+                early_stopping=True,
+                random_state=42,
+                verbose=0
+            )
+            model.fit(X, y)
+
+        predictions = model.predict(X)
+        assert predictions.shape == y.shape
+
+    def test_invalid_learning_rate(self):
+        """Test that invalid learning rate raises error."""
+        with pytest.raises(ValueError, match="learning_rate must be"):
+            NeuralBoostedClassifier(learning_rate=0.0)
+
+        with pytest.raises(ValueError, match="learning_rate must be"):
+            NeuralBoostedClassifier(learning_rate=1.5)
+
+    def test_invalid_early_stopping_metric(self):
+        """Test that invalid early stopping metric raises error."""
+        with pytest.raises(ValueError, match="early_stopping_metric must be"):
+            NeuralBoostedClassifier(early_stopping_metric='invalid_metric')
+
+    def test_invalid_class_weight(self):
+        """Test that invalid class_weight raises error."""
+        with pytest.raises(ValueError, match="class_weight must be"):
+            NeuralBoostedClassifier(class_weight='invalid')
+
+
+class TestClassifierIntegration:
+    """Integration tests with real spectral-like data."""
+
+    def test_high_dimensional_data(self):
+        """Test with high-dimensional spectral-like data."""
+        # Simulate spectral data (many features, few samples)
+        X, y = make_classification(
+            n_samples=80,
+            n_features=200,  # Like spectral wavelengths
+            n_informative=50,
+            n_redundant=100,
+            n_classes=2,
+            random_state=42
+        )
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.25, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            early_stopping=True,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_test)
+
+        acc = accuracy_score(y_test, predictions)
+        assert acc > 0.6, f"High-dimensional accuracy = {acc:.3f}"
+
+    def test_train_test_split_performance(self):
+        """Test generalization to test set."""
+        X, y = make_classification(
+            n_samples=200, n_features=30, n_informative=20,
+            n_classes=2, random_state=42
+        )
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=30,
+            learning_rate=0.1,
+            hidden_layer_size=5,
+            early_stopping=True,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X_train, y_train)
+
+        # Test set performance
+        test_acc = accuracy_score(y_test, model.predict(X_test))
+        train_acc = accuracy_score(y_train, model.predict(X_train))
+
+        assert test_acc > 0.7, f"Test accuracy = {test_acc:.3f}"
+        assert train_acc > 0.7, f"Train accuracy = {train_acc:.3f}"
+
+        # Test set should be close to train (good generalization)
+        assert abs(train_acc - test_acc) < 0.2, "Large train-test gap suggests overfitting"
+
+    def test_roc_auc_score(self):
+        """Test that probability outputs work with ROC-AUC."""
+        X, y = make_classification(n_samples=150, n_features=20, random_state=42)
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+
+        model = NeuralBoostedClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            random_state=42,
+            verbose=0
+        )
+
+        model.fit(X_train, y_train)
+        proba = model.predict_proba(X_test)
+
+        # Calculate ROC-AUC
+        auc = roc_auc_score(y_test, proba[:, 1])
+        assert auc > 0.7, f"ROC-AUC = {auc:.3f}, expected > 0.7"
 
 
 if __name__ == "__main__":
