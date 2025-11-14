@@ -1210,45 +1210,44 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                             )
             grids["MLP"] = mlp_configs
 
-        # Neural Boosted Classifier - tier-aware with classification-optimized hyperparameters
+        # Neural Boosted Classifier - tier-aware (optimized grid size)
         if 'NeuralBoosted' in enabled_models:
             nb_config = get_hyperparameters('NeuralBoosted', tier)
-            hidden_sizes = nb_config.get('hidden_layer_size', [3, 5, 8])
-            activations = nb_config.get('activation', ['tanh', 'relu'])
+            hidden_sizes = nb_config.get('hidden_layer_size', [3, 5])  # Aligned with regression
+            activations = nb_config.get('activation', ['tanh', 'identity'])  # Aligned with regression
 
             nbc_configs = []
             for n_est in n_estimators_list:
                 for lr in learning_rates:
                     for hidden in hidden_sizes:
                         for activation in activations:
-                            for early_stopping_metric in ['accuracy', 'log_loss']:
-                                for class_weight in [None, 'balanced']:
-                                    nbc_configs.append(
-                                        (
-                                            NeuralBoostedClassifier(
-                                                n_estimators=n_est,
-                                                learning_rate=lr,
-                                                hidden_layer_size=hidden,
-                                                activation=activation,
-                                                early_stopping=True,
-                                                validation_fraction=0.15,
-                                                n_iter_no_change=10,
-                                                early_stopping_metric=early_stopping_metric,
-                                                class_weight=class_weight,
-                                                alpha=1e-4,
-                                                random_state=42,
-                                                verbose=0
-                                            ),
-                                            {
-                                                "n_estimators": n_est,
-                                                "learning_rate": lr,
-                                                "hidden_layer_size": hidden,
-                                                "activation": activation,
-                                                "early_stopping_metric": early_stopping_metric,
-                                                "class_weight": class_weight
-                                            }
-                                        )
-                                    )
+                            # NOTE: early_stopping_metric and class_weight removed from grid
+                            # These are user settings, not hyperparameters to search
+                            # Users can modify via GUI if needed
+                            nbc_configs.append(
+                                (
+                                    NeuralBoostedClassifier(
+                                        n_estimators=n_est,
+                                        learning_rate=lr,
+                                        hidden_layer_size=hidden,
+                                        activation=activation,
+                                        early_stopping=True,
+                                        validation_fraction=0.15,
+                                        n_iter_no_change=10,
+                                        early_stopping_metric='accuracy',  # Default (user preference)
+                                        class_weight=None,  # Default (users enable 'balanced' if needed)
+                                        alpha=1e-4,
+                                        random_state=42,
+                                        verbose=0
+                                    ),
+                                    {
+                                        "n_estimators": n_est,
+                                        "learning_rate": lr,
+                                        "hidden_layer_size": hidden,
+                                        "activation": activation
+                                    }
+                                )
+                            )
             grids["NeuralBoosted"] = nbc_configs
 
         # Support Vector Machine (SVM) for classification - tier-aware
