@@ -15732,15 +15732,30 @@ Configuration:
     def _build_transfer_model_new(self):
         """Build new transfer model from loaded master/slave data."""
         from tkinter import messagebox
-        from spectral_predict.calibration_transfer import (
-            build_ds, build_pds, build_tsr, build_ctai, build_nspfce, build_jypls_inv,
-            TransferModel
-        )
+
+        # DEBUG: Confirm method is being called
+        print("DEBUG: _build_transfer_model_new() called")
+        print(f"DEBUG: current_master_data is None? {self.current_master_data is None}")
+        print(f"DEBUG: current_slave_data is None? {self.current_slave_data is None}")
+
+        try:
+            from spectral_predict.calibration_transfer import (
+                estimate_ds, estimate_pds, estimate_tsr, estimate_ctai, estimate_nspfce, estimate_jypls_inv,
+                TransferModel
+            )
+            print("DEBUG: Imports successful")
+        except ImportError as e:
+            print(f"DEBUG: Import failed - {e}")
+            messagebox.showerror("Import Error", f"Failed to import calibration transfer functions:\n{str(e)}")
+            return
 
         # Validate data loaded
         if self.current_master_data is None or self.current_slave_data is None:
+            print("DEBUG: Data validation failed - showing warning")
             messagebox.showwarning("No Data", "Please load both master and slave spectra first.")
             return
+
+        print("DEBUG: Data validation passed, proceeding to build model...")
 
         try:
             wl_master, X_master = self.current_master_data
@@ -15776,33 +15791,30 @@ Configuration:
             # Build transfer model based on method
             if method == 'ds':
                 lambda_val = float(self.ct_ds_lambda_var.get())
-                A = build_ds(X_master_common, X_slave_common, ridge_lambda=lambda_val)
-                self.ct_transfer_model = TransferModel(method='ds', params={'A': A})
+                A = estimate_ds(X_master_common, X_slave_common, lam=lambda_val)
+                params = {'A': A}
 
             elif method == 'pds':
                 window = int(self.ct_pds_window_var.get())
-                B = build_pds(X_master_common, X_slave_common, window=window)
-                self.ct_transfer_model = TransferModel(method='pds', params={'B': B, 'window': window})
+                B = estimate_pds(X_master_common, X_slave_common, window=window)
+                params = {'B': B, 'window': window}
 
             elif method == 'tsr':
                 n_samples = int(self.ct_tsr_n_samples_var.get())
                 if n_samples > X_master_common.shape[0]:
                     raise ValueError(f"TSR requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
-                params = build_tsr(X_master_common[:n_samples], X_slave_common[:n_samples])
-                self.ct_transfer_model = TransferModel(method='tsr', params=params)
+                params = estimate_tsr(X_master_common[:n_samples], X_slave_common[:n_samples])
 
             elif method == 'ctai':
-                params = build_ctai(X_master_common, X_slave_common)
-                self.ct_transfer_model = TransferModel(method='ctai', params=params)
+                params = estimate_ctai(X_master_common, X_slave_common)
 
             elif method == 'nspfce':
                 max_iter = int(self.ct_nspfce_max_iterations_var.get())
                 use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
                 selector = self.ct_nspfce_selector_var.get() if use_wavelength_selection else None
 
-                params = build_nspfce(X_master_common, X_slave_common, wl_common,
-                                     max_iterations=max_iter, selector=selector)
-                self.ct_transfer_model = TransferModel(method='nspfce', params=params)
+                params = estimate_nspfce(X_master_common, X_slave_common, wl_common,
+                                        max_iterations=max_iter, selector=selector)
 
             elif method == 'jypls-inv':
                 n_samples = int(self.ct_jypls_n_samples_var.get())
@@ -15812,12 +15824,21 @@ Configuration:
                 if n_samples > X_master_common.shape[0]:
                     raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
 
-                params = build_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
-                                        n_components=n_components)
-                self.ct_transfer_model = TransferModel(method='jypls-inv', params=params)
+                params = estimate_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
+                                           n_components=n_components)
 
             else:
                 raise ValueError(f"Unknown method: {method}")
+
+            # Create TransferModel with all required fields
+            self.ct_transfer_model = TransferModel(
+                master_id='master',
+                slave_id='slave',
+                method=method,
+                wavelengths_common=wl_common,
+                params=params,
+                meta={}
+            )
 
             # Store in current_transfer_model for consistency
             self.current_transfer_model = self.ct_transfer_model
@@ -15896,6 +15917,47 @@ Configuration:
     # ========================================================================
     # END OF STEP 1 HELPER METHODS
     # ========================================================================
+
+    # ========================================================================
+    # HELPER METHOD: Apply Transfer Model
+    # ========================================================================
+
+    def _apply_transfer_model(self, X_slave, transfer_model):
+        """Apply a transfer model to transform slave spectra to master domain.
+
+        Parameters
+        ----------
+        X_slave : np.ndarray
+            Slave spectra, shape (n_samples, n_wavelengths)
+        transfer_model : TransferModel
+            Transfer model object with method and params
+
+        Returns
+        -------
+        np.ndarray
+            Transformed spectra in master domain
+        """
+        from spectral_predict.calibration_transfer import (
+            apply_ds, apply_pds, apply_tsr, apply_ctai, apply_nspfce, apply_jypls_inv
+        )
+
+        method = transfer_model.method
+        params = transfer_model.params
+
+        if method == 'ds':
+            return apply_ds(X_slave, params['A'])
+        elif method == 'pds':
+            return apply_pds(X_slave, params['B'], params['window'])
+        elif method == 'tsr':
+            return apply_tsr(X_slave, params)
+        elif method == 'ctai':
+            return apply_ctai(X_slave, params)
+        elif method == 'nspfce':
+            return apply_nspfce(X_slave, params)
+        elif method == 'jypls-inv':
+            return apply_jypls_inv(X_slave, params)
+        else:
+            raise ValueError(f"Unknown transfer method: {method}")
 
     # ========================================================================
     # STEP 3A HELPER METHODS: Prediction Workflow
@@ -16072,7 +16134,7 @@ Configuration:
             wavelengths, X_slave = self.new_slave_data_predict
 
             # Transform slave data to master domain
-            X_transferred = self.current_transfer_model.transform(X_slave)
+            X_transferred = self._apply_transfer_model(X_slave, self.current_transfer_model)
 
             # Step 2: Use prediction model to predict properties
             y_pred = self.current_prediction_model.predict(X_transferred)
