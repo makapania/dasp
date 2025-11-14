@@ -1,0 +1,1791 @@
+================================================================================
+SPECTRAGRYPH vs DASP: COMPLETE ANALYSIS & IMPLEMENTATION GUIDE
+================================================================================
+Generated: 2025-11-14
+Total Size: 4 documents consolidated
+
+TABLE OF CONTENTS:
+1. Executive Summary (2 pages)
+2. Full Comparison & Recommendations (23KB)
+3. Comprehensive Review (17KB)
+4. Code Structure Reference (14KB)
+
+================================================================================
+DOCUMENT 1: EXECUTIVE SUMMARY
+================================================================================
+
+# Executive Summary: Spectra Viewing & Analysis Capabilities
+
+## Quick Overview
+
+This project is a comprehensive **spectral modeling and analysis platform** with robust data loading, preprocessing, and machine learning capabilities. However, it has significant gaps in **spectra visualization, grouping, and comparative analysis**.
+
+## What You Have Now
+
+### Excellent Support For
+1. **File Format Loading** (10+ formats with auto-detection)
+   - CSV, Excel, ASD, SPC, JCAMP, ASCII text, OPUS, PerkinElmer, Agilent
+   - Automatic data type detection (reflectance vs absorbance)
+   - Flexible ID matching and alignment
+
+2. **Spectral Preprocessing**
+   - SNV (Standard Normal Variate) normalization
+   - Savitzky-Golay smoothing and derivatives (1st, 2nd order)
+   - Variable combinations with scikit-learn pipelines
+
+3. **Inter-Instrument Calibration Transfer**
+   - 6 different methods: DS, PDS, TSR, CTAI, NSPFCE, JYPLS-inv
+   - Wavelength resampling and alignment
+   - Multi-instrument equalization framework
+
+4. **Wavelength Selection**
+   - SPA, UVE, UVE-SPA, iPLS algorithms
+   - Region-based analysis
+   - Correlation screening
+
+5. **Outlier Detection**
+   - PCA Hotelling T², Q-residuals, Mahalanobis distance
+   - Y-value statistical tests
+   - Multi-method comprehensive reports
+
+6. **Sample Selection**
+   - Kennard-Stone, DUPLEX, SPXY algorithms
+   - For calibration transfer and diversity sampling
+
+7. **Visualization (Limited)**
+   - 2D line plots of raw/1st/2nd derivatives
+   - Click-to-toggle individual spectra
+   - Outlier visualization scatter plots
+   - Prediction vs. actual and residual diagnostics
+
+### Poor or Missing Support For
+1. **Spectra Comparison & Grouping**
+   - No clustering of similar spectra
+   - No spectral similarity metrics
+   - No group averaging/mean spectra
+   - No spectral fingerprinting
+
+2. **Advanced Visualization**
+   - No 3D surface plots
+   - No heatmap/matrix visualization
+   - No contour/density plots
+   - No interactive spectral selection tools
+
+3. **Spectral Operations**
+   - No addition/subtraction (e.g., baseline correction)
+   - No scaling/multiplication
+   - No spectral blending
+
+4. **Peak Analysis**
+   - No automatic peak detection
+   - No peak fitting or extraction
+   - No peak tracking across samples
+
+5. **Quality Metrics**
+   - No SNR calculation
+   - No saturation detection
+   - No baseline slope analysis
+
+---
+
+## Architecture
+
+### Data Structure
+- **Wide format only**: rows = samples, columns = wavelengths (as floats)
+- **Single spectrum per sample**: No multi-beam or time-series support
+- **Metadata minimal**: Limited to data_type, wavelength_range
+
+### Visualization Approach
+- **matplotlib + tkinter**: Embedded plots in GUI windows
+- **Static PNG export**: For batch visualization
+- **Click interaction limited**: Only toggle individual spectra
+
+### Processing Model
+```
+Load Data → Align → Outlier Detection → Preprocessing → 
+Variable Selection → Model Building → Calibration Transfer → Prediction
+```
+
+---
+
+## By the Numbers
+
+| Feature | Status | Priority |
+|---------|--------|----------|
+| File format support | 10+ formats | - |
+| Preprocessing methods | 6 types | - |
+| Calibration transfer methods | 6 algorithms | - |
+| Wavelength selection methods | 4 algorithms | - |
+| Visualization types | 3 (2D lines + diagnostics) | Low |
+| Spectra grouping | None | High |
+| Spectral similarity metrics | None | High |
+| Peak detection | None | High |
+| Batch operations | Limited | Medium |
+| Metadata tracking | Minimal | Medium |
+
+---
+
+## Key Code Locations
+
+### Loading & I/O (3,200 lines)
+**File:** `/home/user/dasp/src/spectral_predict/io.py`
+- Auto-detect format, load all supported file types
+- Align spectra to target variables
+
+### Visualization (18,000+ lines)
+**File:** `/home/user/dasp/spectral_predict_gui_optimized.py`
+- 10-tab GUI with embedded matplotlib plots
+- Interactive outlier detection and results
+
+### Preprocessing (100 lines)
+**File:** `/home/user/dasp/src/spectral_predict/preprocess.py`
+- SNV and Savitzky-Golay transformers
+
+### Calibration Transfer (1,500 lines)
+**File:** `/home/user/dasp/src/spectral_predict/calibration_transfer.py`
+- 6 transfer methods, resampling, alignment
+
+### Wavelength Operations (1,000+ lines)
+**Files:** 
+- `regions.py` - Spectral region analysis
+- `variable_selection.py` - 4 selection algorithms
+- `wavelength_selection.py` - Advanced subsetting
+
+---
+
+## Recommendations for Enhancement
+
+### High Priority (Most Useful)
+1. **Spectra Averaging by Group**
+   - Compute mean/std for sample categories
+   - Compare group differences visually
+
+2. **Spectral Similarity Metrics**
+   - Euclidean distance
+   - Spectral Angle Mapper (SAM)
+   - Spectral Information Divergence (SID)
+   - Library matching
+
+3. **Automatic Peak Detection**
+   - Find peaks, extract positions/areas
+   - Track peaks across samples
+   - Visualization on spectra
+
+4. **Advanced Visualization**
+   - 3D surface plots
+   - Heatmap (wavelength × sample)
+   - Interactive zoom/pan
+   - Annotation tools
+
+5. **Baseline Correction**
+   - Polynomial baseline removal
+   - Asymmetric least squares
+   - Essential preprocessing
+
+### Medium Priority
+6. **Signal Quality Metrics**: SNR, saturation, dynamic range
+7. **Spectral Arithmetic**: Addition, subtraction, scaling
+8. **Batch Processing**: Apply operations to many spectra
+9. **Long Format Support**: Alternative data representation
+10. **HDF5/NetCDF**: Scientific data formats
+
+### Nice to Have
+11. Spectral unmixing
+12. Wavelet denoising
+13. Time-series spectra support
+14. Spectral compression
+15. Automated reports
+
+---
+
+## How to Navigate the Code
+
+**See full documentation:**
+- `/home/user/dasp/documentation/SPECTRA_ANALYSIS_COMPREHENSIVE_REVIEW.md` - Detailed feature breakdown
+- `/home/user/dasp/documentation/CODE_STRUCTURE_REFERENCE.md` - Code locations and examples
+
+**Quick API reference:**
+```python
+# Load spectra
+from spectral_predict.io import read_asd_dir, align_xy
+X = read_asd_dir('path/to/asd/files')
+y = align_xy(X, ref_df, 'sample_id_col', 'target_col')
+
+# Preprocess
+from spectral_predict.preprocess import SNV, SavgolDerivative
+snv = SNV()
+X_norm = snv.transform(X)
+
+# Visualize
+from spectral_predict.interactive import plot_spectra_overview
+plot_spectra_overview(X, output_dir='outputs/plots')
+
+# Outlier detection
+from spectral_predict.outlier_detection import generate_outlier_report
+report = generate_outlier_report(X, y)
+```
+
+---
+
+## Testing & Validation
+
+The codebase includes:
+- 12+ test modules in `/home/user/dasp/tests/`
+- Example datasets in `/home/user/dasp/example/` (50 real ASD files)
+- Comprehensive unit tests for each module
+
+---
+
+## Summary
+
+This is a **production-ready spectral modeling platform** optimized for:
+- Automated model building and ranking
+- Calibration transfer between instruments
+- Preprocessing and feature selection
+- Outlier detection and data quality
+
+But it needs enhancement for:
+- Spectra comparison and grouping
+- Advanced visualization (heatmaps, 3D)
+- Spectral operations (arithmetic, averaging)
+- Peak detection and analysis
+
+The foundation is solid; the gaps are in exploratory/comparative analysis features.
+
+
+================================================================================
+DOCUMENT 2: SPECTRAGRYPH COMPARISON & RECOMMENDATIONS
+================================================================================
+
+# SpectralGryph Feature Comparison & Implementation Strategy
+
+## Executive Summary
+
+**SpectralGryph** is a Windows-based optical spectroscopy software focused on **visualization, processing, and exploratory analysis** of spectra. Your current software (DASP) is a **machine learning and calibration transfer platform** optimized for predictive modeling.
+
+**The Gap:** SpectralGryph excels at interactive visualization, spectral arithmetic, and comparative analysis - areas where DASP is currently weak.
+
+**Recommendation:** **Enhance DASP** with SpectralGryph-inspired features rather than wholesale replacement. The two tools serve complementary purposes, and DASP's ML/calibration capabilities are unique and valuable.
+
+---
+
+## Feature Comparison Matrix
+
+| Feature Category | SpectralGryph | DASP (Current) | Priority |
+|-----------------|---------------|----------------|----------|
+| **File Format Support** | 77 formats | 10+ formats | Medium |
+| **Spectral Visualization** | Overlay, stack, zoom, reverse axis, peak labels | Basic 2D line plots, click-toggle | **HIGH** |
+| **Grouping & Organization** | Datasets, subsets, visual differentiation | None | **HIGH** |
+| **Spectral Arithmetic** | Add, subtract, multiply, divide spectra | None | **HIGH** |
+| **Averaging Spectra** | Average selection with rules | None | **HIGH** |
+| **Baseline Correction** | Polynomial fit subtraction, selective | None | **HIGH** |
+| **Smoothing** | 4 algorithms (MA, SG 2nd-5th order, percentile, baseline-selective) | SG only (1st-2nd derivatives) | Medium |
+| **Derivatives** | 1st-4th order with optional smoothing | 1st-2nd order (SG) | Low |
+| **Normalization** | Peak, area, value-based | SNV only | Medium |
+| **Peak Detection/Analysis** | Automatic peak finding, FWHM, area | None | **HIGH** |
+| **Spectral Library Matching** | Database search & matching | None | Medium |
+| **Automation/Batch Processing** | Sequence automation, parallel processing | Limited | Medium |
+| **Machine Learning** | None | **6 algorithms, AutoML** | - |
+| **Calibration Transfer** | None | **6 methods (DS, PDS, TSR, CTAI, etc.)** | - |
+| **Wavelength Selection** | None | **4 algorithms (SPA, UVE, iPLS)** | - |
+| **Outlier Detection** | None | **PCA Hotelling, Q-residuals, Mahalanobis** | - |
+
+**Legend:**
+- **HIGH** = Critical gap to address
+- Medium = Nice to have
+- Low = Already sufficient or low value
+- `-` = DASP already superior
+
+---
+
+## SpectralGryph Key Features (77 Identified)
+
+### 1. File I/O & Formats
+- **77 file formats** supported (vs. DASP's 10+)
+- Formats: UV/VIS, NIR, FTIR, Raman, LIBS, XRF, fluorescence
+- Windows-only software
+
+### 2. Visualization & Display
+- **Overlay multiple spectra** with color/style differentiation
+- **Stack spectra** vertically for comparison
+- **Reverse wavelength axis**
+- **Peak wavelength labels** on plots
+- **Zoom/pan** interactive tools
+- **EEM (Excitation Emission Matrix)** for fluorescence
+- Export plots to publication-quality graphics
+
+### 3. Spectral Grouping & Organization
+- **Datasets and subsets** for organizing spectra
+- **Visual differentiation** by group (colors, line styles)
+- **Compare multiple groups** side-by-side
+- **Selection rules** for filtering spectra
+
+### 4. Mathematical Operations on Spectra
+- **Addition** of spectra
+- **Subtraction** of spectra (e.g., background removal)
+- **Multiplication** of spectra
+- **Division** of spectra
+- **Averaging** of selected spectra with rules
+
+### 5. Preprocessing & Processing
+- **Baseline Correction:**
+  - Polynomial fit subtraction
+  - Baseline-selective smoothing (vertical gradient)
+- **Smoothing (4 algorithms):**
+  - Moving average
+  - Savitzky-Golay (interval size, polynomial order 2nd-5th)
+  - Percentile filter
+  - Baseline-selective option
+- **Derivatives:**
+  - 1st-4th order
+  - Optional internal smoothing
+- **Normalization:**
+  - Peak normalization (highest peak = 1)
+  - Area normalization
+  - Value-based normalization
+
+### 6. Peak Analysis
+- **Automatic peak detection**
+- **Peak fitting**
+- **Peak area integration**
+- **FWHM (Full Width Half Maximum)** calculation
+- **Peak tracking** across samples
+
+### 7. Spectral Library & Database
+- **Spectral database search** and matching
+- **Library matching** for unknown sample identification
+- **Similarity scoring**
+
+### 8. Automation & Batch Processing
+- **Processing sequences** (100% reproducible workflows)
+- **Parallel processing** of multiple files
+- **Automate repetitive tasks**
+- Data reduction pipelines
+
+### 9. Other Features
+- **Chemometric preprocessing** functions
+- **Merging spectra**
+- **Data reduction** workflows
+- Free for private and academic use
+- Windows 7-11 compatible
+
+---
+
+## DASP Strengths (SpectralGryph Doesn't Have)
+
+### 1. Machine Learning & Predictive Modeling
+- **6 regression algorithms** with automatic model selection
+- **Classification support** (NeuralBoosted, LightGBM, etc.)
+- **AutoML** with hyperparameter tuning
+- **Cross-validation** and performance metrics
+
+### 2. Calibration Transfer (Inter-Instrument Equalization)
+- **6 transfer methods:** DS, PDS, TSR, CTAI, NSPFCE, JYPLS-inv
+- **Wavelength resampling** and alignment
+- Multi-instrument calibration framework
+
+### 3. Wavelength/Variable Selection
+- **SPA, UVE, UVE-SPA, iPLS** algorithms
+- **Region-based analysis**
+- **Correlation screening**
+
+### 4. Outlier Detection & Quality Control
+- **PCA Hotelling T²**
+- **Q-residuals**
+- **Mahalanobis distance**
+- **Y-value statistical tests**
+- Multi-method comprehensive reports
+
+### 5. Sample Selection Algorithms
+- **Kennard-Stone, DUPLEX, SPXY**
+- Diversity sampling for calibration
+
+### 6. Production-Ready Architecture
+- **250,000+ lines** of tested Python code
+- **Extensive unit tests** (12+ test modules)
+- **Real example datasets** (50 ASD files)
+- **Well-documented API**
+
+---
+
+## Critical Gaps in DASP (Your Main Concerns)
+
+### 1. **Viewing Different Groups of Spectra Differently** ❌
+**Current State:** All spectra plotted with same styling; click-to-toggle only
+**SpectralGryph Has:** Group-based colors/styles, datasets/subsets, visual differentiation
+**Impact:** **Critical gap** - can't visually compare experimental groups
+
+### 2. **Spectral Arithmetic (Add/Subtract/Average)** ❌
+**Current State:** No spectral arithmetic operations
+**SpectralGryph Has:** Add, subtract, multiply, divide, average with selection rules
+**Impact:** **Critical gap** - can't do baseline subtraction, reference correction, signal averaging
+
+### 3. **Baseline Correction** ❌
+**Current State:** No baseline removal (essential preprocessing)
+**SpectralGryph Has:** Polynomial fit subtraction, baseline-selective smoothing
+**Impact:** **Critical gap** - many spectra need baseline correction before analysis
+
+### 4. **Peak Detection/Analysis** ❌
+**Current State:** No automatic peak finding
+**SpectralGryph Has:** Automatic detection, fitting, FWHM, area integration
+**Impact:** **High** - important for identifying spectral features
+
+### 5. **Interactive Visualization** ⚠️
+**Current State:** Basic 2D plots, limited interaction
+**SpectralGryph Has:** Zoom, pan, overlay, stack, reverse axis, annotations
+**Impact:** **High** - limits exploratory data analysis
+
+---
+
+## Implementation Strategy: Three Approaches
+
+### **Option A: Enhance DASP (Recommended)**
+**Approach:** Add SpectralGryph-inspired features to DASP as new modules
+
+**Advantages:**
+- ✅ Preserves unique ML/calibration capabilities
+- ✅ Builds on 250,000 lines of tested code
+- ✅ Leverages existing file I/O and preprocessing
+- ✅ Incremental development (low risk)
+- ✅ Unified Python ecosystem
+
+**Disadvantages:**
+- ⚠️ Requires GUI redesign for visualization
+- ⚠️ Development time for new features
+
+**Estimated Effort:** 4-6 weeks for core features
+
+**Priority Features to Add:**
+1. **Group-based visualization** (2-3 days)
+   - Color/style by metadata groups
+   - Interactive legend with group toggle
+
+2. **Spectral arithmetic** (2-3 days)
+   - Add, subtract, multiply, divide operations
+   - Average by group with std dev bands
+
+3. **Baseline correction** (3-4 days)
+   - Polynomial baseline subtraction
+   - Asymmetric least squares (ALS)
+   - Airpls, SNIP algorithms
+
+4. **Peak detection** (4-5 days)
+   - Scipy find_peaks integration
+   - FWHM, area, height extraction
+   - Peak annotation on plots
+
+5. **Interactive visualization** (5-7 days)
+   - Matplotlib interactive mode
+   - Zoom, pan, annotation tools
+   - Plotly integration for web-like interactivity
+
+---
+
+### **Option B: Separate Companion Tool**
+**Approach:** Build a lightweight SpectralGryph-like viewer that works alongside DASP
+
+**Advantages:**
+- ✅ Focused on visualization/exploration only
+- ✅ Can use modern web tech (Plotly Dash, Streamlit)
+- ✅ Doesn't complicate DASP's ML focus
+- ✅ Can share file I/O with DASP
+
+**Disadvantages:**
+- ⚠️ Context switching between tools
+- ⚠️ Duplicate file loading
+- ⚠️ Integration complexity
+
+**Estimated Effort:** 3-4 weeks for standalone tool
+
+**Architecture:**
+```
+DASP (ML/Calibration) ←→ Shared Data ←→ SpectraViewer (Visualization/Exploration)
+```
+
+---
+
+### **Option C: Wholesale Replacement (Not Recommended)**
+**Approach:** Rewrite DASP from scratch with SpectralGryph-like features + ML
+
+**Advantages:**
+- ✅ Clean slate architecture
+- ✅ Modern UI/UX design
+
+**Disadvantages:**
+- ❌ **Loses 250,000 lines of tested code**
+- ❌ **Loses unique calibration transfer capabilities**
+- ❌ **6-12 months development time**
+- ❌ **High risk, uncertain outcome**
+- ❌ Must re-implement ML, outlier detection, variable selection, etc.
+
+**Verdict:** **Not recommended** - DASP's ML/calibration capabilities are too valuable to discard
+
+---
+
+## Recommended Implementation Plan (Option A)
+
+### Phase 1: Critical Visualization Gaps (2 weeks)
+**Goal:** Enable group-based viewing and spectral operations
+
+1. **Group-Based Visualization Module** (`src/spectral_predict/visualization.py`)
+   - Add `plot_spectra_by_group()` function
+   - Color/linestyle mapping by metadata column
+   - Interactive legend with group toggle
+   - Matplotlib styling enhancements
+
+   ```python
+   from spectral_predict.visualization import plot_spectra_by_group
+
+   plot_spectra_by_group(
+       X,  # Spectra DataFrame
+       groups=metadata['treatment'],  # Group labels
+       title="Treatment Comparison",
+       colors={'control': 'blue', 'treated': 'red'}
+   )
+   ```
+
+2. **Spectral Arithmetic Module** (`src/spectral_predict/operations.py`)
+   - `add_spectra()`, `subtract_spectra()`, `multiply_spectra()`, `divide_spectra()`
+   - `average_spectra_by_group()` with std dev bands
+   - `normalize_to_peak()`, `normalize_to_area()`
+
+   ```python
+   from spectral_predict.operations import subtract_spectra, average_spectra_by_group
+
+   # Background subtraction
+   corrected = subtract_spectra(sample_spectra, background_spectrum)
+
+   # Group averaging
+   group_means = average_spectra_by_group(X, groups=metadata['sample_type'])
+   ```
+
+3. **GUI Integration** (Update `spectral_predict_gui_optimized.py`)
+   - Add "Spectra Viewer" tab with group selector
+   - Add "Operations" tab for arithmetic
+   - Update existing visualization to use new modules
+
+### Phase 2: Baseline Correction (1 week)
+**Goal:** Essential preprocessing for many spectra types
+
+4. **Baseline Correction Module** (`src/spectral_predict/baseline.py`)
+   - Polynomial baseline (`fit_polynomial_baseline()`)
+   - Asymmetric Least Squares (ALS)
+   - Airpls algorithm
+   - SNIP (Statistics-sensitive Non-linear Iterative Peak-clipping)
+
+   ```python
+   from spectral_predict.baseline import baseline_als, baseline_polynomial
+
+   # Polynomial baseline
+   X_corrected = baseline_polynomial(X, degree=3)
+
+   # Asymmetric least squares
+   X_corrected = baseline_als(X, lambda_=1e5, p=0.001)
+   ```
+
+### Phase 3: Peak Analysis (1 week)
+**Goal:** Automatic feature extraction
+
+5. **Peak Detection Module** (`src/spectral_predict/peaks.py`)
+   - `detect_peaks()` using scipy.signal.find_peaks
+   - `calculate_fwhm()` for peak widths
+   - `integrate_peak_area()` for quantification
+   - `annotate_peaks_on_plot()` for visualization
+
+   ```python
+   from spectral_predict.peaks import detect_peaks, annotate_peaks_on_plot
+
+   peaks = detect_peaks(spectrum, prominence=0.1, distance=10)
+   # Returns: {wavelength: [500, 650, 800], height: [...], fwhm: [...]}
+
+   fig = plot_spectra(X)
+   annotate_peaks_on_plot(fig, peaks)
+   ```
+
+### Phase 4: Interactive Visualization (1-2 weeks)
+**Goal:** Modern exploratory tools
+
+6. **Plotly Integration** (Optional but recommended)
+   - Add Plotly-based interactive viewer
+   - Hover tooltips with wavelength/intensity
+   - Zoom/pan/box-select
+   - Export to HTML for sharing
+
+   ```python
+   from spectral_predict.interactive import interactive_spectra_viewer
+
+   # Launch interactive viewer
+   fig = interactive_spectra_viewer(X, groups=metadata['treatment'])
+   fig.show()  # Opens in browser with full interactivity
+   ```
+
+---
+
+## Quick Start: Minimal Viable Enhancement (3-5 days)
+
+If you want the **biggest impact with minimal effort**, implement just these three functions:
+
+### 1. Group-Based Plotting (1 day)
+```python
+# File: src/spectral_predict/visualization.py
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+def plot_spectra_by_group(X, groups, colors=None, title="Spectra by Group"):
+    """
+    Plot spectra with different colors/styles per group.
+
+    Parameters:
+    -----------
+    X : pd.DataFrame
+        Spectra (rows=samples, cols=wavelengths)
+    groups : pd.Series or array-like
+        Group labels for each sample
+    colors : dict, optional
+        {group_name: color} mapping
+    """
+    fig, ax = plt.subplots(figsize=(12, 6))
+    wavelengths = X.columns.astype(float)
+
+    unique_groups = groups.unique()
+    if colors is None:
+        colors = {g: f'C{i}' for i, g in enumerate(unique_groups)}
+
+    for group in unique_groups:
+        mask = groups == group
+        X_group = X[mask]
+
+        # Plot mean with std band
+        mean = X_group.mean()
+        std = X_group.std()
+
+        ax.plot(wavelengths, mean, label=group, color=colors[group], linewidth=2)
+        ax.fill_between(wavelengths, mean - std, mean + std,
+                        alpha=0.2, color=colors[group])
+
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("Intensity")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    return fig
+```
+
+### 2. Spectral Arithmetic (1 day)
+```python
+# File: src/spectral_predict/operations.py
+
+import pandas as pd
+
+def subtract_spectra(X, reference):
+    """
+    Subtract a reference spectrum from all spectra.
+
+    Parameters:
+    -----------
+    X : pd.DataFrame
+        Spectra to correct
+    reference : pd.Series or pd.DataFrame (single row)
+        Reference spectrum to subtract
+
+    Returns:
+    --------
+    pd.DataFrame
+        Corrected spectra
+    """
+    if isinstance(reference, pd.DataFrame):
+        reference = reference.iloc[0]
+
+    return X.subtract(reference, axis=1)
+
+
+def average_spectra_by_group(X, groups):
+    """
+    Compute mean spectrum for each group.
+
+    Parameters:
+    -----------
+    X : pd.DataFrame
+        Spectra
+    groups : pd.Series or array-like
+        Group labels
+
+    Returns:
+    --------
+    pd.DataFrame
+        Mean spectra (rows=groups, cols=wavelengths)
+    """
+    X_with_groups = X.copy()
+    X_with_groups['_group'] = groups
+
+    return X_with_groups.groupby('_group').mean()
+```
+
+### 3. Baseline Correction (2 days)
+```python
+# File: src/spectral_predict/baseline.py
+
+import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+
+def baseline_als(X, lambda_=1e5, p=0.001, niter=10):
+    """
+    Asymmetric Least Squares baseline correction.
+
+    Parameters:
+    -----------
+    X : pd.DataFrame
+        Spectra to correct
+    lambda_ : float
+        Smoothness parameter (larger = smoother baseline)
+    p : float
+        Asymmetry parameter (0.001 - 0.1)
+    niter : int
+        Number of iterations
+
+    Returns:
+    --------
+    pd.DataFrame
+        Baseline-corrected spectra
+    """
+    X_corrected = X.copy()
+
+    for idx, row in X.iterrows():
+        y = row.values
+        L = len(y)
+        D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(L, L-2))
+        w = np.ones(L)
+
+        for i in range(niter):
+            W = sparse.spdiags(w, 0, L, L)
+            Z = W + lambda_ * D.dot(D.transpose())
+            z = spsolve(Z, w * y)
+            w = p * (y > z) + (1 - p) * (y < z)
+
+        X_corrected.loc[idx] = y - z
+
+    return X_corrected
+```
+
+**Usage Example:**
+```python
+# Load data
+from spectral_predict.io import read_asd_dir, align_xy
+X = read_asd_dir('data/spectra/')
+metadata = pd.read_csv('data/metadata.csv')
+
+# Baseline correction
+from spectral_predict.baseline import baseline_als
+X_corrected = baseline_als(X, lambda_=1e5)
+
+# Plot by group
+from spectral_predict.visualization import plot_spectra_by_group
+plot_spectra_by_group(X_corrected, groups=metadata['treatment'])
+```
+
+---
+
+## File Format Gap Analysis
+
+**SpectralGryph:** 77 formats
+**DASP:** 10+ formats
+
+**DASP Currently Supports:**
+- ASD (.asd)
+- SPC (.spc)
+- CSV (.csv)
+- Excel (.xlsx, .xls)
+- JCAMP-DX (.jdx, .dx)
+- OPUS (.0, .1, .2, etc.)
+- PerkinElmer (.sp)
+- Agilent (.seq, .spa)
+- ASCII text (.txt)
+
+**Missing (SpectralGryph Has):**
+SpectralGryph likely supports additional vendors and legacy formats. However, DASP already covers the most common formats. **Priority: Low** - current coverage is sufficient for most users.
+
+---
+
+## Technology Recommendations
+
+### For Enhanced Visualization
+**Option 1: Plotly** (Recommended)
+- Modern, interactive
+- Web-based export (shareable HTML)
+- Built-in zoom/pan/hover
+- Easy integration with pandas
+
+**Option 2: Matplotlib + mplcursors**
+- Stays consistent with current stack
+- Add interactivity to existing plots
+- Lower learning curve
+
+**Option 3: Bokeh**
+- Similar to Plotly
+- Better for large datasets
+- Steeper learning curve
+
+### For GUI Redesign
+**Current:** tkinter (functional but dated)
+
+**Upgrade Options:**
+1. **PyQt5/PyQt6** - Professional desktop app
+2. **Streamlit** - Quick web-based dashboards
+3. **Plotly Dash** - Interactive web apps
+4. **Keep tkinter** - Just enhance visualization panels
+
+**Recommendation:** Keep tkinter for now, add Plotly for visualization panels. Upgrade GUI later if needed.
+
+---
+
+## Risk Assessment
+
+### Risks of Enhancing DASP (Option A)
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| Code complexity increases | High | Medium | Modular design, separate files for new features |
+| GUI becomes cluttered | Medium | Medium | Add new tabs, don't modify existing ones |
+| Performance degradation | Low | Low | Optimize plotting for large datasets |
+| Breaking existing functionality | Low | High | Comprehensive unit tests, version control |
+
+### Risks of Wholesale Replacement (Option C)
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| Project never completes | High | **Critical** | Don't pursue this option |
+| Lose calibration transfer | Certain | **Critical** | N/A |
+| Users reject new version | High | High | N/A |
+
+---
+
+## Conclusion & Next Steps
+
+### **Recommended Approach: Enhance DASP (Option A)**
+
+**Rationale:**
+1. DASP has **unique, valuable capabilities** (calibration transfer, AutoML) that SpectralGryph lacks
+2. SpectralGryph's strengths (visualization, grouping, arithmetic) can be **added incrementally** to DASP
+3. **Low risk, high value** approach
+4. Preserves 250,000 lines of tested code
+
+### **Immediate Action Plan:**
+
+**Week 1-2: Core Enhancements**
+1. Create `src/spectral_predict/visualization.py` with group-based plotting
+2. Create `src/spectral_predict/operations.py` with spectral arithmetic
+3. Add "Spectra Viewer" tab to GUI
+
+**Week 3: Baseline Correction**
+4. Create `src/spectral_predict/baseline.py` with ALS algorithm
+5. Add "Baseline Correction" preprocessing option to GUI
+
+**Week 4: Peak Analysis**
+6. Create `src/spectral_predict/peaks.py` with detection/annotation
+7. Add peak detection to "Spectra Viewer" tab
+
+**Week 5-6: Polish & Testing**
+8. Add Plotly interactive viewer (optional)
+9. Write unit tests for all new modules
+10. Update documentation and examples
+
+### **Success Metrics:**
+- ✅ Can view different groups with distinct colors/styles
+- ✅ Can average, add, subtract spectra
+- ✅ Can perform baseline correction
+- ✅ Can detect and annotate peaks
+- ✅ Existing ML/calibration features still work
+- ✅ Users can complete full workflow: Load → Visualize → Group → Preprocess → Model → Transfer
+
+---
+
+## Appendix: Code Structure for New Modules
+
+```
+dasp/
+├── src/
+│   └── spectral_predict/
+│       ├── visualization.py      # NEW: Group-based plotting
+│       ├── operations.py          # NEW: Spectral arithmetic
+│       ├── baseline.py            # NEW: Baseline correction
+│       ├── peaks.py               # NEW: Peak detection
+│       └── interactive.py         # NEW: Plotly viewer (optional)
+│
+├── tests/
+│   ├── test_visualization.py     # NEW
+│   ├── test_operations.py        # NEW
+│   ├── test_baseline.py          # NEW
+│   └── test_peaks.py             # NEW
+│
+├── spectral_predict_gui_optimized.py  # UPDATE: Add new tabs
+│
+└── documentation/
+    ├── SPECTRAGRYPH_COMPARISON.md (this file)
+    ├── VISUALIZATION_GUIDE.md     # NEW: Usage examples
+    └── SPECTRA_OPERATIONS_GUIDE.md # NEW: Arithmetic guide
+```
+
+---
+
+## References
+
+- SpectralGryph Official: https://www.effemm2.de/spectragryph/
+- DASP Documentation: `/home/user/dasp/documentation/`
+- Baseline Correction Algorithms: Eilers & Boelens (2005), Zhang et al. (2010)
+- Peak Detection: scipy.signal.find_peaks documentation
+
+---
+
+**Document Version:** 1.0
+**Created:** 2025-11-14
+**Status:** Ready for review and implementation planning
+
+================================================================================
+DOCUMENT 3: COMPREHENSIVE REVIEW
+================================================================================
+
+# Spectral Predict - Spectra Viewing & Handling Analysis
+
+## 1. VISUALIZATION CAPABILITIES
+
+### Current Visualization Methods
+**Location:** `spectral_predict_gui_optimized.py` (main GUI, 18,000+ lines)
+
+#### 1.1 Interactive Spectral Plots
+- **Raw Spectra Tab**: Plots all spectra as overlaid line charts with transparency
+- **1st Derivative Tab**: Savitzky-Golay 1st derivative visualization
+- **2nd Derivative Tab**: Savitzky-Golay 2nd derivative visualization
+- **Features:**
+  - Click-to-toggle individual spectra (only visible in raw spectra tab)
+  - Automatic sampling for large datasets (>50 spectra)
+  - Adjustable alpha transparency
+  - Grid overlay with zero-line reference for derivatives
+  - matplotlib + tkinter with FigureCanvasTkAgg backend
+
+#### 1.2 Interactive Loading GUI
+**Location:** `src/spectral_predict/interactive_gui.py`
+- Tab-based interface with matplotlib embeddings:
+  - Data preview (treeview table)
+  - Raw spectra plot
+  - 1st derivative plot
+  - 2nd derivative plot
+  - Screening results plot
+- Real-time absorbance conversion capability
+
+#### 1.3 Advanced Diagnostics Plots
+**Location:** `spectral_predict_gui_optimized.py` (Tab 5-7)
+- **Outlier Detection Visualizations:**
+  - Hotelling T² scores (scatter plot)
+  - Q-residuals / SPE (scatter plot)
+  - Mahalanobis distance (scatter plot)
+  - Y-value distribution (histogram/boxplot)
+  - Sample exclusion marking on spectra
+
+- **Prediction Results Plots:**
+  - Predicted vs. Actual scatter plot (regression)
+  - Prediction residuals plot
+  - Residual diagnostics (Q-Q plot, residual distribution)
+  - Leverage plot (hat values)
+  - Classification confusion matrix (heatmap)
+  - Multi-class ROC curves (One-vs-Rest)
+  - Prediction confidence intervals
+
+- **Model Performance Plots:**
+  - PCA scores (2D/3D scatter)
+  - Feature importance (bar charts)
+  - Regional performance heatmaps (model specialization)
+
+#### 1.4 Static Plot Generation
+**Location:** `src/spectral_predict/interactive.py`
+- `plot_spectra_overview()`: Generates PNG files for:
+  - Raw spectra
+  - 1st derivative
+  - 2nd derivative
+- `plot_predictor_screening()`: Correlation screening visualization
+
+### Visualization Limitations
+- No 3D spectral surface plots
+- No heatmap visualization of spectral matrix
+- No contour/density plots for spectral populations
+- Limited spectra comparison tools
+- No animated/time-series spectra visualization
+- No spectral fingerprinting/matching visualization
+
+---
+
+## 2. SPECTRA ARCHITECTURE & DATA STRUCTURES
+
+### Core Data Representation
+**Data Format:** pandas.DataFrame (wide format)
+- **Rows:** Sample IDs (specimen/spectrum identifiers)
+- **Columns:** Float wavelengths (nm) - column names are wavelengths
+- **Values:** Spectral intensities (reflectance, absorbance, transmittance)
+
+### Example:
+```
+             400.5  401.2  402.1  ...  2495.3  2496.1
+sample_1   0.450  0.455  0.460  ...   0.125   0.128
+sample_2   0.380  0.385  0.390  ...   0.105   0.108
+sample_3   0.520  0.525  0.530  ...   0.145   0.148
+```
+
+### Key Design Principles
+1. **Wide Format Only**: No native support for long format spectra representation
+2. **Single-Spectrum per Row**: Each row = one measurement
+3. **Immutable Wavelength Grid**: Once loaded, wavelengths are fixed
+4. **Metadata Sparse**: Limited metadata capture (data_type, wavelength_range)
+
+### Associated Data
+- **Target Variable (y):** pd.Series indexed by sample ID
+- **Reference Data:** Separate DataFrame for targets/properties
+- **Sample IDs:** DataFrame index (can be filenames, numerical IDs, etc.)
+
+---
+
+## 3. FILE FORMAT & LOADING SUPPORT
+
+### Supported Formats
+**Location:** `src/spectral_predict/io.py` (3,200+ lines) & `src/spectral_predict/readers/`
+
+| Format | Extensions | Read | Write | Native Support |
+|--------|-----------|------|-------|-----------------|
+| **CSV** | .csv | ✅ | ✅ | Built-in pandas |
+| **Excel** | .xlsx, .xls | ✅ | ✅ | openpyxl |
+| **ASD (ASCII)** | .asd, .sig | ✅ | ❌ | Built-in text parsing |
+| **ASD (Binary)** | .asd | ✅ | ❌ | specdal (optional) |
+| **SPC** | .spc | ✅ | ✅ | spc-io |
+| **JCAMP-DX** | .jdx, .dx, .jcm | ✅ | ✅ | jcamp |
+| **ASCII Text** | .txt, .dat | ✅ | ✅ | Built-in |
+| **Bruker OPUS** | .0, .1, .2, etc. | ✅ | ❌ | brukeropus (optional) |
+| **PerkinElmer** | .sp | ✅ | ❌ | specio (optional) |
+| **Agilent** | .seq, .dmt, .asp, .bsw | ✅ | ❌ | agilent-ir-formats (optional) |
+
+### Smart Data Detection
+- **Auto-detect format** from file/directory structure
+- **Data type detection**: Reflectance vs Absorbance (ML-based, ~80-90% confidence)
+- **Column inference**: Automatic wavelength and specimen ID detection
+- **Flexible matching**: Handles files with/without extensions, spaces, case variations
+
+### Combined Format Support
+- **Single-file datasets** with specimen ID + wavelengths + targets in one CSV/Excel
+- **Multi-file datasets** with separate spectra directory + reference file
+- **Fuzzy ID matching** for aligning spectra to reference data
+
+---
+
+## 4. OPERATIONS ON SPECTRA (EXISTING)
+
+### 4.1 Preprocessing Transformers
+**Location:** `src/spectral_predict/preprocess.py`
+
+#### SNV (Standard Normal Variate)
+```python
+def transform(X):
+    X_snv = (X - X.mean(axis=1)) / X.std(axis=1)
+    return X_snv
+```
+- Per-spectrum normalization
+
+#### Savitzky-Golay Derivatives
+```python
+def transform(X, deriv=1, window=7, polyorder=2):
+    # 1st derivative (default polyorder=2)
+    # 2nd derivative (default polyorder=3)
+    return savgol_filter(X, window, polyorder, deriv=deriv, axis=1)
+```
+- Smooth differentiation along wavelength axis
+- Configurable window size and polynomial order
+
+#### Pipeline Construction
+- Supports chains: `raw`, `snv`, `deriv`, `snv_deriv`, `deriv_snv`
+
+### 4.2 Wavelength-Based Operations
+**Location:** `src/spectral_predict/regions.py`
+
+#### Region Analysis
+```python
+def compute_region_correlations(X, y, wavelengths, region_size=50, overlap=25):
+    # Divide spectrum into overlapping regions
+    # Compute correlation with target for each region
+    # Return top regions by mean/max correlation
+```
+
+#### Region Subsets
+- Extract top-N wavelength regions
+- Filter spectra to specific wavelength ranges
+- Regional performance analysis
+
+### 4.3 Sample Selection Operations
+**Location:** `src/spectral_predict/sample_selection.py`
+
+#### Kennard-Stone Algorithm
+- Select maximally diverse spectra from dataset
+- O(n²) complexity
+
+#### DUPLEX Algorithm
+- Split spectra into calibration/validation sets
+- Maintains diversity in both sets
+
+#### SPXY Algorithm
+- Joint X-Y space diversity (considers both spectra and targets)
+
+#### Random Selection
+- Baseline for comparison
+
+### 4.4 Variable Selection (Wavelength Selection)
+**Location:** `src/spectral_predict/variable_selection.py`
+
+#### Methods:
+1. **SPA** (Successive Projections Algorithm)
+   - Minimizes collinearity among wavelengths
+   
+2. **UVE** (Uninformative Variable Elimination)
+   - Filters noise-like wavelengths
+   
+3. **UVE-SPA Hybrid**
+   - Combines both methods
+   
+4. **iPLS** (Interval PLS)
+   - Region-based selection across spectrum
+
+### 4.5 Outlier Detection & Filtering
+**Location:** `src/spectral_predict/outlier_detection.py`
+
+#### Methods:
+- **PCA-based Hotelling T²**: Multivariate distance in PC space
+- **Q-Residuals (SPE)**: Reconstruction error from PCA
+- **Mahalanobis Distance**: Covariance-weighted distance
+- **Y-value Checks**: Statistical outliers in target variable
+- **Sample Exclusion**: Mark/exclude samples in analysis
+
+### 4.6 Calibration Transfer (Inter-Instrument)
+**Location:** `src/spectral_predict/calibration_transfer.py` (1,500+ lines)
+
+#### Methods:
+1. **DS** (Direct Standardization)
+   - Linear matrix transformation: X_slave @ A = X_master
+   
+2. **PDS** (Piecewise Direct Standardization)
+   - Windowed DS transformation along wavelengths
+   
+3. **TSR** (Transfer Sample Regression / Shenk-Westerhaus)
+   - Calibration transfer using reference samples
+   
+4. **CTAI** (Calibration Transfer based on Affine Invariance)
+   - Robust method for temperature/humidity drift
+   
+5. **NSPFCE** (Nonlinear Standardization for Particle Size and Field-effect Compensation)
+   - Handles nonlinear instrument differences
+   
+6. **JYPLS-inv** (Joint Inversion for PLS)
+   - Advanced PLS-based transfer
+
+#### Resampling
+```python
+def resample_to_grid(X, wl_src, wl_target):
+    # 1D linear interpolation to common wavelength grid
+    # Handles wavelength misalignment between instruments
+```
+
+### 4.7 Instrument Equalization
+**Location:** `src/spectral_predict/equalization.py`
+
+- **Multi-instrument harmonization**: Combine spectra from multiple instruments
+- **Common wavelength grid selection**: Robust algorithm for overlapping ranges
+- **Smooth resolution compensation**: Account for different instrument resolutions
+
+### 4.8 Diagnostic Statistics
+**Location:** `src/spectral_predict/diagnostics.py`
+
+- **Leverage computation**: Hat values (high-leverage samples)
+- **Residual analysis**: Standardized residuals
+- **Prediction intervals**: Jackknife-based confidence intervals
+- **Q-Q plots**: Normality diagnostics
+
+### 4.9 Spectral Screening
+**Location:** `src/spectral_predict/interactive.py`
+
+```python
+def compute_predictor_screening(X, y, n_top=20):
+    # Compute correlation of each wavelength with target
+    # Rank by absolute correlation
+    # Return top N wavelengths
+```
+
+---
+
+## 5. MISSING FEATURES FOR ADVANCED SPECTRA ANALYSIS
+
+### 5.1 Spectra Grouping & Classification
+**Not Implemented:**
+- ❌ Spectra clustering (K-means, hierarchical, DBSCAN on spectra)
+- ❌ Spectra similarity/distance calculations (Euclidean, DTW, Spectral Angle Mapper)
+- ❌ Spectral fingerprinting/identification
+- ❌ Spectral library/reference matching
+- ❌ Spectra grouping by user-defined categories
+- ❌ Spectra KNN/similarity search
+- ❌ Sample group averaging/mean spectra computation
+- ❌ Sample group statistics (std, quantiles per group)
+
+### 5.2 Spectral Operations & Arithmetic
+**Not Implemented:**
+- ❌ Spectral addition/subtraction (e.g., for baseline correction)
+- ❌ Spectral multiplication/division (scaling)
+- ❌ Spectral blending/interpolation between spectra
+- ❌ Mean/median spectra across groups
+- ❌ Spectral difference maps
+- ❌ Spectral weighted combinations
+
+### 5.3 Advanced Visualization
+**Not Implemented:**
+- ❌ 3D spectral surface plots
+- ❌ Spectral heatmap/matrix visualization (wavelength × sample)
+- ❌ Contour plots of spectral intensity
+- ❌ Spectral density plots
+- ❌ Waterfall plots (sample-by-sample stacked spectra)
+- ❌ Interactive zoom/pan with linked axes
+- ❌ Spectral overlay comparison with difference highlighting
+- ❌ Animated spectral transitions
+- ❌ Spectral movies (time-series visualization)
+- ❌ Peak labeling/annotation on spectra
+- ❌ Interactive peak picking/marking
+
+### 5.4 Spectral Peak/Feature Analysis
+**Not Implemented:**
+- ❌ Automatic peak detection
+- ❌ Peak picking and labeling
+- ❌ Peak wavelength tracking across samples
+- ❌ Peak area/height extraction
+- ❌ Peak resolution metrics
+- ❌ Spectral inflection point detection
+- ❌ Band analysis (absorption bands, transmission windows)
+- ❌ Peak fitting (Lorentzian, Gaussian, Voigt)
+
+### 5.5 Spectral Similarity & Matching
+**Not Implemented:**
+- ❌ Spectral similarity metrics (SAM, SID, etc.)
+- ❌ Spectral library search/matching
+- ❌ Spectral angle mapper (SAM)
+- ❌ Spectral information divergence (SID)
+- ❌ Spectral correlation mapper
+- ❌ Spectral feature matching algorithms
+- ❌ Spectral unmixing (endmember extraction, linear mixing model)
+
+### 5.6 Batch Operations on Spectra Collections
+**Not Implemented:**
+- ❌ Batch resample across multiple spectra
+- ❌ Batch preprocessing with tracking
+- ❌ Batch spectral smoothing with adaptive parameters
+- ❌ Multi-spectrum baseline correction
+- ❌ Spectral co-registration across collections
+- ❌ Spectral mosaic/composite generation
+
+### 5.7 Data Transformation & Representation
+**Not Implemented:**
+- ❌ Long format spectra support
+- ❌ Spectral matrix export (wavelength × sample format)
+- ❌ HDF5/NetCDF format support
+- ❌ Spectral data compression/encoding
+- ❌ Spectral time-series handling
+- ❌ Multi-beam/multi-channel spectra support
+- ❌ Wavelength alignment/co-registration between datasets
+
+### 5.8 Interactive Spectral Analysis
+**Not Implemented:**
+- ❌ Real-time spectral transformations (user sees changes immediately)
+- ❌ Interactive baseline subtraction tool
+- ❌ Interactive spectral range selection with preview
+- ❌ Spectral smoothing slider with live preview
+- ❌ Click-to-identify features on spectrum
+- ❌ Brush selection of spectral regions
+- ❌ Linked brushing across multiple plots
+
+### 5.9 Quality Metrics for Spectra
+**Not Implemented:**
+- ❌ Signal-to-noise ratio (SNR) per spectrum
+- ❌ Spectral smoothness metric
+- ❌ Dynamic range metrics
+- ❌ Saturation detection
+- ❌ Baseline slope/trend detection
+- ❌ Spectral quality scores
+- ❌ Automated spectral quality flags
+
+### 5.10 Spectral Noise & Artifact Handling
+**Not Implemented:**
+- ❌ Noise estimation per spectrum
+- ❌ Spike removal/cosmic ray correction
+- ❌ Spectral smoothing (Savitzky-Golay, median, spline)
+- ❌ Wavelet denoising
+- ❌ Spectral clipping/normalization by wavelength
+- ❌ Baseline correction (polynomial, asymmetric least squares)
+- ❌ Spectral background subtraction
+
+### 5.11 Statistical Spectral Analysis
+**Not Implemented:**
+- ❌ Principal Component Analysis (PCA) on spectral space
+- ❌ Independent Component Analysis (ICA)
+- ❌ Spectral entropy/complexity metrics
+- ❌ Spectral variance analysis by wavelength
+- ❌ Spectral skewness/kurtosis
+- ❌ Spectral range analysis (min, max, dynamic range)
+
+### 5.12 Export & Reporting for Spectra
+**Not Implemented:**
+- ❌ Spectral data export with different format options
+- ❌ Spectral summary statistics reports
+- ❌ Spectral quality control reports
+- ❌ Spectral comparison reports
+- ❌ Spectral feature extraction reports
+- ❌ Custom spectra visualization export (SVG, PDF)
+
+### 5.13 Spectra File Handling
+**Not Implemented:**
+- ❌ Spectral data compression/archiving
+- ❌ Spectral data validation/integrity checking
+- ❌ Batch spectral file conversion
+- ❌ Spectral metadata preservation
+- ❌ Spectral file tagging/categorization
+- ❌ Spectral data versioning
+
+---
+
+## 6. ARCHITECTURE SUMMARY
+
+### Strengths
+1. ✅ **Robust multi-format loading**: 10+ formats with auto-detection
+2. ✅ **Comprehensive preprocessing**: SNV, derivatives with multiple options
+3. ✅ **Advanced calibration transfer**: 6 different inter-instrument methods
+4. ✅ **Variable selection**: 4 different wavelength selection algorithms
+5. ✅ **Outlier detection**: Multiple statistical methods
+6. ✅ **Interactive GUI**: 10 tabs with matplotlib embeddings
+7. ✅ **Sample selection**: Kennard-Stone, DUPLEX, SPXY algorithms
+
+### Gaps
+1. ❌ **Limited spectra comparison**: No similarity metrics or fingerprinting
+2. ❌ **No spectral operations**: Can't add/subtract/average spectra
+3. ❌ **No clustering**: Can't group similar spectra automatically
+4. ❌ **No advanced visualization**: Limited to 2D line plots
+5. ❌ **No batch spectra ops**: Limited multi-spectrum operations
+6. ❌ **No peak analysis**: No automatic peak detection/extraction
+7. ❌ **Limited metadata**: Minimal spectral metadata tracking
+
+### Data Flow
+```
+Load Spectra (10+ formats)
+        ↓
+Auto-detect data type & format
+        ↓
+Align with target variable
+        ↓
+Outlier detection & exclusion
+        ↓
+Preprocessing (SNV, derivatives, etc.)
+        ↓
+Variable selection (SPA, UVE, iPLS)
+        ↓
+Model building & cross-validation
+        ↓
+Calibration transfer (inter-instrument)
+        ↓
+Prediction on new spectra
+```
+
+---
+
+## 7. RECOMMENDATIONS FOR ADVANCED SPECTRA ANALYSIS
+
+### High Priority (Most Useful)
+1. **Spectra averaging by group** - Essential for sample comparison
+2. **Spectral similarity metrics** - For fingerprinting/identification
+3. **Automatic peak detection** - Common chemometric need
+4. **3D/heatmap visualization** - Better visual understanding
+5. **Baseline correction** - Essential preprocessing step
+
+### Medium Priority
+6. **Spectral arithmetic** (addition, subtraction, scaling)
+7. **Interactive spectral tools** (click to identify features)
+8. **Signal quality metrics** (SNR, saturation detection)
+9. **Spectral library matching**
+10. **Batch processing improvements**
+
+### Nice to Have
+11. Spectral unmixing
+12. Animated spectral transitions
+13. Spectral compression/archiving
+14. Advanced noise handling (wavelets, etc.)
+15. Spectral time-series support
+
+
+================================================================================
+DOCUMENT 4: CODE STRUCTURE REFERENCE
+================================================================================
+
+# Code Structure Reference - Quick Navigation
+
+## File Organization
+
+```
+/home/user/dasp/
+├── spectral_predict_gui_optimized.py    [18,000 lines] - Main GUI application
+│   ├── Tab 1: Import & Preview          - Data loading + spectral visualization
+│   ├── Tab 2: Data Viewer               - Excel-like spreadsheet view
+│   ├── Tab 3: Data Quality Check        - Outlier detection
+│   ├── Tab 4: Analysis Configuration    - Model setup
+│   ├── Tab 5: Analysis Progress         - Live progress monitor
+│   ├── Tab 6: Results                   - Ranked models table
+│   ├── Tab 7: Model Development         - Interactive refinement
+│   ├── Tab 8: Model Prediction          - Apply saved models
+│   └── Tab 10: Calibration Transfer     - Inter-instrument alignment
+│
+└── src/spectral_predict/
+    ├── SPECTRA LOADING & I/O
+    ├──────────────────────────
+    │   ├── io.py                        [3,200 lines]
+    │   │   ├── read_csv_spectra()       - CSV wide/long format
+    │   │   ├── read_reference_csv()     - Target variable CSV
+    │   │   ├── align_xy()               - Match spectra to targets
+    │   │   ├── read_asd_dir()           - Load ASD files
+    │   │   ├── read_spc_dir()           - Load SPC files
+    │   │   ├── read_combined_csv()      - Single-file format
+    │   │   ├── detect_spectral_data_type() - Reflectance vs Absorbance
+    │   │   └── [Write functions for CSV, Excel, JCAMP, SPC]
+    │   │
+    │   └── readers/
+    │       ├── opus_reader.py           - Bruker OPUS (.0, .1, etc.)
+    │       ├── perkinelmer_reader.py    - PerkinElmer (.sp)
+    │       ├── agilent_reader.py        - Agilent files
+    │       ├── asd_native.py            - ASD ASCII native
+    │       └── asd_r_bridge.py          - Binary ASD via specdal
+    │
+    ├── SPECTRA PREPROCESSING & OPERATIONS
+    ├──────────────────────────────────────
+    │   ├── preprocess.py
+    │   │   ├── SNV class                - Standard Normal Variate
+    │   │   ├── SavgolDerivative class   - Smooth differentiation
+    │   │   └── build_preprocessing_pipeline()
+    │   │
+    │   ├── calibration_transfer.py      [1,500 lines]
+    │   │   ├── TransferModel class      - Encapsulates transfer mapping
+    │   │   ├── resample_to_grid()       - Wavelength interpolation
+    │   │   ├── estimate_ds()            - Direct Standardization
+    │   │   ├── estimate_pds()           - Piecewise DS
+    │   │   ├── estimate_tsr()           - Transfer Sample Regression
+    │   │   ├── estimate_ctai()          - Affine Invariance
+    │   │   ├── estimate_nspfce()        - Nonlinear correction
+    │   │   ├── estimate_jypls_inv()     - Joint inversion
+    │   │   └── [Apply functions for each method]
+    │   │
+    │   ├── equalization.py              [Skeleton framework]
+    │   │   ├── choose_common_grid()     - Multi-instrument harmonization
+    │   │   └── build_equalization_mapping_for_instrument()
+    │   │
+    │   ├── regions.py
+    │   │   ├── compute_region_correlations() - Divide spectrum into regions
+    │   │   ├── get_top_regions()        - Top N by correlation
+    │   │   └── create_region_subsets()  - Extract region wavelengths
+    │   │
+    │   ├── wavelength_selection.py      [Advanced wavelength subsetting]
+    │   │
+    │   ├── variable_selection.py        [Multiple algorithms]
+    │   │   ├── SPA                      - Successive Projections Algorithm
+    │   │   ├── UVE                      - Uninformative Variable Elimination
+    │   │   ├── UVE-SPA Hybrid           - Combined method
+    │   │   └── iPLS                     - Interval PLS
+    │   │
+    │   └── sample_selection.py
+    │       ├── kennard_stone()          - Diversity-based selection
+    │       ├── duplex()                 - Cal/val split
+    │       ├── spxy()                   - Joint X-Y diversity
+    │       └── random_selection()
+    │
+    ├── SPECTRA ANALYSIS & VISUALIZATION
+    ├──────────────────────────────────────
+    │   ├── interactive_gui.py           [15,000+ lines]
+    │   │   ├── InteractiveLoadingGUI class
+    │   │   │   ├── _create_raw_spectra_tab()      - Line plot visualization
+    │   │   │   ├── _create_derivative1_tab()      - 1st deriv plot
+    │   │   │   ├── _create_derivative2_tab()      - 2nd deriv plot
+    │   │   │   └── _create_screening_tab()        - Correlation screening
+    │   │   └── run_interactive_loading_gui()
+    │   │
+    │   ├── interactive.py
+    │   │   ├── plot_spectra_overview()  - Generate PNG plots
+    │   │   ├── show_data_preview()      - ASCII table
+    │   │   ├── compute_predictor_screening()  - Correlation ranking
+    │   │   └── reflectance_to_absorbance()
+    │   │
+    │   ├── ensemble_viz.py              [12,000 lines]
+    │   │   ├── plot_regional_performance() - Heatmap by region
+    │   │   ├── plot_ensemble_weights()  - Bar charts
+    │   │   └── [Various diagnostic plots]
+    │   │
+    │   ├── diagnostics.py
+    │   │   ├── compute_residuals()      - y_true - y_pred
+    │   │   ├── compute_leverage()       - Hat values
+    │   │   ├── qq_plot_data()           - Normality check
+    │   │   └── jackknife_prediction_intervals()
+    │   │
+    │   └── outlier_detection.py         [20,000+ lines]
+    │       ├── run_pca_outlier_detection() - PCA T² statistics
+    │       ├── compute_q_residuals()    - SPE distances
+    │       ├── compute_mahalanobis_distance()
+    │       ├── check_y_data_consistency() - Target outliers
+    │       └── generate_outlier_report() - Comprehensive report
+    │
+    ├── MODEL BUILDING & ENSEMBLE
+    ├────────────────────────────
+    │   ├── search.py                    [50,000+ lines]
+    │   │   ├── run_search()             - Main grid search engine
+    │   │   ├── [Model × Preprocessing × Variable selection combinations]
+    │   │   └── Cross-validation loop
+    │   │
+    │   ├── models.py                    [78,000+ lines]
+    │   │   ├── Model implementations    - PLS, RF, MLP, etc.
+    │   │   └── Classification variants
+    │   │
+    │   ├── neural_boosted.py            [35,000+ lines]
+    │   │   └── NeuralBoosted class      - Ensemble model
+    │   │
+    │   ├── ensemble.py                  [19,000+ lines]
+    │   │   ├── EnsembleRegressor        - Weighted ensemble
+    │   │   └── EnsembleClassifier
+    │   │
+    │   ├── model_registry.py            - Model availability
+    │   ├── model_config.py              - Model hyperparameters
+    │   ├── model_io.py                  - Save/load .dasp models
+    │   ├── instrument_profiles.py       - Instrument characterization
+    │   ├── scoring.py                   - Ranking functions
+    │   └── progress_monitor.py          - Progress tracking
+    │
+    └── UTILITIES
+        ├── report.py                    - Markdown report generation
+        └── cli.py                       - Command-line interface
+```
+
+## Key Module Functions by Purpose
+
+### 1. DATA LOADING & ALIGNMENT
+```python
+# Load spectra
+X, metadata = read_asd_dir('/path/to/asd/files')
+# Load targets
+ref = read_reference_csv('reference.csv', 'sample_id_column')
+# Align
+X_aligned, y_aligned = align_xy(X, ref, 'sample_id_column', 'target_column')
+```
+
+### 2. VISUALIZATION
+```python
+# Interactive preview
+run_interactive_loading_gui(X, y, 'sample_id', 'target_name')
+
+# Generate static plots
+plot_spectra_overview(X, output_dir='plots/')
+plot_predictor_screening(results, output_dir='plots/')
+
+# GUI-based (in spectral_predict_gui_optimized.py)
+# - _generate_plots() for spectral tabs
+# - _plot_pca_scores() for outlier visualization
+# - _plot_regression_predictions() for model results
+```
+
+### 3. PREPROCESSING
+```python
+# Build pipeline
+steps = build_preprocessing_pipeline('snv_deriv', deriv=1, window=7)
+pipe = Pipeline(steps)
+X_processed = pipe.transform(X)
+
+# Or individual transformers
+snv = SNV()
+X_snv = snv.transform(X)
+
+deriv = SavgolDerivative(deriv=1, window=7)
+X_deriv = deriv.transform(X)
+```
+
+### 4. CALIBRATION TRANSFER
+```python
+# Estimate transfer model
+A = estimate_ds(X_master, X_slave_paired)
+transfer_model = TransferModel(
+    master_id='master_1',
+    slave_id='slave_1',
+    method='ds',
+    wavelengths_common=common_wl,
+    params={'A': A}
+)
+
+# Apply to new data
+X_slave_new_transferred = apply_ds(X_slave_new, A)
+
+# Resample to common grid
+X_resampled = resample_to_grid(X, wl_src, wl_target)
+```
+
+### 5. OUTLIER DETECTION
+```python
+# Run comprehensive detection
+report = generate_outlier_report(X, y, n_pca_components=5)
+
+# Individual methods
+pca_results = run_pca_outlier_detection(X, y, n_components=5)
+q_resid = compute_q_residuals(X, pca_results['pca_model'])
+mahal = compute_mahalanobis_distance(pca_results['scores'])
+```
+
+### 6. VARIABLE SELECTION
+```python
+# Select top wavelengths
+selected_indices = spa(X, y, n_features=20)
+selected_indices = uve(X, y, n_features=20)
+selected_indices = ipls(X, y, n_intervals=10)
+```
+
+### 7. SAMPLE SELECTION
+```python
+# For calibration transfer
+selected_idx = kennard_stone(X, n_samples=20)
+selected_idx = spxy(X, y, n_samples=20)
+```
+
+### 8. SPECTRAL REGION ANALYSIS
+```python
+# Divide into regions
+regions = compute_region_correlations(X, y, wavelengths, region_size=50)
+# Get top regions
+top_regions = get_top_regions(regions, n_top=5)
+```
+
+## Dependencies by Module
+
+| Module | Key Dependencies |
+|--------|------------------|
+| io.py | pandas, numpy, scipy |
+| preprocess.py | numpy, scipy.signal |
+| calibration_transfer.py | numpy, scipy.interpolate, scipy.linalg |
+| models.py | scikit-learn, numpy, pandas |
+| neural_boosted.py | scikit-learn, numpy |
+| outlier_detection.py | scikit-learn, numpy, scipy.stats |
+| interactive_gui.py | matplotlib, tkinter |
+| spectral_predict_gui_optimized.py | tkinter, matplotlib, tksheet, PIL |
+| ensemble.py | numpy, scikit-learn |
+
+## Performance Characteristics
+
+| Operation | Complexity | Dataset Size Tested |
+|-----------|-----------|-------------------|
+| Load ASD files | O(n×p) | 50-100 files |
+| PCA outlier detection | O(n×p²) or O(p³) | n<1000, p<5000 |
+| Kennard-Stone selection | O(n²×p) | n<5000 |
+| Calibration transfer DS | O(n×p²) or O(p³) | Multiple instruments |
+| Neural Boosted search | O(n_iter × n_cv × complexity) | 5-100 sample configs |
+
+## Key Data Structures
+
+### Spectral Data
+```python
+X = pd.DataFrame(
+    data=[[...], [...], ...],  # Spectral values
+    columns=[400.5, 401.2, ..., 2495.3],  # Wavelengths as floats
+    index=['sample_1', 'sample_2', ...]  # Sample IDs
+)
+```
+
+### Target Data
+```python
+y = pd.Series(
+    data=[12.5, 15.3, ...],  # Property values
+    index=['sample_1', 'sample_2', ...],  # Aligned sample IDs
+    name='%Collagen'
+)
+```
+
+### Calibration Transfer Model
+```python
+transfer_model = TransferModel(
+    master_id='master_1',
+    slave_id='slave_1',
+    method='ds',  # or 'pds', 'tsr', 'ctai', 'nspfce', 'jypls-inv'
+    wavelengths_common=np.array([400.5, 401.2, ..., 2495.3]),
+    params={'A': matrix_or_params_dict},
+    meta={'resolution_ratio': 1.2, 'rmse': 0.005}
+)
+```
+
+### Outlier Report
+```python
+report = {
+    'pca_outliers': [idx1, idx2, ...],
+    'leverage_outliers': [idx3, idx4, ...],
+    'y_outliers': [idx5, ...],
+    'all_outliers': {idx: [methods_detecting_it]},
+    'excluded_samples': [final list],
+    'n_excluded': int
+}
+```
+
+---
+
+## GUI Tab Structure in spectral_predict_gui_optimized.py
+
+### Tab 1: Import & Preview (Lines ~1711-1900)
+- Subtab 1A: Data loading
+  - Directory/file selection
+  - Format detection
+  - Reference file matching
+  
+- Subtab 1B: Spectral plots
+  - Dynamic matplotlib canvas
+  - Raw, 1st deriv, 2nd deriv tabs
+  - Click-to-exclude samples
+
+### Tab 2: Data Viewer (Lines ~1922-1990)
+- tksheet-based spreadsheet
+- Virtual scrolling for large datasets
+
+### Tab 3: Data Quality Check (Lines ~1992-2150)
+- PCA T², Q-residuals, Mahalanobis scatter plots
+- Y-value distribution histogram
+- Sample exclusion checkboxes
+
+### Tab 4: Analysis Configuration (Lines ~2149-3618)
+- 4A: Basic settings (preprocessing, models)
+- 4B: Variable selection method
+- 4C: Model hyperparameters
+- 4D: Ensemble methods
+- 4E: Cross-validation settings
+
+### Tab 5: Progress (Lines ~3618-3671)
+- Live progress bar
+- Iteration counter
+- Status messages
+
+### Tab 6: Results (Lines ~3671-3779)
+- Sortable results table
+- Model metrics (RMSE, R², Accuracy, AUC)
+- Click row to refine model
+
+### Tab 7: Model Development (Lines ~3779-4250)
+- 7A: Load model from results
+- 7B: Feature engineering
+- 7C: Hyperparameter tuning
+- 7D: Diagnostics (residuals, leverage, predictions)
+
+### Tab 8: Model Prediction (Lines ~4250-13000)
+- Load .dasp model files
+- Specify new spectral data
+- Make predictions
+- Export results
+
+### Tab 10: Calibration Transfer (Lines ~13000-17300)
+- Master/slave spectra pairing
+- Method selection (DS, PDS, TSR, CTAI, NSPFCE, JYPLS-inv)
+- Transfer quality visualization
+- Apply to new data
+
+
+================================================================================
+END OF COMPLETE ANALYSIS
+================================================================================
