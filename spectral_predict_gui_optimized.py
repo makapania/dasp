@@ -769,7 +769,8 @@ class SpectralPredictApp:
         self.use_xgboost = tk.BooleanVar(value=False)      # Comprehensive (too slow for standard)
         self.use_catboost = tk.BooleanVar(value=False)     # Comprehensive
         self.use_neuralboosted = tk.BooleanVar(value=False)  # Comprehensive
-        self.use_svr = tk.BooleanVar(value=False)          # Experimental (very slow)
+        self.use_svr = tk.BooleanVar(value=False)          # Experimental (very slow) - for regression
+        self.use_svm = tk.BooleanVar(value=False)          # Experimental (very slow) - for classification
         self.use_mlp = tk.BooleanVar(value=False)          # Experimental
 
         # Create model name to checkbox mapping
@@ -784,6 +785,7 @@ class SpectralPredictApp:
             'LightGBM': self.use_lightgbm,
             'CatBoost': self.use_catboost,
             'SVR': self.use_svr,
+            'SVM': self.use_svm,
             'MLP': self.use_mlp,
             'NeuralBoosted': self.use_neuralboosted
         }
@@ -1853,6 +1855,35 @@ class SpectralPredictApp:
             else:
                 # Fallback to terminal bell
                 print('\a')
+        except Exception:
+            pass  # Silently fail if sound doesn't work
+
+    def play_sound(self, sound_type='success'):
+        """Play a simple notification sound.
+
+        Args:
+            sound_type: Type of sound to play ('success', 'error', etc.)
+        """
+        try:
+            if HAS_WINSOUND:
+                if sound_type == 'success':
+                    # Play a simple success beep (higher pitch, short duration)
+                    import threading
+                    def beep():
+                        try:
+                            winsound.Beep(800, 100)  # 800 Hz for 100ms
+                        except Exception:
+                            pass
+                    threading.Thread(target=beep, daemon=True).start()
+                else:
+                    # Default beep
+                    import threading
+                    def beep():
+                        try:
+                            winsound.Beep(600, 100)
+                        except Exception:
+                            pass
+                    threading.Thread(target=beep, daemon=True).start()
         except Exception:
             pass  # Silently fail if sound doesn't work
 
@@ -3054,6 +3085,10 @@ class SpectralPredictApp:
         ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
         CreateToolTip(self.svr_checkbox, text=TOOLTIP_CONTENT['models']['SVR'], delay=500)
 
+        self.svm_checkbox = ttk.Checkbutton(models_frame, text="✓ SVM 🆕", variable=self.use_svm)
+        self.svm_checkbox.grid(row=3, column=2, sticky=tk.W, pady=5, padx=(40, 0))
+        ttk.Label(models_frame, text="Support Vector Machine (classification)", style='Caption.TLabel').grid(row=3, column=3, sticky=tk.W, padx=15)
+
         # Gradient Boosting Models (Column 3, spanning bottom)
         ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
 
@@ -3093,6 +3128,7 @@ class SpectralPredictApp:
             'LightGBM': self.lightgbm_checkbox,
             'CatBoost': self.catboost_checkbox,
             'SVR': self.svr_checkbox,
+            'SVM': self.svm_checkbox,
             'MLP': self.mlp_checkbox,
             'NeuralBoosted': self.neuralboosted_checkbox
         }
@@ -3908,9 +3944,9 @@ class SpectralPredictApp:
         ttk.Label(mlp_content_frame, text="💡 Maximum number of training iterations. Higher values may improve convergence but increase training time.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
-        # SVR Hyperparameters - collapsible
+        # SVR/SVM Hyperparameters - collapsible
         svr_section, svr_content = self._create_collapsible_section(content_frame,
-                                                                    "SVR (Support Vector Regression) Hyperparameters",
+                                                                    "SVR/SVM (Support Vector) Hyperparameters",
                                                                     expanded=False)
         svr_section.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
         row += 1
@@ -4653,18 +4689,19 @@ class SpectralPredictApp:
         # Model Type
         ttk.Label(model_frame, text="Model Type:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         self.refine_model_type = tk.StringVar(value='PLS')
-        model_combo = ttk.Combobox(model_frame, textvariable=self.refine_model_type, width=25, state='readonly')
+        self.refine_model_combo = ttk.Combobox(model_frame, textvariable=self.refine_model_type, width=25, state='readonly')
         # Use central model registry for consistency
         if get_supported_models is not None:
-            model_combo['values'] = get_supported_models('regression')
+            self.refine_model_combo['values'] = get_supported_models('regression')
         else:
             # Fallback if registry import failed
-            model_combo['values'] = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
-        model_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+            self.refine_model_combo['values'] = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
+        self.refine_model_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
 
         # Task Type
         ttk.Label(model_frame, text="Task Type:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
         self.refine_task_type = tk.StringVar(value='regression')
+        self.refine_task_type.trace_add('write', lambda *args: self._on_refine_task_type_changed())
         task_frame = ttk.Frame(model_frame)
         task_frame.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Radiobutton(task_frame, text="Regression", variable=self.refine_task_type, value='regression').pack(side='left', padx=5)
@@ -5259,19 +5296,31 @@ class SpectralPredictApp:
         """Handle task type changes - filter models and update tier selection."""
         task_type = self.task_type.get()
 
+        # Determine actual task type (for auto-detect, check the data)
         if task_type == "auto":
-            # Enable all models when auto-detect is selected
-            for model_name, checkbox_widget in self.model_checkbox_widgets.items():
-                # Don't enable CatBoost if not available
-                if model_name == 'CatBoost' and not HAS_CATBOOST:
-                    continue
-                checkbox_widget.state(['!disabled'])
-            # Refresh tier selection for auto mode
-            self._on_tier_changed()
-            return
+            # Auto-detect from loaded data
+            if self.y is not None:
+                # Use same logic as in analysis to detect task type
+                if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+                    actual_task = "classification"
+                else:
+                    actual_task = "regression"
+            else:
+                # No data loaded yet - enable all models
+                for model_name, checkbox_widget in self.model_checkbox_widgets.items():
+                    # Don't enable CatBoost if not available
+                    if model_name == 'CatBoost' and not HAS_CATBOOST:
+                        continue
+                    checkbox_widget.state(['!disabled'])
+                # Refresh tier selection for auto mode
+                self._on_tier_changed()
+                return
+        else:
+            # User explicitly selected task type
+            actual_task = task_type
 
         # Get supported models for this task type
-        supported_models = set(get_supported_models(task_type))
+        supported_models = set(get_supported_models(actual_task))
 
         # Enable/disable checkboxes based on compatibility
         for model_name, checkbox_var in self.model_checkboxes.items():
@@ -5291,6 +5340,33 @@ class SpectralPredictApp:
 
         # Refresh tier selection to use correct model set
         self._on_tier_changed()
+
+    def _on_refine_task_type_changed(self):
+        """Handle task type changes in Refine tab - update model dropdown to show only appropriate models."""
+        task_type = self.refine_task_type.get()
+
+        # Get current model selection before updating
+        current_model = self.refine_model_type.get()
+
+        # Get supported models for this task type
+        if get_supported_models is not None:
+            supported_models = get_supported_models(task_type)
+        else:
+            # Fallback if registry import failed
+            if task_type == 'regression':
+                supported_models = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
+            else:  # classification
+                supported_models = ['PLS-DA', 'PLS', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVM', 'XGBoost', 'LightGBM', 'CatBoost']
+
+        # Update combobox values
+        self.refine_model_combo['values'] = supported_models
+
+        # If current model is not supported for new task type, switch to default
+        if current_model not in supported_models:
+            if task_type == 'classification':
+                self.refine_model_type.set('PLS-DA')
+            else:
+                self.refine_model_type.set('PLS')
 
     def _on_model_checkbox_changed(self, *args):
         """Switch to Custom tier when user manually changes a model checkbox."""
@@ -7406,6 +7482,8 @@ class SpectralPredictApp:
             selected_models.append("NeuralBoosted")
         if self.use_svr.get():
             selected_models.append("SVR")
+        if self.use_svm.get():
+            selected_models.append("SVM")
         if self.use_xgboost.get():
             selected_models.append("XGBoost")
         if self.use_lightgbm.get():
@@ -10121,35 +10199,51 @@ Performance (Classification):
         if not pd.isna(window) and window in [7, 11, 17, 19]:
             self.refine_window.set(int(window))
 
-        # Set model type with validation
+        # Set task type FIRST (auto-detect from data) - CRITICAL FIX for PLS-DA loading
+        # This must happen before model validation so we validate against the correct task type
+        if self.y is not None:
+            if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+                detected_task_type = 'classification'
+                self.refine_task_type.set('classification')
+            else:
+                detected_task_type = 'regression'
+                self.refine_task_type.set('regression')
+        else:
+            # Fallback to regression if no y data available
+            detected_task_type = 'regression'
+            self.refine_task_type.set('regression')
+
+        # Set model type with validation (now using correct task type)
         model_name = config.get('Model', 'PLS')
         # Use central model registry for validation
         if is_valid_model is not None:
-            if is_valid_model(model_name, 'regression'):
+            # Validate against detected task type (not hardcoded 'regression')
+            if is_valid_model(model_name, detected_task_type):
                 self.refine_model_type.set(model_name)
-                print(f"✓ Model type '{model_name}' validated and loaded")
+                print(f"✓ Model type '{model_name}' validated and loaded for {detected_task_type}")
             else:
-                valid_models = get_supported_models('regression') if get_supported_models is not None else []
-                print(f"⚠️  WARNING: Unknown model type '{model_name}' - defaulting to PLS")
+                valid_models = get_supported_models(detected_task_type) if get_supported_models is not None else []
+                default_model = 'PLS-DA' if detected_task_type == 'classification' else 'PLS'
+                print(f"⚠️  WARNING: Unknown model type '{model_name}' for {detected_task_type} - defaulting to {default_model}")
                 print(f"⚠️  Valid models: {', '.join(valid_models)}")
-                self.refine_model_type.set('PLS')
+                self.refine_model_type.set(default_model)
         else:
             # Fallback if registry import failed
-            valid_models = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
-            if model_name in valid_models:
-                self.refine_model_type.set(model_name)
-                print(f"✓ Model type '{model_name}' validated and loaded")
-            else:
-                print(f"⚠️  WARNING: Unknown model type '{model_name}' - defaulting to PLS")
-                print(f"⚠️  Valid models: {', '.join(valid_models)}")
-                self.refine_model_type.set('PLS')
+            valid_models_regression = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
+            valid_models_classification = ['PLS-DA', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVM', 'XGBoost', 'LightGBM', 'CatBoost']
+            valid_models = valid_models_classification if detected_task_type == 'classification' else valid_models_regression
 
-        # Set task type (auto-detect from data)
-        if self.y is not None:
-            if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
-                self.refine_task_type.set('classification')
+            if model_name in valid_models or (model_name == 'PLS' and detected_task_type == 'classification'):
+                # Allow 'PLS' to map to 'PLS-DA' for classification
+                if model_name == 'PLS' and detected_task_type == 'classification':
+                    model_name = 'PLS-DA'
+                self.refine_model_type.set(model_name)
+                print(f"✓ Model type '{model_name}' validated and loaded for {detected_task_type}")
             else:
-                self.refine_task_type.set('regression')
+                default_model = 'PLS-DA' if detected_task_type == 'classification' else 'PLS'
+                print(f"⚠️  WARNING: Unknown model type '{model_name}' for {detected_task_type} - defaulting to {default_model}")
+                print(f"⚠️  Valid models: {', '.join(valid_models)}")
+                self.refine_model_type.set(default_model)
 
         # Set preprocessing method
         preprocess = config.get('Preprocess', 'raw')
@@ -16261,7 +16355,8 @@ Configuration:
                 method, master_id, slave_id, date_created, n_samples, wavelengths
             )
 
-            messagebox.showinfo("Success", f"Transfer model loaded successfully!\nMethod: {method}")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
@@ -16372,8 +16467,8 @@ Configuration:
             # Update info display
             self._update_data_info()
 
-            messagebox.showinfo("Success", f"Master spectra loaded!\n{X.shape[0]} samples, "
-                                         f"{len(wavelengths)} wavelengths")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load master spectra:\n{str(e)}")
@@ -16412,8 +16507,8 @@ Configuration:
             # Update info display
             self._update_data_info()
 
-            messagebox.showinfo("Success", f"Slave spectra loaded!\n{X.shape[0]} samples, "
-                                         f"{len(wavelengths)} wavelengths")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
@@ -16732,7 +16827,8 @@ Configuration:
             # Plot transfer quality (reuse existing method from lines 14939+)
             self._plot_transfer_quality(method)
 
-            messagebox.showinfo("Success", f"{method.upper()} transfer model built successfully!")
+            # Play success sound (removed popup - info shown in text widget and plot)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to build transfer model:\n{str(e)}")
@@ -16781,7 +16877,8 @@ Configuration:
             with open(filepath, 'wb') as f:
                 pickle.dump(transfer_model_data, f)
 
-            messagebox.showinfo("Success", f"Transfer model saved to:\n{filepath}")
+            # Play success sound (removed popup - file path shown in status)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save transfer model:\n{str(e)}")
@@ -16793,6 +16890,143 @@ Configuration:
     # ========================================================================
     # STEP 1 ENHANCED HELPER METHODS: Load Master/Slave Data with Y Values (for JYPLS-inv)
     # ========================================================================
+
+    def _browse_master_spectra_simple(self):
+        """Browse master spectra directory (simple version without Y auto-detection)."""
+        from tkinter import filedialog
+        from pathlib import Path
+
+        directory = filedialog.askdirectory(title="Select Master Spectra Directory")
+        if not directory:
+            return
+
+        self.ct_master_spectra_path_var.set(directory)
+
+        # Auto-detect file type (priority order)
+        path = Path(directory)
+        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
+        csv_files = list(path.glob("*.csv"))
+        spc_files = list(path.glob("*.spc"))
+
+        if asd_files:
+            self.ct_master_detected_type = "asd"
+            self.ct_master_detection_status.config(
+                text=f"✓ Detected {len(asd_files)} ASD files",
+                foreground=self.colors['success']
+            )
+        elif spc_files:
+            self.ct_master_detected_type = "spc"
+            self.ct_master_detection_status.config(
+                text=f"✓ Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif csv_files:
+            self.ct_master_detected_type = "csv"
+            self.ct_master_detection_status.config(
+                text=f"✓ Detected {len(csv_files)} CSV files",
+                foreground=self.colors['success']
+            )
+        else:
+            self.ct_master_detected_type = None
+            self.ct_master_detection_status.config(
+                text="⚠ No spectral files detected",
+                foreground=self.colors['warning']
+            )
+
+    def _load_master_data_simple(self):
+        """Load master spectra without Y values (for non-JYPLS methods)."""
+        from tkinter import messagebox
+        import pandas as pd
+        import numpy as np
+        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir
+
+        # Validate inputs
+        if not self.ct_master_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select master spectra directory.")
+            return
+
+        try:
+            # Load spectra based on detected type
+            # These functions return (df, metadata) where df is a DataFrame with samples as rows
+            if self.ct_master_detected_type == 'asd':
+                df, metadata = read_asd_dir(self.ct_master_spectra_path_var.get())
+            elif self.ct_master_detected_type == 'spc':
+                df, metadata = read_spc_dir(self.ct_master_spectra_path_var.get())
+            elif self.ct_master_detected_type == 'csv':
+                df, metadata = read_csv_spectra(self.ct_master_spectra_path_var.get())
+            else:
+                raise ValueError(f"Unsupported file type: {self.ct_master_detected_type}")
+
+            # Store data (without Y values)
+            # df is a DataFrame with index=sample names, columns=wavelengths
+            self.ct_master_X = df  # Store as DataFrame
+            self.ct_master_wavelengths = df.columns.values  # Get wavelengths from column names
+            self.master_data_format = self.ct_master_detected_type
+
+            # Update info display
+            info_text = f"Master: {self.ct_master_X.shape[0]} samples, {len(self.ct_master_wavelengths)} wavelengths\n"
+            self.ct_data_info_text.config(state='normal')
+            self.ct_data_info_text.delete('1.0', tk.END)
+            self.ct_data_info_text.insert('1.0', info_text)
+            self.ct_data_info_text.config(state='disabled')
+
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load master spectra:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _load_slave_data_simple(self):
+        """Load slave spectra without Y values (for non-JYPLS methods)."""
+        from tkinter import messagebox
+        import pandas as pd
+        import numpy as np
+        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir
+
+        # Validate inputs
+        if not self.ct_slave_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select slave spectra directory.")
+            return
+
+        try:
+            # Load spectra based on detected type
+            # These functions return (df, metadata) where df is a DataFrame with samples as rows
+            if self.ct_slave_detected_type == 'asd':
+                df, metadata = read_asd_dir(self.ct_slave_spectra_path_var.get())
+            elif self.ct_slave_detected_type == 'spc':
+                df, metadata = read_spc_dir(self.ct_slave_spectra_path_var.get())
+            elif self.ct_slave_detected_type == 'csv':
+                df, metadata = read_csv_spectra(self.ct_slave_spectra_path_var.get())
+            else:
+                raise ValueError(f"Unsupported file type: {self.ct_slave_detected_type}")
+
+            # Store data (without Y values)
+            # df is a DataFrame with index=sample names, columns=wavelengths
+            self.ct_slave_X = df  # Store as DataFrame
+            self.ct_slave_wavelengths = df.columns.values  # Get wavelengths from column names
+            self.slave_data_format = self.ct_slave_detected_type
+
+            # Update info display
+            master_info = ""
+            if hasattr(self, 'ct_master_X') and self.ct_master_X is not None:
+                master_info = f"Master: {self.ct_master_X.shape[0]} samples, {len(self.ct_master_wavelengths)} wavelengths\n"
+
+            slave_info = f"Slave: {self.ct_slave_X.shape[0]} samples, {len(self.ct_slave_wavelengths)} wavelengths\n"
+
+            self.ct_data_info_text.config(state='normal')
+            self.ct_data_info_text.delete('1.0', tk.END)
+            self.ct_data_info_text.insert('1.0', master_info + slave_info)
+            self.ct_data_info_text.config(state='disabled')
+
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def _browse_master_spectra_with_y(self):
         """Browse master spectra directory with auto-detection (Import tab pattern)."""
@@ -16966,11 +17200,8 @@ Configuration:
             # Update data info display
             self._update_data_info()
 
-            messagebox.showinfo("Success",
-                f"Master data loaded successfully!\n\n"
-                f"Samples: {len(X_aligned)}\n"
-                f"Wavelengths: {len(self.ct_master_wavelengths)}\n"
-                f"Target: {self.ct_master_target_col_var.get()}")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load master data:\n{str(e)}")
@@ -16978,6 +17209,48 @@ Configuration:
             traceback.print_exc()
 
     # Slave data methods (parallel to master)
+
+    def _browse_slave_spectra_simple(self):
+        """Browse slave spectra directory (simple version without Y auto-detection)."""
+        from tkinter import filedialog
+        from pathlib import Path
+
+        directory = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        if not directory:
+            return
+
+        self.ct_slave_spectra_path_var.set(directory)
+
+        # Auto-detect file type (priority order)
+        path = Path(directory)
+        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
+        csv_files = list(path.glob("*.csv"))
+        spc_files = list(path.glob("*.spc"))
+
+        if asd_files:
+            self.ct_slave_detected_type = "asd"
+            self.ct_slave_detection_status.config(
+                text=f"✓ Detected {len(asd_files)} ASD files",
+                foreground=self.colors['success']
+            )
+        elif spc_files:
+            self.ct_slave_detected_type = "spc"
+            self.ct_slave_detection_status.config(
+                text=f"✓ Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif csv_files:
+            self.ct_slave_detected_type = "csv"
+            self.ct_slave_detection_status.config(
+                text=f"✓ Detected {len(csv_files)} CSV files",
+                foreground=self.colors['success']
+            )
+        else:
+            self.ct_slave_detected_type = None
+            self.ct_slave_detection_status.config(
+                text="⚠ No spectral files detected",
+                foreground=self.colors['warning']
+            )
 
     def _browse_slave_spectra_with_y(self):
         """Browse slave spectra directory with auto-detection (Import tab pattern)."""
@@ -17154,11 +17427,8 @@ Configuration:
             if self.ct_master_X is not None:
                 self._validate_master_slave_pairing()
 
-            messagebox.showinfo("Success",
-                f"Slave data loaded successfully!\n\n"
-                f"Samples: {len(X_aligned)}\n"
-                f"Wavelengths: {len(self.ct_slave_wavelengths)}\n"
-                f"Target: {self.ct_slave_target_col_var.get()}")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load slave data:\n{str(e)}")
@@ -17317,7 +17587,8 @@ Configuration:
             self.ct_pred_model_info_text.insert('1.0', info_text)
             self.ct_pred_model_info_text.config(state='disabled')
 
-            messagebox.showinfo("Success", f"Prediction model loaded successfully!\nModel: {model_type}")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load prediction model:\n{str(e)}")
@@ -17402,7 +17673,8 @@ Configuration:
             self.ct_pred_slave_info_text.insert('1.0', info_text)
             self.ct_pred_slave_info_text.config(state='disabled')
 
-            messagebox.showinfo("Success", f"Loaded {X.shape[0]} slave spectra successfully!")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load slave data:\n{str(e)}")
@@ -17453,17 +17725,15 @@ Configuration:
             self.ct_export_predictions_button.config(state='normal')
 
             # Create plots
-            self._plot_prediction_results(y_pred, X_slave, X_transferred)
+            self._plot_ct_prediction_results(y_pred, X_slave, X_transferred)
 
-            messagebox.showinfo("Success",
-                f"Prediction workflow completed!\n"
-                f"Predicted {len(y_pred)} samples.\n"
-                f"Results displayed below.")
+            # Play success sound (removed popup - results shown in tree and plots)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Prediction workflow failed:\n{str(e)}")
 
-    def _plot_prediction_results(self, y_pred, X_slave_original, X_transferred):
+    def _plot_ct_prediction_results(self, y_pred, X_slave_original, X_transferred):
         """Create plots showing prediction results and spectral transformation."""
         if not HAS_MATPLOTLIB:
             return
@@ -17543,7 +17813,8 @@ Configuration:
             # Save to CSV
             df.to_csv(filepath, index=False)
 
-            messagebox.showinfo("Success", f"Predictions exported to:\n{filepath}")
+            # Play success sound (removed popup - file saved)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export predictions:\n{str(e)}")
@@ -17632,7 +17903,8 @@ Configuration:
             self.ct_export_data_info_text.insert('1.0', info_text)
             self.ct_export_data_info_text.config(state='disabled')
 
-            messagebox.showinfo("Success", f"Loaded {X.shape[0]} slave spectra for export.")
+            # Play success sound (removed popup - info shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
@@ -17723,7 +17995,8 @@ Configuration:
             # Create before/after plot with tabbed derivatives
             self._plot_transform_preview(X_slave_resampled, X_transferred, model_wavelengths)
 
-            messagebox.showinfo("Success", "Spectra transformed successfully! Review the preview below.")
+            # Play success sound (removed popup - stats and plot shown)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to transform spectra:\n{str(e)}\n\nDetails: {repr(e)}")
@@ -17966,7 +18239,8 @@ Configuration:
             self.ct_export_status_text.insert('1.0', status_msg)
             self.ct_export_status_text.config(state='disabled')
 
-            messagebox.showinfo("Success", f"Export complete!\n\n{status_msg}")
+            # Play success sound (removed popup - status shown in text widget)
+            self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export spectra:\n{str(e)}")
@@ -18916,142 +19190,52 @@ Configuration:
                                                 style='Card.TFrame', padding=15)
         self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
 
-        # Sub-section A1: Load Data (Enhanced for JYPLS-inv support)
-        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Slave Data (with Y values for JYPLS-inv)",
+        # Sub-section A1: Load Data
+        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Slave Data",
                                      style='Card.TFrame', padding=10)
         data_section.pack(fill='x', pady=(0, 10))
 
-        # ===== MASTER DATA LOADING =====
-        master_section = ttk.LabelFrame(data_section, text="Master Instrument Data",
-                                        style='Card.TFrame', padding=8)
-        master_section.pack(fill='x', pady=(0, 10))
+        # Load Master Spectra
+        master_frame = ttk.Frame(data_section)
+        master_frame.pack(fill='x', pady=(0, 10))
 
-        # Master spectra directory
-        ttk.Label(master_section, text="Spectra Directory:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 3))
+        ttk.Label(master_frame, text="Master Spectra:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        master_dir_frame = ttk.Frame(master_section)
-        master_dir_frame.pack(fill='x', pady=(0, 5))
+        master_browse_frame = ttk.Frame(master_frame)
+        master_browse_frame.pack(fill='x')
 
-        ttk.Entry(master_dir_frame, textvariable=self.ct_master_spectra_path_var,
-                 width=50, state='readonly').pack(side='left', padx=(0, 5))
-        ttk.Button(master_dir_frame, text="Browse...",
-                  command=self._browse_master_spectra_with_y,
-                  style='Modern.TButton').pack(side='left')
+        self.ct_master_data_path_var = tk.StringVar()
+        ttk.Entry(master_browse_frame, textvariable=self.ct_master_data_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
 
-        # Detection status
-        self.ct_master_detection_status = ttk.Label(master_section, text="No data selected",
-                                                     foreground=self.colors['text_light'])
-        self.ct_master_detection_status.pack(anchor='w', pady=(0, 5))
+        ttk.Button(master_browse_frame, text="Browse Folder/File...",
+                  command=self._browse_master_spectra,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
 
-        # Master reference CSV
-        ttk.Label(master_section, text="Reference CSV/Excel:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(5, 3))
+        self._create_accent_button(master_browse_frame, "Load Master Spectra",
+                                   self._load_master_spectra).pack(side='left')
 
-        master_ref_frame = ttk.Frame(master_section)
-        master_ref_frame.pack(fill='x', pady=(0, 5))
+        # Load Slave Spectra
+        slave_frame = ttk.Frame(data_section)
+        slave_frame.pack(fill='x', pady=(0, 10))
 
-        ttk.Entry(master_ref_frame, textvariable=self.ct_master_reference_path_var,
-                 width=50, state='readonly').pack(side='left', padx=(0, 5))
-        ttk.Button(master_ref_frame, text="Browse...",
-                  command=self._browse_master_reference,
-                  style='Modern.TButton').pack(side='left')
+        ttk.Label(slave_frame, text="Slave Spectra:",
+                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        # Column mapping
-        master_cols_label = ttk.Label(master_section, text="Column Mapping:",
-                                      style='CardLabel.TLabel')
-        master_cols_label.pack(anchor='w', pady=(5, 3))
+        slave_browse_frame = ttk.Frame(slave_frame)
+        slave_browse_frame.pack(fill='x')
 
-        master_cols_frame = ttk.Frame(master_section)
-        master_cols_frame.pack(fill='x', pady=(0, 5))
+        self.ct_slave_data_path_var = tk.StringVar()
+        ttk.Entry(slave_browse_frame, textvariable=self.ct_slave_data_path_var,
+                 width=50, state='readonly').pack(side='left', padx=(0, 10))
 
-        ttk.Label(master_cols_frame, text="File:", width=12).pack(side='left')
-        self.ct_master_spectral_file_combo = ttk.Combobox(master_cols_frame,
-            textvariable=self.ct_master_spectral_file_col_var, state='readonly', width=15)
-        self.ct_master_spectral_file_combo.pack(side='left', padx=(0, 10))
+        ttk.Button(slave_browse_frame, text="Browse Folder/File...",
+                  command=self._browse_slave_spectra,
+                  style='Modern.TButton').pack(side='left', padx=(0, 10))
 
-        ttk.Label(master_cols_frame, text="ID:", width=8).pack(side='left')
-        self.ct_master_id_combo = ttk.Combobox(master_cols_frame,
-            textvariable=self.ct_master_id_col_var, state='readonly', width=15)
-        self.ct_master_id_combo.pack(side='left', padx=(0, 10))
-
-        ttk.Label(master_cols_frame, text="Target:", width=8).pack(side='left')
-        self.ct_master_target_combo = ttk.Combobox(master_cols_frame,
-            textvariable=self.ct_master_target_col_var, state='readonly', width=15)
-        self.ct_master_target_combo.pack(side='left')
-
-        # Load button
-        master_load_frame = ttk.Frame(master_section)
-        master_load_frame.pack(fill='x', pady=(5, 0))
-
-        self._create_accent_button(master_load_frame, "Load Master Data",
-                                   self._load_master_data_with_y).pack(side='left')
-
-        # ===== SLAVE DATA LOADING =====
-        slave_section = ttk.LabelFrame(data_section, text="Slave Instrument Data",
-                                       style='Card.TFrame', padding=8)
-        slave_section.pack(fill='x', pady=(10, 0))
-
-        # Slave spectra directory
-        ttk.Label(slave_section, text="Spectra Directory:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(0, 3))
-
-        slave_dir_frame = ttk.Frame(slave_section)
-        slave_dir_frame.pack(fill='x', pady=(0, 5))
-
-        ttk.Entry(slave_dir_frame, textvariable=self.ct_slave_spectra_path_var,
-                 width=50, state='readonly').pack(side='left', padx=(0, 5))
-        ttk.Button(slave_dir_frame, text="Browse...",
-                  command=self._browse_slave_spectra_with_y,
-                  style='Modern.TButton').pack(side='left')
-
-        # Detection status
-        self.ct_slave_detection_status = ttk.Label(slave_section, text="No data selected",
-                                                    foreground=self.colors['text_light'])
-        self.ct_slave_detection_status.pack(anchor='w', pady=(0, 5))
-
-        # Slave reference CSV
-        ttk.Label(slave_section, text="Reference CSV/Excel:",
-                 style='CardLabel.TLabel').pack(anchor='w', pady=(5, 3))
-
-        slave_ref_frame = ttk.Frame(slave_section)
-        slave_ref_frame.pack(fill='x', pady=(0, 5))
-
-        ttk.Entry(slave_ref_frame, textvariable=self.ct_slave_reference_path_var,
-                 width=50, state='readonly').pack(side='left', padx=(0, 5))
-        ttk.Button(slave_ref_frame, text="Browse...",
-                  command=self._browse_slave_reference,
-                  style='Modern.TButton').pack(side='left')
-
-        # Column mapping
-        slave_cols_label = ttk.Label(slave_section, text="Column Mapping:",
-                                     style='CardLabel.TLabel')
-        slave_cols_label.pack(anchor='w', pady=(5, 3))
-
-        slave_cols_frame = ttk.Frame(slave_section)
-        slave_cols_frame.pack(fill='x', pady=(0, 5))
-
-        ttk.Label(slave_cols_frame, text="File:", width=12).pack(side='left')
-        self.ct_slave_spectral_file_combo = ttk.Combobox(slave_cols_frame,
-            textvariable=self.ct_slave_spectral_file_col_var, state='readonly', width=15)
-        self.ct_slave_spectral_file_combo.pack(side='left', padx=(0, 10))
-
-        ttk.Label(slave_cols_frame, text="ID:", width=8).pack(side='left')
-        self.ct_slave_id_combo = ttk.Combobox(slave_cols_frame,
-            textvariable=self.ct_slave_id_col_var, state='readonly', width=15)
-        self.ct_slave_id_combo.pack(side='left', padx=(0, 10))
-
-        ttk.Label(slave_cols_frame, text="Target:", width=8).pack(side='left')
-        self.ct_slave_target_combo = ttk.Combobox(slave_cols_frame,
-            textvariable=self.ct_slave_target_col_var, state='readonly', width=15)
-        self.ct_slave_target_combo.pack(side='left')
-
-        # Load button
-        slave_load_frame = ttk.Frame(slave_section)
-        slave_load_frame.pack(fill='x', pady=(5, 0))
-
-        self._create_accent_button(slave_load_frame, "Load Slave Data",
-                                   self._load_slave_data_with_y).pack(side='left')
+        self._create_accent_button(slave_browse_frame, "Load Slave Spectra",
+                                   self._load_slave_spectra).pack(side='left')
 
         # Data info display
         ttk.Label(data_section, text="Data Information:",
@@ -19093,7 +19277,7 @@ Configuration:
         ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
                        variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 10))
         ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
-                       variable=self.ct_method_var, value='jypls-inv').pack(side='left')
+                       variable=self.ct_method_var, value='jypls-inv', state='disabled').pack(side='left')
 
         # Method parameters
         params_frame = ttk.LabelFrame(method_section, text="Method Parameters",
