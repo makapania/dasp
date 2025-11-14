@@ -705,8 +705,13 @@ class SpectralPredictApp:
         self.spectral_file_column = tk.StringVar()
         self.id_column = tk.StringVar()
         self.target_column = tk.StringVar()
-        self.wavelength_min = tk.StringVar(value="")
-        self.wavelength_max = tk.StringVar(value="")
+        self.wavelength_min = tk.StringVar(value="")  # Import filter
+        self.wavelength_max = tk.StringVar(value="")  # Import filter
+
+        # Analysis wavelength restriction (further filters for model training only)
+        self.enable_analysis_wl_restriction = tk.BooleanVar(value=False)
+        self.analysis_wl_min = tk.StringVar(value="")
+        self.analysis_wl_max = tk.StringVar(value="")
 
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
@@ -2664,23 +2669,78 @@ class SpectralPredictApp:
         ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=0, column=1, sticky=tk.W)
 
         # NEW: Variable Count Penalty (0-10 scale)
-        ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10).grid(row=2, column=0, sticky=tk.W, padx=(0, 10))
+        var_penalty_label = ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel')
+        var_penalty_label.grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        CreateToolTip(var_penalty_label, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
+        var_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10)
+        var_penalty_spinbox.grid(row=2, column=0, sticky=tk.W, padx=(0, 10))
+        CreateToolTip(var_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
 
         # NEW: Model Complexity Penalty (0-10 scale)
-        ttk.Label(options_frame, text="Model Complexity Penalty (0-10):", style='Subheading.TLabel').grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10).grid(row=4, column=0, sticky=tk.W, padx=(0, 10))
+        comp_penalty_label = ttk.Label(options_frame, text="Model Complexity Penalty (0-10):", style='Subheading.TLabel')
+        comp_penalty_label.grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        CreateToolTip(comp_penalty_label, text=TOOLTIP_CONTENT['ranking']['complexity_penalty'], delay=500)
+        comp_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10)
+        comp_penalty_spinbox.grid(row=4, column=0, sticky=tk.W, padx=(0, 10))
+        CreateToolTip(comp_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['complexity_penalty'], delay=500)
 
         # Info label explaining the penalty system
         ttk.Label(options_frame, text="💡 Penalties affect ranking gently at low values (exploration-friendly). 0 = rank only by performance, 5 = balanced, 10 = strongly prefer simplicity",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
+        # === Wavelength Restriction for Analysis ===
+        ttk.Separator(options_frame, orient='horizontal').grid(row=6, column=0, columnspan=3, sticky='ew', pady=(20, 10))
+
+        # Enable/disable checkbox
+        self.wl_restrict_checkbox = ttk.Checkbutton(options_frame,
+                                                     text="✓ Restrict wavelengths for model training",
+                                                     variable=self.enable_analysis_wl_restriction)
+        self.wl_restrict_checkbox.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+
+        # Help text explaining the difference from import filter
+        ttk.Label(options_frame,
+                 text="Further restrict wavelength range for analysis only (does not affect data import or plots)",
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=8, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
+
+        # Wavelength range inputs
+        wl_restrict_subframe = ttk.Frame(options_frame)
+        wl_restrict_subframe.grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
+        ttk.Label(wl_restrict_subframe, text="Analysis Range:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(wl_restrict_subframe, textvariable=self.analysis_wl_min, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Label(wl_restrict_subframe, text="to").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(wl_restrict_subframe, textvariable=self.analysis_wl_max, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Label(wl_restrict_subframe, text="nm", style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
+
+        # Preset buttons for common ranges
+        preset_frame = ttk.Frame(options_frame)
+        preset_frame.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
+        ttk.Label(preset_frame, text="Presets:", style='Caption.TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(preset_frame, text="UV (10-400)",
+                  command=lambda: self._set_analysis_wl_preset(10, 400),
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=2)
+        ttk.Button(preset_frame, text="VIS (400-800)",
+                  command=lambda: self._set_analysis_wl_preset(400, 800),
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=2)
+        ttk.Button(preset_frame, text="NIR (800-2500)",
+                  command=lambda: self._set_analysis_wl_preset(800, 2500),
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=2)
+        ttk.Button(preset_frame, text="MIR (2500-25000)",
+                  command=lambda: self._set_analysis_wl_preset(2500, 25000),
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=2)
+
+        # Performance note
+        ttk.Label(options_frame,
+                 text="💡 Tip: Restricting wavelengths speeds up training (fewer features = faster models)",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(10, 0), padx=(20, 0))
+
+        ttk.Separator(options_frame, orient='horizontal').grid(row=12, column=0, columnspan=3, sticky='ew', pady=(15, 10))
+
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=6, column=0, sticky=tk.W, pady=(15, 8), padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=6, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=13, column=0, sticky=tk.W, pady=(0, 8), padx=(0, 10))
+        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=13, column=1, sticky=tk.W)
 
         # Progress monitor
-        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
         self._create_section_header(content_frame, "Preprocessing Methods", row=row, columnspan=2)
@@ -5754,6 +5814,12 @@ class SpectralPredictApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to update wavelengths:\n{e}")
 
+    def _set_analysis_wl_preset(self, min_wl, max_wl):
+        """Set analysis wavelength restriction preset values."""
+        self.analysis_wl_min.set(str(min_wl))
+        self.analysis_wl_max.set(str(max_wl))
+        self.enable_analysis_wl_restriction.set(True)
+
     def _toggle_absorbance(self):
         """
         Toggle between reflectance and absorbance display (legacy method).
@@ -8354,9 +8420,67 @@ class SpectralPredictApp:
 
                 self._log_progress(f"\n🔬 VALIDATION SET:")
                 self._log_progress(f"   Calibration samples: {n_cal}")
-                self._log_progress(f"   Validation samples (held out): {n_val}")
-                self._log_progress(f"   Selection algorithm: {self.validation_algorithm.get()}")
-                self._log_progress(f"")
+                self._log_progress(f"   Validation samples (held out): {n_val}\n")
+
+            # Apply wavelength restriction for analysis (if enabled)
+            if self.enable_analysis_wl_restriction.get():
+                wl_min_str = self.analysis_wl_min.get().strip()
+                wl_max_str = self.analysis_wl_max.get().strip()
+
+                if wl_min_str or wl_max_str:
+                    try:
+                        wavelengths = X_filtered.columns.astype(float)
+                        wl_mask = pd.Series(True, index=X_filtered.columns)
+
+                        original_wl_count = X_filtered.shape[1]
+
+                        if wl_min_str:
+                            wl_min = float(wl_min_str)
+                            wl_mask &= wavelengths >= wl_min
+                        else:
+                            wl_min = wavelengths.min()
+
+                        if wl_max_str:
+                            wl_max = float(wl_max_str)
+                            wl_mask &= wavelengths <= wl_max
+                        else:
+                            wl_max = wavelengths.max()
+
+                        # Validate range
+                        if wl_min >= wl_max:
+                            raise ValueError(f"Minimum wavelength ({wl_min}) must be less than maximum ({wl_max})")
+
+                        # Apply wavelength filter
+                        X_filtered = X_filtered.loc[:, wl_mask]
+                        restricted_wl_count = X_filtered.shape[1]
+
+                        # Validate minimum wavelengths for derivatives
+                        if restricted_wl_count < 1:
+                            raise ValueError(f"No wavelengths in range {wl_min:.1f}-{wl_max:.1f} nm. Please adjust the range.")
+
+                        # Check for sufficient wavelengths if using derivatives
+                        using_derivatives = self.use_sg1.get() or self.use_sg2.get() or self.use_deriv_snv.get()
+                        if using_derivatives and window_sizes:
+                            max_window = max(window_sizes)
+                            min_required = max_window + 5  # Conservative estimate
+                            if restricted_wl_count < min_required:
+                                self._log_progress(f"\n⚠️ WARNING: Only {restricted_wl_count} wavelengths after restriction.")
+                                self._log_progress(f"   Derivatives with window={max_window} need at least {min_required} wavelengths.")
+                                self._log_progress(f"   Analysis may fail for derivative preprocessing methods.\n")
+
+                        # Log the restriction
+                        self._log_progress(f"\n🔬 WAVELENGTH RESTRICTION:")
+                        self._log_progress(f"   Analysis range: {wl_min:.1f} - {wl_max:.1f} nm")
+                        self._log_progress(f"   Original wavelengths: {original_wl_count}")
+                        self._log_progress(f"   Restricted wavelengths: {restricted_wl_count}")
+                        self._log_progress(f"   Reduction: {original_wl_count - restricted_wl_count} wavelengths ({(1 - restricted_wl_count/original_wl_count)*100:.1f}%)")
+                        self._log_progress(f"   ⚡ Expected speedup: ~{original_wl_count/max(restricted_wl_count, 1):.1f}x faster training\n")
+
+                    except ValueError as e:
+                        self._log_progress(f"\n⚠️ WARNING: Invalid wavelength restriction values, ignoring: {e}\n")
+                    except Exception as e:
+                        self._log_progress(f"\n⚠️ WARNING: Failed to apply wavelength restriction: {e}\n")
+
 
             # Parse UVE n_components (empty string = None)
             uve_n_comp = None
@@ -8406,6 +8530,19 @@ class SpectralPredictApp:
                 y_filtered = y_filtered.loc[common_idx]
                 self._log_progress(f"✓ Realigned to {len(common_idx)} common samples")
 
+            # Adjust max_n_components based on restricted wavelength count
+            # PLS cannot use more components than min(n_features, n_samples)
+            n_features = X_filtered.shape[1]
+            n_samples = len(X_filtered)
+            user_max_components = self.max_n_components.get()
+            adjusted_max_components = min(user_max_components, n_features, n_samples)
+
+            if adjusted_max_components < user_max_components:
+                self._log_progress(f"\n⚠️ PLS COMPONENT ADJUSTMENT:")
+                self._log_progress(f"   User setting: {user_max_components} components")
+                self._log_progress(f"   Adjusted to: {adjusted_max_components} (limited by {n_features} features, {n_samples} samples)")
+                self._log_progress(f"   Reason: PLS requires n_components ≤ min(n_features, n_samples)\n")
+
             results_df, label_encoder = run_search(
                 X_filtered,
                 y_filtered,
@@ -8413,7 +8550,7 @@ class SpectralPredictApp:
                 folds=self.folds.get(),
                 variable_penalty=self.variable_penalty.get(),
                 complexity_penalty=self.complexity_penalty.get(),
-                max_n_components=self.max_n_components.get(),
+                max_n_components=adjusted_max_components,
                 max_iter=self.max_iter.get(),
                 models_to_test=selected_models,
                 preprocessing_methods=preprocessing_methods,
