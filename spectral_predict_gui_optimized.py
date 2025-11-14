@@ -17402,7 +17402,7 @@ Configuration:
 
         # Detection status
         self.ct_master_detection_status = ttk.Label(master_section, text="No data selected",
-                                                     foreground=self.colors['text_dim'])
+                                                     foreground=self.colors['text_light'])
         self.ct_master_detection_status.pack(anchor='w', pady=(0, 5))
 
         # Master reference CSV
@@ -17468,7 +17468,7 @@ Configuration:
 
         # Detection status
         self.ct_slave_detection_status = ttk.Label(slave_section, text="No data selected",
-                                                    foreground=self.colors['text_dim'])
+                                                    foreground=self.colors['text_light'])
         self.ct_slave_detection_status.pack(anchor='w', pady=(0, 5))
 
         # Slave reference CSV
