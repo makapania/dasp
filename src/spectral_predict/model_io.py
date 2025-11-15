@@ -53,7 +53,8 @@ def save_model(
     label_encoder: Optional[Any] = None,
     cv_residuals: Optional[np.ndarray] = None,
     cv_predictions: Optional[np.ndarray] = None,
-    cv_actuals: Optional[np.ndarray] = None
+    cv_actuals: Optional[np.ndarray] = None,
+    X_train: Optional[np.ndarray] = None
 ) -> None:
     """
     Save a trained model with all metadata to a .dasp file.
@@ -77,6 +78,10 @@ def save_model(
     cv_actuals : np.ndarray or None
         Cross-validation actual values for uncertainty analysis.
         Shape: (n_cv_samples,)
+    X_train : np.ndarray or None
+        Training data (preprocessed) for applicability domain assessment.
+        Shape: (n_samples, n_features)
+        Used to store representative spectra and fit PCA for distance calculations.
     metadata : dict
         Model metadata. Should include:
         - 'model_name' (str): Model type (e.g., 'PLS', 'Ridge')
@@ -185,6 +190,69 @@ def save_model(
         else:
             metadata_complete['has_cv_data'] = False
 
+        # Save applicability domain data if training data provided
+        ad_data_path = tmppath / 'applicability_domain.npz'
+        if X_train is not None:
+            from sklearn.decomposition import PCA
+            from scipy.spatial.distance import pdist
+
+            n_samples, n_features = X_train.shape
+
+            # Adaptive representative selection
+            if n_samples <= 100:
+                # Store all training spectra for small datasets
+                representative_spectra = X_train
+                representative_indices = np.arange(n_samples)
+                print(f"Applicability domain: storing all {n_samples} training spectra")
+            else:
+                # Use Kennard-Stone to select ~150 representative samples for large datasets
+                from src.spectral_predict.sample_selection import kennard_stone
+                n_representatives = min(150, n_samples)
+                representative_indices = kennard_stone(X_train, n_samples=n_representatives)
+                representative_spectra = X_train[representative_indices]
+                print(f"Applicability domain: selected {n_representatives} representative spectra from {n_samples} using Kennard-Stone")
+
+            # Fit PCA for dimensionality reduction (capture ~99% variance)
+            # Use min to avoid having more components than samples or features
+            n_components = min(20, n_samples - 1, n_features)
+            pca = PCA(n_components=n_components)
+            X_train_pca = pca.fit_transform(X_train)
+
+            # Calculate distance thresholds from training data (for coloring predictions)
+            # Use Euclidean distance in PCA space
+            pca_distances = pdist(X_train_pca, metric='euclidean')
+            distance_thresholds = {
+                'p50': float(np.percentile(pca_distances, 50)),
+                'p75': float(np.percentile(pca_distances, 75)),
+                'p95': float(np.percentile(pca_distances, 95)),
+                'max': float(np.max(pca_distances))
+            }
+
+            # Save applicability domain data
+            ad_data_dict = {
+                'representative_spectra': representative_spectra,
+                'representative_indices': representative_indices,
+                'training_pca_scores': X_train_pca[representative_indices] if n_samples > 100 else X_train_pca,
+                'distance_thresholds': np.array([distance_thresholds['p50'],
+                                                  distance_thresholds['p75'],
+                                                  distance_thresholds['p95'],
+                                                  distance_thresholds['max']])
+            }
+            np.savez_compressed(ad_data_path, **ad_data_dict)
+
+            # Store PCA model separately
+            pca_model_path = tmppath / 'pca_model.pkl'
+            joblib.dump(pca, pca_model_path, compress=3)
+
+            metadata_complete['has_applicability_domain'] = True
+            metadata_complete['n_representatives'] = len(representative_indices)
+            metadata_complete['pca_components'] = n_components
+            metadata_complete['distance_thresholds'] = distance_thresholds
+
+            print(f"Applicability domain: PCA with {n_components} components (explains {pca.explained_variance_ratio_.sum()*100:.1f}% variance)")
+        else:
+            metadata_complete['has_applicability_domain'] = False
+
         # Create ZIP archive
         with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(metadata_path, 'metadata.json')
@@ -195,6 +263,10 @@ def save_model(
                 zf.write(label_encoder_path, 'label_encoder.pkl')
             if cv_data_path.exists():
                 zf.write(cv_data_path, 'cv_data.npz')
+            if ad_data_path.exists():
+                zf.write(ad_data_path, 'applicability_domain.npz')
+            if (tmppath / 'pca_model.pkl').exists():
+                zf.write(tmppath / 'pca_model.pkl', 'pca_model.pkl')
 
 
 def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -283,12 +355,25 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
             # Convert to dict for easier access
             cv_data = {key: cv_data[key] for key in cv_data.files}
 
+        # Load applicability domain data if present
+        ad_data = None
+        pca_model = None
+        ad_data_path = tmppath / 'applicability_domain.npz'
+        pca_model_path = tmppath / 'pca_model.pkl'
+        if ad_data_path.exists():
+            ad_data_raw = np.load(ad_data_path)
+            ad_data = {key: ad_data_raw[key] for key in ad_data_raw.files}
+        if pca_model_path.exists():
+            pca_model = joblib.load(pca_model_path)
+
     return {
         'model': model,
         'preprocessor': preprocessor,
         'label_encoder': label_encoder,
         'metadata': metadata,
-        'cv_data': cv_data
+        'cv_data': cv_data,
+        'ad_data': ad_data,
+        'pca_model': pca_model
     }
 
 
@@ -464,7 +549,8 @@ def predict_with_uncertainty(
 
     This function extends predict_with_model() by also returning:
     - For classification: class probabilities and confidence scores
-    - For regression: prediction intervals based on CV performance
+    - For regression: model RMSECV and applicability domain metrics
+    - Applicability domain: distance to training data for all models
 
     Parameters
     ----------
@@ -486,10 +572,15 @@ def predict_with_uncertainty(
                 - 'confidence': np.ndarray, shape (n_samples,) - max probability
                 - 'class_names': list of class names (if label_encoder exists)
             For regression:
-                - 'lower_bound': np.ndarray, shape (n_samples,) - 95% lower CI
-                - 'upper_bound': np.ndarray, shape (n_samples,) - 95% upper CI
-                - 'std_error': float - standard error from CV (if available)
+                - 'rmsecv': float - overall model error from CV (if available)
+                - 'tree_variance': np.ndarray, shape (n_samples,) - only for RandomForest
+        - 'applicability_domain': dict with distance metrics:
+            - 'pca_distance': np.ndarray, shape (n_samples,) - distance to nearest training sample in PCA space
+            - 'spectral_distance': np.ndarray, shape (n_samples,) - Euclidean distance in spectral space
+            - 'nearest_sample_idx': np.ndarray, shape (n_samples,) - index of nearest training sample
+            - 'distance_status': np.ndarray, shape (n_samples,) - 'good', 'caution', 'extrapolation'
         - 'has_uncertainty': bool - whether uncertainty data is available
+        - 'has_applicability_domain': bool - whether applicability domain data is available
 
     Examples
     --------
@@ -497,10 +588,12 @@ def predict_with_uncertainty(
     >>> result = predict_with_uncertainty(model_dict, X_new)
     >>> print(result['predictions'])
     array([15.2, 18.7, 12.3])
-    >>> print(result['uncertainty']['lower_bound'])
-    array([14.8, 18.3, 11.9])
-    >>> print(result['uncertainty']['upper_bound'])
-    array([15.6, 19.1, 12.7])
+    >>> print(result['uncertainty']['rmsecv'])
+    0.34
+    >>> print(result['applicability_domain']['pca_distance'])
+    array([0.82, 2.45, 5.67])
+    >>> print(result['applicability_domain']['distance_status'])
+    array(['good', 'caution', 'extrapolation'])
     """
     # Get standard predictions first
     predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
@@ -586,42 +679,87 @@ def predict_with_uncertainty(
                 # Model doesn't support predict_proba or failed
                 uncertainty['error'] = f"Could not compute probabilities: {str(e)}"
 
-    # Regression: compute prediction intervals from CV data
+    # Regression: report model-level error, not per-sample CI
     else:  # regression
         cv_data = model_dict.get('cv_data', None)
 
         if cv_data is not None and 'cv_residuals' in cv_data:
-            # Use CV residuals to estimate prediction interval
+            # Use CV residuals to calculate RMSECV (model-level metric)
             residuals = cv_data['cv_residuals']
-            std_error = np.std(residuals)
-
-            # 95% confidence interval: prediction ± 1.96 * std_error
-            lower_bound = predictions - 1.96 * std_error
-            upper_bound = predictions + 1.96 * std_error
-
-            uncertainty['lower_bound'] = lower_bound
-            uncertainty['upper_bound'] = upper_bound
-            uncertainty['std_error'] = float(std_error)
-            uncertainty['interval_width'] = float(3.92 * std_error)  # upper - lower
+            rmsecv = np.sqrt(np.mean(residuals**2))
+            uncertainty['rmsecv'] = float(rmsecv)
             has_uncertainty = True
-        else:
-            # No CV data available - try to use RMSE from metadata as rough estimate
-            if 'performance' in metadata and 'RMSE' in metadata['performance']:
-                rmse = metadata['performance']['RMSE']
-                lower_bound = predictions - 1.96 * rmse
-                upper_bound = predictions + 1.96 * rmse
+        elif 'performance' in metadata and 'RMSE' in metadata['performance']:
+            # Fallback to RMSE from metadata
+            uncertainty['rmsecv'] = float(metadata['performance']['RMSE'])
+            has_uncertainty = True
 
-                uncertainty['lower_bound'] = lower_bound
-                uncertainty['upper_bound'] = upper_bound
-                uncertainty['std_error'] = float(rmse)
-                uncertainty['interval_width'] = float(3.92 * rmse)
-                uncertainty['note'] = 'Uncertainty based on overall RMSE (no CV residuals available)'
-                has_uncertainty = True
+        # For Random Forest: calculate per-sample tree variance
+        model_class = metadata.get('model_class', '')
+        if 'RandomForest' in model_class and hasattr(model, 'estimators_'):
+            # Get predictions from each tree
+            tree_predictions = np.array([tree.predict(X_processed) for tree in model.estimators_])
+            # Calculate variance across trees for each sample
+            tree_variance = np.std(tree_predictions, axis=0)
+            uncertainty['tree_variance'] = tree_variance
+            has_uncertainty = True
+
+    # Calculate applicability domain metrics (for all model types)
+    applicability_domain = {}
+    has_applicability_domain = False
+
+    if 'ad_data' in model_dict and model_dict['ad_data'] is not None:
+        from scipy.spatial.distance import cdist
+
+        ad_data = model_dict['ad_data']
+        pca_model = model_dict.get('pca_model')
+
+        if pca_model is not None:
+            # Transform prediction data to PCA space
+            X_pred_pca = pca_model.transform(X_processed)
+            training_pca_scores = ad_data['training_pca_scores']
+
+            # Calculate distances in PCA space
+            pca_distances = cdist(X_pred_pca, training_pca_scores, metric='euclidean')
+            min_pca_distance = np.min(pca_distances, axis=1)
+            nearest_idx = np.argmin(pca_distances, axis=1)
+
+            applicability_domain['pca_distance'] = min_pca_distance
+            applicability_domain['nearest_sample_idx'] = nearest_idx
+
+            # Calculate distances in spectral space (optional, for comparison)
+            representative_spectra = ad_data['representative_spectra']
+            spectral_distances = cdist(X_processed, representative_spectra, metric='euclidean')
+            min_spectral_distance = np.min(spectral_distances, axis=1)
+            applicability_domain['spectral_distance'] = min_spectral_distance
+
+            # Get distance thresholds for coloring
+            if 'distance_thresholds' in ad_data:
+                thresholds = ad_data['distance_thresholds']
+                p50, p75, p95, max_dist = thresholds
+
+                # Assign status based on PCA distance
+                distance_status = np.empty(len(min_pca_distance), dtype=object)
+                distance_status[min_pca_distance <= p75] = 'good'
+                distance_status[(min_pca_distance > p75) & (min_pca_distance <= p95)] = 'caution'
+                distance_status[min_pca_distance > p95] = 'extrapolation'
+
+                applicability_domain['distance_status'] = distance_status
+                applicability_domain['thresholds'] = {
+                    'p50': float(p50),
+                    'p75': float(p75),
+                    'p95': float(p95),
+                    'max': float(max_dist)
+                }
+
+            has_applicability_domain = True
 
     return {
         'predictions': predictions,
         'uncertainty': uncertainty,
-        'has_uncertainty': has_uncertainty
+        'has_uncertainty': has_uncertainty,
+        'applicability_domain': applicability_domain,
+        'has_applicability_domain': has_applicability_domain
     }
 
 

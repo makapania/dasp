@@ -11664,6 +11664,7 @@ Configuration:
             self.refined_wavelengths = list(selected_wl)
             self.refined_performance = results
             self.refined_label_encoder = local_label_encoder  # Store for decoding predictions
+            self.refined_X_train = X_raw  # Store training data for applicability domain
             self.refined_config = {
                 'model_name': model_name,
                 'task_type': task_type,
@@ -11843,6 +11844,9 @@ Configuration:
                     if hasattr(self, 'refined_y_proba'):
                         cv_residuals = np.array(self.refined_y_proba)  # Store probabilities as "residuals"
 
+            # Get training data for applicability domain (if available)
+            X_train = getattr(self, 'refined_X_train', None)
+
             save_model(
                 model=self.refined_model,
                 preprocessor=self.refined_preprocessor,
@@ -11851,7 +11855,8 @@ Configuration:
                 label_encoder=label_encoder_to_save,
                 cv_residuals=cv_residuals,
                 cv_predictions=cv_predictions,
-                cv_actuals=cv_actuals
+                cv_actuals=cv_actuals,
+                X_train=X_train
             )
 
             # Model saved successfully - update status
@@ -13148,6 +13153,8 @@ Configuration:
                     predictions = pred_result['predictions']
                     uncertainty = pred_result['uncertainty']
                     has_uncertainty = pred_result['has_uncertainty']
+                    applicability_domain = pred_result.get('applicability_domain', {})
+                    has_applicability_domain = pred_result.get('has_applicability_domain', False)
 
                     # Store predictions with descriptive column name
                     col_name = f"{model_name}_{preprocessing}"
@@ -13167,6 +13174,12 @@ Configuration:
                     # Store uncertainty data if available
                     if has_uncertainty:
                         self.predictions_uncertainty[col_name] = uncertainty
+
+                    # Store applicability domain data if available
+                    if has_applicability_domain:
+                        if not hasattr(self, 'predictions_applicability'):
+                            self.predictions_applicability = {}
+                        self.predictions_applicability[col_name] = applicability_domain
 
                     successful_models += 1
 
@@ -13552,9 +13565,9 @@ Configuration:
             self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')   # Red
 
         else:
-            # === REGRESSION: Show prediction intervals ===
-            # Build columns: Sample | Model | Prediction | Lower 95% | Upper 95% | Interval Width
-            columns = ['Sample', 'Model', 'Prediction', 'Lower 95%', 'Upper 95%', 'Interval Width']
+            # === REGRESSION: Show RMSECV and applicability domain ===
+            # Build columns: Sample | Model | Prediction | Model RMSECV | Distance | Variance | Status
+            columns = ['Sample', 'Model', 'Prediction', 'Model RMSECV', 'PCA Distance', 'Tree Var', 'Status']
             self.uncertainty_tree['columns'] = columns
 
             # Configure column headings and widths
@@ -13564,42 +13577,74 @@ Configuration:
                     self.uncertainty_tree.column(col, width=150, anchor='w')
                 elif col == 'Model':
                     self.uncertainty_tree.column(col, width=180, anchor='w')
+                elif col == 'Status':
+                    self.uncertainty_tree.column(col, width=120, anchor='center')
                 else:
-                    self.uncertainty_tree.column(col, width=120, anchor='e')
+                    self.uncertainty_tree.column(col, width=100, anchor='e')
+
+            # Get applicability domain data if available
+            has_applicability = hasattr(self, 'predictions_applicability') and self.predictions_applicability
 
             # Populate rows for each model
-            for model_name, uncertainty in self.predictions_uncertainty.items():
-                if 'lower_bound' not in uncertainty:
-                    continue
+            for model_name in self.predictions_uncertainty.keys():
+                uncertainty = self.predictions_uncertainty[model_name]
 
-                lower_bound = uncertainty['lower_bound']
-                upper_bound = uncertainty['upper_bound']
-                interval_width = uncertainty.get('interval_width', upper_bound[0] - lower_bound[0])
+                # Get RMSECV (model-level metric)
+                rmsecv = uncertainty.get('rmsecv', None)
+                tree_variance = uncertainty.get('tree_variance', None)
+
+                # Get applicability domain data for this model
+                ad_data = None
+                if has_applicability and model_name in self.predictions_applicability:
+                    ad_data = self.predictions_applicability[model_name]
 
                 # Get predictions for this model
                 predictions = self.predictions_df[model_name].values
 
                 for i, sample in enumerate(sample_names):
+                    # Base values
                     row_values = [
                         str(sample),
                         model_name,
                         f"{predictions[i]:.4f}",
-                        f"{lower_bound[i]:.4f}",
-                        f"{upper_bound[i]:.4f}",
-                        f"{interval_width if isinstance(interval_width, float) else upper_bound[i] - lower_bound[i]:.4f}"
+                        f"{rmsecv:.4f}" if rmsecv is not None else "N/A",
                     ]
 
-                    # Color-code by interval width (narrower = more certain)
-                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
-                    width = upper_bound[i] - lower_bound[i]
-                    mean_width = np.mean(upper_bound - lower_bound)
-
-                    if width < mean_width * 0.8:
-                        self.uncertainty_tree.item(item_id, tags=('high_conf',))
-                    elif width < mean_width * 1.2:
-                        self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                    # Add PCA distance if available
+                    if ad_data and 'pca_distance' in ad_data:
+                        pca_dist = ad_data['pca_distance'][i]
+                        row_values.append(f"{pca_dist:.3f}")
                     else:
-                        self.uncertainty_tree.item(item_id, tags=('low_conf',))
+                        row_values.append("N/A")
+
+                    # Add tree variance if available (Random Forest only)
+                    if tree_variance is not None:
+                        row_values.append(f"{tree_variance[i]:.4f}")
+                    else:
+                        row_values.append("N/A")
+
+                    # Add status if available
+                    if ad_data and 'distance_status' in ad_data:
+                        status = ad_data['distance_status'][i]
+                        status_display = {'good': '✓ Good', 'caution': '⚠ Caution', 'extrapolation': '⚠️ Extrap'}
+                        row_values.append(status_display.get(status, status))
+                    else:
+                        row_values.append("N/A")
+
+                    # Color-code by applicability domain status
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+
+                    if ad_data and 'distance_status' in ad_data:
+                        status = ad_data['distance_status'][i]
+                        if status == 'good':
+                            self.uncertainty_tree.item(item_id, tags=('high_conf',))
+                        elif status == 'caution':
+                            self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                        else:  # extrapolation
+                            self.uncertainty_tree.item(item_id, tags=('low_conf',))
+                    else:
+                        # No AD data - neutral color
+                        pass
 
             # Configure tags for color-coding
             self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')  # Green
