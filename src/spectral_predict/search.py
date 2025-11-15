@@ -177,15 +177,29 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
         is_binary_classification = n_classes == 2
 
     # Adjust max_n_components based on minimum CV fold size
-    # PLS requires n_components <= min(n_features, n_samples_in_fold)
-    # With k-fold CV, smallest fold has roughly n_samples / folds samples
+    # For REGRESSION: PLS requires n_components <= min(n_features, n_samples_in_fold)
+    # For CLASSIFICATION: PLS-DA uses PLS as dimensionality reduction before LR classifier,
+    #                     so we can be less strict (LR can handle more components than samples)
     min_fold_samples = n_samples // folds
-    # Use slightly lower bound to be safe (some folds might have fewer samples)
-    safe_max_components = min(max_n_components, min_fold_samples - 1, n_features)
+
+    if task_type == "regression":
+        # Strict constraint for PLS regression
+        # Use slightly lower bound to be safe (some folds might have fewer samples)
+        safe_max_components = min(max_n_components, min_fold_samples - 1, n_features)
+    else:
+        # More relaxed constraint for PLS-DA classification
+        # PLS transforms to latent space, then LR classifies
+        # Allow more components since LR can handle high-dimensional input
+        safe_max_components = min(max_n_components, n_features)
+        # Still warn if components exceed fold size (not recommended but allowed)
+        if max_n_components > min_fold_samples:
+            print(f"Note: Using {max_n_components} PLS components with min_fold_size~{min_fold_samples}. " +
+                  f"This is acceptable for PLS-DA (classification) but may cause instability.")
 
     if safe_max_components < max_n_components:
         print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
-              f"due to dataset size (n_samples={n_samples}, min_fold_size~{min_fold_samples})")
+              f"due to dataset constraints (n_samples={n_samples}, n_features={n_features}, " +
+              f"min_fold_size~{min_fold_samples}, task={task_type})")
 
     # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
     # rf_n_trees_list and rf_max_depth_list for RandomForest,

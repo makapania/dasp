@@ -355,33 +355,33 @@ OPTIMIZED_HYPERPARAMETERS = {
             'max_depth': [None, 15, 30],  # 3 values
             'min_samples_split': [2],  # sklearn default (single value)
             'min_samples_leaf': [1],  # sklearn default (single value)
-            'max_features': ['sqrt'],  # sqrt(n_features) (single value)
+            'max_features': [None],  # Use all features for spectral data (single value)
             'bootstrap': [True],  # bootstrap sampling (single value)
             'max_leaf_nodes': [None],  # no limit (single value)
             'min_impurity_decrease': [0.0],  # no minimum (single value)
-            'note': 'Grid size: 3×3×1×1×1×1×1×1 = 9 configs (unchanged with defaults)'
+            'note': 'Grid size: 3×3×1×1×1×1×1×1 = 9 configs (max_features=None for high-dim spectral data)'
         },
         'comprehensive': {
             'n_estimators': [100, 200, 500],  # 3 values
             'max_depth': [None, 15, 30],  # 3 values
             'min_samples_split': [2, 5, 10],  # vary minimum samples for split
             'min_samples_leaf': [1, 2, 4],  # vary minimum leaf size
-            'max_features': ['sqrt', 'log2', None],  # feature selection strategies
+            'max_features': [None, 'sqrt', 'log2'],  # Test all features first (best for spectral), then restricted
             'bootstrap': [True, False],  # with/without bootstrap
             'max_leaf_nodes': [None, 50, 100],  # limit tree complexity
             'min_impurity_decrease': [0.0, 0.01],  # pruning threshold
-            'note': 'Grid size: 3×3×3×3×3×2×3×2 = 2916 configs (comprehensive exploration)'
+            'note': 'Grid size: 3×3×3×3×3×2×3×2 = 2916 configs (comprehensive exploration, max_features=None prioritized)'
         },
         'quick': {
             'n_estimators': [100, 200, 500],  # 3 values
             'max_depth': [None, 15, 30],  # 3 values
             'min_samples_split': [2],  # sklearn default (single value)
             'min_samples_leaf': [1],  # sklearn default (single value)
-            'max_features': ['sqrt'],  # sqrt(n_features) (single value)
+            'max_features': [None],  # Use all features for spectral data (single value)
             'bootstrap': [True],  # bootstrap sampling (single value)
             'max_leaf_nodes': [None],  # no limit (single value)
             'min_impurity_decrease': [0.0],  # no minimum (single value)
-            'note': 'Grid size: 3×3×1×1×1×1×1×1 = 9 configs (unchanged with defaults)'
+            'note': 'Grid size: 3×3×1×1×1×1×1×1 = 9 configs (max_features=None for high-dim spectral data)'
         }
     },
 

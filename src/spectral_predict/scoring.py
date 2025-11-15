@@ -31,10 +31,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
     task_type : str
         'regression' or 'classification'
     variable_penalty : int (0-10)
-        Penalty for using many variables (default: 3)
+        Penalty for using many variables (default: 2)
         0 = ignore variable count, 10 = strongly penalize many variables
+        Uses cubic scaling for gentle penalty at low values (exploration-friendly)
     complexity_penalty : int (0-10)
-        Penalty for model complexity (default: 5)
+        Penalty for model complexity (default: 2)
         0 = ignore complexity, 10 = strongly penalize complex models
 
     Returns
@@ -80,10 +81,12 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
         full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
         var_fraction = n_vars_array / full_vars_array  # 0-1 scale
 
-        # Scale by user penalty (0-10) with quadratic scaling for better behavior
-        # At penalty=2, using all variables adds ~0.04 units (minimal impact)
+        # REDUCED PENALTY: Scale by user penalty (0-10) with cubic scaling for gentler impact
+        # At penalty=2, using all variables adds ~0.008 units (very minimal impact)
+        # At penalty=5, using all variables adds ~0.125 units (modest impact)
         # At penalty=10, using all variables adds ~1 unit (comparable to ~0.3 std deviations in performance)
-        var_penalty_term = ((variable_penalty / 10.0) ** 2) * var_fraction
+        # This allows exploration of full spectrum models without serious penalty at low settings
+        var_penalty_term = ((variable_penalty / 10.0) ** 3) * var_fraction
     else:
         var_penalty_term = 0
 

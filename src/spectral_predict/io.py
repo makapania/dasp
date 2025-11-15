@@ -1096,12 +1096,23 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
     y = df[y_col].copy()
     y.index = specimen_ids
 
-    # Convert target values to numeric
-    y = pd.to_numeric(y, errors='coerce')
+    # Try to convert target values to numeric, but preserve categorical data for classification
+    # Only convert if the data is actually numeric (for regression tasks)
+    y_numeric = pd.to_numeric(y, errors='coerce')
+
+    # If conversion resulted in mostly NaN values, keep original (likely categorical for classification)
+    # Use threshold: if more than 50% would be converted to NaN, keep as categorical
+    if y_numeric.isna().sum() > len(y) * 0.5:
+        # Keep original categorical/text values for classification tasks
+        # Check for truly missing values (None, np.nan, empty strings)
+        has_nan_y = y.isna() | (y == '') | y.isnull()
+    else:
+        # Successfully converted to numeric (regression task)
+        y = y_numeric
+        has_nan_y = y.isna()
 
     # Check for missing values (NaN) and remove affected specimens
     has_nan_X = X.isna().any(axis=1)
-    has_nan_y = y.isna()
     has_nan = has_nan_X | has_nan_y
 
     if has_nan.any():
@@ -1119,14 +1130,15 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
 
     # Step 7: Validation
     # Check for duplicate specimen IDs (only if not generated)
-    if not generated_ids and specimen_ids.duplicated().any():
-        n_duplicates = specimen_ids.duplicated().sum()
-        duplicates = specimen_ids[specimen_ids.duplicated()].unique()[:5]
+    # Use X.index since specimen_ids may be out of sync after NaN removal
+    if not generated_ids and X.index.duplicated().any():
+        n_duplicates = X.index.duplicated().sum()
+        duplicates = X.index[X.index.duplicated()].unique()[:5]
         print(f"Warning: Found {n_duplicates} duplicate specimen IDs. "
               f"Keeping first occurrence. Examples: {list(duplicates)}")
 
         # Keep first occurrence of each duplicate
-        keep_mask = ~specimen_ids.duplicated(keep='first')
+        keep_mask = ~X.index.duplicated(keep='first')
         X = X[keep_mask]
         y = y[keep_mask]
 
@@ -2457,12 +2469,23 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     y = df[y_col].copy()
     y.index = specimen_ids
 
-    # Convert target values to numeric
-    y = pd.to_numeric(y, errors='coerce')
+    # Try to convert target values to numeric, but preserve categorical data for classification
+    # Only convert if the data is actually numeric (for regression tasks)
+    y_numeric = pd.to_numeric(y, errors='coerce')
+
+    # If conversion resulted in mostly NaN values, keep original (likely categorical for classification)
+    # Use threshold: if more than 50% would be converted to NaN, keep as categorical
+    if y_numeric.isna().sum() > len(y) * 0.5:
+        # Keep original categorical/text values for classification tasks
+        # Check for truly missing values (None, np.nan, empty strings)
+        has_nan_y = y.isna() | (y == '') | y.isnull()
+    else:
+        # Successfully converted to numeric (regression task)
+        y = y_numeric
+        has_nan_y = y.isna()
 
     # Check for missing values (NaN) and remove affected specimens
     has_nan_X = X.isna().any(axis=1)
-    has_nan_y = y.isna()
     has_nan = has_nan_X | has_nan_y
 
     if has_nan.any():
@@ -2480,14 +2503,15 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
 
     # Step 7: Validation
     # Check for duplicate specimen IDs (only if not generated)
-    if not generated_ids and specimen_ids.duplicated().any():
-        n_duplicates = specimen_ids.duplicated().sum()
-        duplicates = specimen_ids[specimen_ids.duplicated()].unique()[:5]
+    # Use X.index since specimen_ids may be out of sync after NaN removal
+    if not generated_ids and X.index.duplicated().any():
+        n_duplicates = X.index.duplicated().sum()
+        duplicates = X.index[X.index.duplicated()].unique()[:5]
         print(f"Warning: Found {n_duplicates} duplicate specimen IDs. "
               f"Keeping first occurrence. Examples: {list(duplicates)}")
 
         # Keep first occurrence of each duplicate
-        keep_mask = ~specimen_ids.duplicated(keep='first')
+        keep_mask = ~X.index.duplicated(keep='first')
         X = X[keep_mask]
         y = y[keep_mask]
 

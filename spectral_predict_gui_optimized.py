@@ -5400,10 +5400,14 @@ class SpectralPredictApp:
                 if self.detected_type == "combined_excel":
                     X_aligned, y_aligned, metadata = read_combined_excel(
                         self.combined_file_path,
+                        y_col=self.target_column.get() if self.target_column.get() else None,
                         sheet_name=self.combined_sheet_name
                     )
                 else:
-                    X_aligned, y_aligned, metadata = read_combined_csv(self.combined_file_path)
+                    X_aligned, y_aligned, metadata = read_combined_csv(
+                        self.combined_file_path,
+                        y_col=self.target_column.get() if self.target_column.get() else None
+                    )
 
                 # Store data type detection results
                 self.original_data_type.set(metadata.get('data_type', 'reflectance'))

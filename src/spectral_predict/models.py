@@ -145,6 +145,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return RandomForestRegressor(
                 n_estimators=200,
                 max_depth=None,
+                max_features=1.0,  # Use all features (explicit, matches sklearn 1.7+ default)
                 random_state=42,
                 n_jobs=-1
             )
@@ -231,6 +232,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return RandomForestClassifier(
                 n_estimators=200,
                 max_depth=None,
+                max_features=None,  # Use all features (critical for high-dim spectral data)
                 random_state=42,
                 n_jobs=-1
             )
