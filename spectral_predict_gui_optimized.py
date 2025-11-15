@@ -11846,6 +11846,10 @@ Configuration:
 
             # Get training data for applicability domain (if available)
             X_train = getattr(self, 'refined_X_train', None)
+            if X_train is not None:
+                print(f"DEBUG: Passing X_train to save_model (shape: {X_train.shape})")
+            else:
+                print("DEBUG: No X_train available - model will not have applicability domain data")
 
             save_model(
                 model=self.refined_model,
@@ -13156,6 +13160,13 @@ Configuration:
                     applicability_domain = pred_result.get('applicability_domain', {})
                     has_applicability_domain = pred_result.get('has_applicability_domain', False)
 
+                    # Debug output
+                    print(f"DEBUG: Model {filename} - has_applicability_domain: {has_applicability_domain}")
+                    if has_applicability_domain:
+                        print(f"  - PCA distance range: {applicability_domain['pca_distance'].min():.3f} - {applicability_domain['pca_distance'].max():.3f}")
+                        print(f"  - Status counts: {dict(zip(*np.unique(applicability_domain['distance_status'], return_counts=True)))}")
+                    print(f"  - has_uncertainty: {has_uncertainty}, keys: {list(uncertainty.keys())}")
+
                     # Store predictions with descriptive column name
                     col_name = f"{model_name}_{preprocessing}"
 
@@ -13566,6 +13577,13 @@ Configuration:
 
         else:
             # === REGRESSION: Show RMSECV and applicability domain ===
+            print("DEBUG: Displaying regression uncertainty table")
+            print(f"  - Number of models with uncertainty: {len(self.predictions_uncertainty)}")
+            if hasattr(self, 'predictions_applicability'):
+                print(f"  - Number of models with applicability domain: {len(self.predictions_applicability)}")
+            else:
+                print(f"  - No predictions_applicability attribute found")
+
             # Build columns: Sample | Model | Prediction | Model RMSECV | Distance | Variance | Status
             columns = ['Sample', 'Model', 'Prediction', 'Model RMSECV', 'PCA Distance', 'Tree Var', 'Status']
             self.uncertainty_tree['columns'] = columns
