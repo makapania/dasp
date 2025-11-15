@@ -616,6 +616,7 @@ class SpectralPredictApp:
         self.refined_config = None  # Configuration dict for refined model
         self.refined_y_proba = None  # Prediction probabilities for classification
         self.refined_cv_indices = None  # CV sample indices for mapping predictions back to specimen IDs
+        self.refined_label_encoder = None  # Label encoder for categorical targets (classification)
         self.task_type_detection_label = None  # Will be created in Import tab
 
         # Model Prediction Tab (Tab 7) variables
@@ -9136,6 +9137,11 @@ class SpectralPredictApp:
         for canvas_id in tabs_to_cancel:
             del self._configure_timers[canvas_id]
 
+        # Stop live monitoring when leaving Multi-Model tab (index 8)
+        if hasattr(self, 'live_monitoring_active') and self.live_monitoring_active:
+            if current_tab != 8:  # Tab 9 (Multi-Model) is index 8
+                self._stop_live_monitoring()
+
         # Auto-refresh calibration transfer instruments when switching to that tab (index 9)
         if current_tab == 9 and self.instrument_profiles:
             inst_ids = list(self.instrument_profiles.keys())
@@ -9878,14 +9884,18 @@ class SpectralPredictApp:
 
         # Validate model type
         model_type = self.refine_model_type.get()
+        task_type = self.refine_task_type.get()  # Get the actual task type from the Model Development tab
         if is_valid_model is not None:
-            # Use registry validation
-            if not is_valid_model(model_type, 'regression'):
-                errors.append(f"Invalid model type selected: '{model_type}'")
+            # Use registry validation with correct task type
+            if not is_valid_model(model_type, task_type):
+                errors.append(f"Invalid model type selected: '{model_type}' for {task_type}")
         else:
             # Fallback validation
-            if model_type not in ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']:
-                errors.append(f"Invalid model type selected: '{model_type}'")
+            valid_models_regression = ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVR', 'XGBoost', 'LightGBM', 'CatBoost']
+            valid_models_classification = ['PLS-DA', 'RandomForest', 'MLP', 'NeuralBoosted', 'SVM', 'XGBoost', 'LightGBM', 'CatBoost']
+            valid_models = valid_models_classification if task_type == 'classification' else valid_models_regression
+            if model_type not in valid_models:
+                errors.append(f"Invalid model type selected: '{model_type}' for {task_type}")
 
         # Validate CV folds
         if self.refine_folds.get() < 3:
@@ -11324,6 +11334,31 @@ F1 Score:  {f1:.4f}
             from spectral_predict.preprocess import build_preprocessing_pipeline
             from sklearn.pipeline import Pipeline
 
+            # Handle categorical labels for classification (must happen BEFORE creating y_array)
+            # This matches the logic in search.py lines 127-143
+            local_label_encoder = None
+            if task_type == "classification":
+                # Check if labels are non-numeric (text labels like "Clean", "Contaminated", etc.)
+                if y_series.dtype == object or not np.issubdtype(y_series.dtype, np.number):
+                    from sklearn.preprocessing import LabelEncoder
+                    local_label_encoder = LabelEncoder()
+                    y_original = y_series.copy()  # Keep original for logging
+                    y_series_encoded = local_label_encoder.fit_transform(y_series)
+                    # Convert back to Series to maintain index
+                    y_series = pd.Series(y_series_encoded, index=y_series.index)
+
+                    # Log the label mapping
+                    label_mapping = dict(zip(local_label_encoder.classes_,
+                                            local_label_encoder.transform(local_label_encoder.classes_)))
+                    print(f"\n{'='*70}")
+                    print(f"CATEGORICAL LABEL ENCODING (Model Development)")
+                    print(f"{'='*70}")
+                    print(f"Detected non-numeric classification labels.")
+                    print(f"Encoding mapping:")
+                    for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
+                        print(f"  '{label}' -> {code}")
+                    print(f"{'='*70}\n")
+
             # Prepare cross-validation
             y_array = y_series.values
             if task_type == "regression":
@@ -11628,6 +11663,7 @@ Configuration:
             self.refined_preprocessor = final_preprocessor
             self.refined_wavelengths = list(selected_wl)
             self.refined_performance = results
+            self.refined_label_encoder = local_label_encoder  # Store for decoding predictions
             self.refined_config = {
                 'model_name': model_name,
                 'task_type': task_type,
@@ -11715,7 +11751,10 @@ Configuration:
             from datetime import datetime
 
             # Ask for save location
-            default_name = f"model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dasp"
+            # Create prefix: C/R for Classification/Regression + number of variables
+            task_prefix = 'C' if self.refined_config['task_type'] == 'classification' else 'R'
+            n_vars = self.refined_config['n_vars']
+            default_name = f"{task_prefix}{n_vars}_model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dasp"
 
             # Get initial directory from spectral data path
             initial_dir = None
@@ -11783,12 +11822,36 @@ Configuration:
                 }
 
             # Save the model
+            # Use refined_label_encoder if available (from Model Development tab),
+            # otherwise fallback to global label_encoder (from Results tab)
+            label_encoder_to_save = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+
+            # Prepare CV data for uncertainty estimation
+            cv_residuals = None
+            cv_predictions = None
+            cv_actuals = None
+
+            if hasattr(self, 'refined_y_true') and hasattr(self, 'refined_y_pred'):
+                cv_actuals = np.array(self.refined_y_true)
+                cv_predictions = np.array(self.refined_y_pred)
+
+                if self.refined_config['task_type'] == 'regression':
+                    # For regression: residuals = predictions - actuals
+                    cv_residuals = cv_predictions - cv_actuals
+                elif self.refined_config['task_type'] == 'classification':
+                    # For classification: store probabilities if available
+                    if hasattr(self, 'refined_y_proba'):
+                        cv_residuals = np.array(self.refined_y_proba)  # Store probabilities as "residuals"
+
             save_model(
                 model=self.refined_model,
                 preprocessor=self.refined_preprocessor,
                 metadata=metadata,
                 filepath=filepath,
-                label_encoder=self.label_encoder
+                label_encoder=label_encoder_to_save,
+                cv_residuals=cv_residuals,
+                cv_predictions=cv_predictions,
+                cv_actuals=cv_actuals
             )
 
             # Model saved successfully - update status
@@ -12652,13 +12715,44 @@ Configuration:
         consensus_scrollbar.pack(side='right', fill='y')
         self.consensus_info_text.config(yscrollcommand=consensus_scrollbar.set)
 
-        # === Step 5: Prediction Plots (Only for Validation Set) ===
-        ttk.Label(step4_frame, text="Prediction Plots (Validation Set Only):", style='Subheading.TLabel').grid(
+        # === Prediction Uncertainty ===
+        ttk.Label(step4_frame, text="Prediction Uncertainty:", style='Subheading.TLabel').grid(
             row=6, column=0, sticky=tk.W, pady=(15, 5))
 
+        uncertainty_frame = ttk.Frame(step4_frame)
+        uncertainty_frame.grid(row=7, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+
+        # Uncertainty table with scrollbars
+        uncertainty_tree_frame = ttk.Frame(uncertainty_frame)
+        uncertainty_tree_frame.pack(fill='both', expand=True)
+
+        self.uncertainty_tree = ttk.Treeview(uncertainty_tree_frame, height=10, show='headings')
+        self.uncertainty_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        unc_vsb = ttk.Scrollbar(uncertainty_tree_frame, orient="vertical", command=self.uncertainty_tree.yview)
+        unc_vsb.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.uncertainty_tree.configure(yscrollcommand=unc_vsb.set)
+
+        unc_hsb = ttk.Scrollbar(uncertainty_tree_frame, orient="horizontal", command=self.uncertainty_tree.xview)
+        unc_hsb.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        self.uncertainty_tree.configure(xscrollcommand=unc_hsb.set)
+
+        uncertainty_tree_frame.grid_rowconfigure(0, weight=1)
+        uncertainty_tree_frame.grid_columnconfigure(0, weight=1)
+
+        # Placeholder for uncertainty
+        self.uncertainty_placeholder = ttk.Label(uncertainty_frame,
+                                                 text="Run predictions to see uncertainty estimates (prediction intervals for regression, confidence scores for classification)",
+                                                 style='Caption.TLabel')
+        # Don't pack yet - will show/hide dynamically
+
+        # === Step 5: Prediction Plots (Only for Validation Set) ===
+        ttk.Label(step4_frame, text="Prediction Plots (Validation Set Only):", style='Subheading.TLabel').grid(
+            row=8, column=0, sticky=tk.W, pady=(15, 5))
+
         prediction_plots_frame = ttk.Frame(step4_frame)
-        prediction_plots_frame.grid(row=7, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        step4_frame.grid_rowconfigure(7, weight=1)
+        prediction_plots_frame.grid(row=9, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        step4_frame.grid_rowconfigure(9, weight=1)
 
         self.prediction_plots_frame = ttk.Frame(prediction_plots_frame)
         self.prediction_plots_frame.pack(fill='both', expand=True)
@@ -13007,7 +13101,7 @@ Configuration:
             return
 
         try:
-            from spectral_predict.model_io import predict_with_model
+            from spectral_predict.model_io import predict_with_model, predict_with_uncertainty
 
             # Initialize results dataframe
             results = pd.DataFrame()
@@ -13016,10 +13110,16 @@ Configuration:
             # Add actual values column if using validation set
             if self.pred_data_source.get() == 'validation' and self.validation_y is not None:
                 # Align actual values with prediction samples
-                results['Actual'] = self.validation_y.loc[results['Sample']].values
+                actual_values = self.validation_y.loc[results['Sample']].values
 
-            # Clear and initialize model map
+                # For classification models, predictions are already decoded text labels
+                # (e.g., "Clean", "Contaminated"), so keep actual values as text too
+                # Do NOT encode - this ensures actual and predicted are in the same format
+                results['Actual'] = actual_values
+
+            # Clear and initialize model map and uncertainty storage
             self.predictions_model_map = {}
+            self.predictions_uncertainty = {}  # Store uncertainty data for each model
 
             # Setup progress bar
             self.pred_progress['maximum'] = len(self.loaded_models)
@@ -13038,12 +13138,16 @@ Configuration:
                 self.root.update()
 
                 try:
-                    # Make predictions
-                    predictions = predict_with_model(
+                    # Make predictions with uncertainty
+                    pred_result = predict_with_uncertainty(
                         model_dict,
                         self.prediction_data,
                         validate_wavelengths=True
                     )
+
+                    predictions = pred_result['predictions']
+                    uncertainty = pred_result['uncertainty']
+                    has_uncertainty = pred_result['has_uncertainty']
 
                     # Store predictions with descriptive column name
                     col_name = f"{model_name}_{preprocessing}"
@@ -13059,6 +13163,10 @@ Configuration:
 
                     # Store mapping to model metadata
                     self.predictions_model_map[col_name] = metadata
+
+                    # Store uncertainty data if available
+                    if has_uncertainty:
+                        self.predictions_uncertainty[col_name] = uncertainty
 
                     successful_models += 1
 
@@ -13081,6 +13189,7 @@ Configuration:
             # Display results
             self._display_predictions()
             self._display_consensus_info()
+            self._display_uncertainty()
 
             # Update status
             if successful_models == len(self.loaded_models):
@@ -13108,6 +13217,9 @@ Configuration:
         1. Simple quality-weighted: Average weighted by model R²
         2. Regional quartile-based: Weights vary by prediction range
 
+        NOTE: Consensus predictions are only computed for REGRESSION models.
+        Classification models return categorical text labels that cannot be averaged.
+
         Parameters
         ----------
         results_df : pd.DataFrame
@@ -13123,6 +13235,22 @@ Configuration:
 
         if len(pred_cols) < 2:
             return results_df  # Need at least 2 models for consensus
+
+        # Check if any models are classification models - consensus only works for regression
+        has_classification = False
+        for col in pred_cols:
+            if col in self.predictions_model_map:
+                metadata = self.predictions_model_map[col]
+                task_type = metadata.get('task_type', 'regression')
+                if task_type == 'classification':
+                    has_classification = True
+                    break
+
+        # Skip consensus for classification models (can't average categorical predictions)
+        if has_classification:
+            print("\nSkipping consensus predictions: Classification models detected.")
+            print("Consensus predictions are only computed for regression models.")
+            return results_df
 
         # Extract model performance metadata
         model_r2 = {}
@@ -13337,6 +13465,146 @@ Configuration:
 
         # Plot predictions if validation set is used
         self._plot_prediction_results()
+
+    def _display_uncertainty(self):
+        """Display prediction uncertainty for each model."""
+        # Clear existing items
+        for item in self.uncertainty_tree.get_children():
+            self.uncertainty_tree.delete(item)
+
+        # Check if we have any uncertainty data
+        if not hasattr(self, 'predictions_uncertainty') or not self.predictions_uncertainty:
+            # Show placeholder
+            self.uncertainty_placeholder.pack(pady=20)
+            return
+
+        # Hide placeholder, show tree
+        self.uncertainty_placeholder.pack_forget()
+
+        # Get sample names
+        sample_names = self.predictions_df['Sample'].values
+
+        # Determine if we have regression or classification by checking first model with uncertainty
+        first_model = list(self.predictions_uncertainty.keys())[0]
+        first_uncertainty = self.predictions_uncertainty[first_model]
+        is_classification = 'probabilities' in first_uncertainty
+
+        if is_classification:
+            # === CLASSIFICATION: Show probabilities and confidence ===
+            # Build columns: Sample | Model | Predicted | Confidence | Prob(Class1) | Prob(Class2) | ...
+            class_names = first_uncertainty.get('class_names', [])
+
+            columns = ['Sample', 'Model', 'Predicted', 'Confidence%']
+            if class_names:
+                columns.extend([f'P({cls})' for cls in class_names])
+
+            self.uncertainty_tree['columns'] = columns
+
+            # Configure column headings and widths
+            for col in columns:
+                self.uncertainty_tree.heading(col, text=col)
+                if col == 'Sample':
+                    self.uncertainty_tree.column(col, width=150, anchor='w')
+                elif col == 'Model':
+                    self.uncertainty_tree.column(col, width=180, anchor='w')
+                elif col == 'Predicted':
+                    self.uncertainty_tree.column(col, width=120, anchor='center')
+                else:
+                    self.uncertainty_tree.column(col, width=100, anchor='e')
+
+            # Populate rows for each model
+            for model_name, uncertainty in self.predictions_uncertainty.items():
+                if 'probabilities' not in uncertainty:
+                    continue
+
+                probabilities = uncertainty['probabilities']
+                confidence = uncertainty['confidence']
+                class_names = uncertainty.get('class_names', [])
+
+                # Get predictions for this model
+                predictions = self.predictions_df[model_name].values
+
+                for i, sample in enumerate(sample_names):
+                    row_values = [
+                        str(sample),
+                        model_name,
+                        str(predictions[i]),
+                        f"{confidence[i]*100:.2f}"
+                    ]
+
+                    # Add class probabilities
+                    if class_names:
+                        for j in range(len(class_names)):
+                            row_values.append(f"{probabilities[i, j]*100:.2f}")
+
+                    # Color-code by confidence
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+                    if confidence[i] >= 0.9:
+                        self.uncertainty_tree.item(item_id, tags=('high_conf',))
+                    elif confidence[i] >= 0.7:
+                        self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                    else:
+                        self.uncertainty_tree.item(item_id, tags=('low_conf',))
+
+            # Configure tags for color-coding
+            self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')  # Green
+            self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')  # Orange
+            self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')   # Red
+
+        else:
+            # === REGRESSION: Show prediction intervals ===
+            # Build columns: Sample | Model | Prediction | Lower 95% | Upper 95% | Interval Width
+            columns = ['Sample', 'Model', 'Prediction', 'Lower 95%', 'Upper 95%', 'Interval Width']
+            self.uncertainty_tree['columns'] = columns
+
+            # Configure column headings and widths
+            for col in columns:
+                self.uncertainty_tree.heading(col, text=col)
+                if col == 'Sample':
+                    self.uncertainty_tree.column(col, width=150, anchor='w')
+                elif col == 'Model':
+                    self.uncertainty_tree.column(col, width=180, anchor='w')
+                else:
+                    self.uncertainty_tree.column(col, width=120, anchor='e')
+
+            # Populate rows for each model
+            for model_name, uncertainty in self.predictions_uncertainty.items():
+                if 'lower_bound' not in uncertainty:
+                    continue
+
+                lower_bound = uncertainty['lower_bound']
+                upper_bound = uncertainty['upper_bound']
+                interval_width = uncertainty.get('interval_width', upper_bound[0] - lower_bound[0])
+
+                # Get predictions for this model
+                predictions = self.predictions_df[model_name].values
+
+                for i, sample in enumerate(sample_names):
+                    row_values = [
+                        str(sample),
+                        model_name,
+                        f"{predictions[i]:.4f}",
+                        f"{lower_bound[i]:.4f}",
+                        f"{upper_bound[i]:.4f}",
+                        f"{interval_width if isinstance(interval_width, float) else upper_bound[i] - lower_bound[i]:.4f}"
+                    ]
+
+                    # Color-code by interval width (narrower = more certain)
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+                    width = upper_bound[i] - lower_bound[i]
+                    mean_width = np.mean(upper_bound - lower_bound)
+
+                    if width < mean_width * 0.8:
+                        self.uncertainty_tree.item(item_id, tags=('high_conf',))
+                    elif width < mean_width * 1.2:
+                        self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                    else:
+                        self.uncertainty_tree.item(item_id, tags=('low_conf',))
+
+            # Configure tags for color-coding
+            self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')  # Green
+            self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')  # Orange
+            self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')   # Red
 
     def _update_prediction_statistics(self):
         """Calculate and display prediction statistics."""
@@ -18271,6 +18539,11 @@ Configuration:
         self.comparison_results = None
         self.comparison_rules = []
 
+        # Live monitoring variables
+        self.live_monitoring_active = False
+        self.live_monitoring_timer_id = None
+        self.live_last_file_count = 0
+
         # Create scrollable canvas
         canvas = tk.Canvas(self.tab9, bg=self.colors['bg'], highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.tab9, orient="vertical", command=canvas.yview)
@@ -18364,11 +18637,14 @@ Configuration:
         ttk.Radiobutton(source_frame, text="Directory (ASD/SPC)",
                        variable=self.comparison_data_source, value='directory',
                        command=self._on_comparison_source_change).pack(side='left', padx=5)
-        ttk.Radiobutton(source_frame, text="CSV File",
+        ttk.Radiobutton(source_frame, text="CSV/Excel File",
                        variable=self.comparison_data_source, value='csv',
                        command=self._on_comparison_source_change).pack(side='left', padx=5)
         ttk.Radiobutton(source_frame, text="Use Validation Set 🔬",
                        variable=self.comparison_data_source, value='validation',
+                       command=self._on_comparison_source_change).pack(side='left', padx=5)
+        ttk.Radiobutton(source_frame, text="Live Folder Monitoring 🔴",
+                       variable=self.comparison_data_source, value='live',
                        command=self._on_comparison_source_change).pack(side='left', padx=5)
 
         # Path entry
@@ -18389,6 +18665,47 @@ Configuration:
         self.comparison_load_data_btn = ttk.Button(path_entry_frame, text="Load Data",
                                                    command=self._load_comparison_data, style='Modern.TButton')
         self.comparison_load_data_btn.pack(side='left')
+
+        # Live monitoring controls frame (shown only when live mode selected)
+        self.comparison_live_frame = ttk.Frame(step2_frame)
+        self.comparison_live_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(15, 0))
+
+        # Live folder path
+        live_path_frame = ttk.Frame(self.comparison_live_frame)
+        live_path_frame.pack(fill='x', pady=(0, 10))
+        ttk.Label(live_path_frame, text="Folder:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
+        self.comparison_live_path = tk.StringVar()
+        ttk.Entry(live_path_frame, textvariable=self.comparison_live_path, width=50).pack(
+            side='left', fill='x', expand=True, padx=(0, 10))
+        ttk.Button(live_path_frame, text="Browse", command=self._browse_live_folder,
+                  style='Modern.TButton').pack(side='left')
+
+        # Scan interval control
+        interval_frame = ttk.Frame(self.comparison_live_frame)
+        interval_frame.pack(fill='x', pady=(0, 10))
+        ttk.Label(interval_frame, text="Scan every:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
+        self.comparison_live_interval = tk.IntVar(value=10)
+        ttk.Spinbox(interval_frame, from_=5, to=60, textvariable=self.comparison_live_interval,
+                   width=10).pack(side='left', padx=(0, 5))
+        ttk.Label(interval_frame, text="seconds", style='Caption.TLabel').pack(side='left')
+
+        # Start/Stop buttons
+        btn_frame = ttk.Frame(self.comparison_live_frame)
+        btn_frame.pack(fill='x', pady=(0, 10))
+        self.comparison_live_start_btn = ttk.Button(btn_frame, text="▶ Start Monitoring",
+                                                    command=self._start_live_monitoring,
+                                                    style='Modern.TButton')
+        self.comparison_live_start_btn.pack(side='left', padx=(0, 5))
+        self.comparison_live_stop_btn = ttk.Button(btn_frame, text="⏹ Stop Monitoring",
+                                                   command=self._stop_live_monitoring,
+                                                   style='Modern.TButton', state='disabled')
+        self.comparison_live_stop_btn.pack(side='left')
+
+        # Status label
+        self.comparison_live_status = ttk.Label(self.comparison_live_frame,
+                                               text="○ Monitoring stopped",
+                                               style='Caption.TLabel', foreground='gray')
+        self.comparison_live_status.pack(pady=(0, 5))
 
         # Data status
         self.comparison_data_status = ttk.Label(step2_frame, text="No data loaded",
@@ -18499,8 +18816,10 @@ Configuration:
                 acc = perf.get('accuracy', 'N/A')
                 perf_str = f"Accuracy = {acc:.4f}" if isinstance(acc, (int, float)) else "N/A"
 
+            # Add emoji indicator for task type
+            task_emoji = "🏷️" if task_type == 'classification' else "📊"
             text = f"🟢 PRIMARY: {filename}\n"
-            text += f"   Target: {target_var}  |  Model: {model_name}  |  Task: {task_type}\n"
+            text += f"   {task_emoji} Task: {task_type.upper()}  |  Target: {target_var}  |  Model: {model_name}\n"
             text += f"   Preprocessing: {preprocessing}  |  Performance: {perf_str}"
 
             self.comparison_primary_text.insert('1.0', text)
@@ -18533,8 +18852,10 @@ Configuration:
                     acc = perf.get('accuracy', 'N/A')
                     perf_str = f"Acc = {acc:.4f}" if isinstance(acc, (int, float)) else "N/A"
 
+                # Add emoji indicator for task type
+                task_emoji = "🏷️" if task_type == 'classification' else "📊"
                 text = f"🔵 [{i+1}] {filename}\n"
-                text += f"    Target: {target_var}  |  Model: {model_name}  |  Task: {task_type}\n"
+                text += f"    {task_emoji} Task: {task_type.upper()}  |  Target: {target_var}  |  Model: {model_name}\n"
                 text += f"    Preprocessing: {preprocessing}  |  Performance: {perf_str}\n"
 
                 if i < len(self.comparison_auxiliary_models) - 1:
@@ -18647,19 +18968,50 @@ Configuration:
         """Handle data source selection changes."""
         source = self.comparison_data_source.get()
 
-        if source == 'validation':
+        if source == 'live':
+            # Stop any active monitoring when switching away from live mode
+            if self.live_monitoring_active:
+                self._stop_live_monitoring()
+
+            # Hide normal path controls, show live monitoring frame
+            self.comparison_path_label.grid_remove()
+            self.comparison_data_path.set("")
+            self.comparison_browse_btn.config(state='disabled')
+            self.comparison_load_data_btn.config(state='disabled')
+
+            # Show live monitoring frame
+            self.comparison_live_frame.grid()
+
+        elif source == 'validation':
+            # Stop monitoring if switching away from live
+            if self.live_monitoring_active:
+                self._stop_live_monitoring()
+
             # Disable path controls
             self.comparison_path_label.config(state='disabled')
             self.comparison_data_path.set("Using pre-selected validation set from Analysis Configuration")
             self.comparison_browse_btn.config(state='disabled')
+            self.comparison_load_data_btn.config(state='normal')
+
+            # Hide live monitoring frame
+            self.comparison_live_frame.grid_remove()
+
         else:
-            # Enable path controls
+            # Stop monitoring if switching away from live
+            if self.live_monitoring_active:
+                self._stop_live_monitoring()
+
+            # Enable path controls for directory/csv
             self.comparison_path_label.config(state='normal')
             self.comparison_data_path.set("")
             self.comparison_browse_btn.config(state='normal')
+            self.comparison_load_data_btn.config(state='normal')
+
+            # Hide live monitoring frame
+            self.comparison_live_frame.grid_remove()
 
     def _browse_comparison_data(self):
-        """Browse for comparison data (directory or CSV)."""
+        """Browse for comparison data (directory, CSV, or Excel)."""
         from tkinter import filedialog
 
         source = self.comparison_data_source.get()
@@ -18667,10 +19019,15 @@ Configuration:
         if source == 'directory':
             path = filedialog.askdirectory(title="Select Directory with Spectral Files",
                                           initialdir=self.last_directory if hasattr(self, 'last_directory') else None)
-        else:  # CSV
+        else:  # CSV or Excel
             path = filedialog.askopenfilename(
-                title="Select CSV File",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+                title="Select CSV or Excel File",
+                filetypes=[
+                    ("Supported files", "*.csv;*.xlsx;*.xls"),
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx;*.xls"),
+                    ("All files", "*.*")
+                ],
                 initialdir=self.last_directory if hasattr(self, 'last_directory') else None
             )
 
@@ -18699,7 +19056,6 @@ Configuration:
 
             elif source == 'directory':
                 # Load spectral files from directory
-                from src.spectral_predict import data_processing
                 import pandas as pd
 
                 directory = self.comparison_data_path.get()
@@ -18707,30 +19063,37 @@ Configuration:
                     messagebox.showerror("Error", "Please select a directory")
                     return
 
-                # Use existing load_spectra_from_directory logic
-                spectra_dict = data_processing.load_spectra_from_directory(directory)
+                # Use existing _load_spectra_from_directory method
+                wavelengths, X = self._load_spectra_from_directory(directory)
 
-                if not spectra_dict:
+                if X is None or len(X) == 0:
                     messagebox.showerror("Error", "No spectral files found in directory")
                     return
 
-                # Convert to DataFrame format
-                self.comparison_data = pd.DataFrame(spectra_dict)
+                # Convert to DataFrame format (wavelengths as columns, spectra as rows)
+                self.comparison_data = pd.DataFrame(X, columns=wavelengths)
                 self.comparison_data_status.config(
                     text=f"✓ Loaded {len(self.comparison_data)} spectra from directory",
                     foreground='green')
 
-            else:  # CSV
+            else:  # CSV or Excel
                 import pandas as pd
 
-                csv_path = self.comparison_data_path.get()
-                if not csv_path:
-                    messagebox.showerror("Error", "Please select a CSV file")
+                file_path = self.comparison_data_path.get()
+                if not file_path:
+                    messagebox.showerror("Error", "Please select a CSV or Excel file")
                     return
 
-                self.comparison_data = pd.read_csv(csv_path)
+                # Detect file type and read accordingly (same as Import tab)
+                if file_path.lower().endswith(('.xlsx', '.xls')):
+                    self.comparison_data = pd.read_excel(file_path)
+                    file_type = "Excel"
+                else:
+                    self.comparison_data = pd.read_csv(file_path)
+                    file_type = "CSV"
+
                 self.comparison_data_status.config(
-                    text=f"✓ Loaded {len(self.comparison_data)} samples from CSV",
+                    text=f"✓ Loaded {len(self.comparison_data)} samples from {file_type}",
                     foreground='green')
 
             self.comparison_status.config(text="Data loaded. Ready to run comparison.", foreground='green')
@@ -18739,6 +19102,178 @@ Configuration:
             messagebox.showerror("Error", f"Failed to load comparison data:\n{str(e)}")
             import traceback
             traceback.print_exc()
+
+    def _browse_live_folder(self):
+        """Browse for folder to monitor in live mode."""
+        from tkinter import filedialog
+
+        path = filedialog.askdirectory(
+            title="Select Folder to Monitor",
+            initialdir=self.last_directory if hasattr(self, 'last_directory') else None
+        )
+
+        if path:
+            self.comparison_live_path.set(path)
+
+    def _count_spectral_files(self, folder_path):
+        """Count spectral files in a folder.
+
+        Args:
+            folder_path: Path to folder
+
+        Returns:
+            Total count of ASD, CSV, and SPC files
+        """
+        import glob
+        import os
+
+        if not os.path.isdir(folder_path):
+            return 0
+
+        asd_files = glob.glob(os.path.join(folder_path, "*.asd"))
+        csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
+        spc_files = glob.glob(os.path.join(folder_path, "*.spc"))
+
+        return len(asd_files) + len(csv_files) + len(spc_files)
+
+    def _update_live_status(self, message, color='gray'):
+        """Update live monitoring status label (thread-safe).
+
+        Args:
+            message: Status message to display
+            color: Text color ('green', 'gray', 'red')
+        """
+        # Use root.after to ensure GUI update happens in main thread
+        self.root.after(0, lambda: self.comparison_live_status.config(
+            text=message, foreground=color))
+
+    def _start_live_monitoring(self):
+        """Start live folder monitoring."""
+        import os
+        from tkinter import messagebox
+        from datetime import datetime
+
+        # Validate folder path
+        folder_path = self.comparison_live_path.get()
+        if not folder_path or not os.path.isdir(folder_path):
+            messagebox.showerror("Error", "Please select a valid folder to monitor")
+            return
+
+        # Validate models are loaded
+        if not self.comparison_primary_model:
+            messagebox.showerror("Error", "Please load a primary model first (Step 1)")
+            return
+
+        # Check for large folders (warn at 500+ files)
+        file_count = self._count_spectral_files(folder_path)
+        if file_count >= 500:
+            response = messagebox.askyesno(
+                "Large Folder Detected",
+                f"This folder contains {file_count} spectral files.\n\n"
+                "Monitoring large folders may impact performance.\n\n"
+                "Do you want to proceed?",
+                icon='warning'
+            )
+            if not response:
+                return
+
+        # Initialize monitoring state
+        self.live_monitoring_active = True
+        self.live_last_file_count = file_count
+
+        # Update UI
+        self.comparison_live_start_btn.config(state='disabled')
+        self.comparison_live_stop_btn.config(state='normal')
+        self._update_live_status("● Starting monitoring...", 'green')
+
+        # Perform initial scan and schedule next scan
+        self._perform_live_scan()
+
+    def _perform_live_scan(self):
+        """Scan folder and update if files changed."""
+        import os
+        from datetime import datetime
+
+        if not self.live_monitoring_active:
+            return
+
+        try:
+            folder_path = self.comparison_live_path.get()
+
+            # Verify folder still exists
+            if not os.path.isdir(folder_path):
+                self._update_live_status("⚠ Error: Folder not found", 'red')
+                self._stop_live_monitoring()
+                return
+
+            # Count files in folder
+            current_count = self._count_spectral_files(folder_path)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+
+            # Check if file count changed
+            if current_count != self.live_last_file_count:
+                # Files changed - reload and re-run
+                self._update_live_status(f"● Files changed ({current_count}), updating...", 'green')
+
+                # Load data from folder
+                import pandas as pd
+                wavelengths, X = self._load_spectra_from_directory(folder_path)
+
+                if X is None or len(X) == 0:
+                    self._update_live_status(f"⚠ No valid files found (Last scan: {timestamp})", 'orange')
+                else:
+                    # Convert to DataFrame
+                    self.comparison_data = pd.DataFrame(X, columns=wavelengths)
+
+                    # Update data status
+                    self.comparison_data_status.config(
+                        text=f"✓ Loaded {len(self.comparison_data)} spectra (Live mode)",
+                        foreground='green'
+                    )
+
+                    # Auto-run comparison
+                    self._run_comparison()
+
+                    # Update status with file count and timestamp
+                    self._update_live_status(
+                        f"● Monitoring active - {current_count} files (Last update: {timestamp})",
+                        'green'
+                    )
+
+                # Update last known count
+                self.live_last_file_count = current_count
+
+            else:
+                # No change - just update timestamp
+                self._update_live_status(
+                    f"● Monitoring active - {current_count} files (Last scan: {timestamp})",
+                    'green'
+                )
+
+        except Exception as e:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self._update_live_status(f"⚠ Scan error: {str(e)} ({timestamp})", 'red')
+            import traceback
+            traceback.print_exc()
+
+        # Schedule next scan (convert seconds to milliseconds)
+        if self.live_monitoring_active:
+            interval_ms = self.comparison_live_interval.get() * 1000
+            self.live_monitoring_timer_id = self.root.after(interval_ms, self._perform_live_scan)
+
+    def _stop_live_monitoring(self):
+        """Stop live folder monitoring."""
+        self.live_monitoring_active = False
+
+        # Cancel scheduled timer
+        if self.live_monitoring_timer_id:
+            self.root.after_cancel(self.live_monitoring_timer_id)
+            self.live_monitoring_timer_id = None
+
+        # Update UI
+        self.comparison_live_start_btn.config(state='normal')
+        self.comparison_live_stop_btn.config(state='disabled')
+        self._update_live_status("○ Monitoring stopped", 'gray')
 
     def _add_comparison_rule(self):
         """Open dialog to add a conditional flagging rule."""
@@ -18749,7 +19284,7 @@ Configuration:
         # Create rule dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Conditional Flagging Rule")
-        dialog.geometry("500x300")
+        dialog.geometry("550x450")
         dialog.configure(bg=self.colors['bg'])
 
         # Make modal
@@ -18803,7 +19338,11 @@ Configuration:
 
         def save_rule():
             if not value_var.get():
-                messagebox.showerror("Error", "Please enter a value")
+                messagebox.showerror("Error", "Please enter a value for the condition.\n\nExample: For '==' condition, enter 'Clean' or '15.5'")
+                return
+
+            if not flag_var.get():
+                messagebox.showerror("Error", "Please enter a flag message.\n\nExample: '⚠️ Unreliable' or 'Contaminated'")
                 return
 
             rule = {
@@ -18854,11 +19393,13 @@ Configuration:
 
             # Run primary model prediction
             primary_metadata = self.comparison_primary_model['metadata']
-            primary_target = primary_metadata.get('target_variable', 'Primary')
-            primary_model_name = primary_metadata.get('model_name', 'Model')
-            primary_preproc = primary_metadata.get('preprocessing', 'Unknown')
+            primary_filename = self.comparison_primary_model.get('filename', 'Primary_Model')
+            primary_task = primary_metadata.get('task_type', 'unknown')
 
-            primary_col_name = f"{primary_target}_{primary_model_name}_{primary_preproc}"
+            # Add task type indicator to column name
+            task_indicator = "(Class)" if primary_task == 'classification' else "(Reg)"
+            # Use filename instead of target_model_preprocessing
+            primary_col_name = f"{primary_filename} {task_indicator}"
 
             primary_predictions = model_io.predict_with_model(self.comparison_primary_model, self.comparison_data)
             results[primary_col_name] = primary_predictions
@@ -18867,11 +19408,13 @@ Configuration:
             aux_col_names = []
             for aux_model in self.comparison_auxiliary_models:
                 aux_metadata = aux_model['metadata']
-                aux_target = aux_metadata.get('target_variable', 'Auxiliary')
-                aux_model_name = aux_metadata.get('model_name', 'Model')
-                aux_preproc = aux_metadata.get('preprocessing', 'Unknown')
+                aux_filename = aux_model.get('filename', 'Auxiliary_Model')
+                aux_task = aux_metadata.get('task_type', 'unknown')
 
-                aux_col_name = f"{aux_target}_{aux_model_name}_{aux_preproc}"
+                # Add task type indicator to column name
+                task_indicator = "(Class)" if aux_task == 'classification' else "(Reg)"
+                # Use filename instead of target_model_preprocessing
+                aux_col_name = f"{aux_filename} {task_indicator}"
 
                 # Handle duplicate column names
                 counter = 1
@@ -18900,26 +19443,42 @@ Configuration:
                     if matching_cols:
                         col = matching_cols[0]
 
-                        # Apply condition
+                        # Apply condition based on type
                         try:
+                            # Detect if column is classification or regression
+                            is_classification = '(Class)' in col or results[col].dtype == 'object'
+
                             if condition == '==':
-                                mask = results[col].astype(str) == value
+                                # Works for both text and numeric
+                                mask = results[col].astype(str) == str(value)
                             elif condition == '!=':
-                                mask = results[col].astype(str) != value
+                                # Works for both text and numeric
+                                mask = results[col].astype(str) != str(value)
                             elif condition == 'contains':
-                                mask = results[col].astype(str).str.contains(value, case=False, na=False)
-                            elif condition == '>':
-                                mask = pd.to_numeric(results[col], errors='coerce') > float(value)
-                            elif condition == '<':
-                                mask = pd.to_numeric(results[col], errors='coerce') < float(value)
-                            elif condition == '>=':
-                                mask = pd.to_numeric(results[col], errors='coerce') >= float(value)
-                            elif condition == '<=':
-                                mask = pd.to_numeric(results[col], errors='coerce') <= float(value)
+                                # Text operation - works on both types
+                                mask = results[col].astype(str).str.contains(str(value), case=False, na=False)
+                            elif condition in ['>', '<', '>=', '<=']:
+                                # Numeric operations - only for regression columns
+                                if is_classification:
+                                    print(f"Warning: Cannot apply numeric comparison '{condition}' to classification column '{col}'. Skipping rule.")
+                                    continue
+
+                                # Convert to numeric (coerce will make text -> NaN, which fails comparison)
+                                numeric_col = pd.to_numeric(results[col], errors='coerce')
+
+                                if condition == '>':
+                                    mask = numeric_col > float(value)
+                                elif condition == '<':
+                                    mask = numeric_col < float(value)
+                                elif condition == '>=':
+                                    mask = numeric_col >= float(value)
+                                elif condition == '<=':
+                                    mask = numeric_col <= float(value)
                             else:
                                 continue
 
-                            # Add flags
+                            # Add flags (only where mask is True and not NaN)
+                            mask = mask.fillna(False)
                             results.loc[mask, 'Flags'] = results.loc[mask, 'Flags'].apply(
                                 lambda x: f"{x}; {flag_text}" if x else flag_text
                             )
@@ -18976,14 +19535,22 @@ Configuration:
             values = []
             for col in columns:
                 val = row[col]
-                # Format numeric values
-                if isinstance(val, (int, float)) and not pd.isna(val):
-                    if col != 'Sample':
-                        values.append(f"{val:.4f}")
-                    else:
-                        values.append(str(val))
+                # Check if this is a classification column (by task indicator or dtype)
+                is_classification = '(Class)' in col or self.comparison_results[col].dtype == 'object'
+
+                # Format values based on type
+                if pd.isna(val):
+                    values.append("")
+                elif col == 'Sample' or col == 'Flags':
+                    values.append(str(val))
+                elif is_classification:
+                    # Classification predictions - display as text
+                    values.append(str(val))
+                elif isinstance(val, (int, float)):
+                    # Regression predictions - format as float
+                    values.append(f"{val:.4f}")
                 else:
-                    values.append(str(val) if not pd.isna(val) else "")
+                    values.append(str(val))
 
             # Add tag for flagged rows
             tags = ()

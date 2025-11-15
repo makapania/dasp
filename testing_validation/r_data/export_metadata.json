@@ -1,0 +1,42 @@
+{
+  "regression": {
+    "task": "regression",
+    "n_train": 36,
+    "n_test": 13,
+    "n_wavelengths": 2151,
+    "wavelength_range": [
+      350.0,
+      2500.0
+    ]
+  },
+  "binary": {
+    "task": "binary",
+    "n_train": 36,
+    "n_test": 13,
+    "n_wavelengths": 2151,
+    "wavelength_range": [
+      350.0,
+      2500.0
+    ]
+  },
+  "4class": {
+    "task": "4class",
+    "n_train": 32,
+    "n_test": 11,
+    "n_wavelengths": 2151,
+    "wavelength_range": [
+      350.0,
+      2500.0
+    ]
+  },
+  "7class": {
+    "task": "7class",
+    "n_train": 36,
+    "n_test": 13,
+    "n_wavelengths": 2151,
+    "wavelength_range": [
+      350.0,
+      2500.0
+    ]
+  }
+}

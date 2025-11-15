@@ -50,7 +50,10 @@ def save_model(
     preprocessor: Optional[Any],
     metadata: Dict[str, Any],
     filepath: Union[str, Path],
-    label_encoder: Optional[Any] = None
+    label_encoder: Optional[Any] = None,
+    cv_residuals: Optional[np.ndarray] = None,
+    cv_predictions: Optional[np.ndarray] = None,
+    cv_actuals: Optional[np.ndarray] = None
 ) -> None:
     """
     Save a trained model with all metadata to a .dasp file.
@@ -65,6 +68,15 @@ def save_model(
     label_encoder : sklearn.preprocessing.LabelEncoder or None
         Label encoder for classification with text labels (e.g., "low", "medium", "high").
         Used to convert between text labels and numeric codes.
+    cv_residuals : np.ndarray or None
+        Cross-validation residuals (predictions - actuals) for uncertainty estimation.
+        Shape: (n_cv_samples,) for regression or (n_cv_samples, n_classes) for classification probabilities.
+    cv_predictions : np.ndarray or None
+        Cross-validation predictions for uncertainty analysis.
+        Shape: (n_cv_samples,) for regression or (n_cv_samples,) for classification.
+    cv_actuals : np.ndarray or None
+        Cross-validation actual values for uncertainty analysis.
+        Shape: (n_cv_samples,)
     metadata : dict
         Model metadata. Should include:
         - 'model_name' (str): Model type (e.g., 'PLS', 'Ridge')
@@ -158,6 +170,21 @@ def save_model(
         if label_encoder is not None:
             joblib.dump(label_encoder, label_encoder_path, compress=3)
 
+        # Save CV data if present (for uncertainty estimation)
+        cv_data_path = tmppath / 'cv_data.npz'
+        if cv_residuals is not None or cv_predictions is not None or cv_actuals is not None:
+            cv_data_dict = {}
+            if cv_residuals is not None:
+                cv_data_dict['cv_residuals'] = cv_residuals
+            if cv_predictions is not None:
+                cv_data_dict['cv_predictions'] = cv_predictions
+            if cv_actuals is not None:
+                cv_data_dict['cv_actuals'] = cv_actuals
+            np.savez_compressed(cv_data_path, **cv_data_dict)
+            metadata_complete['has_cv_data'] = True
+        else:
+            metadata_complete['has_cv_data'] = False
+
         # Create ZIP archive
         with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(metadata_path, 'metadata.json')
@@ -166,6 +193,8 @@ def save_model(
                 zf.write(preprocessor_path, 'preprocessor.pkl')
             if label_encoder is not None:
                 zf.write(label_encoder_path, 'label_encoder.pkl')
+            if cv_data_path.exists():
+                zf.write(cv_data_path, 'cv_data.npz')
 
 
 def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -246,11 +275,20 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if label_encoder_path.exists():
             label_encoder = joblib.load(label_encoder_path)
 
+        # Load CV data if present (for uncertainty estimation)
+        cv_data = None
+        cv_data_path = tmppath / 'cv_data.npz'
+        if cv_data_path.exists():
+            cv_data = np.load(cv_data_path)
+            # Convert to dict for easier access
+            cv_data = {key: cv_data[key] for key in cv_data.files}
+
     return {
         'model': model,
         'preprocessor': preprocessor,
         'label_encoder': label_encoder,
-        'metadata': metadata
+        'metadata': metadata,
+        'cv_data': cv_data
     }
 
 
@@ -405,10 +443,186 @@ def predict_with_model(
     # If label_encoder exists, convert predictions back to original text labels
     if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
         label_encoder = model_dict['label_encoder']
-        # Convert integer predictions back to text labels
-        predictions = label_encoder.inverse_transform(predictions.astype(int))
+        # Check if predictions are already text labels (some models decode internally)
+        if predictions.dtype == object or predictions.dtype.kind == 'U':
+            # Already decoded text labels, return as-is
+            pass
+        else:
+            # Numeric predictions that need decoding
+            predictions = label_encoder.inverse_transform(predictions.astype(int))
 
     return predictions
+
+
+def predict_with_uncertainty(
+    model_dict: Dict[str, Any],
+    X_new: Union[pd.DataFrame, np.ndarray],
+    validate_wavelengths: bool = True
+) -> Dict[str, Any]:
+    """
+    Make predictions with a loaded model and compute uncertainty estimates.
+
+    This function extends predict_with_model() by also returning:
+    - For classification: class probabilities and confidence scores
+    - For regression: prediction intervals based on CV performance
+
+    Parameters
+    ----------
+    model_dict : dict
+        Dictionary returned from load_model(), containing model, metadata, and optionally cv_data
+    X_new : pd.DataFrame or np.ndarray
+        New spectral data to predict on
+    validate_wavelengths : bool, default=True
+        Whether to validate wavelengths match model requirements
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'predictions': np.ndarray of predictions (same as predict_with_model())
+        - 'uncertainty': dict with uncertainty metrics:
+            For classification:
+                - 'probabilities': np.ndarray, shape (n_samples, n_classes)
+                - 'confidence': np.ndarray, shape (n_samples,) - max probability
+                - 'class_names': list of class names (if label_encoder exists)
+            For regression:
+                - 'lower_bound': np.ndarray, shape (n_samples,) - 95% lower CI
+                - 'upper_bound': np.ndarray, shape (n_samples,) - 95% upper CI
+                - 'std_error': float - standard error from CV (if available)
+        - 'has_uncertainty': bool - whether uncertainty data is available
+
+    Examples
+    --------
+    >>> model_dict = load_model('my_model.dasp')
+    >>> result = predict_with_uncertainty(model_dict, X_new)
+    >>> print(result['predictions'])
+    array([15.2, 18.7, 12.3])
+    >>> print(result['uncertainty']['lower_bound'])
+    array([14.8, 18.3, 11.9])
+    >>> print(result['uncertainty']['upper_bound'])
+    array([15.6, 19.1, 12.7])
+    """
+    # Get standard predictions first
+    predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
+
+    model = model_dict['model']
+    metadata = model_dict['metadata']
+    task_type = metadata.get('task_type', 'regression')
+
+    uncertainty = {}
+    has_uncertainty = False
+
+    # Extract components needed for preprocessing
+    preprocessor = model_dict['preprocessor']
+    required_wl = metadata['wavelengths']
+    use_full_spectrum_preprocessing = metadata.get('use_full_spectrum_preprocessing', False)
+    full_wavelengths = metadata.get('full_wavelengths', None)
+
+    # Preprocess X_new to get X_processed (same logic as predict_with_model)
+    if isinstance(X_new, pd.DataFrame):
+        if validate_wavelengths:
+            if use_full_spectrum_preprocessing and full_wavelengths is not None:
+                X_full = _select_wavelengths_from_dataframe(X_new, full_wavelengths)
+                if preprocessor is not None:
+                    X_full_preprocessed = preprocessor.transform(X_full)
+                else:
+                    X_full_preprocessed = X_full
+                wavelength_indices = []
+                for wl in required_wl:
+                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+                X_processed = X_full_preprocessed[:, wavelength_indices]
+            else:
+                X_selected = _select_wavelengths_from_dataframe(X_new, required_wl)
+                if preprocessor is not None:
+                    X_processed = preprocessor.transform(X_selected)
+                else:
+                    X_processed = X_selected
+        else:
+            X_selected = X_new.values
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X_selected)
+            else:
+                X_processed = X_selected
+    elif isinstance(X_new, np.ndarray):
+        if use_full_spectrum_preprocessing and full_wavelengths is not None:
+            if preprocessor is not None:
+                X_full_preprocessed = preprocessor.transform(X_new)
+            else:
+                X_full_preprocessed = X_new
+            wavelength_indices = []
+            for wl in required_wl:
+                idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
+                if len(idx) > 0:
+                    wavelength_indices.append(idx[0])
+            X_processed = X_full_preprocessed[:, wavelength_indices]
+        else:
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X_new)
+            else:
+                X_processed = X_new
+    else:
+        raise TypeError(f"X_new must be DataFrame or ndarray, got {type(X_new)}")
+
+    # Classification: get probabilities
+    if task_type == 'classification':
+        if hasattr(model, 'predict_proba'):
+            try:
+                probabilities = model.predict_proba(X_processed)
+                confidence = np.max(probabilities, axis=1)
+                uncertainty['probabilities'] = probabilities
+                uncertainty['confidence'] = confidence
+                has_uncertainty = True
+
+                # Add class names if label_encoder exists
+                if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
+                    uncertainty['class_names'] = model_dict['label_encoder'].classes_.tolist()
+                else:
+                    # Try to get from model classes if available
+                    if hasattr(model, 'classes_'):
+                        uncertainty['class_names'] = model.classes_.tolist()
+            except Exception as e:
+                # Model doesn't support predict_proba or failed
+                uncertainty['error'] = f"Could not compute probabilities: {str(e)}"
+
+    # Regression: compute prediction intervals from CV data
+    else:  # regression
+        cv_data = model_dict.get('cv_data', None)
+
+        if cv_data is not None and 'cv_residuals' in cv_data:
+            # Use CV residuals to estimate prediction interval
+            residuals = cv_data['cv_residuals']
+            std_error = np.std(residuals)
+
+            # 95% confidence interval: prediction ± 1.96 * std_error
+            lower_bound = predictions - 1.96 * std_error
+            upper_bound = predictions + 1.96 * std_error
+
+            uncertainty['lower_bound'] = lower_bound
+            uncertainty['upper_bound'] = upper_bound
+            uncertainty['std_error'] = float(std_error)
+            uncertainty['interval_width'] = float(3.92 * std_error)  # upper - lower
+            has_uncertainty = True
+        else:
+            # No CV data available - try to use RMSE from metadata as rough estimate
+            if 'performance' in metadata and 'RMSE' in metadata['performance']:
+                rmse = metadata['performance']['RMSE']
+                lower_bound = predictions - 1.96 * rmse
+                upper_bound = predictions + 1.96 * rmse
+
+                uncertainty['lower_bound'] = lower_bound
+                uncertainty['upper_bound'] = upper_bound
+                uncertainty['std_error'] = float(rmse)
+                uncertainty['interval_width'] = float(3.92 * rmse)
+                uncertainty['note'] = 'Uncertainty based on overall RMSE (no CV residuals available)'
+                has_uncertainty = True
+
+    return {
+        'predictions': predictions,
+        'uncertainty': uncertainty,
+        'has_uncertainty': has_uncertainty
+    }
 
 
 def get_model_info(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -765,6 +979,7 @@ __all__ = [
     'save_model',
     'load_model',
     'predict_with_model',
+    'predict_with_uncertainty',
     'get_model_info',
     'save_ensemble',
     'load_ensemble'

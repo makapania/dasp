@@ -1,0 +1,83 @@
+================================================================================
+UNICODE ENCODING FIX APPLIED - 2025-11-14
+================================================================================
+
+PROBLEM FIXED:
+--------------
+Error: UnicodeEncodeError when generating comparison report
+Location: compare_regression_results.py line 332
+
+The script was trying to write Unicode symbols (checkmarks, warning signs)
+that Windows cp1252 encoding couldn't handle.
+
+
+SOLUTION APPLIED:
+-----------------
+1. Added UTF-8 encoding to file write operation (line 331)
+
+   with open(report_path, 'w', encoding='utf-8') as f:
+
+2. Replaced Unicode symbols with ASCII equivalents (lines 290-308)
+
+   [PASS] instead of checkmark
+   [WARN] instead of warning symbol
+   [FAIL] instead of X symbol
+
+
+WHAT TO DO NEXT:
+----------------
+Re-run the comparison step to verify the fix works:
+
+Option 1 (Just the comparison):
+   Double-click: STEP4_Compare_Results.bat
+
+Option 2 (Complete validation from scratch):
+   Double-click: START_HERE.bat
+   (This runs all 5 steps: install packages, R tests, DASP tests, comparison)
+
+
+EXPECTED RESULT:
+----------------
+You should see:
+
+   SUCCESS! Comparison analysis finished.
+
+   Results saved to: results\comparisons\
+
+   Generated files:
+   - bone_collagen_comparison.csv
+   - d13c_comparison.csv
+   - comparison_summary.json
+   - comparison_report.md
+
+
+CHECK YOUR RESULTS:
+-------------------
+Open: results\comparisons\comparison_report.md
+
+This report tells you:
+- Does DASP match R implementations? ([PASS]/[WARN]/[FAIL])
+- R² correlation (should be >0.99 for identical implementations)
+- Mean differences in R² and RMSE
+- Statistical significance tests (p-values)
+- Which models perform best on each dataset
+
+
+TROUBLESHOOTING:
+----------------
+If you still get errors:
+1. Make sure all previous steps completed successfully
+2. Check that results exist in:
+   - results\r_regression\bone_collagen\
+   - results\r_regression\d13c\
+   - results\dasp_regression\bone_collagen\
+   - results\dasp_regression\d13c\
+
+3. If directories are missing, re-run:
+   - STEP2_Run_R_Tests_FIXED.bat
+   - STEP3_Run_DASP_Tests.bat
+
+
+================================================================================
+All testing infrastructure is now complete and ready to use!
+================================================================================

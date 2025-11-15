@@ -1,0 +1,79 @@
+================================================================================
+DASP VALIDATION TESTING - WINDOWS BATCH FILES
+================================================================================
+
+EASY MODE: Just double-click the batch (.bat) files in order!
+
+FIRST: CHECK_REQUIREMENTS.bat
+   - Checks if Python and R are installed correctly
+   - Takes: 10 seconds
+   - FIX ANY ERRORS BEFORE PROCEEDING!
+
+STEP 0: STEP0_Install_Python_Packages.bat
+   - Installs xgboost and scipy for Python
+   - Only needs to be run ONCE
+   - Takes: 2-5 minutes
+
+STEP 1: STEP1_Install_R_Packages.bat
+   - Installs required R packages
+   - Only needs to be run ONCE
+   - Takes: 5-10 minutes
+
+STEP 2: STEP2_Run_R_Tests.bat
+   - Runs regression tests in R
+   - Tests both datasets (Bone Collagen + d13C)
+   - Takes: 15-30 minutes
+
+STEP 3: STEP3_Run_DASP_Tests.bat
+   - Runs the same tests in DASP (Python)
+   - Tests both datasets
+   - Takes: 10-20 minutes
+
+STEP 4: STEP4_Compare_Results.bat
+   - Compares DASP vs R results
+   - Generates reports
+   - Takes: 1-2 minutes
+
+TOTAL TIME: 35-65 minutes (automated)
+
+================================================================================
+ALTERNATIVE: Run everything automatically
+================================================================================
+
+Double-click: RUN_TESTS.bat
+
+This will run Steps 2-4 automatically (requires R packages installed first).
+
+================================================================================
+RESULTS
+================================================================================
+
+After completion, check:
+   results\comparisons\comparison_report.md
+
+This contains the complete analysis showing if DASP matches R.
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+If batch files don't work:
+
+1. Make sure R is installed
+   Download from: https://cran.r-project.org/
+
+2. Make sure Python is installed
+   (Should already be at: C:\Users\sponheim\AppData\Local\Programs\Python\Python314\)
+
+3. Run from Command Prompt instead:
+   - Open Command Prompt
+   - cd C:\Users\sponheim\git\dasp\testing_validation
+   - Run commands manually (see EXECUTION_GUIDE.md)
+
+================================================================================
+
+Ready?
+
+1. Double-click CHECK_REQUIREMENTS.bat first
+2. Fix any [ERROR] or [MISSING] items
+3. Then run STEP0, STEP1, STEP2, STEP3, STEP4 in order

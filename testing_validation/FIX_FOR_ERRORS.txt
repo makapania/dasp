@@ -1,0 +1,98 @@
+================================================================================
+ERROR FIX GUIDE
+================================================================================
+
+You got these errors:
+1. "The system cannot find the file specified" - R/Rscript not found
+2. "No module named 'xgboost'" - Python package missing
+
+================================================================================
+HOW TO FIX
+================================================================================
+
+STEP 1: Check what's installed/missing
+---------------------------------------
+Double-click: CHECK_REQUIREMENTS.bat
+
+This will show you:
+  [OK] = Installed correctly
+  [MISSING] = Need to install
+  [ERROR] = Not found
+
+STEP 2: Install missing Python packages
+---------------------------------------
+If you see [MISSING] xgboost or scipy:
+
+Double-click: STEP0_Install_Python_Packages.bat
+
+This installs:
+  - xgboost (for gradient boosting models)
+  - scipy (for statistical tests)
+
+STEP 3: Install R (if not installed)
+---------------------------------------
+If you see [ERROR] for Rscript:
+
+R is not installed or not in your PATH.
+
+To install R:
+1. Go to: https://cran.r-project.org/bin/windows/base/
+2. Download the latest R for Windows
+3. Run the installer
+4. IMPORTANT: During installation, check "Add R to PATH"
+5. Restart your computer
+6. Run CHECK_REQUIREMENTS.bat again to verify
+
+STEP 4: Verify everything is OK
+---------------------------------------
+Double-click: CHECK_REQUIREMENTS.bat
+
+You should see all [OK] now.
+
+STEP 5: Continue with testing
+---------------------------------------
+Now run in order:
+1. STEP1_Install_R_Packages.bat (install R packages)
+2. STEP2_Run_R_Tests.bat (run R tests)
+3. STEP3_Run_DASP_Tests.bat (run DASP tests)
+4. STEP4_Compare_Results.bat (compare results)
+
+================================================================================
+QUICK FIX SUMMARY
+================================================================================
+
+Missing xgboost?
+  -> Double-click STEP0_Install_Python_Packages.bat
+
+Missing R/Rscript?
+  -> Install R from https://cran.r-project.org/bin/windows/base/
+  -> Make sure to check "Add to PATH" during installation
+  -> Restart computer
+
+Then verify:
+  -> Double-click CHECK_REQUIREMENTS.bat
+  -> All should show [OK]
+
+Then proceed:
+  -> Run STEP1, STEP2, STEP3, STEP4 in order
+
+================================================================================
+ALTERNATIVE: Skip R Tests (Python only)
+================================================================================
+
+If you can't install R or don't want to:
+
+You can still run DASP tests and compare to previous results:
+
+1. Install Python packages: STEP0_Install_Python_Packages.bat
+2. Run DASP tests: STEP3_Run_DASP_Tests.bat
+3. Compare to expected performance:
+   - d13C: R² should be ~0.75-0.90 (your previous: 0.845)
+   - Bone collagen: R² should be ~0.70-0.85
+
+The main validation (DASP vs R comparison) requires R, but you can still:
+  - Test DASP works correctly
+  - Verify performance is in expected range
+  - Compare to your previous d13C results (R²=0.845)
+
+================================================================================

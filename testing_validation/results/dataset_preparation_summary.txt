@@ -1,0 +1,81 @@
+================================================================================
+DASP Validation Testing - Dataset Preparation Summary
+================================================================================
+
+Random Seed: 42
+Total Samples: 49
+Collagen Range: 0.9% - 22.1%
+
+Category Distribution:
+  A: 13 samples ( 26.5%)
+  C:  1 samples (  2.0%)
+  F: 13 samples ( 26.5%)
+  G:  6 samples ( 12.2%)
+  H: 11 samples ( 22.4%)
+  I:  3 samples (  6.1%)
+  J:  2 samples (  4.1%)
+
+================================================================================
+Dataset Splits (75% train / 25% test)
+================================================================================
+
+
+REGRESSION Task:
+  Train: 36 samples
+  Test:  13 samples
+
+BINARY Task:
+  Train: 36 samples
+  Test:  13 samples
+  Train class distribution:
+    0: 23 samples
+    1: 13 samples
+  Test class distribution:
+    0: 8 samples
+    1: 5 samples
+
+4CLASS Task:
+  Train: 32 samples
+  Test:  11 samples
+  Train class distribution:
+    A: 10 samples
+    F: 10 samples
+    G: 4 samples
+    H: 8 samples
+  Test class distribution:
+    A: 3 samples
+    F: 3 samples
+    G: 2 samples
+    H: 3 samples
+
+7CLASS Task:
+  Train: 36 samples
+  Test:  13 samples
+  Train class distribution:
+    A: 9 samples
+    C: 1 samples
+    F: 9 samples
+    G: 5 samples
+    H: 8 samples
+    I: 2 samples
+    J: 2 samples
+  Test class distribution:
+    A: 4 samples
+    F: 4 samples
+    G: 1 samples
+    H: 3 samples
+    I: 1 samples
+
+================================================================================
+Output Files
+================================================================================
+
+CSV Files (in testing_validation/data/):
+  - regression_train.csv / regression_test.csv
+  - binary_train.csv / binary_test.csv
+  - 4class_train.csv / 4class_test.csv
+  - 7class_train.csv / 7class_test.csv
+  - metadata.json
+
+All files are ready for use in DASP and R comparisons.
+================================================================================
