@@ -700,6 +700,16 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
     # Compute composite scores and rank
     from .scoring import compute_composite_score
 
+    # Check for subset contamination (mixing full-spectrum with subset models)
+    if "SubsetTag" in df_results.columns:
+        subset_counts = df_results["SubsetTag"].value_counts()
+        if len(subset_counts) > 1:
+            print("\n⚠️ WARNING: Ranking includes multiple subset types:")
+            for subset_type, count in subset_counts.items():
+                print(f"  - {subset_type}: {count} models")
+            print("  Subset models may rank higher due to lower variable counts.")
+            print("  Consider filtering by SubsetTag before ranking for fairer comparison.\n")
+
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
 
     # Return results along with label_encoder (for classification with text labels)

@@ -62,14 +62,27 @@ def read_csv_spectra(path):
     else:
         # Wide format
         # First column is ID, rest should be numeric wavelengths
+        # BUT: may also have non-numeric columns (like target variables)
         id_col = df.columns[0]
         df = df.set_index(id_col)
 
-        # Parse column names as wavelengths
-        try:
-            wl_cols = {col: float(col) for col in df.columns}
-        except ValueError as e:
-            raise ValueError(f"Could not parse all column names as wavelengths: {e}")
+        # Parse column names as wavelengths, filtering out non-numeric columns
+        wl_cols = {}
+        non_wl_cols = []
+        for col in df.columns:
+            try:
+                wl_cols[col] = float(col)
+            except ValueError:
+                # Non-numeric column (e.g., target variable like 'N', 'protein', etc.)
+                non_wl_cols.append(col)
+
+        if not wl_cols:
+            raise ValueError(f"No numeric wavelength columns found. Columns: {list(df.columns)}")
+
+        # Drop non-wavelength columns for spectral data
+        if non_wl_cols:
+            print(f"Note: Ignoring non-wavelength columns: {non_wl_cols}")
+            df = df.drop(columns=non_wl_cols)
 
         # Rename columns to floats and sort
         df = df.rename(columns=wl_cols)

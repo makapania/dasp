@@ -234,12 +234,13 @@ class TestCompositeScoring:
         assert pd.notna(result.loc[5, "Rank"]), "Models with NaN metrics should still be ranked"
 
     def test_column_order(self):
-        """Test that output has Rank as first column."""
+        """Test that output has Rank as first column and ComplexityScore as last."""
         df = self.create_test_data_regression(10)
         result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
 
         assert result.columns[0] == "Rank", "Rank should be first column"
-        assert result.columns[-1] == "top_vars", "top_vars should be last column"
+        assert result.columns[-1] == "ComplexityScore", "ComplexityScore should be last column"
+        assert "top_vars" in result.columns, "top_vars should be present"
 
     def test_complexity_score_added(self):
         """Test that ComplexityScore column is added."""
