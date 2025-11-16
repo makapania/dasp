@@ -984,6 +984,7 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
     - Specimen ID column (OPTIONAL - will generate if absent)
     - Wavelength columns (numeric headers, possibly quoted, FLEXIBLE POSITION)
     - Target y column (FLEXIBLE POSITION - before or after wavelengths)
+    - Optional metadata columns (preserved and returned)
 
     Example formats supported:
 
@@ -996,9 +997,9 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
     0.245, 0.248, ..., 0.156, 6.4
     0.312, 0.315, ..., 0.201, 7.9
 
-    Format C: ID anywhere
-    collagen, specimen_id, "400", "401", ..., "2400"
-    6.4, A-53, 0.245, 0.248, ..., 0.156
+    Format C: ID anywhere with metadata
+    specimen_id, site, depth, "400", "401", ..., "2400", collagen
+    A-53, "Site1", 10.5, 0.245, 0.248, ..., 0.156, 6.4
 
     Parameters
     ----------
@@ -1015,11 +1016,15 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         Spectral data (rows=specimens, cols=wavelengths)
     y : pd.Series
         Target values
+    metadata_df : pd.DataFrame or None
+        Additional metadata columns (rows=specimens, cols=metadata fields)
+        None if no metadata columns present
     metadata : dict
         {
             'specimen_id_col': detected column name or "__GENERATED__",
             'y_col': detected column name,
             'wavelength_cols': list of wavelength column names,
+            'metadata_cols': list of metadata column names,
             'n_spectra': number of spectra loaded,
             'wavelength_range': (min, max),
             'generated_ids': True if IDs were auto-generated
@@ -1093,8 +1098,24 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
     if y_col not in df.columns:
         raise ValueError(f"Target y column '{y_col}' not found in file")
 
-    # Step 6: Extract data
-    # Extract spectral data
+    # Step 6: Identify and extract metadata columns
+    # Metadata columns = all columns that are NOT wavelengths, NOT specimen ID, NOT target
+    all_cols = set(df.columns)
+    wavelength_cols_set = set(wavelength_cols)
+    used_cols = wavelength_cols_set | {y_col}
+    if not generated_ids and specimen_id_col != "__GENERATED__":
+        used_cols.add(specimen_id_col)
+
+    metadata_cols = sorted(list(all_cols - used_cols))  # Preserve alphabetical order
+
+    # Extract metadata DataFrame (if any metadata columns exist)
+    if metadata_cols:
+        metadata_df = df[metadata_cols].copy()
+        metadata_df.index = specimen_ids
+    else:
+        metadata_df = None
+
+    # Step 7: Extract spectral data
     X = df[wavelength_cols].copy()
     X.index = specimen_ids
 
@@ -1140,8 +1161,10 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         # Remove rows with missing values
         X = X[~has_nan]
         y = y[~has_nan]
+        if metadata_df is not None:
+            metadata_df = metadata_df[~has_nan]
 
-    # Step 7: Validation
+    # Step 8: Validation
     # Check for duplicate specimen IDs (only if not generated)
     # Use X.index since specimen_ids may be out of sync after NaN removal
     if not generated_ids and X.index.duplicated().any():
@@ -1154,6 +1177,8 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         keep_mask = ~X.index.duplicated(keep='first')
         X = X[keep_mask]
         y = y[keep_mask]
+        if metadata_df is not None:
+            metadata_df = metadata_df[keep_mask]
 
     # Check wavelength ordering
     wavelength_values = X.columns.values
@@ -1161,17 +1186,18 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
               for i in range(len(wavelength_values)-1)):
         print("Warning: Wavelengths were not strictly increasing. Sorted automatically.")
 
-    # Step 8: Detect data type (reflectance vs absorbance)
+    # Step 9: Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(X)
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
 
-    # Step 9: Compile metadata
+    # Step 10: Compile metadata
     metadata = {
         'specimen_id_col': specimen_id_col,
         'y_col': y_col,
         'wavelength_cols': wavelength_cols,
+        'metadata_cols': metadata_cols if metadata_cols else [],
         'n_spectra': len(X),
         'wavelength_range': (X.columns.min(), X.columns.max()),
         'file_format': 'combined',
@@ -1181,7 +1207,7 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         'detection_method': detection_method
     }
 
-    return X, y, metadata
+    return X, y, metadata_df, metadata
 
 
 def read_jcamp_file(path):
@@ -2359,6 +2385,7 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     - Specimen ID column (OPTIONAL - will generate if absent)
     - Wavelength columns (numeric headers, FLEXIBLE POSITION)
     - Target y column (FLEXIBLE POSITION - before or after wavelengths)
+    - Optional metadata columns (preserved and returned)
 
     Example formats supported:
 
@@ -2371,9 +2398,9 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     | 0.245  | 0.248  | ... | 0.156  | 6.4      |
     | 0.312  | 0.315  | ... | 0.201  | 7.9      |
 
-    Format C: ID and target anywhere
-    | collagen | specimen_id | 400    | 401    | ... | 2400   |
-    | 6.4      | A-53        | 0.245  | 0.248  | ... | 0.156  |
+    Format C: ID and target anywhere with metadata
+    | specimen_id | site   | depth | 400    | 401    | ... | 2400   | collagen |
+    | A-53        | Site1  | 10.5  | 0.245  | 0.248  | ... | 0.156  | 6.4      |
 
     Parameters
     ----------
@@ -2392,11 +2419,15 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         Spectral data (rows=specimens, cols=wavelengths)
     y : pd.Series
         Target values
+    metadata_df : pd.DataFrame or None
+        Additional metadata columns (rows=specimens, cols=metadata fields)
+        None if no metadata columns present
     metadata : dict
         {
             'specimen_id_col': detected column name or "__GENERATED__",
             'y_col': detected column name,
             'wavelength_cols': list of wavelength column names,
+            'metadata_cols': list of metadata column names,
             'n_spectra': number of spectra loaded,
             'wavelength_range': (min, max),
             'generated_ids': True if IDs were auto-generated,
@@ -2466,8 +2497,24 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     if y_col not in df.columns:
         raise ValueError(f"Target y column '{y_col}' not found in file")
 
-    # Step 6: Extract data
-    # Extract spectral data
+    # Step 6: Identify and extract metadata columns
+    # Metadata columns = all columns that are NOT wavelengths, NOT specimen ID, NOT target
+    all_cols = set(df.columns)
+    wavelength_cols_set = set(wavelength_cols)
+    used_cols = wavelength_cols_set | {y_col}
+    if not generated_ids and specimen_id_col != "__GENERATED__":
+        used_cols.add(specimen_id_col)
+
+    metadata_cols = sorted(list(all_cols - used_cols))  # Preserve alphabetical order
+
+    # Extract metadata DataFrame (if any metadata columns exist)
+    if metadata_cols:
+        metadata_df = df[metadata_cols].copy()
+        metadata_df.index = specimen_ids
+    else:
+        metadata_df = None
+
+    # Step 7: Extract spectral data
     X = df[wavelength_cols].copy()
     X.index = specimen_ids
 
@@ -2513,8 +2560,10 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         # Remove rows with missing values
         X = X[~has_nan]
         y = y[~has_nan]
+        if metadata_df is not None:
+            metadata_df = metadata_df[~has_nan]
 
-    # Step 7: Validation
+    # Step 8: Validation
     # Check for duplicate specimen IDs (only if not generated)
     # Use X.index since specimen_ids may be out of sync after NaN removal
     if not generated_ids and X.index.duplicated().any():
@@ -2527,6 +2576,8 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         keep_mask = ~X.index.duplicated(keep='first')
         X = X[keep_mask]
         y = y[keep_mask]
+        if metadata_df is not None:
+            metadata_df = metadata_df[keep_mask]
 
     # Check wavelength ordering
     wavelength_values = X.columns.values
@@ -2534,17 +2585,18 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
               for i in range(len(wavelength_values)-1)):
         print("Warning: Wavelengths were not strictly increasing. Sorted automatically.")
 
-    # Step 8: Detect data type (reflectance vs absorbance)
+    # Step 9: Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(X)
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
 
-    # Step 9: Compile metadata
+    # Step 10: Compile metadata
     metadata = {
         'specimen_id_col': specimen_id_col,
         'y_col': y_col,
         'wavelength_cols': wavelength_cols,
+        'metadata_cols': metadata_cols if metadata_cols else [],
         'n_spectra': len(X),
         'wavelength_range': (X.columns.min(), X.columns.max()),
         'file_format': 'combined_excel',
@@ -2558,8 +2610,10 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     print(f"Successfully read {len(X)} spectra with {X.shape[1]} wavelengths from Excel file")
     print(f"  Specimen ID column: {specimen_id_col}")
     print(f"  Target column: {y_col}")
+    if metadata_cols:
+        print(f"  Metadata columns: {', '.join(metadata_cols)}")
 
-    return X, y, metadata
+    return X, y, metadata_df, metadata
 
 
 def detect_combined_excel_format(directory_path):

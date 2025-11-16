@@ -1254,7 +1254,9 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
                 n_regions=ensemble_state.get('n_regions', 5),
                 preprocessors=base_preprocessors
             )
-            # Restore analyzer
+            # Restore weights and analyzer
+            if 'weights' in ensemble_state:
+                ensemble.weights_ = ensemble_state['weights']
             if 'analyzer' in ensemble_state:
                 ensemble.analyzer_ = ensemble_state['analyzer']
 
@@ -1264,11 +1266,14 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
                 models=base_models,
                 model_names=model_names,
                 region_aware=region_aware,
-                n_regions=ensemble_state.get('n_regions', 5) if region_aware else None
+                n_regions=ensemble_state.get('n_regions', 5) if region_aware else None,
+                preprocessors=base_preprocessors
             )
-            # Restore meta_model
+            # Restore meta_model and analyzer
             if 'meta_model' in ensemble_state:
                 ensemble.meta_model_ = ensemble_state['meta_model']
+            if 'analyzer' in ensemble_state:
+                ensemble.analyzer_ = ensemble_state['analyzer']
 
         elif ensemble_type == 'simple_average':
             # Simple average - just store models

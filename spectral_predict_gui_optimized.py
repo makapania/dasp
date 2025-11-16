@@ -569,6 +569,133 @@ TOOLTIP_CONTENT = {
             "For PLS: penalizes many components. For trees: penalizes depth/estimators. "
             "Recommended: 2 for exploration, 5-7 for interpretable models."
         ),
+    },
+
+    # ===== CALIBRATION TRANSFER METHODS =====
+    'calibration_transfer': {
+        # Transfer Methods
+        'method_DS': (
+            "Direct Standardization (DS) is a simple pairwise calibration transfer method. "
+            "Builds a linear transformation matrix F that directly maps slave spectra to master spectra: "
+            "X_master ≈ X_slave × F. Fast and straightforward, works well when master and slave "
+            "instruments have similar wavelength grids. Best for simple spectral differences. "
+            "Requires paired samples measured on both instruments. Lambda parameter controls regularization."
+        ),
+        'method_PDS': (
+            "Piecewise Direct Standardization (PDS) is a local version of DS that models each master "
+            "wavelength independently using a sliding window of neighboring slave wavelengths. "
+            "More flexible than global DS, better at handling nonlinear wavelength dependencies. "
+            "Window size controls how many neighboring wavelengths are used (typical: 7-15). "
+            "Larger windows = smoother transfer but may miss local spectral features. "
+            "Good for instruments with slight wavelength misalignments."
+        ),
+        'method_TSR': (
+            "Transfer by Sample Regression (TSR) selects a subset of representative transfer samples "
+            "that span the spectral space, then uses only these samples to build the transformation. "
+            "More efficient than using all transfer samples, reduces overfitting. Sample selection uses "
+            "Kennard-Stone algorithm to ensure good coverage of spectral diversity. "
+            "Number of samples controls subset size (typical: 10-30). Fewer = faster but may miss patterns, "
+            "more = comprehensive but slower. Robust choice for heterogeneous sample sets."
+        ),
+        'method_CTAI': (
+            "Calibration Transfer via Adaptive Integration (CTAI) combines spectral standardization "
+            "with adaptive selection of informative wavelengths. Uses an iterative algorithm to identify "
+            "and weight wavelengths that transfer well between instruments while down-weighting problematic "
+            "regions (e.g., noise, nonlinear response). More sophisticated than DS/PDS, adapts to "
+            "instrument-specific characteristics. Recommended when instruments have different noise profiles "
+            "or response characteristics. Generally provides robust transfer with minimal tuning."
+        ),
+        'method_NSPFCE': (
+            "Null-Space Projection followed by Feature Correlation Enhancement (NS-PFCE) is an advanced "
+            "method that removes instrument-specific variance while preserving chemical information. "
+            "Uses wavelength selection algorithms (VCPA-IRIV, CARS, SPA) to identify informative features, "
+            "then projects out instrument-specific interference using null-space operations. "
+            "Excellent for complex scenarios with significant instrumental differences (e.g., different "
+            "detectors, optical configurations). Slower than other methods but very effective. "
+            "Wavelength selection is critical for performance - VCPA-IRIV recommended for most cases."
+        ),
+        'method_JYPLS': (
+            "Joint-Y Partial Least Squares Inverse (JYPLS-inv) uses PLS regression to model the "
+            "master-slave relationship, treating master spectra as 'Y' and slave spectra as 'X'. "
+            "The PLS model learns latent variables capturing the systematic spectral differences. "
+            "Number of components controls model complexity (typical: 3-15, or 'Auto' for cross-validation). "
+            "More flexible than DS for nonlinear relationships, but requires more transfer samples (30+). "
+            "Sample selection uses Kennard-Stone for representativeness. "
+            "Good when spectral differences are complex but systematic."
+        ),
+
+        # Transfer Parameters
+        'param_ds_lambda': (
+            "Regularization strength for Direct Standardization (DS). Controls the bias-variance tradeoff "
+            "in the transformation matrix. Smaller values (0.0001-0.001) = less regularization, fits "
+            "transfer samples more closely (may overfit). Larger values (0.01-0.1) = more regularization, "
+            "smoother transformation (may underfit). Default 0.001 works well for most cases. "
+            "Increase if transfer performance is poor on new samples (overfitting). "
+            "Decrease if transfer doesn't correct spectral differences enough (underfitting)."
+        ),
+        'param_pds_window': (
+            "Window size for Piecewise Direct Standardization (PDS). Defines how many neighboring slave "
+            "wavelengths are used to predict each master wavelength. Must be odd number. "
+            "Small windows (5-9) = more local, captures fine spectral details, may be noisy. "
+            "Medium windows (11-15) = balanced, recommended for most applications (default: 11). "
+            "Large windows (17-25) = more global, smoother, approaches regular DS. "
+            "Match to your spectral resolution: higher resolution allows smaller windows."
+        ),
+        'param_tsr_samples': (
+            "Number of representative samples selected for Transfer by Sample Regression (TSR). "
+            "Subset selected using Kennard-Stone algorithm to span spectral diversity. "
+            "Fewer samples (8-12) = faster, simpler model, may miss spectral patterns (default: 12). "
+            "More samples (20-30) = more comprehensive, better coverage, slower. "
+            "Rule of thumb: 10-20% of total transfer samples, minimum 10. "
+            "Increase if transfer fails to capture sample diversity. Decrease if overfitting occurs."
+        ),
+        'param_jypls_samples': (
+            "Number of representative samples selected for JYPLS-inv calibration transfer. "
+            "Uses Kennard-Stone algorithm to select diverse subset from full transfer set. "
+            "Typical range: 10-30 samples (default: 12). More samples = better coverage but slower. "
+            "Fewer samples = faster but may miss important spectral variations. "
+            "Should be at least 2-3× the number of PLS components used. "
+            "Increase for heterogeneous sample sets or complex spectral differences."
+        ),
+        'param_jypls_components': (
+            "Number of PLS latent variables for JYPLS-inv transfer model. Components capture systematic "
+            "spectral differences between master and slave instruments. "
+            "'Auto' = automatic optimization via cross-validation (recommended, slower). "
+            "3-5 = simple spectral differences (baseline, scale). "
+            "8-12 = moderate complexity (wavelength shifts, nonlinearities). "
+            "15-20 = complex instrumental differences (different detectors, optics). "
+            "Too few = underfitting (incomplete transfer). Too many = overfitting (noise transfer). "
+            "Start with 'Auto' or 5-8 for typical applications."
+        ),
+        'param_nspfce_max_iter': (
+            "Maximum iterations for NS-PFCE optimization algorithm. Controls convergence of the iterative "
+            "null-space projection process. More iterations allow finding better projection but take longer. "
+            "50-100 = fast, usually sufficient for simple cases (default: 100). "
+            "200-500 = thorough optimization for complex instrumental differences. "
+            "Algorithm may converge early (before max iterations) if tolerance is met. "
+            "Increase if transfer quality is poor and you suspect incomplete convergence. "
+            "Monitor convergence messages - if hitting max iterations, consider increasing."
+        ),
+        'param_nspfce_wavelength_selection': (
+            "Enable wavelength selection for NS-PFCE to identify informative features. "
+            "When checked: Uses feature selection algorithm (VCPA-IRIV, CARS, or SPA) to find wavelengths "
+            "that transfer reliably between instruments while excluding problematic regions (noise, artifacts). "
+            "Recommended: CHECKED for most applications. Dramatically improves transfer quality by focusing "
+            "on stable, informative spectral regions. Unchecked = use all wavelengths (faster but may include "
+            "noisy regions that degrade transfer). Disable only if you've pre-selected optimal wavelengths "
+            "or working with very clean, well-matched instruments."
+        ),
+        'param_nspfce_selector': (
+            "Wavelength selection algorithm for NS-PFCE method. Chooses which features transfer reliably. "
+            "vcpa-iriv = Variable Combination Population Analysis + Iteratively Retaining Informative Variables. "
+            "Most comprehensive, identifies stable informative wavelengths, recommended for spectroscopy (default). "
+            "Slower but most robust. "
+            "cars = Competitive Adaptive Reweighted Sampling. Fast, uses competitive mechanism. Good for "
+            "large datasets where speed matters. "
+            "spa = Successive Projections Algorithm. Very fast, projects orthogonal variables. Good for "
+            "highly collinear spectral data. Less thorough than VCPA-IRIV. "
+            "Default vcpa-iriv works well for most spectroscopy applications."
+        ),
     }
 }
 
@@ -722,8 +849,8 @@ class SpectralPredictApp:
 
         # NEW: User-friendly penalty system (0-10 scale)
         # 0 = only performance (R²) matters, 10 = strong penalty
-        self.variable_penalty = tk.IntVar(value=2)     # Penalty for using many variables
-        self.complexity_penalty = tk.IntVar(value=2)   # Penalty for model complexity (LVs, etc.)
+        self.variable_penalty = tk.IntVar(value=0)     # Penalty for using many variables
+        self.complexity_penalty = tk.IntVar(value=0)   # Penalty for model complexity
 
         self.max_n_components = tk.IntVar(value=8)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
@@ -743,6 +870,12 @@ class SpectralPredictApp:
         # Interactive plot annotation tracking
         self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
         self.active_annotation = None  # Currently visible annotation object
+
+        # Plot coloring variables
+        self.pca_color_var = tk.StringVar(value='Y Value')
+        self.regression_pred_color_var = tk.StringVar(value='Y Value')
+        self.pred_results_color_var = tk.StringVar(value='Y Value')
+        self.residual_color_var = tk.StringVar(value='Y Value')
 
         # Validation set tracking
         self.validation_enabled = tk.BooleanVar(value=False)
@@ -1151,6 +1284,8 @@ class SpectralPredictApp:
         self.ensemble_stacking = tk.BooleanVar(value=True)
         self.ensemble_stacking_region = tk.BooleanVar(value=False)
         self.ensemble_n_regions = tk.IntVar(value=5)  # Number of regions for region-based ensembles
+        self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
+        self.ensemble_manual_selection = tk.BooleanVar(value=False)  # Use manual model selection
         self.ensemble_results = None  # Store ensemble predictions and metrics
 
         # Outlier detection variables (Phase 3)
@@ -1183,6 +1318,182 @@ class SpectralPredictApp:
         return (self.y.dtype == 'object' or
                 self.y.dtype.name == 'category' or
                 not np.issubdtype(self.y.dtype, np.number))
+
+    def _get_available_color_variables(self):
+        """Get list of available variables for plot coloring.
+
+        Returns list of options: ['None', 'Y Value', ...metadata columns]
+        """
+        options = ['None', 'Y Value']
+        if self.ref is not None and len(self.ref.columns) > 0:
+            options.extend(sorted(self.ref.columns.tolist()))
+        return options
+
+    def _is_categorical_variable(self, variable_name, values=None):
+        """Check if a variable is categorical or continuous.
+
+        Parameters
+        ----------
+        variable_name : str
+            Name of the variable ('Y Value' or metadata column name)
+        values : array-like, optional
+            Values to check. If None, will look up from self.y or self.ref
+
+        Returns
+        -------
+        bool
+            True if categorical, False if continuous
+        """
+        if variable_name == 'Y Value':
+            return self._is_categorical_target()
+        elif variable_name == 'None':
+            return False
+        else:
+            # Check metadata column
+            if values is None:
+                if self.ref is None or variable_name not in self.ref.columns:
+                    return False
+                values = self.ref[variable_name]
+
+            # Check dtype
+            if hasattr(values, 'dtype'):
+                return (values.dtype == 'object' or
+                        values.dtype.name == 'category' or
+                        not np.issubdtype(values.dtype, np.number))
+            return False
+
+    def _apply_color_scheme(self, ax, fig, x_data, y_data, color_by, indices=None, **scatter_kwargs):
+        """Apply color scheme to scatter plot based on selected variable.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            The axes to plot on
+        fig : matplotlib.figure.Figure
+            The figure (needed for colorbar)
+        x_data : array-like
+            X coordinates
+        y_data : array-like
+            Y coordinates
+        color_by : str
+            Variable to color by ('None', 'Y Value', or metadata column name)
+        indices : array-like, optional
+            Indices into self.y and self.ref for the data points
+            If None, assumes x_data and y_data align with self.y and self.ref
+        **scatter_kwargs : dict
+            Additional arguments passed to ax.scatter()
+
+        Returns
+        -------
+        scatter
+            The scatter plot object (for potential colorbar addition)
+        has_legend : bool
+            True if categorical legend was added
+        """
+        if indices is None:
+            indices = np.arange(len(x_data))
+
+        # Default scatter arguments
+        default_kwargs = {'alpha': 0.6, 'edgecolors': 'black', 'linewidths': 0.5, 's': 50}
+        default_kwargs.update(scatter_kwargs)
+
+        if color_by == 'None':
+            # Single color
+            scatter = ax.scatter(x_data, y_data, color='steelblue', **default_kwargs)
+            return scatter, False
+
+        elif color_by == 'Y Value':
+            # Color by target variable
+            color_values = self.y.iloc[indices].values if len(indices) <= len(self.y) else self.y.values
+
+            if self._is_categorical_target():
+                # Categorical Y: discrete colors
+                unique_classes = np.unique(color_values)
+                n_classes = len(unique_classes)
+                colors = plt.cm.Set1(np.linspace(0, 1, min(n_classes, 9)))
+                if n_classes > 9:
+                    colors = plt.cm.tab20(np.linspace(0, 1, min(n_classes, 20)))
+
+                color_map = {cls: colors[i % len(colors)] for i, cls in enumerate(unique_classes)}
+
+                # Plot each class separately for legend
+                for cls in unique_classes:
+                    mask = color_values == cls
+                    if np.any(mask):
+                        ax.scatter(x_data[mask], y_data[mask],
+                                 c=[color_map[cls]], label=str(cls), **default_kwargs)
+
+                ax.legend(title='Category', loc='best', framealpha=0.9)
+                return None, True
+            else:
+                # Continuous Y: colormap
+                # Ensure numeric (should already be for regression, but be safe)
+                numeric_y = pd.to_numeric(color_values, errors='coerce')
+                scatter = ax.scatter(x_data, y_data, c=numeric_y,
+                                   cmap='viridis', **default_kwargs)
+                cbar = fig.colorbar(scatter, ax=ax, label='Y Value')
+                return scatter, False
+
+        else:
+            # Color by metadata column
+            if self.ref is None or color_by not in self.ref.columns:
+                # Fallback to no color
+                scatter = ax.scatter(x_data, y_data, color='steelblue', **default_kwargs)
+                return scatter, False
+
+            metadata_values = self.ref[color_by].iloc[indices].values if len(indices) <= len(self.ref) else self.ref[color_by].values
+
+            if self._is_categorical_variable(color_by, metadata_values):
+                # Categorical metadata: discrete colors
+                unique_vals = np.unique(metadata_values[pd.notna(metadata_values)])
+                n_vals = len(unique_vals)
+
+                # Choose colormap based on number of unique values
+                if n_vals <= 10:
+                    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+                elif n_vals <= 20:
+                    colors = plt.cm.tab20(np.linspace(0, 1, 20))
+                else:
+                    # For many categories, use repeated colormap
+                    colors = plt.cm.tab20(np.linspace(0, 1, 20))
+
+                color_map = {val: colors[i % len(colors)] for i, val in enumerate(unique_vals)}
+
+                # Plot each category separately for legend
+                for val in unique_vals:
+                    mask = metadata_values == val
+                    if np.any(mask):
+                        ax.scatter(x_data[mask], y_data[mask],
+                                 c=[color_map[val]], label=str(val), **default_kwargs)
+
+                # Handle NaN values if present
+                nan_mask = pd.isna(metadata_values)
+                if np.any(nan_mask):
+                    ax.scatter(x_data[nan_mask], y_data[nan_mask],
+                             c='lightgray', label='N/A', **default_kwargs)
+
+                ax.legend(title=color_by, loc='best', framealpha=0.9, fontsize=8)
+                return None, True
+            else:
+                # Continuous metadata: colormap
+                # Convert to numeric if needed (handles string numeric values)
+                numeric_values = pd.to_numeric(metadata_values, errors='coerce')
+
+                # Handle NaN values (including conversion failures)
+                valid_mask = pd.notna(numeric_values)
+
+                if np.any(valid_mask):
+                    scatter = ax.scatter(x_data[valid_mask], y_data[valid_mask],
+                                       c=numeric_values[valid_mask],
+                                       cmap='viridis', **default_kwargs)
+                    cbar = fig.colorbar(scatter, ax=ax, label=color_by)
+
+                # Plot NaN values in gray
+                if np.any(~valid_mask):
+                    ax.scatter(x_data[~valid_mask], y_data[~valid_mask],
+                             c='lightgray', label='N/A', **default_kwargs)
+
+                return scatter if np.any(valid_mask) else None, False
 
     def _configure_style(self):
         """Configure modern Wabi-Sabi aesthetic with multiple theme support."""
@@ -4104,11 +4415,24 @@ class SpectralPredictApp:
 
         ttk.Label(regions_frame, text="(default: 5)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
+        # Model Selection Configuration
+        ttk.Label(ensemble_frame, text="Model Selection:", style='Subheading.TLabel').grid(row=9, column=0, sticky=tk.W, pady=(15, 5), padx=(20, 0))
+
+        selection_frame = ttk.Frame(ensemble_frame)
+        selection_frame.grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=5, padx=(20, 0))
+
+        ttk.Label(selection_frame, text="Use top").grid(row=0, column=0, padx=(0, 5))
+        ttk.Spinbox(selection_frame, from_=3, to=20, width=5, textvariable=self.ensemble_top_n).grid(row=0, column=1, padx=5)
+        ttk.Label(selection_frame, text="models from ranked list").grid(row=0, column=2, padx=(5, 20))
+
+        ttk.Checkbutton(selection_frame, text="☑ Enable manual selection (check models in Results table)",
+                       variable=self.ensemble_manual_selection).grid(row=0, column=3, padx=10)
+
         # Info labels
-        ttk.Label(ensemble_frame, text="💡 Ensembles run AFTER individual model search using the top 3-5 models",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        ttk.Label(ensemble_frame, text="💡 Ensembles combine multiple models - more models capture diverse strengths across prediction ranges",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
         ttk.Label(ensemble_frame, text="💡 Region-based methods identify which models excel at low/mid/high predictions",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=12, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Run button - use modern gradient button
         run_btn = self._create_button_with_gradient(content_frame, text="▶ Run Analysis",
@@ -4312,6 +4636,8 @@ class SpectralPredictApp:
 
         # Bind double-click event
         self.results_tree.bind('<Double-Button-1>', self._on_result_double_click)
+        # Bind single-click event for checkbox toggling
+        self.results_tree.bind('<Button-1>', self._on_result_click)
 
         # Button frame for actions (inside card)
         button_frame = ttk.Frame(results_card)
@@ -5068,12 +5394,13 @@ class SpectralPredictApp:
             # Try to read and detect columns
             try:
                 if is_excel:
-                    X, y, metadata = read_combined_excel(combined_file, sheet_name=sheet_name)
+                    X, y, metadata_df, metadata = read_combined_excel(combined_file, sheet_name=sheet_name)
                 else:
-                    X, y, metadata = read_combined_csv(combined_file)
+                    X, y, metadata_df, metadata = read_combined_csv(combined_file)
 
                 # Store metadata for later use
                 self.combined_metadata = metadata
+                self.combined_metadata_df = metadata_df
 
                 # Update status with detailed info
                 if metadata['generated_ids']:
@@ -5182,7 +5509,8 @@ class SpectralPredictApp:
 
             # Update comboboxes
             self.spectral_file_combo['values'] = columns
-            self.id_combo['values'] = columns
+            # Add "N/A - Use Filename" option for Specimen ID
+            self.id_combo['values'] = ['N/A - Use Filename'] + columns
             self.target_combo['values'] = columns
 
             # Auto-select if possible
@@ -5399,13 +5727,13 @@ class SpectralPredictApp:
                 from spectral_predict.io import read_combined_csv, read_combined_excel
 
                 if self.detected_type == "combined_excel":
-                    X_aligned, y_aligned, metadata = read_combined_excel(
+                    X_aligned, y_aligned, metadata_df, metadata = read_combined_excel(
                         self.combined_file_path,
                         y_col=self.target_column.get() if self.target_column.get() else None,
                         sheet_name=self.combined_sheet_name
                     )
                 else:
-                    X_aligned, y_aligned, metadata = read_combined_csv(
+                    X_aligned, y_aligned, metadata_df, metadata = read_combined_csv(
                         self.combined_file_path,
                         y_col=self.target_column.get() if self.target_column.get() else None
                     )
@@ -5421,7 +5749,9 @@ class SpectralPredictApp:
                 # Store original unfiltered data
                 self.X_original = X_aligned
                 self.y = y_aligned
+                # Don't mix metadata with reference data - keep them separate
                 self.ref = None  # No separate reference file for combined format
+                self.combined_metadata_df = metadata_df  # Store metadata columns separately
 
                 # Show success message
                 format_name = "Excel" if self.detected_type == "combined_excel" else "CSV/TXT"
@@ -5430,6 +5760,8 @@ class SpectralPredictApp:
                 print(f"  • Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm")
                 print(f"  • Specimen ID: {metadata['specimen_id_col']}")
                 print(f"  • Target: {metadata['y_col']}")
+                if metadata.get('metadata_cols'):
+                    print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
 
             elif self.detected_type == "asd":
                 X, metadata = read_asd_dir(self.spectral_data_path.get())
@@ -5458,6 +5790,10 @@ class SpectralPredictApp:
 
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
+
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
 
                 # Store original unfiltered data
                 self.X_original = X_aligned
@@ -5492,6 +5828,10 @@ class SpectralPredictApp:
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
 
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
+
                 # Store original unfiltered data
                 self.X_original = X_aligned
                 self.y = y_aligned
@@ -5524,6 +5864,10 @@ class SpectralPredictApp:
 
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
+
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
 
                 # Store original unfiltered data
                 self.X_original = X_aligned
@@ -5560,6 +5904,10 @@ class SpectralPredictApp:
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
 
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
+
                 # Store original unfiltered data
                 self.X_original = X_aligned
                 self.y = y_aligned
@@ -5594,6 +5942,10 @@ class SpectralPredictApp:
 
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
+
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
 
                 # Store original unfiltered data
                 self.X_original = X_aligned
@@ -5630,6 +5982,10 @@ class SpectralPredictApp:
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
 
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
+
                 # Store original unfiltered data
                 self.X_original = X_aligned
                 self.y = y_aligned
@@ -5664,6 +6020,10 @@ class SpectralPredictApp:
 
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
+
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
 
                 # Store original unfiltered data
                 self.X_original = X_aligned
@@ -5700,6 +6060,10 @@ class SpectralPredictApp:
                 # Show alignment report to user
                 self._show_alignment_report(alignment_info)
 
+                # Apply specimen ID column if not using filename
+                # DISABLED: This function can cause data misalignment
+                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
+
                 # Store original unfiltered data
                 self.X_original = X_aligned
                 self.y = y_aligned
@@ -5708,6 +6072,24 @@ class SpectralPredictApp:
             else:
                 messagebox.showerror("Error", f"Unknown data type: {self.detected_type}")
                 return
+
+            # CRITICAL: Verify index alignment to prevent data corruption
+            if self.X_original is not None and self.y is not None:
+                if not (self.X_original.index.equals(self.y.index)):
+                    print("ERROR: X and y indices don't match! This would cause data corruption.")
+                    print(f"X index sample: {list(self.X_original.index[:5])}")
+                    print(f"y index sample: {list(self.y.index[:5])}")
+                    messagebox.showerror("Data Alignment Error",
+                                       "Critical: X and y indices don't match after loading!\n"
+                                       "This would cause incorrect model training.\n"
+                                       "Please check your data format.")
+                    return
+
+                # Also check ref alignment if it exists
+                if self.ref is not None and len(self.ref) > 0:
+                    if not (self.X_original.index.equals(self.ref.index)):
+                        print("WARNING: X and ref indices don't match!")
+                        print("This may affect metadata display but won't corrupt model training.")
 
             # Auto-populate wavelength range ONLY if empty
             if not self.wavelength_min.get().strip() and not self.wavelength_max.get().strip():
@@ -5845,6 +6227,57 @@ class SpectralPredictApp:
             # Center dialog on parent
             dialog.transient(self.root)
             dialog.grab_set()
+
+    def _apply_specimen_id_column(self, X_aligned, y_aligned, ref):
+        """
+        Apply the selected specimen ID column to the aligned data.
+
+        If user selected "N/A - Use Filename", keeps filename as ID.
+        Otherwise, replaces the index with the selected ID column values.
+
+        Parameters
+        ----------
+        X_aligned : pd.DataFrame
+            Aligned spectral data (indexed by filename)
+        y_aligned : pd.Series
+            Aligned target values (indexed by filename)
+        ref : pd.DataFrame
+            Reference dataframe (indexed by filename)
+
+        Returns
+        -------
+        X_aligned, y_aligned, ref : tuple
+            Data with updated indices based on specimen ID column
+        """
+        id_col = self.id_column.get()
+
+        # If "N/A - Use Filename" is selected, keep current indices (filenames)
+        if id_col == "N/A - Use Filename" or not id_col:
+            return X_aligned, y_aligned, ref
+
+        # Otherwise, use the selected ID column as the new index
+        if id_col not in ref.columns:
+            print(f"Warning: ID column '{id_col}' not found in reference data. Using filenames instead.")
+            return X_aligned, y_aligned, ref
+
+        # Get the ID values for the aligned samples (in the same order)
+        new_ids = ref.loc[X_aligned.index, id_col]
+
+        # Check for duplicate IDs
+        if new_ids.duplicated().any():
+            dup_ids = new_ids[new_ids.duplicated()].unique()
+            print(f"\n⚠️ WARNING: Found {new_ids.duplicated().sum()} duplicate specimen IDs after alignment!")
+            print(f"Duplicate IDs: {list(dup_ids[:10])}")
+            print("This may cause issues with data tracking. Consider using unique specimen IDs.\n")
+
+        # Update indices
+        X_aligned.index = new_ids
+        y_aligned.index = new_ids
+        ref.index = new_ids
+
+        print(f"✓ Using '{id_col}' column as specimen IDs")
+
+        return X_aligned, y_aligned, ref
 
     def _apply_wavelength_filter(self):
         """Apply wavelength filtering to X_original and store in self.X."""
@@ -6394,9 +6827,27 @@ class SpectralPredictApp:
         lines = []
 
         # Get specimen ID if available
+        specimen_id = None
         if self.y is not None and hasattr(self.y, 'index'):
             specimen_id = self.y.index[specimen_idx]
             lines.append(f"Specimen: {specimen_id}")
+
+        # Add ALL metadata columns if available
+        if specimen_id is not None and self.ref is not None and len(self.ref.columns) > 0:
+            try:
+                metadata_row = self.ref.loc[specimen_id]
+                for col in sorted(self.ref.columns):
+                    value = metadata_row[col]
+                    if pd.notna(value):
+                        if isinstance(value, (float, np.floating)):
+                            lines.append(f"{col}: {value:.4f}")
+                        else:
+                            lines.append(f"{col}: {value}")
+                    else:
+                        lines.append(f"{col}: N/A")
+            except KeyError:
+                # Specimen not in metadata
+                pass
 
         # Format Y value (handle both regression and classification)
         if y_value is not None:
@@ -6800,13 +7251,32 @@ class SpectralPredictApp:
             self.tab2_status.config(text="Error during outlier detection")
 
     def _plot_pca_scores(self):
-        """Plot PCA scores (PC1 vs PC2) colored by Y value."""
+        """Plot PCA scores (PC1 vs PC2) colored by selected variable."""
         if not HAS_MATPLOTLIB or self.outlier_report is None:
             return
 
         # Clear existing plot
         for widget in self.pca_plot_frame.winfo_children():
             widget.destroy()
+
+        # Add control frame for color selection
+        control_frame = ttk.Frame(self.pca_plot_frame)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
+
+        color_options = self._get_available_color_variables()
+        color_combo = ttk.Combobox(control_frame,
+                                   textvariable=self.pca_color_var,
+                                   values=color_options,
+                                   width=20,
+                                   state='readonly')
+        color_combo.pack(side='left', padx=5)
+        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_pca_scores())
+
+        # Create plot frame
+        plot_frame = ttk.Frame(self.pca_plot_frame)
+        plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         fig = Figure(figsize=(8, 6))
         ax = fig.add_subplot(111)
@@ -6815,20 +7285,77 @@ class SpectralPredictApp:
         y_values = self.y.values
         outliers = self.outlier_report['pca']['outlier_flags']
 
-        # Color points by Y value
-        if self._is_categorical_target():
-            # Use discrete colors for categorical targets
-            unique_classes = np.unique(y_values)
-            n_classes = len(unique_classes)
-            colors = plt.cm.Set1(np.linspace(0, 1, min(n_classes, 9)))  # Set1 has 9 colors
+        # Get color variable selection
+        color_by = self.pca_color_var.get()
 
-            # Create color map
-            color_map = {cls: colors[i % len(colors)] for i, cls in enumerate(unique_classes)}
-            point_colors = [color_map[y] for y in y_values]
+        # Determine coloring values
+        if color_by == 'Y Value':
+            color_values = y_values
+            is_categorical = self._is_categorical_target()
+            color_label = 'Y Value'
+        elif color_by == 'None':
+            color_values = None
+            is_categorical = False
+            color_label = None
+        else:
+            # Metadata column - need to align with y_values using specimen IDs
+            if self.ref is not None and color_by in self.ref.columns:
+                # Get specimen IDs from y (which aligns with scores)
+                specimen_ids = self.y.index
 
-            # Plot with discrete colors
-            for cls in unique_classes:
-                mask = y_values == cls
+                # Align metadata with these specimen IDs
+                try:
+                    color_values = self.ref.loc[specimen_ids, color_by].values
+                except KeyError:
+                    # Some specimen IDs not in ref - shouldn't happen but handle it
+                    print(f"Warning: Some specimen IDs not found in metadata")
+                    color_values = None
+                    is_categorical = False
+                    color_label = None
+                else:
+                    is_categorical = self._is_categorical_variable(color_by, color_values)
+                    color_label = color_by
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
+
+        # Color points based on selection
+        if color_values is None:
+            # No color - single color for all points
+            if outliers is not None and np.any(outliers):
+                # Normal samples
+                ax.scatter(scores[~outliers, 0], scores[~outliers, 1],
+                          color='steelblue', alpha=0.6, edgecolors='black',
+                          linewidths=0.5, s=50, label='Normal')
+                # Outlier samples
+                ax.scatter(scores[outliers, 0], scores[outliers, 1],
+                          color='steelblue', alpha=0.6, edgecolors='red',
+                          linewidths=2, s=100, marker='x', label='Outlier')
+                ax.legend(loc='best', fontsize=8)
+            else:
+                ax.scatter(scores[:, 0], scores[:, 1],
+                          color='steelblue', alpha=0.6, edgecolors='black',
+                          linewidths=0.5, s=50)
+
+        elif is_categorical:
+            # Categorical coloring with discrete colors
+            unique_vals = np.unique(color_values[pd.notna(color_values)])
+            n_vals = len(unique_vals)
+
+            # Choose colormap
+            if n_vals <= 10:
+                colors = plt.cm.tab10(np.linspace(0, 1, 10))
+            elif n_vals <= 20:
+                colors = plt.cm.tab20(np.linspace(0, 1, 20))
+            else:
+                colors = plt.cm.tab20(np.linspace(0, 1, 20))
+
+            color_map = {val: colors[i % len(colors)] for i, val in enumerate(unique_vals)}
+
+            # Plot each category separately
+            for val in unique_vals:
+                mask = color_values == val
                 if outliers is not None:
                     # Separate normal and outlier samples
                     normal_mask = mask & ~outliers
@@ -6836,35 +7363,89 @@ class SpectralPredictApp:
 
                     if np.any(normal_mask):
                         ax.scatter(scores[normal_mask, 0], scores[normal_mask, 1],
-                                  c=[color_map[cls]], alpha=0.6, edgecolors='black',
-                                  linewidths=0.5, label=str(cls), s=50)
+                                  c=[color_map[val]], alpha=0.6, edgecolors='black',
+                                  linewidths=0.5, label=str(val), s=50)
                     if np.any(outlier_mask):
                         ax.scatter(scores[outlier_mask, 0], scores[outlier_mask, 1],
-                                  c=[color_map[cls]], alpha=0.6, edgecolors='red',
+                                  c=[color_map[val]], alpha=0.6, edgecolors='red',
                                   linewidths=2, s=100, marker='x')
                 else:
                     ax.scatter(scores[mask, 0], scores[mask, 1],
-                              c=[color_map[cls]], alpha=0.6, edgecolors='black',
-                              linewidths=0.5, label=str(cls), s=50)
+                              c=[color_map[val]], alpha=0.6, edgecolors='black',
+                              linewidths=0.5, label=str(val), s=50)
 
-            ax.legend(title='Category', loc='best', fontsize=8)
+            # Handle NaN values if present
+            nan_mask = pd.isna(color_values)
+            if np.any(nan_mask):
+                if outliers is not None:
+                    normal_nan = nan_mask & ~outliers
+                    outlier_nan = nan_mask & outliers
+                    if np.any(normal_nan):
+                        ax.scatter(scores[normal_nan, 0], scores[normal_nan, 1],
+                                  c='lightgray', alpha=0.6, edgecolors='black',
+                                  linewidths=0.5, label='N/A', s=50)
+                    if np.any(outlier_nan):
+                        ax.scatter(scores[outlier_nan, 0], scores[outlier_nan, 1],
+                                  c='lightgray', alpha=0.6, edgecolors='red',
+                                  linewidths=2, s=100, marker='x')
+                else:
+                    ax.scatter(scores[nan_mask, 0], scores[nan_mask, 1],
+                              c='lightgray', alpha=0.6, edgecolors='black',
+                              linewidths=0.5, label='N/A', s=50)
+
+            ax.legend(title=color_label, loc='best', fontsize=8, framealpha=0.9)
+
         else:
-            # Use continuous colormap for numeric targets (existing code)
+            # Continuous coloring with colormap
+            # Convert to numeric if needed (handles string numeric values)
+            numeric_color_values = pd.to_numeric(color_values, errors='coerce')
+            valid_mask = pd.notna(numeric_color_values)
+
             if outliers is not None and np.any(outliers):
                 # Normal samples
-                scatter_normal = ax.scatter(scores[~outliers, 0], scores[~outliers, 1],
-                                           c=y_values[~outliers], cmap='viridis',
-                                           alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+                normal_mask = ~outliers & valid_mask
+                if np.any(normal_mask):
+                    scatter_normal = ax.scatter(scores[normal_mask, 0], scores[normal_mask, 1],
+                                               c=numeric_color_values[normal_mask], cmap='viridis',
+                                               alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+                    fig.colorbar(scatter_normal, ax=ax, label=color_label)
+
                 # Outlier samples
-                ax.scatter(scores[outliers, 0], scores[outliers, 1],
-                          c=y_values[outliers], cmap='viridis',
-                          alpha=0.6, edgecolors='red', linewidths=2, s=100, marker='x')
-                fig.colorbar(scatter_normal, ax=ax, label='Y Value')
+                outlier_mask = outliers & valid_mask
+                if np.any(outlier_mask):
+                    ax.scatter(scores[outlier_mask, 0], scores[outlier_mask, 1],
+                              c=numeric_color_values[outlier_mask], cmap='viridis',
+                              alpha=0.6, edgecolors='red', linewidths=2, s=100, marker='x')
+
+                # Handle NaN values
+                nan_mask = ~valid_mask
+                if np.any(nan_mask):
+                    normal_nan = nan_mask & ~outliers
+                    outlier_nan = nan_mask & outliers
+                    if np.any(normal_nan):
+                        ax.scatter(scores[normal_nan, 0], scores[normal_nan, 1],
+                                  c='lightgray', alpha=0.6, edgecolors='black',
+                                  linewidths=0.5, s=50, label='N/A')
+                    if np.any(outlier_nan):
+                        ax.scatter(scores[outlier_nan, 0], scores[outlier_nan, 1],
+                                  c='lightgray', alpha=0.6, edgecolors='red',
+                                  linewidths=2, s=100, marker='x')
+                    ax.legend(loc='best', fontsize=8)
             else:
-                scatter = ax.scatter(scores[:, 0], scores[:, 1], c=y_values,
-                                   cmap='viridis', alpha=0.6, edgecolors='black',
-                                   linewidths=0.5, s=50)
-                fig.colorbar(scatter, ax=ax, label='Y Value')
+                # No outliers
+                if np.any(valid_mask):
+                    scatter = ax.scatter(scores[valid_mask, 0], scores[valid_mask, 1],
+                                       c=numeric_color_values[valid_mask], cmap='viridis',
+                                       alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+                    fig.colorbar(scatter, ax=ax, label=color_label)
+
+                # Handle NaN values
+                nan_mask = ~valid_mask
+                if np.any(nan_mask):
+                    ax.scatter(scores[nan_mask, 0], scores[nan_mask, 1],
+                              c='lightgray', alpha=0.6, edgecolors='black',
+                              linewidths=0.5, s=50, label='N/A')
+                    ax.legend(loc='best', fontsize=8)
 
         ax.set_xlabel(f'PC1 ({self.outlier_report["pca"]["variance_explained"][0]*100:.1f}%)')
         ax.set_ylabel(f'PC2 ({self.outlier_report["pca"]["variance_explained"][1]*100:.1f}%)')
@@ -6872,7 +7453,7 @@ class SpectralPredictApp:
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
 
-        canvas = FigureCanvasTkAgg(fig, self.pca_plot_frame)
+        canvas = FigureCanvasTkAgg(fig, plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -6907,6 +7488,17 @@ class SpectralPredictApp:
                     'PC2': pc2,
                     'Outlier': 'Yes' if is_outlier else 'No'
                 }
+
+                # Add color variable to extra_info if it's a metadata column
+                if color_by not in ['None', 'Y Value'] and color_values is not None:
+                    color_val = color_values[nearest_idx]
+                    if pd.notna(color_val):
+                        if isinstance(color_val, (float, np.floating)):
+                            extra_info[color_by] = f"{color_val:.4f}"
+                        else:
+                            extra_info[color_by] = str(color_val)
+                    else:
+                        extra_info[color_by] = "N/A"
 
                 info_text = self._format_specimen_info(nearest_idx, y_value=y_value, extra_info=extra_info)
                 self._create_or_update_annotation(ax, pc1, pc2, info_text, canvas)
@@ -8695,6 +9287,15 @@ class SpectralPredictApp:
             # Store label_encoder for saving with models
             self.label_encoder = label_encoder
 
+            # Add "Select" column for ensemble model selection
+            # Auto-select top N models by CompositeScore (lower is better)
+            top_n = self.ensemble_top_n.get()
+            results_df.insert(0, 'Select', False)  # Insert as first column
+            if len(results_df) > 0:
+                # Get indices of top N models (lowest CompositeScore)
+                top_indices = results_df.nsmallest(min(top_n, len(results_df)), 'CompositeScore').index
+                results_df.loc[top_indices, 'Select'] = True
+
             # Save results
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = Path(self.output_dir.get())
@@ -8824,11 +9425,22 @@ class SpectralPredictApp:
                     from spectral_predict.ensemble import create_ensemble
                     from sklearn.model_selection import cross_val_predict
 
-                    # Select top N models for ensemble
-                    top_n = 5
-                    top_models_df = results_df.nsmallest(top_n, 'CompositeScore')
+                    # Select models for ensemble based on user configuration
+                    if self.ensemble_manual_selection.get():
+                        # Use manually selected models from checkboxes
+                        top_models_df = results_df[results_df['Select'] == True].copy()
+                        self._log_progress(f"Using {len(top_models_df)} manually selected models for ensemble:")
+                    else:
+                        # Use top N models by CompositeScore
+                        top_n = self.ensemble_top_n.get()
+                        top_models_df = results_df.nsmallest(top_n, 'CompositeScore')
+                        self._log_progress(f"Using top {len(top_models_df)} models (by score) for ensemble:")
 
-                    self._log_progress(f"Using top {len(top_models_df)} models for ensemble:")
+                    if len(top_models_df) == 0:
+                        self._log_progress(f"⚠️ No models selected for ensemble, skipping...")
+                        raise ValueError("No models selected for ensemble")
+
+                    # Log selected models
                     for i, row in enumerate(top_models_df.itertuples(), 1):
                         self._log_progress(f"  {i}. {row.Model} ({row.Preprocess}) - Score: {row.CompositeScore:.4f}")
 
@@ -9240,7 +9852,9 @@ class SpectralPredictApp:
             # Configure column widths and anchors
             for col in columns:
                 # Set column width based on content
-                if col in ['Model', 'Preprocess', 'Subset']:
+                if col == 'Select':
+                    width = 60
+                elif col in ['Model', 'Preprocess', 'Subset']:
                     width = 120
                 elif col in ['top_vars']:
                     width = 200
@@ -9264,11 +9878,45 @@ class SpectralPredictApp:
 
         # Insert data rows
         for idx, row in results_df.iterrows():
-            values = [row[col] for col in columns]
+            values = []
+            for col in columns:
+                if col == 'Select':
+                    # Convert boolean to checkbox symbol
+                    values.append('☑' if row[col] else '☐')
+                else:
+                    values.append(row[col])
             self.results_tree.insert('', 'end', iid=str(idx), values=values)
 
         # Update status
         self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
+
+    def _on_result_click(self, event):
+        """Handle single-click on results table to toggle checkbox selection."""
+        # Identify which column was clicked
+        region = self.results_tree.identify('region', event.x, event.y)
+        if region != 'cell':
+            return
+
+        column = self.results_tree.identify_column(event.x)
+        row_id = self.results_tree.identify_row(event.y)
+
+        if not row_id:
+            return
+
+        # Check if click was on the Select column (column #0)
+        if column != '#1':  # #1 is the first column (Select)
+            return
+
+        # Toggle the selection
+        row_idx = int(row_id)
+        if self.results_df is not None:
+            # Toggle boolean value in DataFrame
+            self.results_df.loc[row_idx, 'Select'] = not self.results_df.loc[row_idx, 'Select']
+
+            # Update display (toggle checkbox symbol)
+            current_values = list(self.results_tree.item(row_id, 'values'))
+            current_values[0] = '☑' if self.results_df.loc[row_idx, 'Select'] else '☐'
+            self.results_tree.item(row_id, values=current_values)
 
     def _on_result_double_click(self, event):
         """Handle double-click on a result row."""
@@ -9460,7 +10108,6 @@ class SpectralPredictApp:
 
             # Show in popup window with clearer title
             fig.canvas.manager.set_window_title(f'Base Model Performance - {ensemble_method} Ensemble')
-            plt.tight_layout()
             plt.show()
 
         except Exception as e:
@@ -9509,7 +10156,6 @@ class SpectralPredictApp:
 
             # Show in popup window with clearer title
             fig.canvas.manager.set_window_title(f'Model Weights - {ensemble_method} Ensemble')
-            plt.tight_layout()
             plt.show()
 
         except Exception as e:
@@ -9564,7 +10210,6 @@ class SpectralPredictApp:
 
             # Show in popup window with clearer title
             fig.canvas.manager.set_window_title(f'Model Specialization - {ensemble_method} Ensemble')
-            plt.tight_layout()
             plt.show()
 
         except Exception as e:
@@ -9837,15 +10482,39 @@ class SpectralPredictApp:
                 display_y = self.y[mask].copy()
                 excluded_indices = []
 
-            # Build headers: Sample ID, Target, then all wavelengths
+            # Check if metadata columns exist (from self.ref)
+            metadata_cols = []
+            display_metadata = None
+            if self.ref is not None and len(self.ref.columns) > 0:
+                # Filter metadata to match displayed samples
+                if show_excluded:
+                    display_metadata = self.ref.copy()
+                else:
+                    display_metadata = self.ref[mask].copy()
+                metadata_cols = list(self.ref.columns)
+
+            # Build headers: Sample ID, Metadata columns, Target, then all wavelengths
             wavelength_headers = [str(wl) for wl in display_df.columns]
-            headers = ['Sample ID', target_col] + wavelength_headers
+            headers = ['Sample ID'] + metadata_cols + [target_col] + wavelength_headers
 
             # Pre-format all data
             formatted_data = []
             for idx in display_df.index:
                 # Sample ID
                 sample_id = str(idx)
+
+                # Metadata values (if any)
+                metadata_vals = []
+                if display_metadata is not None:
+                    for col in metadata_cols:
+                        val = display_metadata.loc[idx, col]
+                        # Format based on type
+                        if pd.isna(val):
+                            metadata_vals.append('')
+                        elif np.issubdtype(type(val), np.number):
+                            metadata_vals.append(f"{val:.4f}")
+                        else:
+                            metadata_vals.append(str(val))
 
                 # Target value
                 if np.issubdtype(display_y.dtype, np.number):
@@ -9856,7 +10525,7 @@ class SpectralPredictApp:
                 # Spectral values (format to 5 decimals)
                 spectral_vals = [f"{val:.5f}" for val in display_df.loc[idx].values]
 
-                row_data = [sample_id, target_val] + spectral_vals
+                row_data = [sample_id] + metadata_vals + [target_val] + spectral_vals
                 formatted_data.append(row_data)
 
             # Set sheet data and headers
@@ -9939,7 +10608,16 @@ class SpectralPredictApp:
 
             # Create combined dataframe
             export_df = self.X.copy()
-            export_df.insert(0, target_col, self.y)
+
+            # Add metadata columns if available (insert before target column)
+            insert_position = 0
+            if self.ref is not None and len(self.ref.columns) > 0:
+                for col in self.ref.columns:
+                    export_df.insert(insert_position, col, self.ref[col])
+                    insert_position += 1
+
+            # Add target column
+            export_df.insert(insert_position, target_col, self.y)
             export_df.index.name = 'Sample_ID'
 
             # Filter out excluded samples if checkbox is unchecked
@@ -10456,6 +11134,25 @@ Performance (Classification):
         for widget in self.refine_plot_frame.winfo_children():
             widget.destroy()
 
+        # Add control frame for color selection
+        control_frame = ttk.Frame(self.refine_plot_frame)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
+
+        color_options = self._get_available_color_variables()
+        color_combo = ttk.Combobox(control_frame,
+                                   textvariable=self.regression_pred_color_var,
+                                   values=color_options,
+                                   width=20,
+                                   state='readonly')
+        color_combo.pack(side='left', padx=5)
+        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_regression_predictions())
+
+        # Create plot frame
+        plot_frame = ttk.Frame(self.refine_plot_frame)
+        plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         # Create figure
         fig = Figure(figsize=(8, 6))
         ax = fig.add_subplot(111)
@@ -10463,8 +11160,93 @@ Performance (Classification):
         y_true = self.refined_y_true
         y_pred = self.refined_y_pred
 
-        # Scatter plot
-        ax.scatter(y_true, y_pred, alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+        # Get color variable selection
+        color_by = self.regression_pred_color_var.get()
+
+        # Determine coloring values - need to align with CV indices
+        if color_by == 'Y Value':
+            color_values = y_true.copy()
+            is_categorical = self._is_categorical_target()
+            color_label = 'Y Value'
+        elif color_by == 'None':
+            color_values = None
+            is_categorical = False
+            color_label = None
+        else:
+            # Metadata column - need to map using refined_cv_indices
+            if self.ref is not None and color_by in self.ref.columns and hasattr(self, 'refined_cv_indices'):
+                # Get specimen IDs for CV samples
+                # CRITICAL FIX: Use the stored specimen IDs that match the CV data
+                if hasattr(self, 'refined_specimen_ids'):
+                    cv_specimen_ids = self.refined_specimen_ids
+                else:
+                    # Fallback to old behavior (might be incorrect with validation set)
+                    cv_specimen_ids = self.y.index[self.refined_cv_indices]
+
+                # Align metadata with these specimen IDs
+                try:
+                    color_values = self.ref.loc[cv_specimen_ids, color_by].values
+                    is_categorical = self._is_categorical_variable(color_by, color_values)
+                    color_label = color_by
+                except KeyError:
+                    color_values = None
+                    is_categorical = False
+                    color_label = None
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
+
+        # Apply coloring
+        if color_values is None:
+            # No color - single color
+            ax.scatter(y_true, y_pred, alpha=0.6, edgecolors='black', linewidths=0.5, s=50, color='steelblue')
+        elif is_categorical:
+            # Categorical coloring
+            unique_vals = np.unique(color_values[pd.notna(color_values)])
+            n_vals = len(unique_vals)
+
+            if n_vals <= 10:
+                colors = plt.cm.tab10(np.linspace(0, 1, 10))
+            elif n_vals <= 20:
+                colors = plt.cm.tab20(np.linspace(0, 1, 20))
+            else:
+                colors = plt.cm.tab20(np.linspace(0, 1, 20))
+
+            color_map = {val: colors[i % len(colors)] for i, val in enumerate(unique_vals)}
+
+            for val in unique_vals:
+                mask = color_values == val
+                if np.any(mask):
+                    ax.scatter(y_true[mask], y_pred[mask],
+                             c=[color_map[val]], alpha=0.6, edgecolors='black',
+                             linewidths=0.5, label=str(val), s=50)
+
+            # Handle NaN values
+            nan_mask = pd.isna(color_values)
+            if np.any(nan_mask):
+                ax.scatter(y_true[nan_mask], y_pred[nan_mask],
+                         c='lightgray', alpha=0.6, edgecolors='black',
+                         linewidths=0.5, label='N/A', s=50)
+
+            ax.legend(title=color_label, loc='upper left', fontsize=8, framealpha=0.9)
+        else:
+            # Continuous coloring
+            # Convert to numeric if needed (handles string numeric values)
+            numeric_color_values = pd.to_numeric(color_values, errors='coerce')
+            valid_mask = pd.notna(numeric_color_values)
+            if np.any(valid_mask):
+                scatter = ax.scatter(y_true[valid_mask], y_pred[valid_mask],
+                                   c=numeric_color_values[valid_mask], cmap='viridis',
+                                   alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+                fig.colorbar(scatter, ax=ax, label=color_label)
+
+            nan_mask = ~valid_mask
+            if np.any(nan_mask):
+                ax.scatter(y_true[nan_mask], y_pred[nan_mask],
+                         c='lightgray', alpha=0.6, edgecolors='black',
+                         linewidths=0.5, s=50, label='N/A')
+                ax.legend(loc='upper left', fontsize=8)
 
         # 1:1 line
         min_val = min(y_true.min(), y_pred.min())
@@ -10487,11 +11269,12 @@ Performance (Classification):
         ax.set_ylabel('Predicted Values', fontsize=11)
         ax.set_title('Cross-Validation: Reference vs Predicted', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
-        ax.legend(loc='lower right')
+        if color_values is None or not is_categorical:
+            ax.legend(loc='lower right')
 
         fig.tight_layout()
 
-        canvas = FigureCanvasTkAgg(fig, self.refine_plot_frame)
+        canvas = FigureCanvasTkAgg(fig, plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -10521,6 +11304,17 @@ Performance (Classification):
                     extra_info = {
                         'Residual': residual
                     }
+
+                    # Add color variable to extra_info if it's a metadata column
+                    if color_by not in ['None', 'Y Value'] and color_values is not None:
+                        color_val = color_values[nearest_idx]
+                        if pd.notna(color_val):
+                            if isinstance(color_val, (float, np.floating)):
+                                extra_info[color_by] = f"{color_val:.4f}"
+                            else:
+                                extra_info[color_by] = str(color_val)
+                        else:
+                            extra_info[color_by] = "N/A"
 
                     info_text = self._format_specimen_info(original_idx, y_value=y_actual,
                                                           y_pred=y_predicted, extra_info=extra_info)
@@ -10642,18 +11436,67 @@ F1 Score:  {f1:.4f}
         for widget in self.residual_diagnostics_frame.winfo_children():
             widget.destroy()
 
+        # Add control frame for color selection
+        control_frame = ttk.Frame(self.residual_diagnostics_frame)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
+
+        color_options = self._get_available_color_variables()
+        color_combo = ttk.Combobox(control_frame,
+                                   textvariable=self.residual_color_var,
+                                   values=color_options,
+                                   width=20,
+                                   state='readonly')
+        color_combo.pack(side='left', padx=5)
+        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_residual_diagnostics())
+
+        # Create plot frame
+        plot_container = ttk.Frame(self.residual_diagnostics_frame)
+        plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         y_true = self.refined_y_true
         y_pred = self.refined_y_pred
 
         # Compute residuals
         residuals, std_residuals = compute_residuals(y_true, y_pred)
 
+        # Get color variable selection
+        color_by = self.residual_color_var.get()
+
+        # Determine coloring values - align with CV indices
+        if color_by == 'Y Value':
+            color_values = y_true.copy()
+            is_categorical = self._is_categorical_target()
+            color_label = 'Y Value'
+        elif color_by == 'None':
+            color_values = None
+            is_categorical = False
+            color_label = None
+        else:
+            # Metadata column - align with CV indices
+            if self.ref is not None and color_by in self.ref.columns and hasattr(self, 'refined_cv_indices'):
+                cv_specimen_ids = self.y.index[self.refined_cv_indices]
+                try:
+                    color_values = self.ref.loc[cv_specimen_ids, color_by].values
+                    is_categorical = self._is_categorical_variable(color_by, color_values)
+                    color_label = color_by
+                except KeyError:
+                    color_values = None
+                    is_categorical = False
+                    color_label = None
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
+
         # Create 1x3 subplot figure
         fig = Figure(figsize=(12, 4))
 
         # Plot 1: Residuals vs Fitted
         ax1 = fig.add_subplot(131)
-        ax1.scatter(y_pred, residuals, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+        self._apply_color_scheme(ax1, fig, y_pred, residuals, color_by,
+                                alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
         ax1.axhline(y=0, color='r', linestyle='--', linewidth=2)
         ax1.set_xlabel('Fitted Values', fontsize=10)
         ax1.set_ylabel('Residuals', fontsize=10)
@@ -10663,7 +11506,8 @@ F1 Score:  {f1:.4f}
         # Plot 2: Residuals vs Index
         ax2 = fig.add_subplot(132)
         indices = np.arange(len(residuals))
-        ax2.scatter(indices, residuals, alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
+        self._apply_color_scheme(ax2, fig, indices, residuals, color_by,
+                                alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
         ax2.axhline(y=0, color='r', linestyle='--', linewidth=2)
         ax2.set_xlabel('Sample Index', fontsize=10)
         ax2.set_ylabel('Residuals', fontsize=10)
@@ -10688,7 +11532,7 @@ F1 Score:  {f1:.4f}
         fig.tight_layout()
 
         # Embed in tkinter
-        canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
+        canvas = FigureCanvasTkAgg(fig, plot_container)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -10718,6 +11562,14 @@ F1 Score:  {f1:.4f}
                     'Residual': residual_val
                 }
 
+                # Add color variable info if applicable
+                if color_values is not None and color_label:
+                    color_val = color_values[nearest_idx]
+                    if pd.notna(color_val):
+                        extra_info[color_label] = color_val
+                    else:
+                        extra_info[color_label] = 'N/A'
+
                 info_text = self._format_specimen_info(original_idx, y_value=y_actual,
                                                       y_pred=y_predicted, extra_info=extra_info)
                 self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas)
@@ -10738,6 +11590,14 @@ F1 Score:  {f1:.4f}
                     'Fitted': y_predicted,
                     'Residual': residual_val
                 }
+
+                # Add color variable info if applicable
+                if color_values is not None and color_label:
+                    color_val = color_values[bar_idx]
+                    if pd.notna(color_val):
+                        extra_info[color_label] = color_val
+                    else:
+                        extra_info[color_label] = 'N/A'
 
                 info_text = self._format_specimen_info(original_idx, y_value=y_actual,
                                                       y_pred=y_predicted, extra_info=extra_info)
@@ -11822,6 +12682,11 @@ Configuration:
             self.refined_y_true = np.array(all_y_true)
             self.refined_y_pred = np.array(all_y_pred)
             self.refined_cv_indices = np.array(all_cv_indices)  # Store CV indices for specimen ID mapping
+
+            # CRITICAL FIX: Store the actual specimen IDs that correspond to the CV data
+            # This is needed because refined_cv_indices are relative to the filtered data (without validation set)
+            # but self.y.index contains all samples (including validation set)
+            self.refined_specimen_ids = y_series.index[all_cv_indices].tolist()
 
             # Store prediction probabilities if available
             if all_y_proba:
@@ -13259,6 +14124,19 @@ Configuration:
             results = pd.DataFrame()
             results['Sample'] = self.prediction_data.index
 
+            # Add metadata columns if available (from self.ref)
+            if self.ref is not None and hasattr(self.ref, 'columns') and len(self.ref.columns) > 0:
+                # Add metadata columns for prediction samples
+                for col in self.ref.columns:
+                    try:
+                        # Check if indices match before adding
+                        if all(idx in self.ref.index for idx in self.prediction_data.index):
+                            results[col] = self.ref.loc[self.prediction_data.index, col].values
+                        else:
+                            print(f"Warning: Metadata column '{col}' indices don't match prediction data - skipping")
+                    except Exception as e:
+                        print(f"Warning: Could not add metadata column '{col}': {str(e)}")
+
             # Add actual values column if using validation set
             if self.pred_data_source.get() == 'validation' and self.validation_y is not None:
                 # Align actual values with prediction samples
@@ -13281,8 +14159,20 @@ Configuration:
             successful_models = 0
             for i, model_dict in enumerate(self.loaded_models):
                 metadata = model_dict['metadata']
-                model_name = metadata.get('model_name', 'Unknown')
-                preprocessing = metadata.get('preprocessing', 'raw')
+                is_ensemble = model_dict.get('is_ensemble', False)
+
+                # Derive a descriptive model name for display / column headers
+                if is_ensemble:
+                    # Prefer human-friendly ensemble name, then type
+                    ensemble_name = model_dict.get('ensemble_name') or metadata.get('ensemble_name')
+                    ensemble_type = model_dict.get('ensemble_type') or metadata.get('ensemble_type')
+                    display_name = ensemble_name or ensemble_type or 'Ensemble'
+                    model_name = f"Ensemble {display_name}"
+                    preprocessing = metadata.get('preprocessing', 'raw')
+                else:
+                    model_name = metadata.get('model_name', 'Unknown')
+                    preprocessing = metadata.get('preprocessing', 'raw')
+
                 filename = model_dict.get('filename', f'Model_{i+1}')
 
                 # Update status
@@ -13311,7 +14201,10 @@ Configuration:
                     print(f"  - has_uncertainty: {has_uncertainty}, keys: {list(uncertainty.keys())}")
 
                     # Store predictions with descriptive column name
-                    col_name = f"{model_name}_{preprocessing}"
+                    if preprocessing in (None, '', 'unknown', 'raw'):
+                        col_name = f"{model_name}"
+                    else:
+                        col_name = f"{model_name}_{preprocessing}"
 
                     # Handle duplicate column names
                     counter = 1
@@ -13397,8 +14290,21 @@ Configuration:
         pd.DataFrame
             DataFrame with added consensus columns
         """
-        # Get prediction columns (all except 'Sample' and 'Actual')
-        pred_cols = [col for col in results_df.columns if col not in ['Sample', 'Actual']]
+        # Get prediction columns - exclude Sample, Actual, and metadata columns
+        metadata_cols = list(self.ref.columns) if self.ref is not None else []
+
+        # Initial filtering - exclude known non-prediction columns
+        excluded_cols = {'Sample', 'Actual'} | set(metadata_cols)
+        pred_cols = [col for col in results_df.columns if col not in excluded_cols]
+
+        # Additional safety: Filter out non-numeric columns
+        numeric_pred_cols = []
+        for col in pred_cols:
+            if pd.api.types.is_numeric_dtype(results_df[col]):
+                numeric_pred_cols.append(col)
+            else:
+                print(f"Warning: Excluding non-numeric column '{col}' from consensus predictions")
+        pred_cols = numeric_pred_cols
 
         if len(pred_cols) < 2:
             return results_df  # Need at least 2 models for consensus
@@ -13496,6 +14402,12 @@ Configuration:
         if len(model_r2) > 0:
             # Get all model columns as a 2D numpy array: (n_samples, n_models)
             model_cols = list(model_r2.keys())
+
+            # Validate all columns are numeric before numpy operations
+            for col in model_cols:
+                if not pd.api.types.is_numeric_dtype(results_df[col]):
+                    raise ValueError(f"Cannot compute consensus: Column '{col}' contains non-numeric data")
+
             model_data = results_df[model_cols].values
 
             # Create normalized weight array
@@ -13519,6 +14431,12 @@ Configuration:
 
             # Vectorized regional consensus computation
             regional_cols = list(model_regional_rmse.keys())
+
+            # Validate all columns are numeric before numpy operations
+            for col in regional_cols:
+                if not pd.api.types.is_numeric_dtype(results_df[col]):
+                    raise ValueError(f"Cannot compute regional consensus: Column '{col}' contains non-numeric data")
+
             regional_data = results_df[regional_cols].values  # (n_samples, n_models)
 
             # Compute median predictions for all samples at once
@@ -13834,8 +14752,10 @@ Configuration:
             stats_text = "Prediction Statistics:\n"
             stats_text += "=" * 60 + "\n\n"
 
-        # Calculate stats for each prediction column (skip 'Sample' and 'Actual' columns)
-        prediction_cols = [col for col in self.predictions_df.columns if col not in ['Sample', 'Actual']]
+        # Calculate stats for each prediction column - exclude Sample, Actual, and metadata columns
+        metadata_cols = list(self.ref.columns) if self.ref is not None else []
+        prediction_cols = [col for col in self.predictions_df.columns
+                          if col not in ['Sample', 'Actual'] + metadata_cols]
 
         if not prediction_cols:
             stats_text += "No prediction columns found.\n"
@@ -13994,9 +14914,30 @@ Configuration:
         for widget in self.prediction_plots_frame.winfo_children():
             widget.destroy()
 
-        # Get prediction columns (exclude 'Sample', 'Actual', and consensus columns)
+        # Add control frame for color selection
+        control_frame = ttk.Frame(self.prediction_plots_frame)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
+
+        color_options = self._get_available_color_variables()
+        color_combo = ttk.Combobox(control_frame,
+                                   textvariable=self.pred_results_color_var,
+                                   values=color_options,
+                                   width=20,
+                                   state='readonly')
+        color_combo.pack(side='left', padx=5)
+        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_prediction_results())
+
+        # Create plot frame
+        plot_container = ttk.Frame(self.prediction_plots_frame)
+        plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Get prediction columns - exclude Sample, Actual, Consensus_*, and metadata columns
+        metadata_cols = list(self.ref.columns) if self.ref is not None else []
         prediction_cols = [col for col in self.predictions_df.columns
-                          if col not in ['Sample', 'Actual'] and not col.startswith('Consensus_')]
+                          if col not in ['Sample', 'Actual'] + metadata_cols
+                          and not col.startswith('Consensus_')]
 
         if not prediction_cols:
             return
@@ -14008,6 +14949,35 @@ Configuration:
             print(f"Error getting validation y values: {e}")
             return
 
+        # Get color variable selection
+        color_by = self.pred_results_color_var.get()
+
+        # Determine coloring values - align with prediction samples
+        if color_by == 'Y Value':
+            color_values = y_true.copy()
+            is_categorical = self._is_categorical_target()
+            color_label = 'Y Value'
+        elif color_by == 'None':
+            color_values = None
+            is_categorical = False
+            color_label = None
+        else:
+            # Metadata column - align with prediction sample IDs
+            if self.ref is not None and color_by in self.ref.columns:
+                sample_ids = self.predictions_df['Sample'].values
+                try:
+                    color_values = self.ref.loc[sample_ids, color_by].values
+                    is_categorical = self._is_categorical_variable(color_by, color_values)
+                    color_label = color_by
+                except KeyError:
+                    color_values = None
+                    is_categorical = False
+                    color_label = None
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
+
         # Determine grid size for subplots
         n_models = len(prediction_cols)
         n_cols = min(3, n_models)  # Max 3 columns
@@ -14016,14 +14986,44 @@ Configuration:
         # Create figure with subplots
         fig = Figure(figsize=(6*n_cols, 5*n_rows))
 
+        # Helper function to apply coloring to a subplot
+        def add_colored_scatter(ax, y_true_data, y_pred_data, color_vals, is_cat):
+            if color_vals is None:
+                ax.scatter(y_true_data, y_pred_data, alpha=0.6, edgecolors='black', linewidths=0.5, s=50, color='steelblue')
+            elif is_cat:
+                unique_vals = np.unique(color_vals[pd.notna(color_vals)])
+                n_vals = len(unique_vals)
+                colors = plt.cm.tab10(np.linspace(0, 1, 10)) if n_vals <= 10 else plt.cm.tab20(np.linspace(0, 1, 20))
+                color_map = {val: colors[i % len(colors)] for i, val in enumerate(unique_vals)}
+                for val in unique_vals:
+                    mask = color_vals == val
+                    if np.any(mask):
+                        ax.scatter(y_true_data[mask], y_pred_data[mask], c=[color_map[val]], alpha=0.6,
+                                 edgecolors='black', linewidths=0.5, s=50, label=str(val))
+                nan_mask = pd.isna(color_vals)
+                if np.any(nan_mask):
+                    ax.scatter(y_true_data[nan_mask], y_pred_data[nan_mask], c='lightgray', alpha=0.6,
+                             edgecolors='black', linewidths=0.5, s=50, label='N/A')
+            else:
+                # Convert to numeric if needed (handles string numeric values)
+                numeric_color_vals = pd.to_numeric(color_vals, errors='coerce')
+                valid_mask = pd.notna(numeric_color_vals)
+                if np.any(valid_mask):
+                    ax.scatter(y_true_data[valid_mask], y_pred_data[valid_mask], c=numeric_color_vals[valid_mask],
+                             cmap='viridis', alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+                nan_mask = ~valid_mask
+                if np.any(nan_mask):
+                    ax.scatter(y_true_data[nan_mask], y_pred_data[nan_mask], c='lightgray', alpha=0.6,
+                             edgecolors='black', linewidths=0.5, s=50, label='N/A')
+
         # Plot each model
         for idx, col in enumerate(prediction_cols):
             ax = fig.add_subplot(n_rows, n_cols, idx + 1)
 
             y_pred = self.predictions_df[col].values
 
-            # Scatter plot
-            ax.scatter(y_true, y_pred, alpha=0.6, edgecolors='black', linewidths=0.5, s=50)
+            # Apply colored scatter
+            add_colored_scatter(ax, y_true, y_pred, color_values, is_categorical)
 
             # 1:1 line
             min_val = min(y_true.min(), y_pred.min())
@@ -14051,7 +15051,7 @@ Configuration:
         fig.tight_layout()
 
         # Add to GUI
-        canvas = FigureCanvasTkAgg(fig, self.prediction_plots_frame)
+        canvas = FigureCanvasTkAgg(fig, plot_container)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -14092,6 +15092,15 @@ Configuration:
                 residual = y_actual - y_predicted
 
                 info_text = f"Sample: {sample_name}\nActual: {y_actual:.4f}\nPredicted: {y_predicted:.4f}\nResidual: {residual:.4f}"
+
+                # Add color variable info if applicable
+                if color_values is not None and color_label:
+                    color_val = color_values[nearest_idx]
+                    if pd.notna(color_val):
+                        info_text += f"\n{color_label}: {color_val}"
+                    else:
+                        info_text += f"\n{color_label}: N/A"
+
                 self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_click)
@@ -20099,18 +21108,42 @@ Configuration:
         method_buttons_frame.pack(fill='x', pady=(0, 10))
 
         self.ct_method_var = tk.StringVar(value='ctai')
-        ttk.Radiobutton(method_buttons_frame, text="DS",
-                       variable=self.ct_method_var, value='ds').pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(method_buttons_frame, text="PDS",
-                       variable=self.ct_method_var, value='pds').pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(method_buttons_frame, text="TSR",
-                       variable=self.ct_method_var, value='tsr').pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(method_buttons_frame, text="CTAI",
-                       variable=self.ct_method_var, value='ctai').pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
-                       variable=self.ct_method_var, value='nspfce').pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
-                       variable=self.ct_method_var, value='jypls-inv', state='disabled').pack(side='left')
+
+        # DS method
+        ds_radio = ttk.Radiobutton(method_buttons_frame, text="DS",
+                                   variable=self.ct_method_var, value='ds')
+        ds_radio.pack(side='left', padx=(0, 10))
+        CreateToolTip(ds_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_DS'], delay=500)
+
+        # PDS method
+        pds_radio = ttk.Radiobutton(method_buttons_frame, text="PDS",
+                                    variable=self.ct_method_var, value='pds')
+        pds_radio.pack(side='left', padx=(0, 10))
+        CreateToolTip(pds_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_PDS'], delay=500)
+
+        # TSR method
+        tsr_radio = ttk.Radiobutton(method_buttons_frame, text="TSR",
+                                    variable=self.ct_method_var, value='tsr')
+        tsr_radio.pack(side='left', padx=(0, 10))
+        CreateToolTip(tsr_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_TSR'], delay=500)
+
+        # CTAI method
+        ctai_radio = ttk.Radiobutton(method_buttons_frame, text="CTAI",
+                                     variable=self.ct_method_var, value='ctai')
+        ctai_radio.pack(side='left', padx=(0, 10))
+        CreateToolTip(ctai_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_CTAI'], delay=500)
+
+        # NS-PFCE method
+        nspfce_radio = ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
+                                       variable=self.ct_method_var, value='nspfce')
+        nspfce_radio.pack(side='left', padx=(0, 10))
+        CreateToolTip(nspfce_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_NSPFCE'], delay=500)
+
+        # JYPLS-inv method
+        jypls_radio = ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
+                                      variable=self.ct_method_var, value='jypls-inv', state='disabled')
+        jypls_radio.pack(side='left')
+        CreateToolTip(jypls_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_JYPLS'], delay=500)
 
         # Method parameters
         params_frame = ttk.LabelFrame(method_section, text="Method Parameters",
@@ -20121,53 +21154,98 @@ Configuration:
         row1 = ttk.Frame(params_frame)
         row1.pack(fill='x', pady=(0, 5))
 
-        ttk.Label(row1, text="DS Lambda:", style='CardLabel.TLabel', width=20).pack(side='left')
-        self.ct_ds_lambda_var = tk.StringVar(value='0.001')
-        ttk.Entry(row1, textvariable=self.ct_ds_lambda_var, width=12).pack(side='left', padx=(0, 20))
+        # DS Lambda
+        ds_lambda_label = ttk.Label(row1, text="DS Lambda:", style='CardLabel.TLabel', width=20)
+        ds_lambda_label.pack(side='left')
+        CreateToolTip(ds_lambda_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_ds_lambda'], delay=500)
 
-        ttk.Label(row1, text="PDS Window:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_ds_lambda_var = tk.StringVar(value='0.001')
+        ds_lambda_entry = ttk.Entry(row1, textvariable=self.ct_ds_lambda_var, width=12)
+        ds_lambda_entry.pack(side='left', padx=(0, 20))
+        CreateToolTip(ds_lambda_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_ds_lambda'], delay=500)
+
+        # PDS Window
+        pds_window_label = ttk.Label(row1, text="PDS Window:", style='CardLabel.TLabel', width=20)
+        pds_window_label.pack(side='left')
+        CreateToolTip(pds_window_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_pds_window'], delay=500)
+
         self.ct_pds_window_var = tk.StringVar(value='11')
-        ttk.Entry(row1, textvariable=self.ct_pds_window_var, width=12).pack(side='left')
+        pds_window_entry = ttk.Entry(row1, textvariable=self.ct_pds_window_var, width=12)
+        pds_window_entry.pack(side='left')
+        CreateToolTip(pds_window_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_pds_window'], delay=500)
 
         # Row 2
         row2 = ttk.Frame(params_frame)
         row2.pack(fill='x', pady=(0, 5))
 
-        ttk.Label(row2, text="TSR Samples:", style='CardLabel.TLabel', width=20).pack(side='left')
-        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
-        ttk.Entry(row2, textvariable=self.ct_tsr_n_samples_var, width=12).pack(side='left', padx=(0, 20))
+        # TSR Samples
+        tsr_samples_label = ttk.Label(row2, text="TSR Samples:", style='CardLabel.TLabel', width=20)
+        tsr_samples_label.pack(side='left')
+        CreateToolTip(tsr_samples_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
 
-        ttk.Label(row2, text="JYPLS Samples:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
+        tsr_samples_entry = ttk.Entry(row2, textvariable=self.ct_tsr_n_samples_var, width=12)
+        tsr_samples_entry.pack(side='left', padx=(0, 20))
+        CreateToolTip(tsr_samples_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
+
+        # JYPLS Samples
+        jypls_samples_label = ttk.Label(row2, text="JYPLS Samples:", style='CardLabel.TLabel', width=20)
+        jypls_samples_label.pack(side='left')
+        CreateToolTip(jypls_samples_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_samples'], delay=500)
+
         self.ct_jypls_n_samples_var = tk.StringVar(value='12')
-        ttk.Entry(row2, textvariable=self.ct_jypls_n_samples_var, width=12).pack(side='left')
+        jypls_samples_entry = ttk.Entry(row2, textvariable=self.ct_jypls_n_samples_var, width=12)
+        jypls_samples_entry.pack(side='left')
+        CreateToolTip(jypls_samples_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_samples'], delay=500)
 
         # Row 3
         row3 = ttk.Frame(params_frame)
         row3.pack(fill='x', pady=(0, 5))
 
-        ttk.Label(row3, text="JYPLS Components:", style='CardLabel.TLabel', width=20).pack(side='left')
-        self.ct_jypls_n_components_var = tk.StringVar(value='Auto')
-        ttk.Combobox(row3, textvariable=self.ct_jypls_n_components_var,
-                    values=['Auto', '3', '5', '8', '10', '15', '20'],
-                    state='readonly', width=10).pack(side='left', padx=(0, 20))
+        # JYPLS Components
+        jypls_comp_label = ttk.Label(row3, text="JYPLS Components:", style='CardLabel.TLabel', width=20)
+        jypls_comp_label.pack(side='left')
+        CreateToolTip(jypls_comp_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_components'], delay=500)
 
-        ttk.Label(row3, text="NS-PFCE Max Iter:", style='CardLabel.TLabel', width=20).pack(side='left')
+        self.ct_jypls_n_components_var = tk.StringVar(value='Auto')
+        jypls_comp_combo = ttk.Combobox(row3, textvariable=self.ct_jypls_n_components_var,
+                                        values=['Auto', '3', '5', '8', '10', '15', '20'],
+                                        state='readonly', width=10)
+        jypls_comp_combo.pack(side='left', padx=(0, 20))
+        CreateToolTip(jypls_comp_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_components'], delay=500)
+
+        # NS-PFCE Max Iter
+        nspfce_maxiter_label = ttk.Label(row3, text="NS-PFCE Max Iter:", style='CardLabel.TLabel', width=20)
+        nspfce_maxiter_label.pack(side='left')
+        CreateToolTip(nspfce_maxiter_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_max_iter'], delay=500)
+
         self.ct_nspfce_max_iterations_var = tk.StringVar(value='100')
-        ttk.Entry(row3, textvariable=self.ct_nspfce_max_iterations_var, width=12).pack(side='left')
+        nspfce_maxiter_entry = ttk.Entry(row3, textvariable=self.ct_nspfce_max_iterations_var, width=12)
+        nspfce_maxiter_entry.pack(side='left')
+        CreateToolTip(nspfce_maxiter_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_max_iter'], delay=500)
 
         # Row 4
         row4 = ttk.Frame(params_frame)
         row4.pack(fill='x')
 
+        # NS-PFCE Wavelength Selection
         self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
-                       variable=self.ct_nspfce_use_wavelength_selection_var).pack(side='left', padx=(0, 20))
+        nspfce_wavsel_check = ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
+                                              variable=self.ct_nspfce_use_wavelength_selection_var)
+        nspfce_wavsel_check.pack(side='left', padx=(0, 20))
+        CreateToolTip(nspfce_wavsel_check, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_wavelength_selection'], delay=500)
 
-        ttk.Label(row4, text="Selector:", style='CardLabel.TLabel').pack(side='left')
+        # NS-PFCE Selector
+        nspfce_selector_label = ttk.Label(row4, text="Selector:", style='CardLabel.TLabel')
+        nspfce_selector_label.pack(side='left')
+        CreateToolTip(nspfce_selector_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
+
         self.ct_nspfce_selector_var = tk.StringVar(value='vcpa-iriv')
-        ttk.Combobox(row4, textvariable=self.ct_nspfce_selector_var,
-                    values=['vcpa-iriv', 'cars', 'spa'], state='readonly',
-                    width=12).pack(side='left')
+        nspfce_selector_combo = ttk.Combobox(row4, textvariable=self.ct_nspfce_selector_var,
+                                             values=['vcpa-iriv', 'cars', 'spa'], state='readonly',
+                                             width=12)
+        nspfce_selector_combo.pack(side='left')
+        CreateToolTip(nspfce_selector_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
 
         # Build button
         build_btn_frame = ttk.Frame(self.ct_build_new_frame)

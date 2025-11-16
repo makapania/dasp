@@ -418,7 +418,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
     """
 
     def __init__(self, models, model_names=None, meta_model=None,
-                 region_aware=True, n_regions=5, cv=5):
+                 region_aware=True, n_regions=5, cv=5, preprocessors=None):
         """
         Parameters
         ----------
@@ -431,6 +431,9 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         n_regions : int, default=5
         cv : int, default=5
             Cross-validation folds
+        preprocessors : list of preprocessors, optional
+            Individual preprocessor for each base model. If None, assumes
+            models receive raw data directly.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -438,6 +441,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         self.region_aware = region_aware
         self.n_regions = n_regions
         self.cv = cv
+        self.preprocessors = preprocessors
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions) if region_aware else None
 
     @property
@@ -496,8 +500,14 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         """Predict using stacking ensemble."""
-        # Get predictions from base models
-        predictions = [model.predict(X) for model in self.models]
+        # Get predictions from base models, applying individual preprocessors
+        predictions = []
+        for i, model in enumerate(self.models):
+            if self.preprocessors and self.preprocessors[i] is not None:
+                X_processed = self.preprocessors[i].transform(X)
+            else:
+                X_processed = X
+            predictions.append(model.predict(X_processed))
         meta_features = np.column_stack(predictions)
 
         # Add region features if enabled
@@ -550,8 +560,9 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
     if ensemble_type == 'simple_average':
         # Simple averaging ensemble (baseline)
         class SimpleAverage(BaseEstimator, RegressorMixin):
-            def __init__(self, models, preprocessors=None):
+            def __init__(self, models, model_names=None, preprocessors=None):
                 self.models = models
+                self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
                 self.preprocessors = preprocessors
             def fit(self, X, y):
                 return self
@@ -566,7 +577,7 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
                     predictions.append(model.predict(X_processed))
                 return np.mean(predictions, axis=0)
 
-        ensemble = SimpleAverage(models, preprocessors=kwargs.get('preprocessors'))
+        ensemble = SimpleAverage(models, model_names=model_names, preprocessors=kwargs.get('preprocessors'))
         ensemble.fit(X, y)
 
     elif ensemble_type == 'region_weighted':

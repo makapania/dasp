@@ -37,7 +37,7 @@ def plot_regional_performance(analyzer, y_true, predictions_dict, metric='rmse',
     fig, axes
     """
     fig = plt.figure(figsize=figsize)
-    gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+    gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3, top=0.92)
 
     ax1 = fig.add_subplot(gs[0, :])  # Regional performance
     ax2 = fig.add_subplot(gs[1, 0])   # Overall performance
@@ -153,7 +153,7 @@ def plot_ensemble_weights(ensemble, figsize=(12, 6), save_path=None):
     model_names = ensemble.model_names
     n_models, n_regions = weights.shape
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
 
     # Plot 1: Stacked area chart of weights
     x = np.arange(n_regions)
@@ -218,7 +218,7 @@ def plot_model_specialization_profile(ensemble, save_path=None):
     n_models = len(model_names)
     n_regions = len(profiles[model_names[0]]['weights'])
 
-    fig, axes = plt.subplots(n_models, 1, figsize=(10, 2*n_models), sharex=True)
+    fig, axes = plt.subplots(n_models, 1, figsize=(10, 2*n_models), sharex=True, constrained_layout=True)
 
     if n_models == 1:
         axes = [axes]
