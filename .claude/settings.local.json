@@ -17,7 +17,16 @@
       "Bash(py -m py_compile:*)",
       "Bash(py test_plsda_validation_fix.py)",
       "Bash(python -m py_compile:*)",
-      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile:*)"
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile:*)",
+      "Bash(git fetch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git commit:*)",
+      "Bash(git pull:*)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/scoring.py)",
+      "Bash(unzip:*)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/ensemble.py)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/model_io.py)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []

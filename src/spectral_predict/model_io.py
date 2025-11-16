@@ -712,12 +712,12 @@ def predict_with_uncertainty(
     is_ensemble = 'base_model_dicts' in model_dict and model_dict['base_model_dicts']
 
     if is_ensemble:
-        # Aggregate applicability domain from base models
+        # Aggregate applicability domain information from base models
         base_model_dicts = model_dict['base_model_dicts']
         aggregated_ad = _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed)
 
         if aggregated_ad is not None:
-            applicability_domain = aggregated_ad
+            applicability_domain.update(aggregated_ad)
             has_applicability_domain = True
 
     elif 'ad_data' in model_dict and model_dict['ad_data'] is not None:
@@ -1217,6 +1217,9 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             base_models.append(model_dict['model'])
             base_model_dicts.append(model_dict)  # Store full dict
 
+        # Extract preprocessors from base model dicts
+        base_preprocessors = [md.get('preprocessor') for md in base_model_dicts]
+
         # Load ensemble state
         ensemble_state_path = tmpdir_path / "ensemble_state.pkl"
         ensemble_state = joblib.load(ensemble_state_path)
@@ -1235,7 +1238,8 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             ensemble = RegionAwareWeightedEnsemble(
                 models=base_models,
                 model_names=model_names,
-                n_regions=ensemble_state.get('n_regions', 5)
+                n_regions=ensemble_state.get('n_regions', 5),
+                preprocessors=base_preprocessors
             )
             # Restore weights and analyzer
             if 'weights' in ensemble_state:
@@ -1247,7 +1251,8 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             ensemble = MixtureOfExpertsEnsemble(
                 models=base_models,
                 model_names=model_names,
-                n_regions=ensemble_state.get('n_regions', 5)
+                n_regions=ensemble_state.get('n_regions', 5),
+                preprocessors=base_preprocessors
             )
             # Restore analyzer
             if 'analyzer' in ensemble_state:
@@ -1268,15 +1273,23 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
         elif ensemble_type == 'simple_average':
             # Simple average - just store models
             class SimpleAverageEnsemble:
-                def __init__(self, models, model_names):
+                def __init__(self, models, model_names, preprocessors=None):
                     self.models = models
                     self.model_names = model_names
+                    self.preprocessors = preprocessors
 
                 def predict(self, X):
-                    predictions = np.array([model.predict(X) for model in self.models])
-                    return predictions.mean(axis=0)
+                    # Apply individual preprocessors if provided
+                    predictions = []
+                    for i, model in enumerate(self.models):
+                        if self.preprocessors and self.preprocessors[i] is not None:
+                            X_processed = self.preprocessors[i].transform(X)
+                        else:
+                            X_processed = X
+                        predictions.append(model.predict(X_processed))
+                    return np.mean(predictions, axis=0)
 
-            ensemble = SimpleAverageEnsemble(base_models, model_names)
+            ensemble = SimpleAverageEnsemble(base_models, model_names, base_preprocessors)
         else:
             raise ValueError(f"Unknown ensemble type: {ensemble_type}")
 

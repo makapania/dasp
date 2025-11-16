@@ -19107,10 +19107,39 @@ Configuration:
             # Reuse existing model loading logic from Tab 8
             from pathlib import Path
             from src.spectral_predict import model_io
+            import zipfile
 
-            model_dict = model_io.load_model(filepath)
-            model_dict['filepath'] = filepath
-            model_dict['filename'] = Path(filepath).name
+            # Check if this is an ensemble file
+            is_ensemble = False
+            try:
+                with zipfile.ZipFile(filepath, 'r') as zf:
+                    if 'ensemble_config.json' in zf.namelist():
+                        is_ensemble = True
+            except:
+                pass
+
+            if is_ensemble:
+                # Load as ensemble
+                ensemble_dict = model_io.load_ensemble(filepath)
+
+                # Create model_dict format compatible with existing code
+                model_dict = {
+                    'model': ensemble_dict['ensemble'],
+                    'metadata': ensemble_dict['metadata'],
+                    'preprocessor': None,  # Ensembles have preprocessing in base models
+                    'filepath': filepath,
+                    'filename': Path(filepath).name,
+                    'is_ensemble': True,
+                    'ensemble_type': ensemble_dict['config']['ensemble_type'],
+                    'ensemble_name': ensemble_dict['config']['ensemble_name'],
+                    'model_names': ensemble_dict['model_names'],
+                    'base_model_dicts': ensemble_dict.get('base_model_dicts', [])
+                }
+            else:
+                # Load as individual model
+                model_dict = model_io.load_model(filepath)
+                model_dict['filepath'] = filepath
+                model_dict['filename'] = Path(filepath).name
 
             self.comparison_primary_model = model_dict
             self._update_comparison_primary_display()
@@ -19145,11 +19174,40 @@ Configuration:
         try:
             from pathlib import Path
             from src.spectral_predict import model_io
+            import zipfile
 
             for filepath in filepaths:
-                model_dict = model_io.load_model(filepath)
-                model_dict['filepath'] = filepath
-                model_dict['filename'] = Path(filepath).name
+                # Check if this is an ensemble file
+                is_ensemble = False
+                try:
+                    with zipfile.ZipFile(filepath, 'r') as zf:
+                        if 'ensemble_config.json' in zf.namelist():
+                            is_ensemble = True
+                except:
+                    pass
+
+                if is_ensemble:
+                    # Load as ensemble
+                    ensemble_dict = model_io.load_ensemble(filepath)
+
+                    # Create model_dict format compatible with existing code
+                    model_dict = {
+                        'model': ensemble_dict['ensemble'],
+                        'metadata': ensemble_dict['metadata'],
+                        'preprocessor': None,  # Ensembles have preprocessing in base models
+                        'filepath': filepath,
+                        'filename': Path(filepath).name,
+                        'is_ensemble': True,
+                        'ensemble_type': ensemble_dict['config']['ensemble_type'],
+                        'ensemble_name': ensemble_dict['config']['ensemble_name'],
+                        'model_names': ensemble_dict['model_names'],
+                        'base_model_dicts': ensemble_dict.get('base_model_dicts', [])
+                    }
+                else:
+                    # Load as individual model
+                    model_dict = model_io.load_model(filepath)
+                    model_dict['filepath'] = filepath
+                    model_dict['filename'] = Path(filepath).name
 
                 self.comparison_auxiliary_models.append(model_dict)
 

@@ -135,7 +135,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
     that varies based on the predicted value.
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, cv=5):
+    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None):
         """
         Parameters
         ----------
@@ -147,13 +147,29 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
             Number of regions to analyze
         cv : int, default=5
             Cross-validation folds for computing weights
+        preprocessors : list of preprocessors, optional
+            Individual preprocessor for each base model. If None, assumes
+            models receive raw data directly.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
         self.n_regions = n_regions
         self.cv = cv
+        self.preprocessors = preprocessors
         self.regional_weights_ = None
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
+
+    @property
+    def weights_(self):
+        """
+        Alias for regional_weights_ so that save/load helpers
+        can treat all ensembles consistently.
+        """
+        return self.regional_weights_
+
+    @weights_.setter
+    def weights_(self, value):
+        self.regional_weights_ = value
 
     def fit(self, X, y):
         """
@@ -205,8 +221,15 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         """Predict using region-aware weighted averaging."""
-        # Get predictions from all models
-        predictions = np.array([model.predict(X) for model in self.models])  # (n_models, n_samples)
+        # Get predictions from all models, applying individual preprocessors
+        predictions = []
+        for i, model in enumerate(self.models):
+            if self.preprocessors and self.preprocessors[i] is not None:
+                X_processed = self.preprocessors[i].transform(X)
+            else:
+                X_processed = X
+            predictions.append(model.predict(X_processed))
+        predictions = np.array(predictions)  # (n_models, n_samples)
 
         # For each prediction, determine which region it falls in
         # Use the average prediction to determine region (chicken-and-egg problem)
@@ -267,7 +290,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
     Optionally uses soft gating (weighted combination).
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True):
+    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, preprocessors=None):
         """
         Parameters
         ----------
@@ -276,14 +299,30 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         n_regions : int, default=5
         soft_gating : bool, default=True
             If True, use weighted combination. If False, use hard selection.
+        preprocessors : list of preprocessors, optional
+            Individual preprocessor for each base model. If None, assumes
+            models receive raw data directly.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
         self.n_regions = n_regions
         self.soft_gating = soft_gating
+        self.preprocessors = preprocessors
         self.expert_assignment_ = None  # Which model is best for each region
         self.expert_weights_ = None  # Soft weights if soft_gating=True
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
+
+    @property
+    def weights_(self):
+        """
+        Alias for expert_weights_ so that save/load helpers
+        can access ensemble weights in a uniform way.
+        """
+        return self.expert_weights_
+
+    @weights_.setter
+    def weights_(self, value):
+        self.expert_weights_ = value
 
     def fit(self, X, y):
         """Fit by determining which expert handles which region."""
@@ -333,7 +372,15 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         """Predict using mixture of experts."""
-        predictions = np.array([model.predict(X) for model in self.models])
+        # Get predictions from all models, applying individual preprocessors
+        predictions = []
+        for i, model in enumerate(self.models):
+            if self.preprocessors and self.preprocessors[i] is not None:
+                X_processed = self.preprocessors[i].transform(X)
+            else:
+                X_processed = X
+            predictions.append(model.predict(X_processed))
+        predictions = np.array(predictions)
 
         # Determine regions for predictions
         avg_pred = np.mean(predictions, axis=0)
@@ -392,6 +439,18 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         self.n_regions = n_regions
         self.cv = cv
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions) if region_aware else None
+
+    @property
+    def meta_model_(self):
+        """
+        Alias for meta_model so that save/load helpers can
+        persist and restore the stacking meta-learner.
+        """
+        return self.meta_model
+
+    @meta_model_.setter
+    def meta_model_(self, value):
+        self.meta_model = value
 
     def fit(self, X, y):
         """Fit the stacking ensemble."""
@@ -491,15 +550,23 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
     if ensemble_type == 'simple_average':
         # Simple averaging ensemble (baseline)
         class SimpleAverage(BaseEstimator, RegressorMixin):
-            def __init__(self, models):
+            def __init__(self, models, preprocessors=None):
                 self.models = models
+                self.preprocessors = preprocessors
             def fit(self, X, y):
                 return self
             def predict(self, X):
-                predictions = np.array([m.predict(X) for m in self.models])
+                # Apply individual preprocessors if provided
+                predictions = []
+                for i, model in enumerate(self.models):
+                    if self.preprocessors and self.preprocessors[i] is not None:
+                        X_processed = self.preprocessors[i].transform(X)
+                    else:
+                        X_processed = X
+                    predictions.append(model.predict(X_processed))
                 return np.mean(predictions, axis=0)
 
-        ensemble = SimpleAverage(models)
+        ensemble = SimpleAverage(models, preprocessors=kwargs.get('preprocessors'))
         ensemble.fit(X, y)
 
     elif ensemble_type == 'region_weighted':
