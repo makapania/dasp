@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-def compute_composite_score(df_results, task_type, variable_penalty=2, complexity_penalty=2):
+def compute_composite_score(df_results, task_type, variable_penalty=2, complexity_penalty=2, verbose=False):
     """
     Compute composite score with user-friendly penalty system.
 
@@ -13,6 +13,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
     - complexity_penalty (0-10): Penalty for model complexity (LVs, etc.)
     - 0 = only performance (R²) matters
     - 10 = strong penalty for variables/complexity
+
+    Parameters
+    ----------
+    verbose : bool, default=False
+        If True, print detailed scoring breakdown for top 20 models
 
     Formula: Score = performance_score + variable_penalty_term + complexity_penalty_term
 
@@ -81,33 +86,66 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
         full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
         var_fraction = n_vars_array / full_vars_array  # 0-1 scale
 
-        # REDUCED PENALTY: Scale by user penalty (0-10) with cubic scaling for gentler impact
-        # At penalty=2, using all variables adds ~0.008 units (very minimal impact)
-        # At penalty=5, using all variables adds ~0.125 units (modest impact)
-        # At penalty=10, using all variables adds ~1 unit (comparable to ~0.3 std deviations in performance)
-        # This allows exploration of full spectrum models without serious penalty at low settings
-        var_penalty_term = ((variable_penalty / 10.0) ** 3) * var_fraction
+        # RESTORED PENALTY: Scale by user penalty (0-10) with quadratic scaling for meaningful impact
+        # At penalty=2, using all variables adds ~0.04 units (1-2% of z-score range)
+        # At penalty=5, using all variables adds ~0.25 units (4-8% of z-score range)
+        # At penalty=10, using all variables adds ~1.0 unit (comparable to ~0.3 std deviations in performance)
+        # This provides meaningful variable selection pressure while still allowing full spectrum exploration
+        var_penalty_term = ((variable_penalty / 10.0) ** 2) * var_fraction
     else:
         var_penalty_term = 0
 
     # 2. Model Complexity Penalty (0-10 scale)
-    # For PLS: penalize latent variables. For others: use median baseline
+    # Use model-type-specific complexity for fair comparison across different algorithms
     if complexity_penalty > 0:
         lvs = df["LVs"].fillna(0).astype(np.float64)
 
+        # Get model types
+        models = df["Model"].astype(str)
+
+        # For PLS models: use latent variables
         # Normalize LVs to [0, 1] scale (assume max useful LVs is ~25)
         lv_fraction = lvs / 25.0
         lv_fraction = np.minimum(lv_fraction, 1.0)  # Cap at 1.0
 
-        # For non-PLS models (LVs=0), use a median penalty to avoid favoring them unfairly
-        # This makes all model types comparable
-        median_lv_fraction = 0.4  # Equivalent to ~10 LVs
-        lv_fraction_adjusted = np.where(lvs == 0, median_lv_fraction, lv_fraction)
+        # For non-PLS models: use intrinsic model complexity
+        # Based on model type complexity scores (normalized to [0, 1])
+        model_complexity_map = {
+            "PLS": None,  # Use LVs for PLS
+            "Ridge": 0.25,
+            "Lasso": 0.30,
+            "ElasticNet": 0.28,
+            "RandomForest": 0.60,
+            "XGBoost": 0.65,
+            "LightGBM": 0.63,
+            "CatBoost": 0.64,
+            "MLP": 0.80,
+            "NeuralBoosted": 0.85,
+            "SVM": 0.55,
+            "KNN": 0.45
+        }
+
+        # Calculate complexity for each model
+        complexity_values = []
+        for idx, (model, lv_val, lv_frac) in enumerate(zip(models, lvs, lv_fraction)):
+            if lv_val > 0:  # PLS model with LVs
+                complexity_values.append(lv_frac)
+            else:
+                # Non-PLS: use model-specific complexity
+                complexity = model_complexity_map.get(model, 0.50)  # Default to 0.50 if unknown
+                complexity_values.append(complexity)
+
+        lv_fraction_adjusted = np.array(complexity_values, dtype=np.float64)
 
         # Scale by user penalty (0-10) with quadratic scaling for better behavior
         comp_penalty_term = ((complexity_penalty / 10.0) ** 2) * lv_fraction_adjusted
     else:
         comp_penalty_term = 0
+
+    # Store individual components for diagnostics
+    df["PerformanceScore"] = performance_score
+    df["VarPenalty"] = var_penalty_term if not np.isscalar(var_penalty_term) else np.zeros(len(df))
+    df["CompPenalty"] = comp_penalty_term if not np.isscalar(comp_penalty_term) else np.zeros(len(df))
 
     # Composite score (lower is better)
     # Performance score dominates, but penalties can affect ranking meaningfully
@@ -134,6 +172,40 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
         # If complexity calculation fails, set to NaN (don't break pipeline)
         print(f"Warning: Unified complexity calculation failed: {e}")
         df["ComplexityScore"] = np.nan
+
+    # Verbose diagnostic output
+    if verbose:
+        print("\n" + "="*80)
+        print("RANKING DIAGNOSTIC - Top 20 Models")
+        print("="*80)
+        print(f"Penalty Settings: Variables={variable_penalty}/10, Complexity={complexity_penalty}/10")
+        print(f"Task Type: {task_type}")
+        print("\nScore Components (lower CompositeScore = better rank):")
+        print("  - PerformanceScore: Based on R²/RMSE (or AUC/Accuracy)")
+        print("  - VarPenalty: Penalty for using many wavelengths")
+        print("  - CompPenalty: Penalty for model complexity")
+        print("-"*80)
+
+        # Show top 20 models with score breakdown
+        top20 = df.head(20).copy()
+
+        if task_type == "regression":
+            display_cols = ["Rank", "Model", "R2", "RMSE", "n_vars", "LVs",
+                           "PerformanceScore", "VarPenalty", "CompPenalty", "CompositeScore"]
+        else:
+            display_cols = ["Rank", "Model", "ROC_AUC", "Accuracy", "n_vars", "LVs",
+                           "PerformanceScore", "VarPenalty", "CompPenalty", "CompositeScore"]
+
+        # Filter to available columns
+        display_cols = [c for c in display_cols if c in top20.columns]
+
+        # Format for display
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', None)
+        pd.set_option('display.float_format', '{:.4f}'.format)
+
+        print(top20[display_cols].to_string(index=False))
+        print("="*80 + "\n")
 
     return df
 
