@@ -4361,8 +4361,8 @@ class SpectralPredictApp:
         ensemble_buttons = ttk.Frame(self.ensemble_frame)
         ensemble_buttons.pack(pady=10, fill='x')
 
-        self.btn_save_best_ensemble = ttk.Button(ensemble_buttons, text="💾 Save Best Ensemble",
-                   command=self._save_best_ensemble, style='Modern.TButton', state='disabled')
+        self.btn_save_best_ensemble = ttk.Button(ensemble_buttons, text="💾 Save Selected Ensemble",
+                   command=self._save_selected_ensemble, style='Modern.TButton', state='disabled')
         self.btn_save_best_ensemble.pack(side='left', padx=5)
 
         self.btn_show_regional_perf = ttk.Button(ensemble_buttons, text="📊 Show Regional Performance",
@@ -8760,7 +8760,7 @@ class SpectralPredictApp:
                                 # Savitzky-Golay derivative
                                 deriv_order = 1 if preprocess == 'sg1' else 2
                                 steps.append(('derivative', SavgolDerivative(
-                                    window_length=int(window),
+                                    window=int(window),
                                     polyorder=int(polyorder),
                                     deriv=deriv_order
                                 )))
@@ -8768,7 +8768,7 @@ class SpectralPredictApp:
                                 # Derivative then SNV
                                 deriv_order = int(deriv)
                                 steps.append(('derivative', SavgolDerivative(
-                                    window_length=int(window),
+                                    window=int(window),
                                     polyorder=int(polyorder),
                                     deriv=deriv_order
                                 )))
@@ -8778,8 +8778,12 @@ class SpectralPredictApp:
                             steps.append(('scaler', StandardScaler()))
 
                         # Create model with exact parameters
-                        if params_dict:
-                            model = get_model(model_name, task_type=task_type, **params_dict)
+                        # Filter params_dict to only include parameters that get_model() accepts
+                        allowed_params = {'n_components', 'max_n_components', 'max_iter'}
+                        filtered_params = {k: v for k, v in params_dict.items() if k in allowed_params}
+
+                        if filtered_params:
+                            model = get_model(model_name, task_type=task_type, **filtered_params)
                         else:
                             model = get_model(model_name, task_type=task_type)
 
@@ -9366,10 +9370,16 @@ class SpectralPredictApp:
 
             # Highlight best ensemble
             tag = 'best' if i == 1 else ''
-            self.ensemble_tree.insert('', 'end', values=values, tags=(tag,))
+            # Store index (i-1) as the item ID so we can retrieve the ensemble later
+            self.ensemble_tree.insert('', 'end', iid=str(i-1), values=values, tags=(tag,))
 
         # Configure tag colors
         self.ensemble_tree.tag_configure('best', background='#d4edda', foreground='#155724')
+
+        # Select the best ensemble by default
+        if len(self.ensemble_results) > 0:
+            self.ensemble_tree.selection_set('0')
+            self.ensemble_tree.focus('0')
 
         # Update status
         n_ensembles = len(self.ensemble_results)
@@ -9383,8 +9393,19 @@ class SpectralPredictApp:
         self.btn_show_weights.config(state='normal')
         self.btn_show_specialization.config(state='normal')
 
+    def _get_selected_ensemble(self):
+        """Get the currently selected ensemble from the tree."""
+        selection = self.ensemble_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select an ensemble from the table first.")
+            return None
+
+        # Get the index from the item ID
+        selected_idx = int(selection[0])
+        return self.ensemble_results[selected_idx]
+
     def _show_regional_performance(self):
-        """Show regional performance heatmap for all models in the ensemble."""
+        """Show regional performance heatmap for all models in the selected ensemble."""
         if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
@@ -9397,16 +9418,18 @@ class SpectralPredictApp:
             from spectral_predict.ensemble_viz import plot_regional_performance
             import matplotlib.pyplot as plt
 
-            # Get best ensemble
-            best_result = self.ensemble_results[0]
-            ensemble = best_result['ensemble']
+            # Get selected ensemble
+            selected_result = self._get_selected_ensemble()
+            if selected_result is None:
+                return
+            ensemble = selected_result['ensemble']
 
             # Check if ensemble has analyzer (only region-aware ensembles)
             if not hasattr(ensemble, 'analyzer_'):
                 messagebox.showinfo(
                     "Not Applicable",
                     f"Regional performance visualization is only available for region-aware ensembles.\n\n"
-                    f"Current ensemble type: {best_result['method']}\n\n"
+                    f"Selected ensemble type: {selected_result['method']}\n\n"
                     f"Try 'Region-Aware Weighted' or 'Mixture of Experts' ensemble methods."
                 )
                 return
@@ -9424,15 +9447,19 @@ class SpectralPredictApp:
                 metric='rmse'
             )
 
-            # Add explanation text
+            # Add very explicit explanation text
+            ensemble_method = selected_result['method']
+            n_models = len(ensemble.models)
             fig.suptitle(
-                'Regional Performance: Which Models Excel Where?\n'
-                'Lower RMSE (darker blue) = Better Performance',
-                fontsize=12, y=0.98
+                f'INDIVIDUAL MODEL PERFORMANCE WITHIN "{ensemble_method}" ENSEMBLE\n'
+                f'Comparing {n_models} Base Models Across Different Prediction Regions\n'
+                f'(Each row = 1 model inside the ensemble | Each column = 1 target value range)\n'
+                f'DARKER BLUE = BETTER (Lower RMSE error)',
+                fontsize=11, y=0.98, weight='bold'
             )
 
-            # Show in popup window
-            fig.canvas.manager.set_window_title('Regional Performance Heatmap - Ensemble Analysis')
+            # Show in popup window with clearer title
+            fig.canvas.manager.set_window_title(f'Base Model Performance - {ensemble_method} Ensemble')
             plt.tight_layout()
             plt.show()
 
@@ -9442,7 +9469,7 @@ class SpectralPredictApp:
             messagebox.showerror("Visualization Error", f"Failed to show regional performance:\n{str(e)}\n\nDetails:\n{error_details}")
 
     def _show_ensemble_weights(self):
-        """Show ensemble weights visualization."""
+        """Show ensemble weights visualization for selected ensemble."""
         if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
@@ -9451,32 +9478,37 @@ class SpectralPredictApp:
             from spectral_predict.ensemble_viz import plot_ensemble_weights
             import matplotlib.pyplot as plt
 
-            # Get best ensemble
-            best_result = self.ensemble_results[0]
-            ensemble = best_result['ensemble']
+            # Get selected ensemble
+            selected_result = self._get_selected_ensemble()
+            if selected_result is None:
+                return
+            ensemble = selected_result['ensemble']
 
             # Check if ensemble has weights
             if not hasattr(ensemble, 'weights_'):
                 messagebox.showinfo(
                     "Not Applicable",
                     f"Ensemble weights visualization is only available for weighted ensembles.\n\n"
-                    f"Current ensemble type: {best_result['method']}\n\n"
-                    f"Try 'Region-Aware Weighted' ensemble method."
+                    f"Selected ensemble type: {selected_result['method']}\n\n"
+                    f"Weighted ensemble types: 'Region-Aware Weighted', 'Optimized Weighted', 'Error-Based Weighted'"
                 )
                 return
 
             # Create figure
             fig, axes = plot_ensemble_weights(ensemble=ensemble)
 
-            # Add explanation
+            # Add explicit explanation
+            ensemble_method = selected_result['method']
+            n_models = len(ensemble.models)
             fig.suptitle(
-                'Ensemble Weights: How Much Each Model Contributes\n'
-                'Higher weight = More influence on final prediction',
-                fontsize=12, y=0.98
+                f'MODEL WEIGHTS IN "{ensemble_method}" ENSEMBLE\n'
+                f'How Much Each of the {n_models} Base Models Contributes to Final Predictions\n'
+                f'HIGHER WEIGHT = MORE INFLUENCE on ensemble output',
+                fontsize=11, y=0.98, weight='bold'
             )
 
-            # Show in popup window
-            fig.canvas.manager.set_window_title('Ensemble Weights Analysis')
+            # Show in popup window with clearer title
+            fig.canvas.manager.set_window_title(f'Model Weights - {ensemble_method} Ensemble')
             plt.tight_layout()
             plt.show()
 
@@ -9486,7 +9518,7 @@ class SpectralPredictApp:
             messagebox.showerror("Visualization Error", f"Failed to show ensemble weights:\n{str(e)}\n\nDetails:\n{error_details}")
 
     def _show_specialization_profile(self):
-        """Show model specialization profiles."""
+        """Show model specialization profiles for selected ensemble."""
         if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
@@ -9499,16 +9531,18 @@ class SpectralPredictApp:
             from spectral_predict.ensemble_viz import plot_model_specialization_profile
             import matplotlib.pyplot as plt
 
-            # Get best ensemble
-            best_result = self.ensemble_results[0]
-            ensemble = best_result['ensemble']
+            # Get selected ensemble
+            selected_result = self._get_selected_ensemble()
+            if selected_result is None:
+                return
+            ensemble = selected_result['ensemble']
 
             # Check if ensemble has analyzer (only region-aware ensembles)
             if not hasattr(ensemble, 'analyzer_'):
                 messagebox.showinfo(
                     "Not Applicable",
                     f"Specialization profile is only available for region-aware ensembles.\n\n"
-                    f"Current ensemble type: {best_result['method']}\n\n"
+                    f"Selected ensemble type: {selected_result['method']}\n\n"
                     f"Try 'Region-Aware Weighted' or 'Mixture of Experts' ensemble methods."
                 )
                 return
@@ -9516,15 +9550,20 @@ class SpectralPredictApp:
             # Create figure
             fig, axes = plot_model_specialization_profile(ensemble=ensemble)
 
-            # Add explanation
+            # Add very explicit explanation
+            ensemble_method = selected_result['method']
+            n_models = len(ensemble.models)
+            model_list = ', '.join(ensemble.model_names[:3]) + (f' + {n_models-3} more' if n_models > 3 else '')
             fig.suptitle(
-                'Model Specialization: Performance Across Prediction Range\n'
-                'Shows which models excel at low/medium/high target values',
-                fontsize=12, y=0.98
+                f'MODEL SPECIALIZATION IN "{ensemble_method}" ENSEMBLE\n'
+                f'Which of the {n_models} Base Models Excel at Different Target Value Ranges\n'
+                f'Models: {model_list}\n'
+                f'(Each line = 1 model\'s performance across low/medium/high values)',
+                fontsize=11, y=0.98, weight='bold'
             )
 
-            # Show in popup window
-            fig.canvas.manager.set_window_title('Model Specialization Analysis')
+            # Show in popup window with clearer title
+            fig.canvas.manager.set_window_title(f'Model Specialization - {ensemble_method} Ensemble')
             plt.tight_layout()
             plt.show()
 
@@ -9533,8 +9572,8 @@ class SpectralPredictApp:
             error_details = traceback.format_exc()
             messagebox.showerror("Visualization Error", f"Failed to show specialization profile:\n{str(e)}\n\nDetails:\n{error_details}")
 
-    def _save_best_ensemble(self):
-        """Save the best ensemble model to a .dasp file."""
+    def _save_selected_ensemble(self):
+        """Save the selected ensemble model to a .dasp file."""
         if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
@@ -9543,11 +9582,13 @@ class SpectralPredictApp:
             from pathlib import Path
             from spectral_predict.model_io import save_ensemble
 
-            # Get best ensemble
-            best_result = self.ensemble_results[0]
-            ensemble = best_result['ensemble']
-            ensemble_type = best_result['type']
-            ensemble_name = best_result['method']
+            # Get selected ensemble
+            selected_result = self._get_selected_ensemble()
+            if selected_result is None:
+                return
+            ensemble = selected_result['ensemble']
+            ensemble_type = selected_result['type']
+            ensemble_name = selected_result['method']
 
             # Determine initial directory (prefer data import folder over output folder)
             initial_dir = None
@@ -9573,23 +9614,123 @@ class SpectralPredictApp:
             if not filepath:
                 return  # User cancelled
 
-            # Collect metadata
+            # Get wavelengths from ensemble training data
+            if hasattr(self, 'ensemble_X') and self.ensemble_X is not None:
+                wavelengths = self.ensemble_X.columns.astype(float).tolist()
+                n_vars = len(wavelengths)
+            elif hasattr(self, 'X') and self.X is not None:
+                wavelengths = self.X.columns.astype(float).tolist()
+                n_vars = len(wavelengths)
+            else:
+                messagebox.showerror("Error", "Cannot determine wavelengths from training data.")
+                return
+
+            # Determine task type from target column or results
+            task_type = 'regression'  # Default
+            if hasattr(self, 'task_type_var'):
+                task_type = self.task_type_var.get()
+            elif hasattr(self, 'y') and self.y is not None:
+                # Infer from data
+                import numpy as np
+                if self.y.dtype == object or not np.issubdtype(self.y.dtype, np.number):
+                    task_type = 'classification'
+                elif len(np.unique(self.y)) < 20:  # Heuristic for classification
+                    task_type = 'classification'
+
+            # Get preprocessing information from results DataFrame if available
+            preprocessing = 'unknown'
+            window = None
+            use_full_spectrum_preprocessing = False
+            full_wavelengths = None
+
+            if hasattr(self, 'results_df') and self.results_df is not None and len(self.results_df) > 0:
+                # Get the most common preprocessing from top models used in ensemble
+                top_preprocess = self.results_df.nsmallest(5, 'CompositeScore')['Preprocess'].mode()
+                if len(top_preprocess) > 0:
+                    preprocessing = top_preprocess[0]
+
+                # Get window size if applicable
+                if 'Window' in self.results_df.columns:
+                    top_windows = self.results_df.nsmallest(5, 'CompositeScore')['Window'].mode()
+                    if len(top_windows) > 0:
+                        window = int(top_windows[0])
+
+            # Get training data for applicability domain if available
+            X_train = None
+            if hasattr(self, 'ensemble_X') and self.ensemble_X is not None:
+                # Convert to numpy array (preprocessed data)
+                X_train = self.ensemble_X.values
+                self._log_progress(f"Including applicability domain data ({X_train.shape[0]} samples)")
+
+            # Get CV data if available (from ensemble predictions)
+            cv_residuals = None
+            cv_predictions = None
+            cv_actuals = None
+            if hasattr(self, 'ensemble_y') and self.ensemble_y is not None:
+                cv_actuals = self.ensemble_y.values if hasattr(self.ensemble_y, 'values') else np.array(self.ensemble_y)
+                # Get ensemble predictions
+                try:
+                    cv_predictions = ensemble.predict(self.ensemble_X.values if hasattr(self.ensemble_X, 'values') else self.ensemble_X)
+                    if task_type == 'regression':
+                        cv_residuals = cv_predictions - cv_actuals
+                    self._log_progress(f"Including uncertainty estimation data")
+                except Exception as e:
+                    self._log_progress(f"Warning: Could not generate CV predictions: {e}")
+
+            # Get preprocessor if available (usually None for ensembles as preprocessing is in pipelines)
+            preprocessor = None
+
+            # Get label encoder if available
+            label_encoder = getattr(self, 'label_encoder', None)
+
+            # Build comprehensive metadata
             metadata = {
+                # Ensemble-specific fields
                 'ensemble_type': ensemble_type,
                 'ensemble_name': ensemble_name,
                 'n_models': len(ensemble.models),
                 'model_names': ensemble.model_names,
-                'rmse': float(best_result['rmse']),  # Ensure JSON-serializable
-                'r2': float(best_result['r2']),
-                'mae': float(best_result['mae']),
-                'rpd': float(best_result['rpd']),
+
+                # Required fields for save_model validation
+                'task_type': task_type,
+                'wavelengths': wavelengths,
+                'n_vars': n_vars,
+
+                # Preprocessing information
+                'preprocessing': preprocessing,
+                'window': window,
+                'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
+                'full_wavelengths': full_wavelengths,
+
+                # Performance metrics
+                'performance': {
+                    'RMSE': float(selected_result['rmse']),
+                    'R2': float(selected_result['r2']),
+                    'MAE': float(selected_result['mae']),
+                    'RPD': float(selected_result['rpd'])
+                },
+
+                # Training information
                 'training_date': datetime.now().isoformat(),
                 'target_column': self.target_column.get(),
-                'n_training_samples': int(len(self.ensemble_y)) if hasattr(self, 'ensemble_y') else 0
+                'n_training_samples': int(len(self.ensemble_y)) if hasattr(self, 'ensemble_y') else 0,
+
+                # Optional fields for applicability domain and uncertainty
+                'X_train': X_train,
+                'cv_residuals': cv_residuals,
+                'cv_predictions': cv_predictions,
+                'cv_actuals': cv_actuals,
+                'preprocessor': preprocessor,
+                'label_encoder': label_encoder
             }
 
             # Save ensemble
             self._log_progress(f"\nSaving ensemble to: {filepath}")
+            self._log_progress(f"  Task type: {task_type}")
+            self._log_progress(f"  Wavelengths: {n_vars}")
+            self._log_progress(f"  Preprocessing: {preprocessing}")
+            self._log_progress(f"  Models: {', '.join(ensemble.model_names)}")
+
             save_ensemble(ensemble, filepath, metadata)
             self._log_progress(f"✓ Ensemble saved successfully!")
 
@@ -9602,6 +9743,7 @@ class SpectralPredictApp:
             import traceback
             error_details = traceback.format_exc()
             messagebox.showerror("Save Error", f"Failed to save ensemble:\n{str(e)}\n\n{error_details}")
+            self._log_progress(f"\n❌ Error saving ensemble:\n{error_details}")
 
     def _export_results_table(self):
         """Export the current results table to a CSV file."""
@@ -12815,7 +12957,8 @@ Configuration:
                             'is_ensemble': True,
                             'ensemble_type': ensemble_dict['config']['ensemble_type'],
                             'ensemble_name': ensemble_dict['config']['ensemble_name'],
-                            'model_names': ensemble_dict['model_names']
+                            'model_names': ensemble_dict['model_names'],
+                            'base_model_dicts': ensemble_dict.get('base_model_dicts', [])  # For applicability domain
                         }
                     else:
                         # Load as individual model

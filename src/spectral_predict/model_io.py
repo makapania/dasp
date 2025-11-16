@@ -708,7 +708,19 @@ def predict_with_uncertainty(
     applicability_domain = {}
     has_applicability_domain = False
 
-    if 'ad_data' in model_dict and model_dict['ad_data'] is not None:
+    # Check if this is an ensemble with base model dicts
+    is_ensemble = 'base_model_dicts' in model_dict and model_dict['base_model_dicts']
+
+    if is_ensemble:
+        # Aggregate applicability domain from base models
+        base_model_dicts = model_dict['base_model_dicts']
+        aggregated_ad = _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed)
+
+        if aggregated_ad is not None:
+            applicability_domain = aggregated_ad
+            has_applicability_domain = True
+
+    elif 'ad_data' in model_dict and model_dict['ad_data'] is not None:
         from scipy.spatial.distance import cdist
 
         ad_data = model_dict['ad_data']
@@ -761,6 +773,104 @@ def predict_with_uncertainty(
         'applicability_domain': applicability_domain,
         'has_applicability_domain': has_applicability_domain
     }
+
+
+def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
+    """
+    Aggregate applicability domain information from multiple base models in an ensemble.
+
+    Strategy: Use the worst-case (maximum) distance across all base models.
+    This ensures conservative warnings - if ANY base model considers a prediction
+    as extrapolation, the ensemble prediction will be flagged.
+
+    Parameters
+    ----------
+    base_model_dicts : list of dict
+        List of model dictionaries for each base model
+    X_processed : ndarray
+        Preprocessed input data
+
+    Returns
+    -------
+    dict or None
+        Aggregated applicability domain info, or None if no base models have AD data
+    """
+    from scipy.spatial.distance import cdist
+
+    all_pca_distances = []
+    all_spectral_distances = []
+    has_any_ad = False
+    aggregated_thresholds = None
+
+    # Collect applicability domain info from each base model
+    for model_dict in base_model_dicts:
+        if 'ad_data' not in model_dict or model_dict['ad_data'] is None:
+            continue
+
+        ad_data = model_dict['ad_data']
+        pca_model = model_dict.get('pca_model')
+
+        if pca_model is None:
+            continue
+
+        has_any_ad = True
+
+        # Transform to PCA space
+        X_pred_pca = pca_model.transform(X_processed)
+        training_pca_scores = ad_data['training_pca_scores']
+
+        # Calculate distances
+        pca_distances = cdist(X_pred_pca, training_pca_scores, metric='euclidean')
+        min_pca_distance = np.min(pca_distances, axis=1)
+        all_pca_distances.append(min_pca_distance)
+
+        # Spectral distances
+        representative_spectra = ad_data['representative_spectra']
+        spectral_distances = cdist(X_processed, representative_spectra, metric='euclidean')
+        min_spectral_distance = np.min(spectral_distances, axis=1)
+        all_spectral_distances.append(min_spectral_distance)
+
+        # Get thresholds (use first model's thresholds as reference)
+        if aggregated_thresholds is None and 'distance_thresholds' in ad_data:
+            aggregated_thresholds = ad_data['distance_thresholds']
+
+    if not has_any_ad:
+        return None
+
+    # Aggregate: use maximum (worst-case) distance across all base models
+    all_pca_distances = np.array(all_pca_distances)
+    all_spectral_distances = np.array(all_spectral_distances)
+
+    max_pca_distance = np.max(all_pca_distances, axis=0)
+    max_spectral_distance = np.max(all_spectral_distances, axis=0)
+
+    # Find which model contributed the max distance for each sample
+    nearest_model_idx = np.argmax(all_pca_distances, axis=0)
+
+    applicability_domain = {
+        'pca_distance': max_pca_distance,
+        'spectral_distance': max_spectral_distance,
+        'nearest_model_idx': nearest_model_idx  # Which base model had worst distance
+    }
+
+    # Assign status based on aggregated thresholds
+    if aggregated_thresholds is not None:
+        p50, p75, p95, max_dist = aggregated_thresholds
+
+        distance_status = np.empty(len(max_pca_distance), dtype=object)
+        distance_status[max_pca_distance <= p75] = 'good'
+        distance_status[(max_pca_distance > p75) & (max_pca_distance <= p95)] = 'caution'
+        distance_status[max_pca_distance > p95] = 'extrapolation'
+
+        applicability_domain['distance_status'] = distance_status
+        applicability_domain['thresholds'] = {
+            'p50': float(p50),
+            'p75': float(p75),
+            'p95': float(p95),
+            'max': float(max_dist)
+        }
+
+    return applicability_domain
 
 
 def get_model_info(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -888,6 +998,15 @@ def _json_serializer(obj):
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+def _convert_to_serializable(obj):
+    """
+    Convert objects to JSON-serializable format for ensemble config.
+
+    This is an alias for _json_serializer to maintain consistency.
+    """
+    return _json_serializer(obj)
+
+
 def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> None:
     """
     Save an ensemble model to a .dasp file.
@@ -899,7 +1018,19 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
     filepath : str
         Path where the ensemble .dasp file will be saved
     metadata : dict
-        Additional metadata (ensemble_type, performance metrics, etc.)
+        Additional metadata including:
+        - 'ensemble_type': Type of ensemble ('simple_average', 'region_weighted', etc.)
+        - 'ensemble_name': Display name
+        - 'task_type': 'regression' or 'classification' (REQUIRED)
+        - 'preprocessing': Preprocessing method (REQUIRED)
+        - 'wavelengths': List of wavelengths (REQUIRED)
+        - 'n_vars': Number of variables (REQUIRED)
+        - 'performance': Performance metrics dict
+        - 'use_full_spectrum_preprocessing': Boolean for derivative+subset case
+        - 'full_wavelengths': Full wavelength list if using derivative+subset
+        - 'window': Savgol window size (if applicable)
+        - 'X_train': Training data for applicability domain (optional)
+        - 'cv_residuals', 'cv_predictions', 'cv_actuals': CV data for uncertainty (optional)
 
     Returns
     -------
@@ -911,8 +1042,27 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
     - ensemble_config.json: Ensemble configuration and metadata
     - base_model_0.dasp, base_model_1.dasp, ...: Individual model files
     - ensemble_state.pkl: Ensemble-specific state (weights, analyzer, etc.)
+
+    Raises
+    ------
+    ValueError
+        If metadata is missing required fields (task_type, wavelengths, n_vars)
     """
+    # Validate required metadata fields
+    required_fields = ['task_type', 'wavelengths', 'n_vars']
+    missing_fields = [f for f in required_fields if f not in metadata]
+    if missing_fields:
+        raise ValueError(f"Ensemble metadata missing required fields: {missing_fields}")
+
     filepath = Path(filepath)
+
+    # Extract optional training data for applicability domain
+    X_train = metadata.pop('X_train', None)
+    cv_residuals = metadata.pop('cv_residuals', None)
+    cv_predictions = metadata.pop('cv_predictions', None)
+    cv_actuals = metadata.pop('cv_actuals', None)
+    preprocessor = metadata.pop('preprocessor', None)
+    label_encoder = metadata.pop('label_encoder', None)
 
     # Create temporary directory for base model files
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -923,13 +1073,37 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
         for i, (model, model_name) in enumerate(zip(ensemble.models, ensemble.model_names)):
             base_model_path = tmpdir_path / f"base_model_{i}.dasp"
 
-            # Save individual model
+            # Build comprehensive base model metadata with all required fields
             base_metadata = {
                 'model_name': model_name,
                 'model_index': i,
-                'is_base_model': True
+                'is_base_model': True,
+                # Required fields
+                'task_type': metadata['task_type'],
+                'wavelengths': metadata['wavelengths'],
+                'n_vars': metadata['n_vars'],
+                # Optional but important fields
+                'preprocessing': metadata.get('preprocessing', 'unknown'),
+                'window': metadata.get('window', None),
+                'performance': metadata.get('performance', {}),
+                'use_full_spectrum_preprocessing': metadata.get('use_full_spectrum_preprocessing', False),
+                'full_wavelengths': metadata.get('full_wavelengths', None),
+                'n_samples': metadata.get('n_training_samples', 0),
+                'ensemble_parent': True,  # Flag to indicate this is from an ensemble
             }
-            save_model(model, None, base_metadata, str(base_model_path))
+
+            # Save individual model with all metadata and optional training data
+            save_model(
+                model=model,
+                preprocessor=preprocessor,
+                metadata=base_metadata,
+                filepath=str(base_model_path),
+                label_encoder=label_encoder,
+                cv_residuals=cv_residuals,
+                cv_predictions=cv_predictions,
+                cv_actuals=cv_actuals,
+                X_train=X_train
+            )
             base_model_files.append(f"base_model_{i}.dasp")
 
         # Create ensemble config
@@ -1033,6 +1207,7 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
 
         # Load base models
         base_models = []
+        base_model_dicts = []  # Keep full model_dicts for applicability domain
         base_model_files = config['base_model_files']
         model_names = config['model_names']
 
@@ -1040,6 +1215,7 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             base_model_path = tmpdir_path / base_file
             model_dict = load_model(str(base_model_path))
             base_models.append(model_dict['model'])
+            base_model_dicts.append(model_dict)  # Store full dict
 
         # Load ensemble state
         ensemble_state_path = tmpdir_path / "ensemble_state.pkl"
@@ -1108,7 +1284,8 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             'ensemble': ensemble,
             'metadata': config['metadata'],
             'model_names': model_names,
-            'config': config
+            'config': config,
+            'base_model_dicts': base_model_dicts  # Include for applicability domain
         }
 
 

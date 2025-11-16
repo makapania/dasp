@@ -93,7 +93,7 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
     # 2. Model Complexity Penalty (0-10 scale)
     # For PLS: penalize latent variables. For others: use median baseline
     if complexity_penalty > 0:
-        lvs = df["LVs"].fillna(0).astype(np.float64)
+        lvs = df["LVs"].fillna(0).infer_objects(copy=False).astype(np.float64)
 
         # Normalize LVs to [0, 1] scale (assume max useful LVs is ~25)
         lv_fraction = lvs / 25.0
