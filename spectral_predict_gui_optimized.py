@@ -19104,15 +19104,13 @@ Configuration:
         try:
             if source == 'validation':
                 # Use validation set from Tab 4
-                if not hasattr(self, 'validation_indices') or self.validation_indices is None:
-                    messagebox.showerror("Error", "No validation set selected. Please configure in Analysis Configuration tab first.")
+                if self.validation_X is None or self.validation_y is None:
+                    messagebox.showerror("Error",
+                        "No validation set has been created yet.\n\n"
+                        "Please go to the Analysis Configuration tab and create a validation set first.")
                     return
 
-                if not hasattr(self, 'data') or self.data is None:
-                    messagebox.showerror("Error", "No data loaded. Please load data in Import & Preview tab first.")
-                    return
-
-                self.comparison_data = self.data.iloc[self.validation_indices].copy()
+                self.comparison_data = self.validation_X.copy()
                 self.comparison_data_status.config(
                     text=f"✓ Loaded {len(self.comparison_data)} samples from validation set",
                     foreground='green')

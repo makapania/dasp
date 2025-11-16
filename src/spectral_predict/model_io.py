@@ -351,9 +351,9 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         cv_data = None
         cv_data_path = tmppath / 'cv_data.npz'
         if cv_data_path.exists():
-            cv_data = np.load(cv_data_path)
-            # Convert to dict for easier access
-            cv_data = {key: cv_data[key] for key in cv_data.files}
+            with np.load(cv_data_path) as npz_file:
+                # Convert to dict for easier access
+                cv_data = {key: npz_file[key] for key in npz_file.files}
 
         # Load applicability domain data if present
         ad_data = None
@@ -361,8 +361,8 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         ad_data_path = tmppath / 'applicability_domain.npz'
         pca_model_path = tmppath / 'pca_model.pkl'
         if ad_data_path.exists():
-            ad_data_raw = np.load(ad_data_path)
-            ad_data = {key: ad_data_raw[key] for key in ad_data_raw.files}
+            with np.load(ad_data_path) as npz_file:
+                ad_data = {key: npz_file[key] for key in npz_file.files}
         if pca_model_path.exists():
             pca_model = joblib.load(pca_model_path)
 
