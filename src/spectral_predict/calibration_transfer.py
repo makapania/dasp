@@ -1564,6 +1564,63 @@ def apply_jypls_inv(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
     return X_transferred
 
 
+def apply_transfer_dispatch(X_slave: np.ndarray, transfer_model: TransferModel) -> np.ndarray:
+    """
+    Unified dispatcher for applying any transfer model type.
+
+    This function provides a single interface for applying calibration transfer
+    models regardless of the specific method used (DS, PDS, TSR, CTAI, etc.).
+
+    Parameters
+    ----------
+    X_slave : np.ndarray
+        Slave instrument spectra to transform, shape (n_samples, n_wavelengths).
+        The wavelengths should match the transfer model's common wavelength grid.
+    transfer_model : TransferModel
+        Transfer model object containing the method type, parameters, and
+        wavelength information.
+
+    Returns
+    -------
+    np.ndarray
+        Transformed spectra in master instrument space, shape (n_samples, n_wavelengths).
+
+    Raises
+    ------
+    ValueError
+        If the transfer method is unknown or unsupported.
+
+    Examples
+    --------
+    >>> # Load a transfer model
+    >>> transfer_model = load_transfer_model("path/to/model")
+    >>>
+    >>> # Apply to new slave spectra
+    >>> X_slave_new = load_spectra("slave_data.csv")
+    >>> X_master_space = apply_transfer_dispatch(X_slave_new, transfer_model)
+    """
+    method = transfer_model.method.lower()
+    params = transfer_model.params
+
+    if method == 'ds':
+        return apply_ds(X_slave, params['A'])
+    elif method == 'pds':
+        return apply_pds(X_slave, params['B'], params['window'])
+    elif method == 'tsr':
+        return apply_tsr(X_slave, params)
+    elif method == 'ctai':
+        return apply_ctai(X_slave, params)
+    elif method == 'ns-pfce' or method == 'nspfce':
+        return apply_nspfce(X_slave, params)
+    elif method == 'jypls-inv':
+        return apply_jypls_inv(X_slave, params)
+    else:
+        raise ValueError(
+            f"Unknown transfer method: {method}. "
+            f"Supported methods are: ds, pds, tsr, ctai, ns-pfce, jypls-inv"
+        )
+
+
 if __name__ == "__main__":
     # Simple self-test
     print("Calibration Transfer Module")

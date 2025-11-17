@@ -328,8 +328,15 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         """Fit by determining which expert handles which region."""
         self.analyzer_.fit(y)
 
-        # Get predictions from all models
-        predictions = np.array([model.predict(X) for model in self.models])
+        # Get cross-validated predictions from all models to avoid data leakage
+        # This ensures we evaluate model performance on out-of-fold predictions
+        predictions = []
+        for model in self.models:
+            # Use cross_val_predict to get out-of-fold predictions
+            # This prevents overfitting and gives realistic performance estimates
+            cv_pred = cross_val_predict(model, X, y, cv=5)
+            predictions.append(cv_pred)
+        predictions = np.array(predictions)
 
         # For each region, find the best model
         self.expert_assignment_ = np.zeros(self.n_regions, dtype=int)

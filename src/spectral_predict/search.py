@@ -18,7 +18,8 @@ from .variable_selection import spa_selection, uve_selection, uve_spa_selection,
 from .model_registry import supports_subset_analysis, supports_feature_importance
 
 
-def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=5,
+def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
+               total_samples_original=None, variable_penalty=3, complexity_penalty=5,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                pls_max_iter_list=None, pls_tol_list=None,
@@ -462,6 +463,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                     is_binary_classification,
                     subset_indices=None,
                     subset_tag="full",
+                    top_n_vars=30,
+                    skip_preprocessing=False,
+                    excluded_count=excluded_count,
+                    validation_count=validation_count,
+                    total_samples_original=total_samples_original,
+                    folds=folds,
                 )
                 df_results = add_result(df_results, result)
 
@@ -619,7 +626,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                             is_binary_classification,
                                             subset_indices=top_indices,
                                             subset_tag=f"top{n_top}_{varsel_method}",
+                                            top_n_vars=30,
                                             skip_preprocessing=True,  # Flag to skip reapplying
+                                            excluded_count=excluded_count,
+                                            validation_count=validation_count,
+                                            total_samples_original=total_samples_original,
+                                            folds=folds,
                                         )
                                     else:
                                         # For raw/SNV: indices map to original wavelengths, can reapply preprocessing
@@ -636,6 +648,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                             is_binary_classification,
                                             subset_indices=top_indices,
                                             subset_tag=f"top{n_top}_{varsel_method}",
+                                            top_n_vars=30,
+                                            skip_preprocessing=False,
+                                            excluded_count=excluded_count,
+                                            validation_count=validation_count,
+                                            total_samples_original=total_samples_original,
+                                            folds=folds,
                                         )
                                     df_results = add_result(df_results, subset_result)
 
@@ -671,7 +689,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                 is_binary_classification,
                                 subset_indices=region_subset['indices'],
                                 subset_tag=region_subset['tag'],
+                                top_n_vars=30,
                                 skip_preprocessing=True,  # Flag to skip reapplying
+                                excluded_count=excluded_count,
+                                validation_count=validation_count,
+                                total_samples_original=total_samples_original,
+                                folds=folds,
                             )
                         else:
                             # For raw/SNV: use raw data, reapply preprocessing
@@ -688,6 +711,12 @@ def run_search(X, y, task_type, folds=5, variable_penalty=3, complexity_penalty=
                                 is_binary_classification,
                                 subset_indices=region_subset['indices'],
                                 subset_tag=region_subset['tag'],
+                                top_n_vars=30,
+                                skip_preprocessing=False,
+                                excluded_count=excluded_count,
+                                validation_count=validation_count,
+                                total_samples_original=total_samples_original,
+                                folds=folds,
                             )
                         df_results = add_result(df_results, region_result)
 
@@ -793,6 +822,10 @@ def _run_single_config(
     subset_tag="full",
     top_n_vars=30,
     skip_preprocessing=False,
+    excluded_count=0,
+    validation_count=0,
+    total_samples_original=None,
+    folds=5,
 ):
     """
     Run a single model configuration with CV.
@@ -894,9 +927,10 @@ def _run_single_config(
                 pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
             )
 
-            # FIX: Capture ALL parameters for XGBoost, LightGBM, and CatBoost
+            # FIX: Capture ALL parameters for ALL models
             # This fixes the R² reproducibility issue by ensuring ALL parameters are saved
-            if model_name in ["XGBoost", "LightGBM", "CatBoost"]:
+            # This includes PLS, Ridge, Lasso, ElasticNet, RandomForest, XGBoost, LightGBM, CatBoost, MLP, NeuralBoosted, etc.
+            if True:  # Apply to ALL models
                 print(f"\n{'='*80}")
                 print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
                 print(f"{'='*80}")
@@ -977,6 +1011,18 @@ def _run_single_config(
         "n_vars": n_vars,
         "full_vars": full_vars,
         "SubsetTag": subset_tag,
+    }
+
+    # Add training configuration for tracking data state
+    # This helps identify when Model Development tab uses different data
+    result["training_config"] = {
+        "folds": cv_splitter.n_splits if hasattr(cv_splitter, 'n_splits') else folds,
+        "n_samples_used": len(X),  # Number of samples used for training (after filtering)
+        "n_samples_total": total_samples_original if total_samples_original else len(X),
+        "excluded_count": excluded_count,  # Number of excluded samples
+        "validation_count": validation_count,  # Number of validation samples
+        "n_features_used": X.shape[1],  # Number of features/wavelengths used
+        "random_state": 42,  # CV random state (always 42 in this codebase)
     }
 
     if task_type == "regression":

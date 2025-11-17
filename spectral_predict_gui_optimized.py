@@ -3059,6 +3059,28 @@ class SpectralPredictApp:
         ttk.Entry(wl_restrict_subframe, textvariable=self.analysis_wl_max, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Label(wl_restrict_subframe, text="nm", style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
 
+        # Auto-select checkbox when both range values are entered
+        def auto_check_wavelength_restriction(*args):
+            """Auto-check the restrict wavelengths checkbox when both min and max are entered."""
+            try:
+                min_val = self.analysis_wl_min.get().strip()
+                max_val = self.analysis_wl_max.get().strip()
+
+                # Only auto-check if both fields have numeric values
+                if min_val and max_val:
+                    # Try to convert to float to ensure they're numeric
+                    float(min_val)
+                    float(max_val)
+                    # Auto-check the checkbox
+                    self.enable_analysis_wl_restriction.set(True)
+            except (ValueError, AttributeError):
+                # If conversion fails or variables not initialized, do nothing
+                pass
+
+        # Add trace callbacks to both min and max variables
+        self.analysis_wl_min.trace_add('write', auto_check_wavelength_restriction)
+        self.analysis_wl_max.trace_add('write', auto_check_wavelength_restriction)
+
         # Preset buttons for common ranges
         preset_frame = ttk.Frame(options_frame)
         preset_frame.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
@@ -9223,11 +9245,19 @@ class SpectralPredictApp:
                 self._log_progress(f"   Adjusted to: {adjusted_max_components} (limited by {n_features} features, {n_samples} samples)")
                 self._log_progress(f"   Reason: PLS requires n_components ≤ min(n_features, n_samples)\n")
 
+            # Calculate excluded and validation counts for saving in results
+            n_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
+            n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
+            n_total_original = len(self.X)  # Total samples before filtering
+
             results_df, label_encoder = run_search(
                 X_filtered,
                 y_filtered,
                 task_type=task_type,
                 folds=self.folds.get(),
+                excluded_count=n_excluded,
+                validation_count=n_validation,
+                total_samples_original=n_total_original,
                 variable_penalty=self.variable_penalty.get(),
                 complexity_penalty=self.complexity_penalty.get(),
                 max_n_components=adjusted_max_components,
@@ -9515,6 +9545,11 @@ class SpectralPredictApp:
                                     self._log_progress(f"   R²:   {r2:.4f}")
                                     self._log_progress(f"   MAE:  {mae:.4f}")
                                     self._log_progress(f"   RPD:  {rpd:.2f}")
+
+                                    # Add warning for mixture of experts about cross-validated performance
+                                    if ensemble_type == 'mixture_experts' and r2 > 0.95:
+                                        self._log_progress(f"   ⚠️ Note: These metrics are on training data.")
+                                        self._log_progress(f"   ⚠️ Actual performance on new data will be lower.")
 
                                     # Store results
                                     ensemble_results.append({
@@ -10655,6 +10690,79 @@ class SpectralPredictApp:
 
         return True
 
+    def _validate_training_configuration(self, training_config):
+        """Validate that current state matches training configuration and warn about mismatches."""
+        warnings = []
+
+        # Check fold count
+        current_folds = self.refine_folds.get()
+        saved_folds = training_config.get("folds", 5)
+        if current_folds != saved_folds:
+            warnings.append(f"CV folds: trained with {saved_folds}, current setting is {current_folds}")
+
+        # Calculate current data state
+        current_total = len(self.X) if self.X is not None else len(self.X_original)
+        current_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
+        current_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
+        current_calibration = current_total - current_excluded - current_validation
+
+        # Check sample counts
+        saved_samples = training_config.get("n_samples_used")
+        if saved_samples and abs(current_calibration - saved_samples) > 0:
+            warnings.append(
+                f"Calibration samples: trained with {saved_samples}, current has {current_calibration} "
+                f"(difference: {current_calibration - saved_samples:+d})"
+            )
+
+        # Check excluded count
+        saved_excluded = training_config.get("excluded_count", 0)
+        if current_excluded != saved_excluded:
+            warnings.append(
+                f"Excluded samples: trained with {saved_excluded} excluded, current has {current_excluded} excluded"
+            )
+
+        # Check validation count
+        saved_validation = training_config.get("validation_count", 0)
+        if current_validation != saved_validation:
+            warnings.append(
+                f"Validation set: trained with {saved_validation} validation, current has {current_validation} validation"
+            )
+
+        if warnings:
+            # Show detailed warning message
+            message = "⚠️ TRAINING CONFIGURATION MISMATCH DETECTED!\n\n"
+            message += "The following differences were found between the original training and current state:\n\n"
+            for warning in warnings:
+                message += f"• {warning}\n"
+            message += "\nThis WILL cause R² scores to differ from the Results tab.\n\n"
+            message += "Recommendations:\n"
+            message += "1. Reset excluded samples and validation set to match original training\n"
+            message += "2. Set CV folds to match original setting\n"
+            message += "3. OR accept that performance metrics will differ with current dataset\n"
+            message += "4. OR re-run the full search with current settings\n\n"
+            message += "Do you want to continue anyway?"
+
+            # Show warning dialog
+            response = messagebox.askyesno(
+                "Training Configuration Mismatch",
+                message,
+                icon='warning'
+            )
+
+            if not response:
+                # User chose not to continue
+                raise ValueError("Model loading cancelled due to configuration mismatch")
+
+            # Also print to console for debugging
+            print(f"\n{'='*80}")
+            print("⚠️ TRAINING CONFIGURATION MISMATCH")
+            print(f"{'='*80}")
+            for warning in warnings:
+                print(f"  • {warning}")
+            print(f"{'='*80}\n")
+        else:
+            print("\n✓ Training configuration matches current state - R² should be consistent")
+
     def _load_default_parameters(self):
         """Load default parameters for fresh model development."""
         if not self._validate_data_for_refinement():
@@ -10864,9 +10972,20 @@ class SpectralPredictApp:
 
     def _load_model_for_refinement(self, config):
         """Load a model configuration into the Model Development tab."""
+        # Store config for use in _run_refined_model_thread
+        self.loaded_model_config = config
+
         # Validate data availability
         if not self._validate_data_for_refinement():
             return
+
+        # Check for training configuration mismatch
+        if 'training_config' in config:
+            self._validate_training_configuration(config['training_config'])
+        else:
+            # Legacy model without training configuration
+            print("\n⚠️  Note: This model was saved before training configuration tracking was added.")
+            print("    Cannot verify if current dataset state matches original training state.")
 
         # Build configuration text
         info_text = f"""Model: {config.get('Model', 'N/A')}
@@ -11109,6 +11228,18 @@ Performance (Classification):
         # Update mode label to indicate loaded from results
         rank = config.get('Rank', 'N/A')
         self.refine_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})")
+
+        # CRITICAL FIX: Restore validation indices from saved configuration
+        # This ensures Model Development uses the same data split as Results
+        if 'validation_indices' in config and config.get('validation_set_enabled'):
+            self.validation_indices = set(config.get('validation_indices', []))
+            self.validation_enabled.set(True)
+            print(f"✓ Restored {len(self.validation_indices)} validation indices from model config")
+        else:
+            # Clear validation if not used in original model
+            self.validation_indices = set()
+            self.validation_enabled.set(False)
+            print("✓ No validation indices to restore (model was trained on all data)")
 
         # Update the wavelength count display
         self._update_wavelength_count()
@@ -12126,6 +12257,46 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: Calibration: {n_cal} samples | Validation: {n_val} samples")
                 print(f"DEBUG: This matches the data split used in the main search (Results tab)")
 
+            # Add comprehensive diagnostic output for debugging R² discrepancies
+            print(f"\n{'='*80}")
+            print(f"MODEL DEVELOPMENT - DATASET STATE DIAGNOSTIC")
+            print(f"{'='*80}")
+            print(f"Configuration:")
+            print(f"  CV Folds: {n_folds}")
+            print(f"  Random State: 42 (fixed)")
+            print(f"\nData Filtering:")
+            print(f"  Total samples in dataset: {len(X_source)}")
+            print(f"  Excluded samples: {len(excluded_indices) if excluded_indices else 0}")
+            print(f"  Validation enabled: {self.validation_enabled.get()}")
+            print(f"  Validation samples: {len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0}")
+            print(f"  → Calibration samples for CV: {len(X_base_df)}")
+
+            # Check if we have saved training configuration from the original search
+            if hasattr(self, 'loaded_model_config') and self.loaded_model_config and 'training_config' in self.loaded_model_config:
+                training_config = self.loaded_model_config['training_config']
+                print(f"\nOriginal Training Configuration (from Results):")
+                print(f"  CV Folds: {training_config.get('folds', 'NOT SAVED')}")
+                print(f"  Calibration samples: {training_config.get('n_samples_used', 'NOT SAVED')}")
+                print(f"  Excluded count: {training_config.get('excluded_count', 'NOT SAVED')}")
+                print(f"  Validation count: {training_config.get('validation_count', 'NOT SAVED')}")
+
+                # Check for mismatches
+                if 'n_samples_used' in training_config:
+                    original_samples = training_config['n_samples_used']
+                    current_samples = len(X_base_df)
+                    if original_samples != current_samples:
+                        print(f"\n⚠️  WARNING: SAMPLE COUNT MISMATCH!")
+                        print(f"  Original training used: {original_samples} samples")
+                        print(f"  Current refinement uses: {current_samples} samples")
+                        print(f"  Difference: {current_samples - original_samples:+d} samples")
+                        print(f"  → This WILL cause R² values to differ from Results tab!")
+            else:
+                print(f"\n⚠️  Note: Training configuration not saved in results")
+                print(f"  (Model was saved before configuration tracking was added)")
+                print(f"  Cannot verify if dataset state matches original training")
+
+            print(f"{'='*80}\n")
+
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
             # Get user-selected preprocessing method and map to build_preprocessing_pipeline format
@@ -12194,6 +12365,11 @@ F1 Score:  {f1:.4f}
                     # No valid deriv in config, use map
                     deriv = deriv_map.get(preprocess, 0)
                     polyorder = polyorder_map.get(preprocess, 2)
+                    print(f"WARNING: No Deriv value in config for '{preprocess}'")
+                    print(f"  Using fallback: deriv={deriv}, polyorder={polyorder}")
+                    if preprocess == 'deriv_snv':
+                        print(f"  CRITICAL: deriv_snv can be 1st (needs polyorder=2) or 2nd (needs polyorder=3) derivative")
+                        print(f"  Cannot determine which from config - R² may be incorrect!")
             else:
                 # No config loaded, use map (custom model creation)
                 deriv = deriv_map.get(preprocess, 0)
@@ -12211,11 +12387,25 @@ F1 Score:  {f1:.4f}
                     except (TypeError, ValueError):
                         pass
             is_subset = len(selected_wl) < base_full_vars
-            use_full_spectrum_preprocessing = is_derivative and is_subset
+            # CRITICAL FIX: Use PATH A for ALL derivative preprocessing, not just subset
+            # Derivatives need full spectral context for correct Savitzky-Golay windows
+            # This matches search.py behavior and fixes R² discrepancy
+            use_full_spectrum_preprocessing = is_derivative  # Changed from: is_derivative and is_subset
+
+            # Debug output for preprocessing parameters
+            print(f"\nDEBUG: Preprocessing Parameters:")
+            print(f"  Method: {preprocess}")
+            print(f"  Derivative order: {deriv}")
+            print(f"  Polyorder: {polyorder}")
+            print(f"  Window size: {window}")
 
             if use_full_spectrum_preprocessing:
-                print("DEBUG: Derivative + subset detected. Using full-spectrum preprocessing (matching search.py).")
-                print(f"DEBUG: This fixes the R² discrepancy for non-contiguous wavelength selections.")
+                if is_subset:
+                    print("DEBUG: Derivative + subset detected. Using full-spectrum preprocessing (matching search.py).")
+                    print(f"DEBUG: This fixes the R² discrepancy for non-contiguous wavelength selections.")
+                else:
+                    print("DEBUG: Derivative preprocessing detected. Using full-spectrum preprocessing for correct spectral context.")
+                    print(f"DEBUG: Processing {len(selected_wl)} wavelengths with full spectral context.")
 
             # Get user-selected task type
             task_type = self.refine_task_type.get()
@@ -12254,8 +12444,8 @@ F1 Score:  {f1:.4f}
 
             if params_from_search:
                 try:
-                    # DIAGNOSTIC: Capture parameters BEFORE set_params
-                    if model_name in ["XGBoost", "LightGBM"]:
+                    # DIAGNOSTIC: Capture parameters BEFORE set_params for ALL models
+                    if True:  # Apply to ALL models
                         print(f"\n{'='*80}")
                         print(f"DIAGNOSTIC - {model_name} Model Development (BEFORE set_params)")
                         print(f"{'='*80}")
@@ -12271,8 +12461,8 @@ F1 Score:  {f1:.4f}
                     model.set_params(**params_from_search)
                     print(f"DEBUG: Applied saved search parameters: {params_from_search}")
 
-                    # DIAGNOSTIC: Capture parameters AFTER set_params
-                    if model_name in ["XGBoost", "LightGBM"]:
+                    # DIAGNOSTIC: Capture parameters AFTER set_params for ALL models
+                    if True:  # Apply to ALL models including PLS
                         print(f"\n{'='*80}")
                         print(f"DIAGNOSTIC - {model_name} Model Development (AFTER set_params)")
                         print(f"{'='*80}")
@@ -19754,6 +19944,10 @@ Configuration:
         self.comparison_results = None
         self.comparison_rules = []
 
+        # Transfer model storage
+        self.transfer_models = []  # List of transfer model dicts with 'path', 'model', 'description'
+        self.apply_transfer = tk.BooleanVar(value=False)
+
         # Live monitoring variables
         self.live_monitoring_active = False
         self.live_monitoring_timer_id = None
@@ -19837,6 +20031,64 @@ Configuration:
         aux_scrollbar.pack(side='right', fill='y')
         self.comparison_auxiliary_text.config(yscrollcommand=aux_scrollbar.set)
         self._update_comparison_auxiliary_display()
+
+        # === STEP 1.5: Transfer Models (Optional) ===
+        transfer_frame = ttk.LabelFrame(main_frame, text="Step 1.5: Load Transfer Models (Optional)", padding="20")
+        transfer_frame.pack(fill='x', pady=(0, 15))
+
+        # Enable checkbox and description
+        self.apply_transfer_checkbox = ttk.Checkbutton(transfer_frame,
+                                                       text="Apply Transfer Models Before Prediction",
+                                                       variable=self.apply_transfer,
+                                                       command=self._on_transfer_toggle)
+        self.apply_transfer_checkbox.pack(anchor='w', pady=(0, 10))
+
+        ttk.Label(transfer_frame, text="Apply calibration transfer models to transform spectra between instrument domains",
+                  style='Caption.TLabel').pack(anchor='w', pady=(0, 10))
+
+        # Button frame
+        transfer_btn_frame = ttk.Frame(transfer_frame)
+        transfer_btn_frame.pack(anchor='w', pady=5)
+
+        ttk.Button(transfer_btn_frame, text="📂 Browse Transfer Models...",
+                   command=self._load_transfer_models, style='Modern.TButton').pack(side='left', padx=(0, 5))
+        ttk.Button(transfer_btn_frame, text="🗑️ Clear All",
+                   command=self._clear_transfer_models, style='Modern.TButton').pack(side='left')
+
+        # Transfer models listbox with controls
+        list_frame = ttk.Frame(transfer_frame)
+        list_frame.pack(fill='both', expand=True, pady=(10, 0))
+
+        ttk.Label(list_frame, text="Loaded Transfer Models (applied in order):",
+                  style='Subheading.TLabel').pack(anchor='w', pady=(0, 5))
+
+        # Listbox with scrollbar
+        listbox_frame = ttk.Frame(list_frame)
+        listbox_frame.pack(fill='both', expand=True)
+
+        self.transfer_listbox = tk.Listbox(listbox_frame, height=5, width=80,
+                                          font=('Consolas', 9),
+                                          bg=self.colors['panel'], fg=self.colors['text'],
+                                          selectbackground=self.colors['accent'],
+                                          selectforeground=self.colors['text_inverse'],
+                                          relief='flat', borderwidth=0)
+        self.transfer_listbox.pack(side='left', fill='both', expand=True)
+
+        transfer_scrollbar = ttk.Scrollbar(listbox_frame, orient='vertical',
+                                          command=self.transfer_listbox.yview)
+        transfer_scrollbar.pack(side='right', fill='y')
+        self.transfer_listbox.config(yscrollcommand=transfer_scrollbar.set)
+
+        # Listbox controls
+        control_frame = ttk.Frame(list_frame)
+        control_frame.pack(fill='x', pady=(5, 0))
+
+        ttk.Button(control_frame, text="↑", command=self._move_transfer_up,
+                   style='Modern.TButton', width=3).pack(side='left', padx=(0, 5))
+        ttk.Button(control_frame, text="↓", command=self._move_transfer_down,
+                   style='Modern.TButton', width=3).pack(side='left', padx=(0, 5))
+        ttk.Button(control_frame, text="Remove Selected", command=self._remove_transfer_model,
+                   style='Modern.TButton').pack(side='left', padx=(10, 0))
 
         # === STEP 2: Load Data ===
         step2_frame = ttk.LabelFrame(main_frame, text="Step 2: Load Spectra", padding="20")
@@ -20634,6 +20886,166 @@ Configuration:
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy,
                    style='Modern.TButton').pack(side='left')
 
+    # === Transfer Model Functions ===
+    def _load_transfer_models(self):
+        """Load multiple transfer models maintaining order."""
+        from tkinter import filedialog
+        import os
+
+        filepaths = filedialog.askopenfilenames(
+            title="Select Transfer Models (in order of application)",
+            filetypes=[("Transfer Models", "*.json"), ("All Files", "*.*")]
+        )
+
+        if not filepaths:
+            return
+
+        for filepath in filepaths:
+            try:
+                # Import calibration_transfer module
+                from spectral_predict import calibration_transfer
+
+                # Load the transfer model (json + npz pair)
+                prefix = filepath.replace('.json', '')
+                transfer_model = calibration_transfer.load_transfer_model(prefix)
+
+                # Create display description
+                description = f"{transfer_model.method.upper()}: {transfer_model.slave_id} → {transfer_model.master_id}"
+
+                # Add to list maintaining order
+                self.transfer_models.append({
+                    'path': filepath,
+                    'model': transfer_model,
+                    'description': description
+                })
+
+                # Update listbox display
+                self._update_transfer_model_display()
+
+                print(f"Loaded transfer model: {description}")
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load {os.path.basename(filepath)}: {str(e)}")
+
+    def _clear_transfer_models(self):
+        """Clear all loaded transfer models."""
+        self.transfer_models.clear()
+        self.transfer_listbox.delete(0, tk.END)
+        print("Cleared all transfer models")
+
+    def _update_transfer_model_display(self):
+        """Update the transfer model listbox display."""
+        self.transfer_listbox.delete(0, tk.END)
+        for i, transfer_dict in enumerate(self.transfer_models, 1):
+            display_text = f"{i}. {transfer_dict['description']}"
+            self.transfer_listbox.insert(tk.END, display_text)
+
+    def _move_transfer_up(self):
+        """Move selected transfer model up in the chain."""
+        selection = self.transfer_listbox.curselection()
+        if not selection:
+            return
+
+        idx = selection[0]
+        if idx > 0:
+            # Swap with previous item
+            self.transfer_models[idx-1], self.transfer_models[idx] = \
+                self.transfer_models[idx], self.transfer_models[idx-1]
+            self._update_transfer_model_display()
+            self.transfer_listbox.selection_set(idx-1)
+
+    def _move_transfer_down(self):
+        """Move selected transfer model down in the chain."""
+        selection = self.transfer_listbox.curselection()
+        if not selection:
+            return
+
+        idx = selection[0]
+        if idx < len(self.transfer_models) - 1:
+            # Swap with next item
+            self.transfer_models[idx], self.transfer_models[idx+1] = \
+                self.transfer_models[idx+1], self.transfer_models[idx]
+            self._update_transfer_model_display()
+            self.transfer_listbox.selection_set(idx+1)
+
+    def _remove_transfer_model(self):
+        """Remove selected transfer model from chain."""
+        selection = self.transfer_listbox.curselection()
+        if not selection:
+            return
+
+        idx = selection[0]
+        removed = self.transfer_models.pop(idx)
+        self._update_transfer_model_display()
+        print(f"Removed transfer model: {removed['description']}")
+
+    def _on_transfer_toggle(self):
+        """Handle transfer model checkbox toggle."""
+        if self.apply_transfer.get():
+            print("Transfer models enabled")
+        else:
+            print("Transfer models disabled")
+
+    def _apply_transfer_chain(self, X_data):
+        """
+        Apply sequential transfer models to spectra.
+
+        Parameters
+        ----------
+        X_data : pd.DataFrame
+            Input spectra with wavelengths as columns
+
+        Returns
+        -------
+        pd.DataFrame
+            Transformed spectra with updated wavelengths
+        """
+        if not self.apply_transfer.get() or not self.transfer_models:
+            return X_data
+
+        from spectral_predict import calibration_transfer
+        import pandas as pd
+        import numpy as np
+
+        X_current = X_data.copy()
+
+        for i, transfer_dict in enumerate(self.transfer_models):
+            transfer_model = transfer_dict['model']
+
+            print(f"Applying transfer {i+1}/{len(self.transfer_models)}: {transfer_dict['description']}")
+
+            # Convert to numpy if needed
+            if isinstance(X_current, pd.DataFrame):
+                X_values = X_current.values
+                sample_names = X_current.index
+            else:
+                X_values = X_current
+                sample_names = None
+
+            # Apply transfer using the dispatcher
+            try:
+                X_transferred = calibration_transfer.apply_transfer_dispatch(X_values, transfer_model)
+            except Exception as e:
+                messagebox.showerror("Transfer Error",
+                                   f"Failed to apply transfer model {transfer_dict['description']}: {str(e)}")
+                return X_data  # Return original data on error
+
+            # Reconstruct DataFrame with new wavelengths
+            if sample_names is not None:
+                X_current = pd.DataFrame(
+                    X_transferred,
+                    index=sample_names,
+                    columns=transfer_model.wavelengths_common
+                )
+            else:
+                X_current = X_transferred
+
+        # Log the transformation
+        transfer_chain_desc = " → ".join([t['description'] for t in self.transfer_models])
+        print(f"Successfully applied transfer chain: {transfer_chain_desc}")
+
+        return X_current
+
     def _run_comparison(self):
         """Run multi-model comparison with all loaded models."""
         # Validate inputs
@@ -20658,9 +21070,17 @@ Configuration:
             import pandas as pd
             from src.spectral_predict import model_io
 
+            # Apply transfer chain if enabled
+            if self.apply_transfer.get() and self.transfer_models:
+                self.comparison_status.config(text="Applying transfer models...", foreground='orange')
+                self.root.update()
+                comparison_data_transformed = self._apply_transfer_chain(self.comparison_data)
+            else:
+                comparison_data_transformed = self.comparison_data
+
             # Initialize results DataFrame
             results = pd.DataFrame()
-            results['Sample'] = self.comparison_data.index if hasattr(self.comparison_data.index, 'tolist') else range(len(self.comparison_data))
+            results['Sample'] = comparison_data_transformed.index if hasattr(comparison_data_transformed.index, 'tolist') else range(len(comparison_data_transformed))
 
             # Run primary model prediction
             primary_metadata = self.comparison_primary_model['metadata']
@@ -20672,7 +21092,7 @@ Configuration:
             # Use filename instead of target_model_preprocessing
             primary_col_name = f"{primary_filename} {task_indicator}"
 
-            primary_predictions = model_io.predict_with_model(self.comparison_primary_model, self.comparison_data)
+            primary_predictions = model_io.predict_with_model(self.comparison_primary_model, comparison_data_transformed)
             results[primary_col_name] = primary_predictions
 
             # Run auxiliary model predictions
@@ -20694,7 +21114,7 @@ Configuration:
                     aux_col_name = f"{original_col_name}_{counter}"
                     counter += 1
 
-                aux_predictions = model_io.predict_with_model(aux_model, self.comparison_data)
+                aux_predictions = model_io.predict_with_model(aux_model, comparison_data_transformed)
                 results[aux_col_name] = aux_predictions
                 aux_col_names.append(aux_col_name)
 
