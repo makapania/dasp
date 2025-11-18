@@ -2933,27 +2933,25 @@ class SpectralPredictApp:
         ttk.Button(export_frame, text="Export to Excel", command=self._export_to_excel).pack(side='left', padx=5)
 
     def _create_tab0d_view_merged_data(self):
-        """Subtab 0D: View & Edit Merged Data - Spreadsheet view with column management."""
+        """Subtab 0D: View & Edit Data - Spreadsheet view for merged or single dataset with column management."""
         from tksheet import Sheet
 
         tab0d = ttk.Frame(self.data_mgmt_notebook, style='TFrame')
-        self.data_mgmt_notebook.add(tab0d, text='  📊 View Merged Data  ')
+        self.data_mgmt_notebook.add(tab0d, text='  📊 View Data  ')
 
         # Top controls
         control_frame = ttk.Frame(tab0d)
         control_frame.pack(fill='x', padx=10, pady=10)
 
-        ttk.Button(control_frame, text="🔄 Load Merged Data",
-                  command=self._load_merged_to_viewer).pack(side='left', padx=5)
         ttk.Button(control_frame, text="🗑️ Delete Selected Column",
                   command=self._delete_merged_column).pack(side='left', padx=5)
         ttk.Button(control_frame, text="💾 Save Changes",
                   command=self._save_merged_changes).pack(side='left', padx=5)
-        ttk.Label(control_frame, text="Right-click column header to add column",
+        ttk.Label(control_frame, text="Right-click column header to add or manage columns • Use Ctrl+C/V to copy/paste • F2 to edit",
                  style='Caption.TLabel').pack(side='left', padx=15)
 
         # Info label
-        self.merged_info_label = ttk.Label(tab0d, text="No merged data loaded", style='Caption.TLabel')
+        self.merged_info_label = ttk.Label(tab0d, text="No data loaded", style='Caption.TLabel')
         self.merged_info_label.pack(padx=10, pady=5)
 
         # Sheet frame
@@ -2968,14 +2966,12 @@ class SpectralPredictApp:
             theme='light blue',
             height=500
         )
-        # Enable Excel-like bindings
+        # Enable Excel-like bindings (excluding right_click_popup_menu to use custom menu)
         self.merged_data_sheet.enable_bindings(
             "single_select",
             "column_select",
             "row_select",
             "drag_select",
-            "right_click_popup_menu",
-            "rc_select",
             "copy",           # Ctrl+C to copy
             "paste",          # Ctrl+V to paste
             "cut",            # Ctrl+X to cut
@@ -2986,8 +2982,8 @@ class SpectralPredictApp:
         )
         self.merged_data_sheet.pack(fill='both', expand=True)
 
-        # Bind right-click on column headers
-        self.merged_data_sheet.bind("<Button-3>", self._on_merged_sheet_right_click, add="+")
+        # Bind right-click AFTER sheet is packed
+        self.merged_data_sheet.bind("<Button-3>", self._on_merged_sheet_right_click)
 
     def _create_tab1_import_preview(self):
         """Tab 1: Import & Preview - Data loading + spectral plots."""
@@ -6671,6 +6667,18 @@ class SpectralPredictApp:
                 f"Has metadata: {source.ref is not None}\n"
             )
 
+            # Auto-load single dataset to View Data tab
+            if len(self.data_source_manager.sources) == 1:
+                print("Single dataset loaded - auto-loading to View Data tab")
+                # Create a "merged" dataset from the single source
+                merged = self.data_source_manager.merge_sources(
+                    source_ids=[source.source_id],
+                    strategy='single'
+                )
+                # Load to viewer
+                self._load_merged_to_viewer()
+                print("Single dataset loaded to View Data tab")
+
             messagebox.showinfo("Success", f"Loaded {source.n_samples} samples from {source.name}")
 
             # Clear input fields
@@ -6946,32 +6954,115 @@ class SpectralPredictApp:
         self._load_merged_to_viewer()  # Refresh view
 
     def _on_merged_sheet_right_click(self, event):
-        """Handle right-click on sheet to add column."""
-        # Get clicked position
-        region = self.merged_data_sheet.identify_region(event)
-
-        if region and region.type_ == "header":
-            # Right-clicked on column header
-            col_idx = region.column
+        """Handle right-click on sheet to add/delete columns."""
+        try:
             headers = self.merged_data_sheet.headers()
+            if not headers:
+                print("No headers available")
+                return
 
-            if col_idx < len(headers):
+            print(f"Right-click at x={event.x}, y={event.y}")
+
+            # First check if we have a currently selected column
+            selected = self.merged_data_sheet.get_currently_selected()
+            col_idx = None
+
+            if selected:
+                print(f"Selected region: {selected}")
+                # Check if it's a column selection
+                if hasattr(selected, 'column') and selected.column is not None:
+                    col_idx = selected.column
+                    print(f"Using selected column index: {col_idx}")
+
+            # If no column selected, try to identify from click position
+            if col_idx is None:
+                try:
+                    # Calculate column from x position using column widths
+                    # Get all column widths
+                    total_width = 0
+                    for i, header in enumerate(headers):
+                        col_width = self.merged_data_sheet.column_width(column=i)
+                        total_width += col_width
+                        if event.x <= total_width:
+                            col_idx = i
+                            print(f"Calculated column from position: {col_idx}")
+                            break
+                except Exception as e:
+                    print(f"Column calculation error: {e}")
+
+            # Verify we have a valid column index
+            if col_idx is not None and 0 <= col_idx < len(headers):
                 col_name = headers[col_idx]
+                print(f"Opening menu for column {col_idx}: '{col_name}'")
 
-                # Show menu to add column
+                # Create and show menu
                 menu = tk.Menu(self.merged_data_sheet, tearoff=0)
-                menu.add_command(label=f"Add column after '{col_name}'",
-                               command=lambda: self._add_column_after(col_idx))
+                menu.add_command(
+                    label=f"✚ Insert column after '{col_name}'",
+                    command=lambda idx=col_idx, name=col_name: self._add_column_after(idx, name)
+                )
+                menu.add_separator()
+                menu.add_command(
+                    label=f"🗑️ Delete column '{col_name}'",
+                    command=lambda idx=col_idx: self._delete_column_by_idx(idx)
+                )
                 menu.post(event.x_root, event.y_root)
+            else:
+                print(f"No valid column index found. col_idx={col_idx}, headers={len(headers)}")
 
-    def _add_column_after(self, col_idx):
+        except Exception as e:
+            print(f"Right-click error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _delete_column_by_idx(self, col_idx):
+        """Delete column at specified index."""
+        if not self.data_source_manager or not self.data_source_manager.merged_dataset:
+            messagebox.showwarning("No Data", "No data loaded")
+            return
+
+        headers = self.merged_data_sheet.headers()
+        if col_idx >= len(headers):
+            return
+
+        col_name = headers[col_idx]
+
+        # Don't allow deleting sample ID
+        if col_name == '_sample_id_':
+            messagebox.showerror("Error", "Cannot delete sample ID column")
+            return
+
+        # Confirm deletion
+        confirm = messagebox.askyesno("Confirm Delete",
+            f"Delete column '{col_name}'?\n\nThis cannot be undone.")
+
+        if not confirm:
+            return
+
+        # Delete column from sheet
+        self.merged_data_sheet.delete_column(col_idx)
+
+        # Update merged dataset
+        merged = self.data_source_manager.merged_dataset
+
+        if merged.ref is not None and col_name in merged.ref.columns:
+            merged.ref = merged.ref.drop(columns=[col_name])
+            print(f"Deleted metadata column: {col_name}")
+        elif col_name in merged.X.columns:
+            merged.X = merged.X.drop(columns=[col_name])
+            print(f"Deleted wavelength column: {col_name}")
+
+        messagebox.showinfo("Success", f"Deleted column '{col_name}'")
+        self._load_merged_to_viewer()  # Refresh view
+
+    def _add_column_after(self, col_idx, col_name):
         """Add a new categorical column after the specified index."""
         if not self.data_source_manager or not self.data_source_manager.merged_dataset:
             return
 
         # Get new column name from user
         new_col_name = tk.simpledialog.askstring("Add Column",
-            "Enter name for new column:",
+            f"Enter name for new column (will be added after '{col_name}'):",
             parent=self.merged_data_sheet)
 
         if not new_col_name:
@@ -6979,14 +7070,43 @@ class SpectralPredictApp:
 
         merged = self.data_source_manager.merged_dataset
 
-        # Add empty column to ref (metadata)
+        # Initialize ref if needed
         if merged.ref is None:
             merged.ref = pd.DataFrame(index=merged.X.index)
 
-        merged.ref[new_col_name] = ""  # Empty string for categorical data
+        print(f"Adding column '{new_col_name}' after '{col_name}' (index {col_idx})")
 
-        print(f"Added new column: {new_col_name}")
-        messagebox.showinfo("Success", f"Added column '{new_col_name}'")
+        # Check if the clicked column is a metadata column or wavelength column
+        headers = self.merged_data_sheet.headers()
+
+        # Figure out which metadata column position to insert at
+        # Display order: _sample_id_, metadata cols (in merged.ref.columns order), wavelength cols
+
+        if col_name == '_sample_id_':
+            # Insert as first metadata column
+            position = 0
+        elif col_name in merged.ref.columns:
+            # Insert after this metadata column
+            ref_col_idx = list(merged.ref.columns).index(col_name)
+            position = ref_col_idx + 1
+        else:
+            # It's a wavelength column - insert at end of metadata
+            position = len(merged.ref.columns)
+
+        # Create new column with empty values
+        new_col_data = pd.Series("", index=merged.X.index, name=new_col_name)
+
+        # Insert at the calculated position
+        ref_cols = list(merged.ref.columns)
+        ref_cols.insert(position, new_col_name)
+
+        # Rebuild ref with new column order
+        merged.ref[new_col_name] = new_col_data
+        merged.ref = merged.ref[ref_cols]
+
+        print(f"Added new column: {new_col_name} at position {position}")
+        print(f"New column order: {list(merged.ref.columns)}")
+        messagebox.showinfo("Success", f"Added column '{new_col_name}' after '{col_name}'")
 
         # Refresh viewer
         self._load_merged_to_viewer()
