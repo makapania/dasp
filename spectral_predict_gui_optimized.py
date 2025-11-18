@@ -10500,6 +10500,21 @@ class SpectralPredictApp:
             # Store label_encoder for saving with models
             self.label_encoder = label_encoder
 
+            # Store training configuration for validation when transferring to Model Dev
+            # This captures the exact data configuration used for training
+            self.last_training_config = {
+                'folds': self.folds.get(),
+                'n_samples_used': len(X_filtered),  # Actual calibration samples used
+                'excluded_count': n_excluded,
+                'validation_count': n_validation,
+                'total_samples_original': len(self.X) if self.X is not None else 0
+            }
+            print(f"\n✓ Stored training configuration:")
+            print(f"  Calibration samples: {self.last_training_config['n_samples_used']}")
+            print(f"  Excluded samples: {self.last_training_config['excluded_count']}")
+            print(f"  Validation samples: {self.last_training_config['validation_count']}")
+            print(f"  CV folds: {self.last_training_config['folds']}")
+
             # Add "Select" column for ensemble model selection
             # Auto-select top N models by CompositeScore (lower is better)
             top_n = self.ensemble_top_n.get()
@@ -11168,6 +11183,29 @@ class SpectralPredictApp:
         # CRITICAL: Use .loc (label-based) not .iloc (position-based)
         # because treeview IID uses the dataframe's original index labels
         model_config = self.results_df.loc[row_idx].to_dict()
+
+        # Attach training configuration if available (for validation checking)
+        # This ensures Model Dev can verify it's using the same data configuration as Results tab
+        if hasattr(self, 'last_training_config') and self.last_training_config is not None:
+            model_config['training_config'] = self.last_training_config
+            print(f"✓ Attached training configuration to model transfer")
+            print(f"  Expected calibration samples: {self.last_training_config['n_samples_used']}")
+
+            # CRITICAL: Also attach validation configuration
+            # Without this, validation_indices gets cleared and causes false mismatch warnings
+            if self.validation_enabled.get() and self.validation_indices:
+                model_config['validation_indices'] = list(self.validation_indices)
+                model_config['validation_set_enabled'] = True
+                print(f"  Validation samples: {len(self.validation_indices)}")
+            else:
+                model_config['validation_set_enabled'] = False
+                print(f"  Validation: not used")
+
+            # Also attach excluded spectra info for consistency
+            if self.excluded_spectra:
+                model_config['excluded_spectra'] = list(self.excluded_spectra)
+                print(f"  Excluded samples: {len(self.excluded_spectra)}")
+
         self.selected_model_config = model_config
 
         # Validation logging
@@ -12201,6 +12239,17 @@ class SpectralPredictApp:
             self.validation_indices = set()
             self.validation_enabled.set(False)
             print("✓ No validation indices to restore (model was trained on all data)")
+
+        # CRITICAL: Also restore excluded spectra if available
+        # This ensures excluded count matches for validation check
+        if 'excluded_spectra' in config:
+            self.excluded_spectra = set(config.get('excluded_spectra', []))
+            if len(self.excluded_spectra) > 0:
+                print(f"✓ Restored {len(self.excluded_spectra)} excluded samples from model config")
+        else:
+            # Don't clear excluded_spectra - user may have manually excluded samples in Data Upload tab
+            # Only update if explicitly provided in config
+            pass
 
         # Check for training configuration mismatch
         if 'training_config' in config:
