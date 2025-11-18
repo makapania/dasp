@@ -6641,11 +6641,16 @@ class SpectralPredictApp:
 
     def _preview_merge(self):
         """Preview merge operation."""
+        print("Preview merge button clicked")
+
         if not self.data_source_manager:
+            print("No data source manager")
+            messagebox.showerror("Error", "Data source manager not initialized")
             return
 
         # Get selected sources
         selected_sources = [sid for sid, var in self.merge_source_vars.items() if var.get()]
+        print(f"Selected sources: {selected_sources}")
 
         if len(selected_sources) < 2:
             messagebox.showwarning("Not Enough Sources", "Please select at least 2 sources to merge")
@@ -6696,15 +6701,23 @@ class SpectralPredictApp:
             self.merge_preview_text.insert('1.0', preview)
 
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Preview merge error:\n{error_details}")
             messagebox.showerror("Preview Error", f"Failed to preview merge: {str(e)}")
 
     def _execute_merge(self):
         """Execute merge operation."""
+        print("Execute merge button clicked")
+
         if not self.data_source_manager:
+            print("No data source manager")
+            messagebox.showerror("Error", "Data source manager not initialized")
             return
 
         # Get selected sources
         selected_sources = [sid for sid, var in self.merge_source_vars.items() if var.get()]
+        print(f"Selected sources for merge: {selected_sources}")
 
         if len(selected_sources) < 2:
             messagebox.showwarning("Not Enough Sources", "Please select at least 2 sources to merge")
@@ -6713,13 +6726,17 @@ class SpectralPredictApp:
         try:
             strategy = self.merge_strategy_var.get()
             handle_duplicates = self.duplicate_handling_var.get()
+            print(f"Merge strategy: {strategy}, duplicate handling: {handle_duplicates}")
 
             # Execute merge
+            print("Calling data_source_manager.merge_sources...")
             merged = self.data_source_manager.merge_sources(
                 source_ids=selected_sources,
                 strategy=strategy,
                 handle_duplicates=handle_duplicates
             )
+
+            print(f"Merge successful! Result: {len(merged.X)} samples, {len(merged.X.columns)} wavelengths")
 
             # Show results
             report = merged.merge_report
@@ -6733,7 +6750,10 @@ class SpectralPredictApp:
             self.merge_preview_text.insert(tk.END, f"Report: {report}\n")
 
         except Exception as e:
-            messagebox.showerror("Merge Error", f"Failed to merge: {str(e)}")
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Merge error:\n{error_details}")
+            messagebox.showerror("Merge Error", f"Failed to merge: {str(e)}\n\nCheck console for details.")
 
     def _merge_and_use(self):
         """Execute merge and immediately use for analysis."""
@@ -12170,6 +12190,18 @@ class SpectralPredictApp:
         if not self._validate_data_for_refinement():
             return
 
+        # CRITICAL: Restore validation indices BEFORE validation check
+        # This ensures the check sees the correct validation state
+        if 'validation_indices' in config and config.get('validation_set_enabled'):
+            self.validation_indices = set(config.get('validation_indices', []))
+            self.validation_enabled.set(True)
+            print(f"✓ Restored {len(self.validation_indices)} validation indices from model config")
+        else:
+            # Clear validation if not used in original model
+            self.validation_indices = set()
+            self.validation_enabled.set(False)
+            print("✓ No validation indices to restore (model was trained on all data)")
+
         # Check for training configuration mismatch
         if 'training_config' in config:
             self._validate_training_configuration(config['training_config'])
@@ -12419,18 +12451,6 @@ Performance (Classification):
         # Update mode label to indicate loaded from results
         rank = config.get('Rank', 'N/A')
         self.refine_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})")
-
-        # CRITICAL FIX: Restore validation indices from saved configuration
-        # This ensures Model Development uses the same data split as Results
-        if 'validation_indices' in config and config.get('validation_set_enabled'):
-            self.validation_indices = set(config.get('validation_indices', []))
-            self.validation_enabled.set(True)
-            print(f"✓ Restored {len(self.validation_indices)} validation indices from model config")
-        else:
-            # Clear validation if not used in original model
-            self.validation_indices = set()
-            self.validation_enabled.set(False)
-            print("✓ No validation indices to restore (model was trained on all data)")
 
         # Update the wavelength count display
         self._update_wavelength_count()
