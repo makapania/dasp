@@ -914,88 +914,62 @@ def _run_single_config(
         mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
         regional_rmse = None  # Not applicable for classification
 
-    # Extract top important variables/wavelengths
-    # Refit on full data to get feature importances
-    # IMPORTANT: Do this BEFORE building result dict so we can capture complete params
-    if supports_feature_importance(model_name):
+    # Capture complete parameters for ALL models (not just those with feature importance)
+    # This fixes R² reproducibility issue for Ridge, Lasso, ElasticNet, PLS, etc.
+    try:
+        # Refit the pipeline on full data to get final fitted parameters
+        pipe.fit(X, y)
+
+        # Get the fitted model from pipeline
+        fitted_model = (
+            pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
+        )
+
+        # Capture ALL parameters
+        print(f"\n{'='*80}")
+        print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
+        print(f"{'='*80}")
         try:
-            # Refit the pipeline on full data
-            pipe.fit(X, y)
+            all_params = fitted_model.get_params()
+            print(f"ALL {model_name} parameters after training:")
+            for key in sorted(all_params.keys()):
+                print(f"  {key}: {all_params[key]}")
+            print(f"\nOld params dict (incomplete - only grid search params):")
+            print(f"  {params}")
 
-            # Get the fitted model from pipeline
-            fitted_model = (
-                pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
-            )
-
-            # FIX: Capture ALL parameters for ALL models
-            # This fixes the R² reproducibility issue by ensuring ALL parameters are saved
-            # This includes PLS, Ridge, Lasso, ElasticNet, RandomForest, XGBoost, LightGBM, CatBoost, MLP, NeuralBoosted, etc.
-            if True:  # Apply to ALL models
-                print(f"\n{'='*80}")
-                print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
-                print(f"{'='*80}")
+            # CRITICAL FIX: Replace params with complete parameter set
+            # Filter out non-serializable parameters
+            filtered_params = {}
+            for key, value in all_params.items():
+                # Skip callables and complex objects
+                if callable(value) or hasattr(value, '__dict__'):
+                    continue
+                # Include all serializable values (including None, bool, int, float, str, etc.)
                 try:
-                    all_params = fitted_model.get_params()
-                    print(f"ALL {model_name} parameters after training:")
-                    for key in sorted(all_params.keys()):
-                        print(f"  {key}: {all_params[key]}")
-                    print(f"\nOld params dict (incomplete - only grid search params):")
-                    print(f"  {params}")
+                    # Test if value can be converted to string and back
+                    str(value)
+                    filtered_params[key] = value
+                except:
+                    # Skip non-serializable values
+                    continue
 
-                    # CRITICAL FIX: Replace params with complete parameter set
-                    # Filter out non-serializable parameters
-                    filtered_params = {}
-                    for key, value in all_params.items():
-                        # Skip callables and complex objects
-                        if callable(value) or hasattr(value, '__dict__'):
-                            continue
-                        # Include all serializable values (including None, bool, int, float, str, etc.)
-                        try:
-                            # Test if value can be converted to string and back
-                            str(value)
-                            filtered_params[key] = value
-                        except:
-                            # Skip non-serializable values
-                            continue
+            params = filtered_params  # Replace params with complete set
 
-                    params = filtered_params  # Replace params with complete set
-
-                    print(f"\nNew params dict (complete - ALL parameters):")
-                    print(f"  {params}")
-                    print(f"{'='*80}\n")
-                except Exception as e:
-                    print(f"ERROR capturing {model_name} params: {e}\n")
-                    print(f"Continuing with original params dict\n")
-
-            # Also capture params for NeuralBoosted to ensure reproducibility
-            # Note: NeuralBoosted with early_stopping may show small variance (±0.01-0.02)
-            # due to validation split context differences between CV folds and full dataset
-            elif model_name == "NeuralBoosted":
-                try:
-                    all_params = fitted_model.get_params()
-                    filtered_params = {}
-                    for key, value in all_params.items():
-                        if not callable(value) and not hasattr(value, '__dict__'):
-                            try:
-                                str(value)
-                                filtered_params[key] = value
-                            except:
-                                continue
-                    params = filtered_params
-
-                    # Add warning if early stopping is enabled
-                    if filtered_params.get('early_stopping', False):
-                        print(f"\nNote: NeuralBoosted uses early_stopping=True. "
-                              f"R² scores may vary slightly (±0.01-0.02) between "
-                              f"Results and Development tabs due to validation split differences.\n")
-                except Exception as e:
-                    print(f"Warning: Could not capture complete NeuralBoosted params: {e}")
-
+            print(f"\nNew params dict (complete - ALL parameters):")
+            print(f"  {params}")
+            print(f"{'='*80}\n")
         except Exception as e:
-            # If parameter capture fails, continue with original params
-            print(f"Warning: Could not fit model for parameter capture: {e}")
+            print(f"ERROR capturing {model_name} params: {e}\n")
+            print(f"Continuing with original params dict\n")
 
-    # Extract LVs (for PLS models)
+        # Store the fitted_model for feature importance calculation below
+        fitted_model_for_importance = fitted_model
+
+    except Exception as e:
+        print(f"Warning: Could not fit model for parameter capture: {e}")
+        fitted_model_for_importance = None
+
+    # Extract LVs (for PLS models) - must be done before building result dict
     lvs = params.get("n_components", np.nan)
 
     # Build result dictionary AFTER capturing complete params
@@ -1035,13 +1009,21 @@ def _run_single_config(
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc
 
+    # Save all_vars for ALL subset models (not just those with importance)
+    # This ensures Model Development can reconstruct the exact subset used
+    if subset_tag != "full" and subset_indices is not None:
+        # Save ALL wavelengths used in the subset model
+        subset_wavelengths = wavelengths[subset_indices]
+        all_vars_str = ','.join([f"{w:.1f}" for w in subset_wavelengths])
+        result['all_vars'] = all_vars_str
+    else:
+        result['all_vars'] = 'N/A'
+
     # Continue with feature importance extraction if model was already fitted above
-    if supports_feature_importance(model_name):
+    if supports_feature_importance(model_name) and fitted_model_for_importance is not None:
         try:
-            # Model already fitted above, get fitted_model reference
-            fitted_model = (
-                pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
-            )
+            # Use the already-fitted model from parameter capture above
+            fitted_model = fitted_model_for_importance
 
             # For PLS-DA, get the PLS component
             if model_name == "PLS-DA" and hasattr(pipe, "named_steps"):
@@ -1060,22 +1042,6 @@ def _run_single_config(
             importances = get_feature_importances(
                 fitted_model, model_name, X_transformed, y
             )
-
-            # For subset models: save ALL wavelengths used (not just top 30)
-            # This fixes the variable count mismatch when loading models for refinement
-            if subset_tag != "full" and subset_indices is not None:
-                # Save ALL wavelengths used in the subset model
-                all_indices = np.arange(len(importances))
-                if subset_indices is not None:
-                    original_wavelengths_all = wavelengths[subset_indices]
-                    all_wavelengths = original_wavelengths_all[all_indices]
-                else:
-                    all_wavelengths = wavelengths[all_indices]
-
-                all_vars_str = ','.join([f"{w:.1f}" for w in all_wavelengths])
-                result['all_vars'] = all_vars_str
-            else:
-                result['all_vars'] = 'N/A'
 
             # Get top N features for display purposes (always top 30)
             n_to_select = min(top_n_vars, len(importances))
@@ -1097,10 +1063,10 @@ def _run_single_config(
         except Exception as e:
             # If anything fails, just mark as N/A
             result['top_vars'] = 'N/A'
-            result['all_vars'] = 'N/A'
+            # Keep all_vars that we already set above
     else:
         # For models that don't support importance extraction
         result['top_vars'] = 'N/A'
-        result['all_vars'] = 'N/A'
+        # Keep all_vars that we already set above
 
     return result

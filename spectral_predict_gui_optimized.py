@@ -12210,6 +12210,21 @@ F1 Score:  {f1:.4f}
             # Determine how many folds we'll run so we can validate sample counts
             n_folds = self.refine_folds.get()
 
+            # Validate CV folds match original training if available
+            if hasattr(self, 'loaded_model_config') and self.loaded_model_config:
+                # Check if we have CV fold information from original training
+                original_folds = self.loaded_model_config.get('cv_folds', None)
+                if original_folds is None and 'training_config' in self.loaded_model_config:
+                    original_folds = self.loaded_model_config['training_config'].get('folds', None)
+
+                if original_folds is not None:
+                    if n_folds != original_folds:
+                        print(f"\n⚠️  WARNING: CV FOLDS MISMATCH!")
+                        print(f"  Original model trained with: {original_folds}-fold CV")
+                        print(f"  Current refinement using: {n_folds}-fold CV")
+                        print(f"  → This may cause R² differences from Results tab!")
+                        print(f"  → Consider using {original_folds} folds to match original training\n")
+
             # Determine data source (respect current wavelength filter)
             if self.X is not None:
                 X_source = self.X
@@ -12323,6 +12338,20 @@ F1 Score:  {f1:.4f}
                 'deriv_snv': 'deriv_snv'
             }
 
+            # Helper function to determine polyorder from derivative order
+            def get_polyorder_from_deriv(deriv_value):
+                """Determine polynomial order from derivative order."""
+                if deriv_value == 0:
+                    return 2  # No derivative
+                elif deriv_value == 1:
+                    return 2  # 1st derivative needs poly order 2
+                elif deriv_value == 2:
+                    return 3  # 2nd derivative needs poly order 3
+                else:
+                    print(f"WARNING: Unexpected deriv value {deriv_value}, using polyorder=2")
+                    return 2
+
+            # Default derivative orders for GUI preprocessing methods
             deriv_map = {
                 'raw': 0,
                 'snv': 0,
@@ -12330,50 +12359,45 @@ F1 Score:  {f1:.4f}
                 'sg2': 2,
                 'snv_sg1': 1,
                 'snv_sg2': 2,
-                'deriv_snv': 1
-            }
-
-            polyorder_map = {
-                'raw': 2,
-                'snv': 2,
-                'sg1': 2,
-                'sg2': 3,
-                'snv_sg1': 2,
-                'snv_sg2': 3,
-                'deriv_snv': 2
+                'deriv_snv': None  # Ambiguous - must be determined from config
             }
 
             preprocess_name = preprocess_name_map.get(preprocess, 'raw')
 
-            # Use actual derivative order from loaded config if available (fixes deriv_snv mismatch)
-            # Otherwise fall back to hardcoded map for custom models
+            # Determine derivative order and polyorder
+            # Priority: Use actual derivative order from loaded config, otherwise use defaults
+            deriv = None
+            polyorder = None
+
             if self.selected_model_config is not None:
                 config_deriv = self.selected_model_config.get('Deriv', None)
                 if config_deriv is not None and not pd.isna(config_deriv):
+                    # Use the actual derivative order from config
                     deriv = int(config_deriv)
-                    # Determine polyorder based on actual derivative order
-                    if deriv == 0:
-                        polyorder = 2
-                    elif deriv == 1:
-                        polyorder = 2
-                    elif deriv == 2:
-                        polyorder = 3
-                    else:
-                        polyorder = 2  # Fallback
+                    polyorder = get_polyorder_from_deriv(deriv)
                     print(f"DEBUG: Using deriv={deriv}, polyorder={polyorder} from loaded config")
                 else:
-                    # No valid deriv in config, use map
-                    deriv = deriv_map.get(preprocess, 0)
-                    polyorder = polyorder_map.get(preprocess, 2)
-                    print(f"WARNING: No Deriv value in config for '{preprocess}'")
-                    print(f"  Using fallback: deriv={deriv}, polyorder={polyorder}")
-                    if preprocess == 'deriv_snv':
-                        print(f"  CRITICAL: deriv_snv can be 1st (needs polyorder=2) or 2nd (needs polyorder=3) derivative")
-                        print(f"  Cannot determine which from config - R² may be incorrect!")
+                    print(f"WARNING: No 'Deriv' value in loaded config")
+
+            # If we couldn't get from config, use defaults
+            if deriv is None:
+                default_deriv = deriv_map.get(preprocess, 0)
+                if default_deriv is None:
+                    # This is deriv_snv without config - we can't determine the derivative order
+                    print(f"\n⚠️  CRITICAL WARNING: Cannot determine derivative order for 'deriv_snv'!")
+                    print(f"  'deriv_snv' can be either 1st or 2nd derivative")
+                    print(f"  Without config data, assuming 1st derivative (may be wrong!)")
+                    print(f"  R² WILL BE INCORRECT if this assumption is wrong!")
+                    deriv = 1  # Assume 1st derivative as safer default
+                    polyorder = 2
+                else:
+                    deriv = default_deriv
+                    polyorder = get_polyorder_from_deriv(deriv)
+                    if self.selected_model_config is not None:
+                        print(f"INFO: Using default deriv={deriv}, polyorder={polyorder} for '{preprocess}'")
             else:
-                # No config loaded, use map (custom model creation)
-                deriv = deriv_map.get(preprocess, 0)
-                polyorder = polyorder_map.get(preprocess, 2)
+                # Already set from config above
+                pass
 
             # CRITICAL FIX: Detect if we have derivative preprocessing + variable subset
             # This matches the behavior in search.py (lines 434-449)
@@ -12387,10 +12411,11 @@ F1 Score:  {f1:.4f}
                     except (TypeError, ValueError):
                         pass
             is_subset = len(selected_wl) < base_full_vars
-            # CRITICAL FIX: Use PATH A for ALL derivative preprocessing, not just subset
-            # Derivatives need full spectral context for correct Savitzky-Golay windows
-            # This matches search.py behavior and fixes R² discrepancy
-            use_full_spectrum_preprocessing = is_derivative  # Changed from: is_derivative and is_subset
+            # CRITICAL FIX: Use PATH A ONLY for derivative + subset (non-contiguous wavelengths)
+            # - Derivative subsets need full spectral context for correct Savitzky-Golay windows
+            # - Full-spectrum derivatives should use PATH B to avoid data leakage in CV
+            # - This matches search.py behavior (skip_preprocessing=True only for derivative subsets)
+            use_full_spectrum_preprocessing = is_derivative and is_subset
 
             # Debug output for preprocessing parameters
             print(f"\nDEBUG: Preprocessing Parameters:")
@@ -12400,12 +12425,17 @@ F1 Score:  {f1:.4f}
             print(f"  Window size: {window}")
 
             if use_full_spectrum_preprocessing:
-                if is_subset:
-                    print("DEBUG: Derivative + subset detected. Using full-spectrum preprocessing (matching search.py).")
-                    print(f"DEBUG: This fixes the R² discrepancy for non-contiguous wavelength selections.")
+                print(f"DEBUG: Derivative + subset detected. Using PATH A (preprocess full spectrum, then subset).")
+                print(f"DEBUG: This preserves derivative context for non-contiguous wavelengths.")
+                print(f"DEBUG: Preprocessing {len(X_base_df.columns)} wavelengths → subsetting to {len(selected_wl)} wavelengths")
+            else:
+                if is_derivative:
+                    print(f"DEBUG: Full-spectrum derivative detected. Using PATH B (preprocess inside CV).")
+                    print(f"DEBUG: This prevents data leakage by fitting preprocessing per-fold.")
+                    print(f"DEBUG: Processing {len(selected_wl)} wavelengths")
                 else:
-                    print("DEBUG: Derivative preprocessing detected. Using full-spectrum preprocessing for correct spectral context.")
-                    print(f"DEBUG: Processing {len(selected_wl)} wavelengths with full spectral context.")
+                    print(f"DEBUG: Raw/SNV preprocessing. Using PATH B (standard pipeline).")
+                    print(f"DEBUG: Processing {len(selected_wl)} wavelengths")
 
             # Get user-selected task type
             task_type = self.refine_task_type.get()
@@ -12486,12 +12516,32 @@ F1 Score:  {f1:.4f}
                                         f"  - {key}: expected={expected_val}, got={actual_val}"
                                     )
 
-                            # Check for important params that weren't in saved params
-                            important_params = ['n_estimators', 'learning_rate', 'max_depth',
-                                              'subsample', 'colsample_bytree', 'reg_alpha',
-                                              'reg_lambda', 'random_state', 'tree_method']
-                            for key in important_params:
+                            # Check for critical params based on model type
+                            critical_params_by_model = {
+                                "XGBoost": ['n_estimators', 'learning_rate', 'max_depth', 'random_state', 'tree_method'],
+                                "LightGBM": ['n_estimators', 'learning_rate', 'num_leaves', 'random_state', 'verbose'],
+                                "CatBoost": ['iterations', 'learning_rate', 'depth', 'random_state'],
+                                "Ridge": ['alpha', 'solver', 'tol', 'max_iter'],
+                                "Lasso": ['alpha', 'selection', 'tol', 'max_iter'],
+                                "ElasticNet": ['alpha', 'l1_ratio', 'selection', 'tol', 'max_iter'],
+                                "RandomForest": ['n_estimators', 'max_depth', 'min_samples_split', 'random_state'],
+                                "PLS": ['n_components', 'scale', 'max_iter', 'tol']
+                            }
+
+                            critical_params = critical_params_by_model.get(model_name, [])
+                            missing_critical = []
+
+                            for key in critical_params:
                                 if key not in params_from_search and key in after_params:
+                                    missing_critical.append(
+                                        f"  - {key}: using default={after_params[key]} (CRITICAL for {model_name})"
+                                    )
+
+                            # Also check other potentially important params
+                            other_params = ['subsample', 'colsample_bytree', 'reg_alpha', 'reg_lambda',
+                                          'min_samples_leaf', 'bootstrap', 'criterion']
+                            for key in other_params:
+                                if key not in critical_params and key not in params_from_search and key in after_params:
                                     params_not_loaded.append(
                                         f"  - {key}: using default={after_params[key]}"
                                     )
@@ -12502,8 +12552,15 @@ F1 Score:  {f1:.4f}
                                     print(mismatch)
                                 print(f"⚠️  This may cause R² differences from Results tab!")
 
+                            if missing_critical:
+                                print(f"\n⚠️  CRITICAL WARNING: Missing critical parameters for {model_name}!")
+                                print(f"⚠️  These parameters significantly affect model behavior and R² values:")
+                                for missing in missing_critical:
+                                    print(missing)
+                                print(f"⚠️  R² WILL differ from Results tab due to missing critical parameters!")
+
                             if params_not_loaded:
-                                print(f"\n⚠️  WARNING: Some important parameters not in saved results!")
+                                print(f"\n⚠️  WARNING: Some parameters not in saved results!")
                                 for missing in params_not_loaded:
                                     print(missing)
                                 print(f"⚠️  This may cause R² differences from Results tab!")
