@@ -1313,6 +1313,7 @@ class SpectralPredictApp:
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
         self.ensemble_manual_selection = tk.BooleanVar(value=False)  # Use manual model selection
         self.ensemble_results = None  # Store ensemble predictions and metrics
+        self.training_data_cache = None  # Cache for manual ensemble retraining
 
         # Outlier detection variables (Phase 3)
         self.n_pca_components = tk.IntVar(value=5)
@@ -2565,6 +2566,7 @@ class SpectralPredictApp:
         self._create_tab0a_import_sources()
         self._create_tab0b_merge_combine()
         self._create_tab0c_data_manipulation()
+        self._create_tab0d_view_merged_data()
 
     def _create_tab0a_import_sources(self):
         """Subtab 0A: Import Sources - Load and manage multiple data sources."""
@@ -2930,6 +2932,63 @@ class SpectralPredictApp:
 
         ttk.Button(export_frame, text="Export to CSV", command=self._export_to_csv).pack(side='left', padx=5)
         ttk.Button(export_frame, text="Export to Excel", command=self._export_to_excel).pack(side='left', padx=5)
+
+    def _create_tab0d_view_merged_data(self):
+        """Subtab 0D: View & Edit Merged Data - Spreadsheet view with column management."""
+        from tksheet import Sheet
+
+        tab0d = ttk.Frame(self.data_mgmt_notebook, style='TFrame')
+        self.data_mgmt_notebook.add(tab0d, text='  📊 View Merged Data  ')
+
+        # Top controls
+        control_frame = ttk.Frame(tab0d)
+        control_frame.pack(fill='x', padx=10, pady=10)
+
+        ttk.Button(control_frame, text="🔄 Load Merged Data",
+                  command=self._load_merged_to_viewer).pack(side='left', padx=5)
+        ttk.Button(control_frame, text="🗑️ Delete Selected Column",
+                  command=self._delete_merged_column).pack(side='left', padx=5)
+        ttk.Button(control_frame, text="💾 Save Changes",
+                  command=self._save_merged_changes).pack(side='left', padx=5)
+        ttk.Label(control_frame, text="Right-click column header to add column",
+                 style='Caption.TLabel').pack(side='left', padx=15)
+
+        # Info label
+        self.merged_info_label = ttk.Label(tab0d, text="No merged data loaded", style='Caption.TLabel')
+        self.merged_info_label.pack(padx=10, pady=5)
+
+        # Sheet frame
+        sheet_frame = ttk.Frame(tab0d)
+        sheet_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Create tksheet
+        self.merged_data_sheet = Sheet(
+            sheet_frame,
+            headers=[],
+            data=[],
+            theme='light blue',
+            height=500
+        )
+        # Enable Excel-like bindings
+        self.merged_data_sheet.enable_bindings(
+            "single_select",
+            "column_select",
+            "row_select",
+            "drag_select",
+            "right_click_popup_menu",
+            "rc_select",
+            "copy",           # Ctrl+C to copy
+            "paste",          # Ctrl+V to paste
+            "cut",            # Ctrl+X to cut
+            "delete",         # Delete key to clear cells
+            "edit_cell",      # Double-click or F2 to edit
+            "ctrl_click_select",  # Ctrl+click for multi-select
+            "arrowkeys"       # Arrow keys to navigate
+        )
+        self.merged_data_sheet.pack(fill='both', expand=True)
+
+        # Bind right-click on column headers
+        self.merged_data_sheet.bind("<Button-3>", self._on_merged_sheet_right_click, add="+")
 
     def _create_tab1_import_preview(self):
         """Tab 1: Import & Preview - Data loading + spectral plots."""
@@ -5129,6 +5188,10 @@ class SpectralPredictApp:
                    command=self._save_selected_ensemble, style='Modern.TButton', state='disabled')
         self.btn_save_best_ensemble.pack(side='left', padx=5)
 
+        self.btn_train_ensemble = ttk.Button(ensemble_buttons, text="🔄 Train Ensemble",
+                   command=self._on_train_ensemble_click, style='Modern.TButton', state='disabled')
+        self.btn_train_ensemble.pack(side='left', padx=5)
+
         self.btn_show_regional_perf = ttk.Button(ensemble_buttons, text="📊 Show Regional Performance",
                    command=self._show_regional_performance, style='Modern.TButton', state='disabled')
         self.btn_show_regional_perf.pack(side='left', padx=5)
@@ -6350,12 +6413,24 @@ class SpectralPredictApp:
 
                             X, y, metadata_df, metadata = read_combined_excel(spectra_path, sheet_name=sheet_idx)
                             format_type = 'combined_excel'
-                            ref = None  # Combined format has no separate reference file
+
+                            # Don't designate target yet - keep ALL non-wavelength columns as metadata
+                            # Put the y column back into metadata with its real name
+                            if metadata_df is not None and y is not None:
+                                y_col_name = metadata.get('y_col', 'target')
+                                metadata_df[y_col_name] = y
+                            elif y is not None:
+                                # No metadata_df, create one with just the y column
+                                y_col_name = metadata.get('y_col', 'target')
+                                metadata_df = pd.DataFrame({y_col_name: y})
+
+                            ref = metadata_df  # All metadata columns with real names
+                            y = None  # Don't pre-designate target
+
                             print(f"✓ Loaded combined Excel from sheet '{sheet_name}': {len(X)} samples, {len(X.columns)} wavelengths")
                             print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
-                            print(f"  • Target: {metadata.get('y_col', 'N/A')}")
-                            if metadata.get('metadata_cols'):
-                                print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
+                            if ref is not None:
+                                print(f"  • Metadata columns: {', '.join(ref.columns)}")
                             loaded = True
                             break  # Success - stop trying other sheets
                         except Exception as e:
@@ -6383,13 +6458,25 @@ class SpectralPredictApp:
                     try:
                         print(f"Attempting to load {os.path.basename(spectra_path)} as combined CSV...")
                         X, y, metadata_df, metadata = read_combined_csv(spectra_path)
-                        ref = None  # Combined format has no separate reference file
                         format_type = 'combined'
+
+                        # Don't designate target yet - keep ALL non-wavelength columns as metadata
+                        # Put the y column back into metadata with its real name
+                        if metadata_df is not None and y is not None:
+                            y_col_name = metadata.get('y_col', 'target')
+                            metadata_df[y_col_name] = y
+                        elif y is not None:
+                            # No metadata_df, create one with just the y column
+                            y_col_name = metadata.get('y_col', 'target')
+                            metadata_df = pd.DataFrame({y_col_name: y})
+
+                        ref = metadata_df  # All metadata columns with real names
+                        y = None  # Don't pre-designate target
+
                         print(f"✓ Loaded combined CSV: {len(X)} samples, {len(X.columns)} wavelengths")
                         print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
-                        print(f"  • Target: {metadata.get('y_col', 'N/A')}")
-                        if metadata.get('metadata_cols'):
-                            print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
+                        if ref is not None:
+                            print(f"  • Metadata columns: {', '.join(ref.columns)}")
                     except Exception as e:
                         print(f"Combined CSV failed: {str(e)}")
 
@@ -6738,12 +6825,16 @@ class SpectralPredictApp:
 
             print(f"Merge successful! Result: {len(merged.X)} samples, {len(merged.X.columns)} wavelengths")
 
+            # Automatically load merged data to viewer
+            self._load_merged_to_viewer()
+
             # Show results
             report = merged.merge_report
             messagebox.showinfo("Merge Complete",
                 f"Merged {len(merged.sources)} sources\n"
                 f"Result: {len(merged.X)} samples, {len(merged.X.columns)} wavelengths\n"
-                f"Strategy: {strategy}")
+                f"Strategy: {strategy}\n\n"
+                f"View in the '📊 View Merged Data' tab")
 
             # Update preview
             self.merge_preview_text.insert(tk.END, f"\n\n{'='*50}\nMERGE COMPLETED\n")
@@ -6765,6 +6856,178 @@ class SpectralPredictApp:
             messagebox.showinfo("Success", "Merged dataset loaded for analysis")
             # Switch to Import & Preview tab
             self.notebook.select(1)
+
+    def _load_merged_to_viewer(self):
+        """Load merged dataset into the spreadsheet viewer."""
+        if not self.data_source_manager or not self.data_source_manager.merged_dataset:
+            messagebox.showwarning("No Merged Data", "Please execute a merge first")
+            return
+
+        merged = self.data_source_manager.merged_dataset
+
+        # Start with wavelength data
+        display_df = merged.X.copy()
+
+        # Add metadata columns with their real names (no special "target" designation)
+        if merged.ref is not None:
+            for col in merged.ref.columns:
+                display_df.insert(0, col, merged.ref[col])
+
+        # Add sample ID as first column
+        display_df.insert(0, '_sample_id_', display_df.index)
+
+        # Set data in sheet
+        headers = list(display_df.columns)
+        data = display_df.values.tolist()
+
+        self.merged_data_sheet.headers(headers)
+        self.merged_data_sheet.data = data
+        self.merged_data_sheet.set_sheet_data(data)
+
+        # Update info label
+        n_samples = len(display_df)
+        n_cols = len(headers)
+        n_metadata = len(merged.ref.columns) if merged.ref is not None else 0
+        n_wavelengths = len(headers) - 1 - n_metadata  # Total - sample_id - metadata
+
+        self.merged_info_label.config(
+            text=f"Loaded: {n_samples} samples, {n_wavelengths} wavelength columns, {n_metadata} metadata columns"
+        )
+
+        print(f"Merged data loaded to viewer: {n_samples} x {n_cols}")
+        if merged.ref is not None:
+            print(f"  Metadata columns: {', '.join(merged.ref.columns)}")
+
+    def _delete_merged_column(self):
+        """Delete selected column from merged data."""
+        if not self.data_source_manager or not self.data_source_manager.merged_dataset:
+            messagebox.showwarning("No Data", "No merged data loaded")
+            return
+
+        # Get selected column
+        selected = self.merged_data_sheet.get_currently_selected()
+        if not selected or selected.type_ != "column":
+            messagebox.showwarning("No Selection", "Please select a column header to delete")
+            return
+
+        col_idx = selected.column
+        headers = self.merged_data_sheet.headers()
+
+        if col_idx >= len(headers):
+            return
+
+        col_name = headers[col_idx]
+
+        # Don't allow deleting sample ID
+        if col_name == '_sample_id_':
+            messagebox.showerror("Error", "Cannot delete sample ID column")
+            return
+
+        # Confirm deletion
+        confirm = messagebox.askyesno("Confirm Delete",
+            f"Delete column '{col_name}'?\n\nThis cannot be undone.")
+
+        if not confirm:
+            return
+
+        # Delete column from sheet
+        self.merged_data_sheet.delete_column(col_idx)
+
+        # Update merged dataset
+        merged = self.data_source_manager.merged_dataset
+
+        if merged.ref is not None and col_name in merged.ref.columns:
+            merged.ref = merged.ref.drop(columns=[col_name])
+            print(f"Deleted metadata column: {col_name}")
+        elif col_name in merged.X.columns:
+            merged.X = merged.X.drop(columns=[col_name])
+            print(f"Deleted wavelength column: {col_name}")
+
+        messagebox.showinfo("Success", f"Deleted column '{col_name}'")
+        self._load_merged_to_viewer()  # Refresh view
+
+    def _on_merged_sheet_right_click(self, event):
+        """Handle right-click on sheet to add column."""
+        # Get clicked position
+        region = self.merged_data_sheet.identify_region(event)
+
+        if region and region.type_ == "header":
+            # Right-clicked on column header
+            col_idx = region.column
+            headers = self.merged_data_sheet.headers()
+
+            if col_idx < len(headers):
+                col_name = headers[col_idx]
+
+                # Show menu to add column
+                menu = tk.Menu(self.merged_data_sheet, tearoff=0)
+                menu.add_command(label=f"Add column after '{col_name}'",
+                               command=lambda: self._add_column_after(col_idx))
+                menu.post(event.x_root, event.y_root)
+
+    def _add_column_after(self, col_idx):
+        """Add a new categorical column after the specified index."""
+        if not self.data_source_manager or not self.data_source_manager.merged_dataset:
+            return
+
+        # Get new column name from user
+        new_col_name = tk.simpledialog.askstring("Add Column",
+            "Enter name for new column:",
+            parent=self.merged_data_sheet)
+
+        if not new_col_name:
+            return
+
+        merged = self.data_source_manager.merged_dataset
+
+        # Add empty column to ref (metadata)
+        if merged.ref is None:
+            merged.ref = pd.DataFrame(index=merged.X.index)
+
+        merged.ref[new_col_name] = ""  # Empty string for categorical data
+
+        print(f"Added new column: {new_col_name}")
+        messagebox.showinfo("Success", f"Added column '{new_col_name}'")
+
+        # Refresh viewer
+        self._load_merged_to_viewer()
+
+    def _save_merged_changes(self):
+        """Save changes from sheet back to merged dataset."""
+        if not self.data_source_manager or not self.data_source_manager.merged_dataset:
+            messagebox.showwarning("No Data", "No merged data to save")
+            return
+
+        # Get data from sheet
+        data = self.merged_data_sheet.get_sheet_data()
+        headers = self.merged_data_sheet.headers()
+
+        if not data or not headers:
+            return
+
+        # Convert to dataframe
+        df = pd.DataFrame(data, columns=headers)
+
+        # Set index
+        if '_sample_id_' in df.columns:
+            df = df.set_index('_sample_id_')
+
+        merged = self.data_source_manager.merged_dataset
+
+        # Separate wavelength columns from metadata
+        wavelength_cols = [c for c in df.columns if c in merged.X.columns]
+        metadata_cols = [c for c in df.columns if c not in wavelength_cols]
+
+        # Update X (wavelength data)
+        if wavelength_cols:
+            merged.X = df[wavelength_cols]
+
+        # Update ref (all metadata columns with real names)
+        if metadata_cols:
+            merged.ref = df[metadata_cols]
+
+        messagebox.showinfo("Success", "Changes saved to merged dataset")
+        print("Merged dataset updated from viewer")
 
     def _apply_sample_filter(self):
         """Apply sample filter to current dataset."""
@@ -9329,6 +9592,495 @@ class SpectralPredictApp:
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier))
         self.analysis_thread.start()
 
+    def _reconstruct_models_from_results(self, top_models_df, X_train, y_train, task_type):
+        """
+        Reconstruct and refit models from results DataFrame rows.
+
+        Args:
+            top_models_df: DataFrame rows with model configurations
+            X_train: Training features
+            y_train: Training targets
+            task_type: 'regression' or 'classification'
+
+        Returns:
+            List of tuples: [(fitted_pipeline, model_name, metadata), ...]
+        """
+        from spectral_predict.models import get_model
+        from spectral_predict.preprocess import SavgolDerivative
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        import ast
+
+        reconstructed_models = []
+
+        for idx, row in enumerate(top_models_df.itertuples(), 1):
+            try:
+                # Extract configuration
+                model_name = row.Model
+                params_str = row.Params
+                preprocess = row.Preprocess
+                deriv = row.Deriv
+                window = row.Window
+                polyorder = row.Poly
+
+                # Parse parameters
+                if params_str and params_str != '{}':
+                    try:
+                        params_dict = ast.literal_eval(params_str)
+                    except:
+                        params_dict = {}
+                else:
+                    params_dict = {}
+
+                # Create preprocessing pipeline
+                steps = []
+
+                # Add derivative/SNV preprocessing if applicable
+                if preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
+                    if preprocess == 'snv':
+                        # SNV only - no derivative
+                        pass  # Will add scaler below
+                    elif preprocess in ['sg1', 'sg2']:
+                        # Savitzky-Golay derivative
+                        deriv_order = 1 if preprocess == 'sg1' else 2
+                        steps.append(('derivative', SavgolDerivative(
+                            window=int(window),
+                            polyorder=int(polyorder),
+                            deriv=deriv_order
+                        )))
+                    elif preprocess == 'deriv_snv':
+                        # Derivative then SNV
+                        deriv_order = int(deriv)
+                        steps.append(('derivative', SavgolDerivative(
+                            window=int(window),
+                            polyorder=int(polyorder),
+                            deriv=deriv_order
+                        )))
+
+                # Add scaler for models that need it
+                if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
+                    steps.append(('scaler', StandardScaler()))
+
+                # Create model with exact parameters
+                # Filter params_dict to only include parameters that get_model() accepts
+                allowed_params = {'n_components', 'max_n_components', 'max_iter'}
+                filtered_params = {k: v for k, v in params_dict.items() if k in allowed_params}
+
+                if filtered_params:
+                    model = get_model(model_name, task_type=task_type, **filtered_params)
+                else:
+                    model = get_model(model_name, task_type=task_type)
+
+                steps.append(('model', model))
+
+                # Create pipeline
+                if len(steps) > 1:
+                    pipeline = Pipeline(steps)
+                else:
+                    pipeline = model
+
+                # Fit on training data
+                pipeline.fit(X_train, y_train)
+
+                # Store metadata (including wavelength information for transparency)
+                metadata = {
+                    'model_name': model_name,
+                    'preprocess': preprocess,
+                    'params': params_dict,
+                    'score': row.CompositeScore if hasattr(row, 'CompositeScore') else 0.0,
+                    # Wavelength information for reproducibility
+                    'wavelengths': X_train.columns.tolist(),
+                    'n_vars': X_train.shape[1],
+                    'use_full_spectrum_preprocessing': True,
+                    'full_wavelengths': X_train.columns.tolist()
+                }
+
+                reconstructed_models.append((pipeline, model_name, metadata))
+
+            except Exception as e:
+                self._log_progress(f"⚠️ Failed to reconstruct {row.Model}: {e}")
+                continue
+
+        return reconstructed_models
+
+    def _on_train_ensemble_click(self):
+        """Handle Train Ensemble button click with custom model selection."""
+        try:
+            # === VALIDATION 1: Check if results exist ===
+            if self.results_df is None or len(self.results_df) == 0:
+                messagebox.showerror(
+                    "No Results",
+                    "No analysis results available.\n\n"
+                    "Please run an analysis first before training ensembles."
+                )
+                return
+
+            # === VALIDATION 2: Check if training data is cached ===
+            if self.training_data_cache is None:
+                messagebox.showerror(
+                    "No Training Data",
+                    "Training data is not available.\n\n"
+                    "This can happen if:\n"
+                    "• Analysis was run in an older version\n"
+                    "• Application was restarted\n\n"
+                    "Please re-run the analysis to cache training data."
+                )
+                return
+
+            # === VALIDATION 3: Check selection count ===
+            selected_count = self.results_df['Select'].sum()
+
+            if selected_count == 0:
+                messagebox.showwarning(
+                    "No Models Selected",
+                    "Please select at least 2 models from the Results table.\n\n"
+                    "Click the checkboxes in the 'Select' column to choose models."
+                )
+                return
+
+            if selected_count == 1:
+                messagebox.showwarning(
+                    "Too Few Models",
+                    "Ensemble requires at least 2 models.\n\n"
+                    "You have selected 1 model. Please select at least one more."
+                )
+                return
+
+            # === VALIDATION 4: Warn if too many models selected ===
+            if selected_count > 50:
+                proceed = messagebox.askyesno(
+                    "Many Models Selected",
+                    f"You have selected {selected_count} models.\n\n"
+                    f"Training ensembles with many models can be slow.\n"
+                    f"This may take several minutes.\n\n"
+                    f"Do you want to continue?",
+                    icon='warning'
+                )
+                if not proceed:
+                    return
+
+            # === VALIDATION 5: Check if ensemble methods are enabled ===
+            ensemble_methods_count = sum([
+                self.ensemble_simple_average.get(),
+                self.ensemble_region_weighted.get(),
+                self.ensemble_mixture_experts.get(),
+                self.ensemble_stacking.get(),
+                self.ensemble_stacking_region.get()
+            ])
+
+            if ensemble_methods_count == 0:
+                messagebox.showwarning(
+                    "No Ensemble Methods",
+                    "No ensemble methods are enabled.\n\n"
+                    "Please enable at least one ensemble method in the "
+                    "Analysis Configuration tab (Ensemble Settings section)."
+                )
+                return
+
+            # === VALIDATION 6: Check if already training ===
+            if hasattr(self, 'ensemble_training_thread') and \
+               self.ensemble_training_thread is not None and \
+               self.ensemble_training_thread.is_alive():
+                messagebox.showwarning(
+                    "Training In Progress",
+                    "Ensemble training is already in progress.\n\n"
+                    "Please wait for the current training to complete."
+                )
+                return
+
+            # === ALL VALIDATIONS PASSED - START TRAINING ===
+            # Show info message
+            self.ensemble_status.config(
+                text=f"Training ensembles with {selected_count} selected models..."
+            )
+
+            # Disable button during training
+            self.btn_train_ensemble.config(state='disabled')
+
+            # Launch background thread
+            self.ensemble_training_thread = threading.Thread(
+                target=self._train_ensemble_thread,
+                daemon=True
+            )
+            self.ensemble_training_thread.start()
+
+        except Exception as e:
+            import traceback
+            error_msg = f"Failed to start ensemble training:\n{str(e)}\n\n{traceback.format_exc()}"
+            messagebox.showerror("Training Error", error_msg)
+            self.btn_train_ensemble.config(state='normal')
+
+    def _train_ensemble_thread(self):
+        """Background thread for manual ensemble training."""
+        try:
+            # Extract cached data
+            cache = self.training_data_cache
+            X_filtered = cache['X_filtered']
+            y_filtered = cache['y_filtered']
+            task_type = cache['task_type']
+            analysis_wl_min = cache.get('analysis_wl_min')
+            analysis_wl_max = cache.get('analysis_wl_max')
+
+            # Temporarily set label_encoder for model reconstruction
+            original_encoder = self.label_encoder
+            self.label_encoder = cache['label_encoder']
+
+            # Train ensembles
+            ensemble_results, trained_ensembles = self._train_ensembles(
+                self.results_df,
+                X_filtered,
+                y_filtered,
+                task_type,
+                analysis_wl_min_value=analysis_wl_min,
+                analysis_wl_max_value=analysis_wl_max,
+                is_manual_retrain=True
+            )
+
+            # Restore original encoder
+            self.label_encoder = original_encoder
+
+            # Update UI on main thread
+            if ensemble_results is not None:
+                # Store results
+                self.ensemble_results = ensemble_results
+                self.trained_ensembles = trained_ensembles
+                self.ensemble_X = X_filtered
+                self.ensemble_y = y_filtered
+
+                # Update metadata
+                if not hasattr(self, 'ensemble_metadata'):
+                    self.ensemble_metadata = {}
+                self.ensemble_metadata.update({
+                    'wavelengths': X_filtered.columns.tolist(),
+                    'n_wavelengths': X_filtered.shape[1],
+                    'analysis_wl_min': analysis_wl_min,
+                    'analysis_wl_max': analysis_wl_max,
+                    'use_full_spectrum_preprocessing': True,
+                    'n_base_models': len(ensemble_results),
+                    'manually_retrained': True,
+                    'retrain_timestamp': datetime.now().isoformat()
+                })
+
+                # Refresh display on main thread
+                self.root.after(0, self._populate_ensemble_results)
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Training Complete",
+                    f"Successfully trained {len(ensemble_results)} ensemble(s)!\n\n"
+                    f"Best ensemble: {ensemble_results[0]['method']}\n"
+                    f"R² = {ensemble_results[0]['r2']:.4f}"
+                ))
+            else:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Training Failed",
+                    "Ensemble training failed. Check the log for details."
+                ))
+
+        except Exception as e:
+            import traceback
+            error_msg = f"Ensemble training error:\n{str(e)}\n\n{traceback.format_exc()}"
+            self.root.after(0, lambda: messagebox.showerror("Training Error", error_msg))
+
+        finally:
+            # Re-enable button on main thread
+            self.root.after(0, lambda: self.btn_train_ensemble.config(state='normal'))
+
+    def _train_ensembles(self, results_df, X_filtered, y_filtered, task_type,
+                         analysis_wl_min_value=None, analysis_wl_max_value=None,
+                         is_manual_retrain=False):
+        """
+        Train ensemble models from selected models in results_df.
+
+        Args:
+            results_df: DataFrame with model results (must have 'Select' column)
+            X_filtered: Training features (filtered by exclusions/validation)
+            y_filtered: Training targets (aligned with X_filtered)
+            task_type: 'regression' or 'classification'
+            analysis_wl_min_value: Minimum wavelength used in analysis (for metadata)
+            analysis_wl_max_value: Maximum wavelength used in analysis (for metadata)
+            is_manual_retrain: If True, this is a manual retrain (affects logging)
+
+        Returns:
+            tuple: (ensemble_results, trained_ensembles) or (None, None) on failure
+        """
+        try:
+            self._log_progress(f"\n{'='*70}")
+            if is_manual_retrain:
+                self._log_progress(f"RETRAINING ENSEMBLES WITH CUSTOM MODEL SELECTION")
+            else:
+                self._log_progress(f"RUNNING ENSEMBLE METHODS")
+            self._log_progress(f"{'='*70}")
+
+            from spectral_predict.ensemble import create_ensemble
+            from sklearn.model_selection import cross_val_predict
+
+            # Select models for ensemble based on user configuration
+            if self.ensemble_manual_selection.get() or is_manual_retrain:
+                # Use manually selected models from checkboxes
+                top_models_df = results_df[results_df['Select'] == True].copy()
+                self._log_progress(f"Using {len(top_models_df)} manually selected models for ensemble:")
+            else:
+                # Use top N models by CompositeScore
+                top_n = self.ensemble_top_n.get()
+                top_models_df = results_df.nsmallest(top_n, 'CompositeScore')
+                self._log_progress(f"Using top {len(top_models_df)} models (by score) for ensemble:")
+
+            if len(top_models_df) == 0:
+                self._log_progress(f"⚠️ No models selected for ensemble, skipping...")
+                return None, None
+
+            # Validation: minimum 2 models required
+            if len(top_models_df) < 2:
+                self._log_progress(f"⚠️ Need at least 2 models for ensemble (got {len(top_models_df)}), skipping...")
+                return None, None
+
+            # Log selected models
+            for i, row in enumerate(top_models_df.itertuples(), 1):
+                self._log_progress(f"  {i}. {row.Model} ({row.Preprocess}) - Score: {row.CompositeScore:.4f}")
+
+            # Reconstruct models from results
+            self._log_progress(f"\nReconstructing top {len(top_models_df)} models...")
+            reconstructed = self._reconstruct_models_from_results(top_models_df, X_filtered, y_filtered, task_type)
+
+            if len(reconstructed) < 2:
+                self._log_progress(f"⚠️ Need at least 2 models for ensemble (got {len(reconstructed)}), skipping...")
+                return None, None
+
+            self._log_progress(f"✓ Successfully reconstructed {len(reconstructed)} models")
+
+            # Extract models and names
+            models = [m[0] for m in reconstructed]
+            model_names = [m[1] for m in reconstructed]
+
+            # Collect ensemble methods to run
+            ensemble_methods = []
+            if self.ensemble_simple_average.get():
+                ensemble_methods.append(('simple_average', 'Simple Average'))
+            if self.ensemble_region_weighted.get():
+                ensemble_methods.append(('region_weighted', 'Region-Aware Weighted'))
+            if self.ensemble_mixture_experts.get():
+                ensemble_methods.append(('mixture_experts', 'Mixture of Experts'))
+            if self.ensemble_stacking.get():
+                ensemble_methods.append(('stacking', 'Stacking'))
+            if self.ensemble_stacking_region.get():
+                ensemble_methods.append(('region_stacking', 'Stacking + Region Features'))
+
+            if not ensemble_methods:
+                self._log_progress("⚠️ No ensemble methods selected, skipping...")
+                return None, None
+
+            self._log_progress(f"\nTesting {len(ensemble_methods)} ensemble methods...")
+            n_regions = self.ensemble_n_regions.get()
+            self._log_progress(f"Number of regions: {n_regions}")
+
+            # Train and evaluate each ensemble method
+            ensemble_results = []
+            trained_ensembles = {}
+
+            for ensemble_type, ensemble_name in ensemble_methods:
+                try:
+                    self._log_progress(f"\n--- Training {ensemble_name} ---")
+
+                    # Create ensemble
+                    ensemble = create_ensemble(
+                        models=models,
+                        model_names=model_names,
+                        X=X_filtered,
+                        y=y_filtered,
+                        ensemble_type=ensemble_type,
+                        n_regions=n_regions,
+                        cv=min(5, len(y_filtered))  # Use 5-fold or less if small dataset
+                    )
+
+                    # Make predictions
+                    ensemble_pred = ensemble.predict(X_filtered)
+
+                    # Calculate metrics
+                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+                    import numpy as np
+
+                    rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
+                    r2 = r2_score(y_filtered, ensemble_pred)
+                    mae = mean_absolute_error(y_filtered, ensemble_pred)
+
+                    # Calculate RPD (Ratio of Performance to Deviation)
+                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
+
+                    self._log_progress(f"✓ {ensemble_name} Results:")
+                    self._log_progress(f"   RMSE: {rmse:.4f}")
+                    self._log_progress(f"   R²:   {r2:.4f}")
+                    self._log_progress(f"   MAE:  {mae:.4f}")
+                    self._log_progress(f"   RPD:  {rpd:.2f}")
+
+                    # Add warning for mixture of experts about cross-validated performance
+                    if ensemble_type == 'mixture_experts' and r2 > 0.95:
+                        self._log_progress(f"   ⚠️ Note: These metrics are on training data.")
+                        self._log_progress(f"   ⚠️ Actual performance on new data will be lower.")
+
+                    # Store results
+                    ensemble_results.append({
+                        'method': ensemble_name,
+                        'type': ensemble_type,
+                        'rmse': rmse,
+                        'r2': r2,
+                        'mae': mae,
+                        'rpd': rpd,
+                        'ensemble': ensemble
+                    })
+
+                    # Store trained ensemble
+                    trained_ensembles[ensemble_type] = ensemble
+
+                except Exception as e:
+                    self._log_progress(f"✗ {ensemble_name} failed: {e}")
+                    import traceback
+                    self._log_progress(f"   {traceback.format_exc()}")
+                    continue
+
+            # Summary of ensemble results
+            if ensemble_results:
+                self._log_progress(f"\n{'='*70}")
+                self._log_progress(f"ENSEMBLE RESULTS SUMMARY")
+                self._log_progress(f"{'='*70}")
+
+                # Sort by R² (best first)
+                ensemble_results.sort(key=lambda x: x['r2'], reverse=True)
+
+                # Find best individual model for comparison
+                best_individual_r2 = results_df['R2'].max() if 'R2' in results_df.columns else 0
+                best_individual_rmse = results_df['RMSE'].min() if 'RMSE' in results_df.columns else float('inf')
+
+                self._log_progress(f"\nBest Individual Model: R²={best_individual_r2:.4f}, RMSE={best_individual_rmse:.4f}")
+                self._log_progress(f"\nEnsemble Rankings:")
+
+                for i, result in enumerate(ensemble_results, 1):
+                    r2_improvement = result['r2'] - best_individual_r2
+                    rmse_improvement = ((best_individual_rmse - result['rmse']) / best_individual_rmse * 100) if best_individual_rmse > 0 else 0
+
+                    status = "🏆" if i == 1 else f"  {i}."
+                    self._log_progress(f"{status} {result['method']}")
+                    self._log_progress(f"     R²:   {result['r2']:.4f} ({r2_improvement:+.4f})")
+                    self._log_progress(f"     RMSE: {result['rmse']:.4f} ({rmse_improvement:+.1f}%)")
+                    self._log_progress(f"     RPD:  {result['rpd']:.2f}")
+
+                self._log_progress(f"\n✓ Ensemble training complete!")
+                self._log_progress(f"✓ Trained {len(ensemble_results)} ensemble(s)")
+                if is_manual_retrain:
+                    self._log_progress(f"✓ Ensemble results updated in Results tab")
+                else:
+                    self._log_progress(f"✓ View ensemble results in the Results tab")
+
+                return ensemble_results, trained_ensembles
+            else:
+                self._log_progress(f"\n⚠️ No ensembles were successfully trained")
+                return None, None
+
+        except Exception as e:
+            import traceback
+            self._log_progress(f"\n⚠️ Ensemble execution failed: {e}")
+            self._log_progress(f"   {traceback.format_exc()}")
+            self._log_progress(f"   Individual model results are still available")
+            return None, None
+
     def _run_analysis_thread(self, selected_models, tier):
         """Run analysis in background thread."""
         try:
@@ -10537,303 +11289,56 @@ class SpectralPredictApp:
             report_dir.mkdir(parents=True, exist_ok=True)
             write_markdown_report(self.target_column.get(), results_df, str(report_dir))
 
-            # === Helper function to reconstruct models from results ===
-            def reconstruct_models_from_results(top_models_df, X_train, y_train):
-                """
-                Reconstruct and refit models from results DataFrame rows.
-
-                Args:
-                    top_models_df: DataFrame rows with model configurations
-                    X_train: Training features
-                    y_train: Training targets
-
-                Returns:
-                    List of tuples: [(fitted_model, model_name, metadata), ...]
-                """
-                from spectral_predict.models import get_model
-                from spectral_predict.preprocess import SavgolDerivative
-                from sklearn.pipeline import Pipeline
-                from sklearn.preprocessing import StandardScaler
-                import ast
-
-                reconstructed_models = []
-
-                for idx, row in enumerate(top_models_df.itertuples(), 1):
-                    try:
-                        # Extract configuration
-                        model_name = row.Model
-                        params_str = row.Params
-                        preprocess = row.Preprocess
-                        deriv = row.Deriv
-                        window = row.Window
-                        polyorder = row.Poly
-
-                        # Parse parameters
-                        if params_str and params_str != '{}':
-                            try:
-                                params_dict = ast.literal_eval(params_str)
-                            except:
-                                params_dict = {}
-                        else:
-                            params_dict = {}
-
-                        # Create preprocessing pipeline
-                        steps = []
-
-                        # Add derivative/SNV preprocessing if applicable
-                        if preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
-                            if preprocess == 'snv':
-                                # SNV only - no derivative
-                                pass  # Will add scaler below
-                            elif preprocess in ['sg1', 'sg2']:
-                                # Savitzky-Golay derivative
-                                deriv_order = 1 if preprocess == 'sg1' else 2
-                                steps.append(('derivative', SavgolDerivative(
-                                    window=int(window),
-                                    polyorder=int(polyorder),
-                                    deriv=deriv_order
-                                )))
-                            elif preprocess == 'deriv_snv':
-                                # Derivative then SNV
-                                deriv_order = int(deriv)
-                                steps.append(('derivative', SavgolDerivative(
-                                    window=int(window),
-                                    polyorder=int(polyorder),
-                                    deriv=deriv_order
-                                )))
-
-                        # Add scaler for models that need it
-                        if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
-                            steps.append(('scaler', StandardScaler()))
-
-                        # Create model with exact parameters
-                        # Filter params_dict to only include parameters that get_model() accepts
-                        allowed_params = {'n_components', 'max_n_components', 'max_iter'}
-                        filtered_params = {k: v for k, v in params_dict.items() if k in allowed_params}
-
-                        if filtered_params:
-                            model = get_model(model_name, task_type=task_type, **filtered_params)
-                        else:
-                            model = get_model(model_name, task_type=task_type)
-
-                        steps.append(('model', model))
-
-                        # Create pipeline
-                        if len(steps) > 1:
-                            pipeline = Pipeline(steps)
-                        else:
-                            pipeline = model
-
-                        # Fit on training data
-                        pipeline.fit(X_train, y_train)
-
-                        # Store metadata (including wavelength information for transparency)
-                        metadata = {
-                            'model_name': model_name,
-                            'preprocess': preprocess,
-                            'params': params_dict,
-                            'score': row.CompositeScore if hasattr(row, 'CompositeScore') else 0.0,
-                            # Wavelength information for reproducibility
-                            'wavelengths': X_filtered.columns.tolist(),
-                            'n_vars': X_filtered.shape[1],
-                            'use_full_spectrum_preprocessing': True,
-                            'full_wavelengths': X_filtered.columns.tolist()
-                        }
-
-                        reconstructed_models.append((pipeline, model_name, metadata))
-
-                    except Exception as e:
-                        self._log_progress(f"⚠️ Failed to reconstruct {row.Model}: {e}")
-                        continue
-
-                return reconstructed_models
-
             # === Run Ensemble Methods (if enabled) ===
             if self.enable_ensembles.get():
-                try:
-                    self._log_progress(f"\n{'='*70}")
-                    self._log_progress(f"RUNNING ENSEMBLE METHODS")
-                    self._log_progress(f"{'='*70}")
+                ensemble_results, trained_ensembles = self._train_ensembles(
+                    results_df,
+                    X_filtered,
+                    y_filtered,
+                    task_type,
+                    analysis_wl_min_value=analysis_wl_min_value,
+                    analysis_wl_max_value=analysis_wl_max_value,
+                    is_manual_retrain=False
+                )
 
-                    from spectral_predict.ensemble import create_ensemble
-                    from sklearn.model_selection import cross_val_predict
+                if ensemble_results is not None:
+                    # Store ensemble results for later use
+                    self.ensemble_results = ensemble_results
+                    self.trained_ensembles = trained_ensembles
+                    # Store training data for visualizations
+                    self.ensemble_X = X_filtered
+                    self.ensemble_y = y_filtered
+                    # Store wavelength metadata for transparency and reproducibility
+                    self.ensemble_metadata = {
+                        'wavelengths': X_filtered.columns.tolist(),
+                        'n_wavelengths': X_filtered.shape[1],
+                        'analysis_wl_min': analysis_wl_min_value,
+                        'analysis_wl_max': analysis_wl_max_value,
+                        'use_full_spectrum_preprocessing': True,
+                        'n_base_models': len(ensemble_results[0]['ensemble'].models) if ensemble_results else 0,
+                        'base_model_names': ensemble_results[0]['ensemble'].model_names if ensemble_results else []
+                    }
 
-                    # Select models for ensemble based on user configuration
-                    if self.ensemble_manual_selection.get():
-                        # Use manually selected models from checkboxes
-                        top_models_df = results_df[results_df['Select'] == True].copy()
-                        self._log_progress(f"Using {len(top_models_df)} manually selected models for ensemble:")
-                    else:
-                        # Use top N models by CompositeScore
-                        top_n = self.ensemble_top_n.get()
-                        top_models_df = results_df.nsmallest(top_n, 'CompositeScore')
-                        self._log_progress(f"Using top {len(top_models_df)} models (by score) for ensemble:")
-
-                    if len(top_models_df) == 0:
-                        self._log_progress(f"⚠️ No models selected for ensemble, skipping...")
-                        raise ValueError("No models selected for ensemble")
-
-                    # Log selected models
-                    for i, row in enumerate(top_models_df.itertuples(), 1):
-                        self._log_progress(f"  {i}. {row.Model} ({row.Preprocess}) - Score: {row.CompositeScore:.4f}")
-
-                    # Reconstruct models from results
-                    self._log_progress(f"\nReconstructing top {len(top_models_df)} models...")
-                    reconstructed = reconstruct_models_from_results(top_models_df, X_filtered, y_filtered)
-
-                    if len(reconstructed) < 2:
-                        self._log_progress(f"⚠️ Need at least 2 models for ensemble (got {len(reconstructed)}), skipping...")
-                    else:
-                        self._log_progress(f"✓ Successfully reconstructed {len(reconstructed)} models")
-
-                        # Extract models and names
-                        models = [m[0] for m in reconstructed]
-                        model_names = [m[1] for m in reconstructed]
-
-                        # Collect ensemble methods to run
-                        ensemble_methods = []
-                        if self.ensemble_simple_average.get():
-                            ensemble_methods.append(('simple_average', 'Simple Average'))
-                        if self.ensemble_region_weighted.get():
-                            ensemble_methods.append(('region_weighted', 'Region-Aware Weighted'))
-                        if self.ensemble_mixture_experts.get():
-                            ensemble_methods.append(('mixture_experts', 'Mixture of Experts'))
-                        if self.ensemble_stacking.get():
-                            ensemble_methods.append(('stacking', 'Stacking'))
-                        if self.ensemble_stacking_region.get():
-                            ensemble_methods.append(('region_stacking', 'Stacking + Region Features'))
-
-                        if not ensemble_methods:
-                            self._log_progress("⚠️ No ensemble methods selected, skipping...")
-                        else:
-                            self._log_progress(f"\nTesting {len(ensemble_methods)} ensemble methods...")
-                            n_regions = self.ensemble_n_regions.get()
-                            self._log_progress(f"Number of regions: {n_regions}")
-
-                            # Train and evaluate each ensemble method
-                            ensemble_results = []
-                            trained_ensembles = {}
-
-                            for ensemble_type, ensemble_name in ensemble_methods:
-                                try:
-                                    self._log_progress(f"\n--- Training {ensemble_name} ---")
-
-                                    # Create ensemble
-                                    ensemble = create_ensemble(
-                                        models=models,
-                                        model_names=model_names,
-                                        X=X_filtered,
-                                        y=y_filtered,
-                                        ensemble_type=ensemble_type,
-                                        n_regions=n_regions,
-                                        cv=min(5, len(y_filtered))  # Use 5-fold or less if small dataset
-                                    )
-
-                                    # Make predictions
-                                    ensemble_pred = ensemble.predict(X_filtered)
-
-                                    # Calculate metrics
-                                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                                    import numpy as np
-
-                                    rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
-                                    r2 = r2_score(y_filtered, ensemble_pred)
-                                    mae = mean_absolute_error(y_filtered, ensemble_pred)
-
-                                    # Calculate RPD (Ratio of Performance to Deviation)
-                                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
-
-                                    self._log_progress(f"✓ {ensemble_name} Results:")
-                                    self._log_progress(f"   RMSE: {rmse:.4f}")
-                                    self._log_progress(f"   R²:   {r2:.4f}")
-                                    self._log_progress(f"   MAE:  {mae:.4f}")
-                                    self._log_progress(f"   RPD:  {rpd:.2f}")
-
-                                    # Add warning for mixture of experts about cross-validated performance
-                                    if ensemble_type == 'mixture_experts' and r2 > 0.95:
-                                        self._log_progress(f"   ⚠️ Note: These metrics are on training data.")
-                                        self._log_progress(f"   ⚠️ Actual performance on new data will be lower.")
-
-                                    # Store results
-                                    ensemble_results.append({
-                                        'method': ensemble_name,
-                                        'type': ensemble_type,
-                                        'rmse': rmse,
-                                        'r2': r2,
-                                        'mae': mae,
-                                        'rpd': rpd,
-                                        'ensemble': ensemble
-                                    })
-
-                                    # Store trained ensemble
-                                    trained_ensembles[ensemble_type] = ensemble
-
-                                except Exception as e:
-                                    self._log_progress(f"✗ {ensemble_name} failed: {e}")
-                                    import traceback
-                                    self._log_progress(f"   {traceback.format_exc()}")
-                                    continue
-
-                            # Summary of ensemble results
-                            if ensemble_results:
-                                self._log_progress(f"\n{'='*70}")
-                                self._log_progress(f"ENSEMBLE RESULTS SUMMARY")
-                                self._log_progress(f"{'='*70}")
-
-                                # Sort by R² (best first)
-                                ensemble_results.sort(key=lambda x: x['r2'], reverse=True)
-
-                                # Find best individual model for comparison
-                                best_individual_r2 = results_df['R2'].max() if 'R2' in results_df.columns else 0
-                                best_individual_rmse = results_df['RMSE'].min() if 'RMSE' in results_df.columns else float('inf')
-
-                                self._log_progress(f"\nBest Individual Model: R²={best_individual_r2:.4f}, RMSE={best_individual_rmse:.4f}")
-                                self._log_progress(f"\nEnsemble Rankings:")
-
-                                for i, result in enumerate(ensemble_results, 1):
-                                    r2_improvement = result['r2'] - best_individual_r2
-                                    rmse_improvement = ((best_individual_rmse - result['rmse']) / best_individual_rmse * 100) if best_individual_rmse > 0 else 0
-
-                                    status = "🏆" if i == 1 else f"  {i}."
-                                    self._log_progress(f"{status} {result['method']}")
-                                    self._log_progress(f"     R²:   {result['r2']:.4f} ({r2_improvement:+.4f})")
-                                    self._log_progress(f"     RMSE: {result['rmse']:.4f} ({rmse_improvement:+.1f}%)")
-                                    self._log_progress(f"     RPD:  {result['rpd']:.2f}")
-
-                                # Store ensemble results for later use
-                                self.ensemble_results = ensemble_results
-                                self.trained_ensembles = trained_ensembles
-                                # Store training data for visualizations
-                                self.ensemble_X = X_filtered
-                                self.ensemble_y = y_filtered
-                                # Store wavelength metadata for transparency and reproducibility
-                                self.ensemble_metadata = {
-                                    'wavelengths': X_filtered.columns.tolist(),
-                                    'n_wavelengths': X_filtered.shape[1],
-                                    'analysis_wl_min': analysis_wl_min_value,
-                                    'analysis_wl_max': analysis_wl_max_value,
-                                    'use_full_spectrum_preprocessing': True,
-                                    'n_base_models': len(models),
-                                    'base_model_names': model_names
-                                }
-
-                                # Populate ensemble results table in Tab 5
-                                self.root.after(0, self._populate_ensemble_results)
-
-                                self._log_progress(f"\n✓ Ensemble training complete!")
-                                self._log_progress(f"✓ Trained {len(ensemble_results)} ensemble(s)")
-                                self._log_progress(f"✓ View ensemble results in the Results tab")
-                            else:
-                                self._log_progress(f"\n⚠️ No ensembles were successfully trained")
-
-                except Exception as e:
-                    import traceback
-                    self._log_progress(f"\n⚠️ Ensemble execution failed: {e}")
-                    self._log_progress(f"   {traceback.format_exc()}")
-                    self._log_progress(f"   Individual model results are still available")
+                    # Populate ensemble results table in Tab 5
+                    self.root.after(0, self._populate_ensemble_results)
 
             # Store results for Results tab
             self.results_df = results_df
+
+            # === CACHE TRAINING DATA FOR MANUAL ENSEMBLE RETRAINING ===
+            # Store filtered data and configuration so user can retrain ensembles
+            # with different model selections after initial analysis
+            self.training_data_cache = {
+                'X_filtered': X_filtered.copy(),  # Deep copy to prevent modifications
+                'y_filtered': y_filtered.copy(),
+                'task_type': task_type,
+                'folds': self.folds.get(),
+                'label_encoder': label_encoder,
+                'analysis_wl_min': analysis_wl_min_value,
+                'analysis_wl_max': analysis_wl_max_value,
+                'timestamp': datetime.now().isoformat()
+            }
+            self._log_progress(f"\n✓ Cached training data for ensemble retraining")
 
             # Populate Results tab
             self.root.after(0, lambda: self._populate_results_table(results_df))
@@ -11137,6 +11642,12 @@ class SpectralPredictApp:
 
         # Update status
         self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
+
+        # Enable Train Ensemble button if conditions are met
+        if len(results_df) >= 2 and self.training_data_cache is not None:
+            self.btn_train_ensemble.config(state='normal')
+        else:
+            self.btn_train_ensemble.config(state='disabled')
 
     def _on_result_click(self, event):
         """Handle single-click on results table to toggle checkbox selection."""
