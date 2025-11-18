@@ -695,6 +695,17 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     else:
                                         print(f"AUC={subset_result.get('ROC_AUC', 0):.3f}, Acc={subset_result.get('Accuracy', 0):.3f}")
 
+                                    # Update best model tracker for subset results
+                                    if best_model_so_far is None:
+                                        best_model_so_far = subset_result
+                                    else:
+                                        if task_type == "regression":
+                                            if subset_result["RMSE"] < best_model_so_far["RMSE"]:
+                                                best_model_so_far = subset_result
+                                        else:  # classification
+                                            if subset_result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                                                best_model_so_far = subset_result
+
                             except Exception as e:
                                 print(f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}")
 
@@ -757,6 +768,17 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             print(f"R²={region_result['R2']:.3f}, RMSE={region_result['RMSE']:.3f}")
                         else:
                             print(f"AUC={region_result.get('ROC_AUC', 0):.3f}, Acc={region_result.get('Accuracy', 0):.3f}")
+
+                        # Update best model tracker for region subset results
+                        if best_model_so_far is None:
+                            best_model_so_far = region_result
+                        else:
+                            if task_type == "regression":
+                                if region_result["RMSE"] < best_model_so_far["RMSE"]:
+                                    best_model_so_far = region_result
+                            else:  # classification
+                                if region_result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                                    best_model_so_far = region_result
 
     # Compute composite scores and rank
     from .scoring import compute_composite_score
