@@ -6326,32 +6326,57 @@ class SpectralPredictApp:
                 file_ext = os.path.splitext(spectra_path)[1].lower()
 
                 if file_ext in ['.xlsx', '.xls']:
-                    # Try to load as Excel combined format first
-                    try:
-                        X, y, metadata_df, metadata = read_combined_excel(spectra_path)
-                        format_type = 'combined_excel'
-                        ref = None  # Combined format has no separate reference file
-                        print(f"✓ Loaded combined Excel: {len(X)} samples, {len(X.columns)} wavelengths")
-                        print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
-                        print(f"  • Target: {metadata.get('y_col', 'N/A')}")
-                        if metadata.get('metadata_cols'):
-                            print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
-                    except Exception as e:
-                        print(f"Not a combined Excel format (error: {e}), treating as single spectrum Excel...")
-                        # This would be a single-spectrum Excel file requiring a separate reference
-                        # For now, show error - can be enhanced to support this format later
+                    # Try to load as Excel combined format
+                    # Excel files can have multiple sheets - try each one
+                    import openpyxl
+                    wb = openpyxl.load_workbook(spectra_path, read_only=True, data_only=True)
+                    sheet_names = wb.sheetnames
+                    wb.close()
+
+                    print(f"Excel file has {len(sheet_names)} sheet(s): {sheet_names}")
+
+                    loaded = False
+                    last_error = None
+
+                    for sheet_idx, sheet_name in enumerate(sheet_names):
+                        try:
+                            print(f"Trying sheet '{sheet_name}' (index {sheet_idx})...")
+
+                            # First, peek at what columns exist
+                            peek_df = pd.read_excel(spectra_path, sheet_name=sheet_idx, nrows=5)
+                            print(f"  Sheet has {len(peek_df.columns)} columns")
+                            print(f"  First 20 column names: {list(peek_df.columns[:20])}")
+                            print(f"  Sample of first row: {peek_df.iloc[0].head(10).to_dict()}")
+
+                            X, y, metadata_df, metadata = read_combined_excel(spectra_path, sheet_name=sheet_idx)
+                            format_type = 'combined_excel'
+                            ref = None  # Combined format has no separate reference file
+                            print(f"✓ Loaded combined Excel from sheet '{sheet_name}': {len(X)} samples, {len(X.columns)} wavelengths")
+                            print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
+                            print(f"  • Target: {metadata.get('y_col', 'N/A')}")
+                            if metadata.get('metadata_cols'):
+                                print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
+                            loaded = True
+                            break  # Success - stop trying other sheets
+                        except Exception as e:
+                            last_error = e
+                            print(f"  Sheet '{sheet_name}' failed: {str(e)[:100]}...")
+                            continue
+
+                    if not loaded:
+                        # All sheets failed
                         import traceback
                         error_details = traceback.format_exc()
-                        print(f"Full error:\n{error_details}")
+                        print(f"Failed to load any sheet. Last error:\n{error_details}")
                         messagebox.showerror("Excel Format Error",
-                            f"Excel file is not in combined format.\n\n"
-                            f"Error: {str(e)}\n\n"
+                            f"Could not load Excel file from any sheet.\n\n"
+                            f"Tried {len(sheet_names)} sheet(s): {', '.join(sheet_names)}\n\n"
+                            f"Last error: {str(last_error)}\n\n"
                             f"Combined Excel format requires:\n"
-                            f"- Sample_ID column\n"
+                            f"- Sample_ID column (optional)\n"
                             f"- Numeric wavelength columns (at least 100)\n"
                             f"- Target column (e.g., 'target', 'y')\n\n"
-                            f"For single-spectrum Excel files, use a directory instead.\n\n"
-                            f"Check console for detailed error.")
+                            f"Check console for detailed errors from each sheet.")
                         return
                 elif file_ext in ['.csv', '.txt']:
                     # Try to load as combined format CSV (preferred)
@@ -11865,7 +11890,9 @@ class SpectralPredictApp:
             warnings.append(f"CV folds: trained with {saved_folds}, current setting is {current_folds}")
 
         # Calculate current data state
-        current_total = len(self.X) if self.X is not None else len(self.X_original)
+        # IMPORTANT: Use X_original to get total count BEFORE any exclusions
+        # self.X may already have validation samples removed, causing double-counting
+        current_total = len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
         current_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
         current_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
         current_calibration = current_total - current_excluded - current_validation
