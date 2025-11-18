@@ -6330,8 +6330,12 @@ class SpectralPredictApp:
                     try:
                         X, y, metadata_df, metadata = read_combined_excel(spectra_path)
                         format_type = 'combined_excel'
-                        ref = metadata_df
-                        print(f"Loaded as combined Excel: {len(X)} samples, {len(X.columns)} wavelengths")
+                        ref = None  # Combined format has no separate reference file
+                        print(f"✓ Loaded combined Excel: {len(X)} samples, {len(X.columns)} wavelengths")
+                        print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
+                        print(f"  • Target: {metadata.get('y_col', 'N/A')}")
+                        if metadata.get('metadata_cols'):
+                            print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
                     except Exception as e:
                         print(f"Not a combined Excel format (error: {e}), treating as single spectrum Excel...")
                         # This would be a single-spectrum Excel file requiring a separate reference
@@ -6354,9 +6358,13 @@ class SpectralPredictApp:
                     try:
                         print(f"Attempting to load {os.path.basename(spectra_path)} as combined CSV...")
                         X, y, metadata_df, metadata = read_combined_csv(spectra_path)
-                        ref = metadata_df
+                        ref = None  # Combined format has no separate reference file
                         format_type = 'combined'
-                        print(f"✓ Loaded as combined CSV: {len(X)} samples, {len(X.columns)} wavelengths")
+                        print(f"✓ Loaded combined CSV: {len(X)} samples, {len(X.columns)} wavelengths")
+                        print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
+                        print(f"  • Target: {metadata.get('y_col', 'N/A')}")
+                        if metadata.get('metadata_cols'):
+                            print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
                     except Exception as e:
                         print(f"Combined CSV failed: {str(e)}")
 
@@ -6506,9 +6514,16 @@ class SpectralPredictApp:
 
                 # Show alignment info
                 if alignment_info:
-                    print(f"Alignment: {alignment_info['matched']} matched, "
-                          f"{alignment_info['unmatched_X']} unmatched spectra, "
-                          f"{alignment_info['unmatched_y']} unmatched references")
+                    try:
+                        matched = alignment_info.get('matched', 'unknown')
+                        unmatched_X = alignment_info.get('unmatched_X', 'unknown')
+                        unmatched_y = alignment_info.get('unmatched_y', 'unknown')
+                        print(f"Alignment: {matched} matched, "
+                              f"{unmatched_X} unmatched spectra, "
+                              f"{unmatched_y} unmatched references")
+                    except Exception as e:
+                        print(f"Alignment info available: {alignment_info}")
+                        print(f"Warning: Could not display alignment stats: {e}")
 
             # Validate loaded data
             if X is None or len(X) == 0:
@@ -10552,12 +10567,17 @@ class SpectralPredictApp:
                         # Fit on training data
                         pipeline.fit(X_train, y_train)
 
-                        # Store metadata
+                        # Store metadata (including wavelength information for transparency)
                         metadata = {
                             'model_name': model_name,
                             'preprocess': preprocess,
                             'params': params_dict,
-                            'score': row.CompositeScore if hasattr(row, 'CompositeScore') else 0.0
+                            'score': row.CompositeScore if hasattr(row, 'CompositeScore') else 0.0,
+                            # Wavelength information for reproducibility
+                            'wavelengths': X_filtered.columns.tolist(),
+                            'n_vars': X_filtered.shape[1],
+                            'use_full_spectrum_preprocessing': True,
+                            'full_wavelengths': X_filtered.columns.tolist()
                         }
 
                         reconstructed_models.append((pipeline, model_name, metadata))
@@ -10726,6 +10746,16 @@ class SpectralPredictApp:
                                 # Store training data for visualizations
                                 self.ensemble_X = X_filtered
                                 self.ensemble_y = y_filtered
+                                # Store wavelength metadata for transparency and reproducibility
+                                self.ensemble_metadata = {
+                                    'wavelengths': X_filtered.columns.tolist(),
+                                    'n_wavelengths': X_filtered.shape[1],
+                                    'analysis_wl_min': analysis_wl_min_value,
+                                    'analysis_wl_max': analysis_wl_max_value,
+                                    'use_full_spectrum_preprocessing': True,
+                                    'n_base_models': len(models),
+                                    'base_model_names': model_names
+                                }
 
                                 # Populate ensemble results table in Tab 5
                                 self.root.after(0, self._populate_ensemble_results)
@@ -11443,8 +11473,8 @@ class SpectralPredictApp:
             # Get preprocessing information from results DataFrame if available
             preprocessing = 'unknown'
             window = None
-            use_full_spectrum_preprocessing = False
-            full_wavelengths = None
+            use_full_spectrum_preprocessing = True  # Always true with our new implementation
+            full_wavelengths = wavelengths  # Same as wavelengths since we use full spectrum
 
             if hasattr(self, 'results_df') and self.results_df is not None and len(self.results_df) > 0:
                 # Get the most common preprocessing from top models used in ensemble
@@ -11457,6 +11487,13 @@ class SpectralPredictApp:
                     top_windows = self.results_df.nsmallest(5, 'CompositeScore')['Window'].mode()
                     if len(top_windows) > 0:
                         window = int(top_windows[0])
+
+            # Get wavelength restriction info if available
+            analysis_wl_min_saved = None
+            analysis_wl_max_saved = None
+            if hasattr(self, 'ensemble_metadata') and self.ensemble_metadata is not None:
+                analysis_wl_min_saved = self.ensemble_metadata.get('analysis_wl_min')
+                analysis_wl_max_saved = self.ensemble_metadata.get('analysis_wl_max')
 
             # Get training data for applicability domain if available
             X_train = None
@@ -11504,6 +11541,10 @@ class SpectralPredictApp:
                 'window': window,
                 'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
                 'full_wavelengths': full_wavelengths,
+
+                # Wavelength restriction info (for transparency and reproducibility)
+                'analysis_wl_min': analysis_wl_min_saved,
+                'analysis_wl_max': analysis_wl_max_saved,
 
                 # Performance metrics
                 'performance': {
