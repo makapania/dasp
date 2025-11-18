@@ -1311,7 +1311,6 @@ class SpectralPredictApp:
         self.ensemble_stacking_region = tk.BooleanVar(value=False)
         self.ensemble_n_regions = tk.IntVar(value=5)  # Number of regions for region-based ensembles
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
-        self.ensemble_manual_selection = tk.BooleanVar(value=False)  # Use manual model selection
         self.ensemble_results = None  # Store ensemble predictions and metrics
         self.training_data_cache = None  # Cache for manual ensemble retraining
 
@@ -4922,8 +4921,8 @@ class SpectralPredictApp:
         ttk.Spinbox(selection_frame, from_=3, to=20, width=5, textvariable=self.ensemble_top_n).grid(row=0, column=1, padx=5)
         ttk.Label(selection_frame, text="models from ranked list").grid(row=0, column=2, padx=(5, 20))
 
-        ttk.Checkbutton(selection_frame, text="☑ Enable manual selection (check models in Results table)",
-                       variable=self.ensemble_manual_selection).grid(row=0, column=3, padx=10)
+        ttk.Label(selection_frame, text="(Auto-trains with top N. Use 🔄 Train Ensemble button for custom selection)",
+                 font=('TkDefaultFont', 8, 'italic')).grid(row=0, column=3, padx=10, sticky='w')
 
         # Info labels
         ttk.Label(ensemble_frame, text="💡 Ensembles combine multiple models - more models capture diverse strengths across prediction ranges",
@@ -9913,13 +9912,13 @@ class SpectralPredictApp:
             from spectral_predict.ensemble import create_ensemble
             from sklearn.model_selection import cross_val_predict
 
-            # Select models for ensemble based on user configuration
-            if self.ensemble_manual_selection.get() or is_manual_retrain:
-                # Use manually selected models from checkboxes
+            # Select models for ensemble based on context
+            if is_manual_retrain:
+                # Manual retrain: use currently selected models from checkboxes
                 top_models_df = results_df[results_df['Select'] == True].copy()
                 self._log_progress(f"Using {len(top_models_df)} manually selected models for ensemble:")
             else:
-                # Use top N models by CompositeScore
+                # Auto-training: use top N models by CompositeScore
                 top_n = self.ensemble_top_n.get()
                 top_models_df = results_df.nsmallest(top_n, 'CompositeScore')
                 self._log_progress(f"Using top {len(top_models_df)} models (by score) for ensemble:")
