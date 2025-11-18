@@ -51,7 +51,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
-               tier='standard', enabled_models=None):
+               tier='standard', enabled_models=None,
+               analysis_wl_min=None, analysis_wl_max=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -525,13 +526,43 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         else:
                             X_transformed = X_np
 
+                        # Apply wavelength restriction for variable selection (if specified)
+                        # This happens AFTER preprocessing, so derivatives/SNV used full spectrum
+                        # Create LOCAL COPIES - do NOT mutate the original arrays (needed for next model)
+                        if analysis_wl_min is not None or analysis_wl_max is not None:
+                            wavelengths_float = wavelengths.astype(float)
+                            wl_mask = np.ones(len(wavelengths), dtype=bool)
+
+                            if analysis_wl_min is not None:
+                                wl_mask &= (wavelengths_float >= analysis_wl_min)
+                            if analysis_wl_max is not None:
+                                wl_mask &= (wavelengths_float <= analysis_wl_max)
+
+                            # Create filtered COPIES for variable selection (don't mutate originals!)
+                            wavelengths_varsel = wavelengths[wl_mask]
+                            X_transformed_varsel = X_transformed[:, wl_mask]
+                            n_features_varsel = X_transformed_varsel.shape[1]
+
+                            print(f"\n{'='*70}")
+                            print(f"WAVELENGTH FILTERING (after preprocessing)")
+                            print(f"{'='*70}")
+                            print(f"Filtered to: {analysis_wl_min or 'min'} - {analysis_wl_max or 'max'} nm")
+                            print(f"Remaining wavelengths for variable selection: {n_features_varsel}")
+                            print(f"Note: Preprocessing was applied to FULL spectrum first")
+                            print(f"{'='*70}\n")
+                        else:
+                            # No filtering - use original arrays
+                            wavelengths_varsel = wavelengths
+                            X_transformed_varsel = X_transformed
+                            n_features_varsel = n_features
+
                         # Loop over each selected variable selection method
                         for varsel_method in selected_methods:
                             # Get importances computed on preprocessed data
                             try:
                                 if varsel_method == 'importance':
                                     importances = get_feature_importances(
-                                        fitted_model, model_name, X_transformed, y_np
+                                        fitted_model, model_name, X_transformed_varsel, y_np
                                     )
 
                                 elif varsel_method == 'spa':
@@ -539,7 +570,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     # Select minimally correlated variables
                                     n_to_select = min(n_top, n_features_for_validation)
                                     importances = spa_selection(
-                                        X_transformed, y_np,
+                                        X_transformed_varsel, y_np,
                                         n_features=n_to_select,
                                         n_random_starts=spa_n_random_starts,
                                         cv_folds=folds
@@ -548,7 +579,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 elif varsel_method == 'uve':
                                     # UVE: Uninformative Variable Elimination - filters noise
                                     importances = uve_selection(
-                                        X_transformed, y_np,
+                                        X_transformed_varsel, y_np,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         n_components=uve_n_components,
                                         cv_folds=folds
@@ -558,7 +589,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     # UVE-SPA: Hybrid method - filters noise then reduces collinearity
                                     n_to_select = min(n_top, n_features_for_validation)
                                     importances = uve_spa_selection(
-                                        X_transformed, y_np,
+                                        X_transformed_varsel, y_np,
                                         n_features=n_to_select,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         uve_n_components=uve_n_components,
@@ -570,7 +601,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 elif varsel_method == 'ipls':
                                     # iPLS: Interval PLS - selects based on spectral regions
                                     importances = ipls_selection(
-                                        X_transformed, y_np,
+                                        X_transformed_varsel, y_np,
                                         n_intervals=ipls_n_intervals,
                                         n_components=uve_n_components,
                                         cv_folds=folds
@@ -587,9 +618,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 else:
                                     user_variable_counts = variable_counts
 
-                                # For validation, use the feature count from the PREPROCESSED data
-                                # (derivatives reduce feature count, so use transformed shape)
-                                n_features_for_validation = X_transformed.shape[1]
+                                # For validation, use the feature count from the FILTERED PREPROCESSED data
+                                # (derivatives reduce feature count, wavelength filtering further reduces)
+                                n_features_for_validation = n_features_varsel
 
                                 # Only test counts that are less than total features
                                 valid_variable_counts = [n for n in user_variable_counts if n < n_features_for_validation]
@@ -614,9 +645,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         # Use preprocessed data, skip reprocessing
                                         # Keep original preprocess_cfg for correct labeling in results
                                         subset_result = _run_single_config(
-                                            X_transformed,
+                                            X_transformed_varsel,
                                             y_np,
-                                            wavelengths,
+                                            wavelengths_varsel,
                                             model,
                                             model_name,
                                             params,
@@ -634,11 +665,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             folds=folds,
                                         )
                                     else:
-                                        # For raw/SNV: indices map to original wavelengths, can reapply preprocessing
+                                        # For raw/SNV: use filtered data since indices reference filtered array
+                                        # Must use X_transformed_varsel because importances were computed on filtered data
                                         subset_result = _run_single_config(
-                                            X_np,
+                                            X_transformed_varsel,
                                             y_np,
-                                            wavelengths,
+                                            wavelengths_varsel,
                                             model,
                                             model_name,
                                             params,
@@ -649,7 +681,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             subset_indices=top_indices,
                                             subset_tag=f"top{n_top}_{varsel_method}",
                                             top_n_vars=30,
-                                            skip_preprocessing=False,
+                                            skip_preprocessing=True,  # Already preprocessed (SNV/raw applied)
                                             excluded_count=excluded_count,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,

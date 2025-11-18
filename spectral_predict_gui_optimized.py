@@ -10242,6 +10242,10 @@ class SpectralPredictApp:
                 self._log_progress(f"   Validation samples (held out): {n_val}\n")
 
             # Apply wavelength restriction for analysis (if enabled)
+            # These will be passed to run_search() to filter variable selection only
+            analysis_wl_min_value = None
+            analysis_wl_max_value = None
+
             if self.enable_analysis_wl_restriction.get():
                 wl_min_str = self.analysis_wl_min.get().strip()
                 wl_max_str = self.analysis_wl_max.get().strip()
@@ -10256,12 +10260,14 @@ class SpectralPredictApp:
                         if wl_min_str:
                             wl_min = float(wl_min_str)
                             wl_mask &= wavelengths >= wl_min
+                            analysis_wl_min_value = wl_min
                         else:
                             wl_min = wavelengths.min()
 
                         if wl_max_str:
                             wl_max = float(wl_max_str)
                             wl_mask &= wavelengths <= wl_max
+                            analysis_wl_max_value = wl_max
                         else:
                             wl_max = wavelengths.max()
 
@@ -10269,32 +10275,33 @@ class SpectralPredictApp:
                         if wl_min >= wl_max:
                             raise ValueError(f"Minimum wavelength ({wl_min}) must be less than maximum ({wl_max})")
 
-                        # Apply wavelength filter
-                        # DISABLED: Preprocessing should happen on full imported spectrum first
-                        # Then variable selection can be restricted to specific wavelengths
-                        # X_filtered = X_filtered.loc[:, wl_mask]
-                        # restricted_wl_count = X_filtered.shape[1]
-                        restricted_wl_count = wl_mask.sum()  # Count for logging, but don't filter yet
-
-                        # TODO: Pass wl_min/wl_max to run_search() to restrict variable selection only
+                        # NOTE: We do NOT filter X_filtered here
+                        # Preprocessing (SNV, derivatives) needs full imported spectrum
+                        # The wavelength restriction will be applied INSIDE run_search()
+                        # AFTER preprocessing, to constrain variable selection only
+                        restricted_wl_count = wl_mask.sum()
 
                         # Validate minimum wavelengths exist in range
                         if restricted_wl_count < 1:
                             raise ValueError(f"No wavelengths in range {wl_min:.1f}-{wl_max:.1f} nm. Please adjust the range.")
 
-                        # Log the wavelength range (informational only - filtering not applied)
-                        self._log_progress(f"\n🔬 WAVELENGTH RANGE SPECIFIED:")
+                        # Log the wavelength range
+                        self._log_progress(f"\n🔬 WAVELENGTH RANGE FOR VARIABLE SELECTION:")
                         self._log_progress(f"   Requested range: {wl_min:.1f} - {wl_max:.1f} nm ({restricted_wl_count} wavelengths)")
                         self._log_progress(f"   Full imported spectrum: {original_wl_count} wavelengths")
                         self._log_progress(f"")
-                        self._log_progress(f"   ℹ️  NOTE: Preprocessing (SNV, derivatives) will use FULL imported spectrum")
-                        self._log_progress(f"   ℹ️  This ensures derivatives have proper spectral context")
-                        self._log_progress(f"   ℹ️  Variable selection will be constrained to specified range (future feature)\n")
+                        self._log_progress(f"   ✓ Preprocessing (SNV, derivatives) will use FULL imported spectrum")
+                        self._log_progress(f"   ✓ Variable selection will be constrained to specified range")
+                        self._log_progress(f"   ✓ This ensures proper spectral context for derivatives\n")
 
                     except ValueError as e:
                         self._log_progress(f"\n⚠️ WARNING: Invalid wavelength restriction values, ignoring: {e}\n")
+                        analysis_wl_min_value = None
+                        analysis_wl_max_value = None
                     except Exception as e:
-                        self._log_progress(f"\n⚠️ WARNING: Failed to apply wavelength restriction: {e}\n")
+                        self._log_progress(f"\n⚠️ WARNING: Failed to validate wavelength restriction: {e}\n")
+                        analysis_wl_min_value = None
+                        analysis_wl_max_value = None
 
 
             # Parse UVE n_components (empty string = None)
@@ -10424,7 +10431,10 @@ class SpectralPredictApp:
                 ipls_n_intervals=self.ipls_n_intervals.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
-                enabled_models=selected_models  # User's manual selection overrides tier defaults
+                enabled_models=selected_models,  # User's manual selection overrides tier defaults
+                # Wavelength restriction for variable selection only (preprocessing uses full spectrum)
+                analysis_wl_min=analysis_wl_min_value,
+                analysis_wl_max=analysis_wl_max_value
             )
 
             # Store label_encoder for saving with models
