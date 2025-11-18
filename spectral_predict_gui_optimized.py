@@ -10270,30 +10270,26 @@ class SpectralPredictApp:
                             raise ValueError(f"Minimum wavelength ({wl_min}) must be less than maximum ({wl_max})")
 
                         # Apply wavelength filter
-                        X_filtered = X_filtered.loc[:, wl_mask]
-                        restricted_wl_count = X_filtered.shape[1]
+                        # DISABLED: Preprocessing should happen on full imported spectrum first
+                        # Then variable selection can be restricted to specific wavelengths
+                        # X_filtered = X_filtered.loc[:, wl_mask]
+                        # restricted_wl_count = X_filtered.shape[1]
+                        restricted_wl_count = wl_mask.sum()  # Count for logging, but don't filter yet
 
-                        # Validate minimum wavelengths for derivatives
+                        # TODO: Pass wl_min/wl_max to run_search() to restrict variable selection only
+
+                        # Validate minimum wavelengths exist in range
                         if restricted_wl_count < 1:
                             raise ValueError(f"No wavelengths in range {wl_min:.1f}-{wl_max:.1f} nm. Please adjust the range.")
 
-                        # Check for sufficient wavelengths if using derivatives
-                        using_derivatives = self.use_sg1.get() or self.use_sg2.get() or self.use_deriv_snv.get()
-                        if using_derivatives and window_sizes:
-                            max_window = max(window_sizes)
-                            min_required = max_window + 5  # Conservative estimate
-                            if restricted_wl_count < min_required:
-                                self._log_progress(f"\n⚠️ WARNING: Only {restricted_wl_count} wavelengths after restriction.")
-                                self._log_progress(f"   Derivatives with window={max_window} need at least {min_required} wavelengths.")
-                                self._log_progress(f"   Analysis may fail for derivative preprocessing methods.\n")
-
-                        # Log the restriction
-                        self._log_progress(f"\n🔬 WAVELENGTH RESTRICTION:")
-                        self._log_progress(f"   Analysis range: {wl_min:.1f} - {wl_max:.1f} nm")
-                        self._log_progress(f"   Original wavelengths: {original_wl_count}")
-                        self._log_progress(f"   Restricted wavelengths: {restricted_wl_count}")
-                        self._log_progress(f"   Reduction: {original_wl_count - restricted_wl_count} wavelengths ({(1 - restricted_wl_count/original_wl_count)*100:.1f}%)")
-                        self._log_progress(f"   ⚡ Expected speedup: ~{original_wl_count/max(restricted_wl_count, 1):.1f}x faster training\n")
+                        # Log the wavelength range (informational only - filtering not applied)
+                        self._log_progress(f"\n🔬 WAVELENGTH RANGE SPECIFIED:")
+                        self._log_progress(f"   Requested range: {wl_min:.1f} - {wl_max:.1f} nm ({restricted_wl_count} wavelengths)")
+                        self._log_progress(f"   Full imported spectrum: {original_wl_count} wavelengths")
+                        self._log_progress(f"")
+                        self._log_progress(f"   ℹ️  NOTE: Preprocessing (SNV, derivatives) will use FULL imported spectrum")
+                        self._log_progress(f"   ℹ️  This ensures derivatives have proper spectral context")
+                        self._log_progress(f"   ℹ️  Variable selection will be constrained to specified range (future feature)\n")
 
                     except ValueError as e:
                         self._log_progress(f"\n⚠️ WARNING: Invalid wavelength restriction values, ignoring: {e}\n")
