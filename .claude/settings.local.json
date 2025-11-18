@@ -31,7 +31,11 @@
       "Bash(py test_metadata_columns.py)",
       "Bash(tasklist:*)",
       "Bash(findstr:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(git -C \"C:\\Users\\mspon\\git\\dasp\" show --stat 8a48ec2)",
+      "Bash(git show:*)",
+      "Bash(if exist nul del nul)",
+      "Bash(rm:*)"
     ],
     "deny": [],
     "ask": []

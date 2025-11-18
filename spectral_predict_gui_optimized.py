@@ -87,6 +87,20 @@ except ImportError:
     HAS_CATBOOST = False
     CatBoostRegressor = None
 
+# Import data management module
+try:
+    from spectral_predict.data_management import (
+        DataSource,
+        MergedDataset,
+        DataSourceManager,
+    )
+    HAS_DATA_MANAGEMENT = True
+except ImportError:
+    HAS_DATA_MANAGEMENT = False
+    DataSource = None
+    MergedDataset = None
+    DataSourceManager = None
+
 # Import calibration transfer and instrument profile modules
 try:
     from spectral_predict.instrument_profiles import (
@@ -746,7 +760,19 @@ class SpectralPredictApp:
         self.refined_label_encoder = None  # Label encoder for categorical targets (classification)
         self.task_type_detection_label = None  # Will be created in Import tab
 
-        # Model Prediction Tab (Tab 7) variables
+        # Data Management Tab (Tab 0) variables
+        self.data_source_manager = DataSourceManager() if HAS_DATA_MANAGEMENT else None
+        self.data_sources_tree = None  # TreeView for data sources
+        self.current_active_dataset = None  # Currently active dataset for analysis
+        self.merge_strategy_var = tk.StringVar(value='intersection')
+        self.duplicate_handling_var = tk.StringVar(value='error')
+        self.filter_type_var = tk.StringVar(value='regex')
+        self.filter_column_var = tk.StringVar()
+        self.filter_value_var = tk.StringVar()
+        self.min_wavelength_var = tk.DoubleVar()
+        self.max_wavelength_var = tk.DoubleVar()
+
+        # Model Prediction Tab (Tab 8) variables - shifted from Tab 7
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
         self.predictions_df = None  # Results dataframe
@@ -1682,29 +1708,30 @@ class SpectralPredictApp:
         style.configure('Accent.TButton',
                        font=(body_font, 11, 'bold'),
                        padding=(20, 12),
-                       background=self.colors['accent'],
-                       foreground=self.colors['text_inverse'],
-                       borderwidth=0,
-                       relief='flat')
+                       background='#0078D4',  # Explicit blue background
+                       foreground='#FFFFFF',  # Explicit white text
+                       borderwidth=1,
+                       relief='solid')
         style.map('Accent.TButton',
-                 background=[('active', self.colors['accent_dark']),
-                           ('!disabled', self.colors['accent'])],
-                 foreground=[('active', self.colors['text_inverse']),
-                           ('!disabled', self.colors['text_inverse'])])
+                 background=[('active', '#005A9E'),        # Darker blue on hover
+                           ('!disabled', '#0078D4')],      # Blue normally
+                 foreground=[('active', '#FFFFFF'),        # White text on hover
+                           ('!disabled', '#FFFFFF')])      # White text normally
 
         # Default style for all ttk.Button widgets (IMPORTANT: prevents invisible text)
         style.configure('TButton',
                        font=(body_font, 10),
                        padding=(15, 8),
-                       borderwidth=0,
-                       relief='flat',
-                       foreground=self.colors['text'])  # Dark text for light backgrounds
+                       borderwidth=1,  # Add border for visibility
+                       relief='solid',
+                       foreground='#000000',  # Explicit black text
+                       background='#FFFFFF')  # Explicit white background
 
         style.map('TButton',
                  background=[('active', self.colors['accent']),      # Colored on hover
-                           ('!disabled', self.colors['panel'])],     # White/light normally
+                           ('!disabled', '#FFFFFF')],               # White normally
                  foreground=[('active', self.colors['text_inverse']),# White text on hover
-                           ('!disabled', self.colors['text'])])      # Dark text normally
+                           ('!disabled', '#000000')])               # Black text normally
 
         # Secondary button style (for less prominent actions)
         style.configure('Secondary.TButton',
@@ -2501,6 +2528,7 @@ class SpectralPredictApp:
         self.notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
 
         # Create tabs
+        self._create_tab0_data_management()  # NEW: Data Management tab (Tab 0)
         self._create_tab1_import_preview()
         self._create_tab2_data_viewer()
         self._create_tab3_data_quality_check()
@@ -2514,6 +2542,394 @@ class SpectralPredictApp:
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+
+    def _create_tab0_data_management(self):
+        """Tab 0: Data Management - Import, merge, and manipulate multiple data sources."""
+        # Create main tab frame
+        self.tab0 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab0, text='  🗃️ Data Management  ')
+
+        # Check if data management module is available
+        if not HAS_DATA_MANAGEMENT:
+            error_label = ttk.Label(self.tab0,
+                                   text="Data Management module not available. Please check installation.",
+                                   style='Heading.TLabel')
+            error_label.pack(pady=20)
+            return
+
+        # Create notebook for subtabs
+        self.data_mgmt_notebook = ttk.Notebook(self.tab0)
+        self.data_mgmt_notebook.pack(fill='both', expand=True)
+
+        # Create subtabs
+        self._create_tab0a_import_sources()
+        self._create_tab0b_merge_combine()
+        self._create_tab0c_data_manipulation()
+
+    def _create_tab0a_import_sources(self):
+        """Subtab 0A: Import Sources - Load and manage multiple data sources."""
+        # Create subtab frame with scrolling
+        tab0a = ttk.Frame(self.data_mgmt_notebook, style='TFrame')
+        self.data_mgmt_notebook.add(tab0a, text='  📥 Import Sources  ')
+
+        # Create canvas for scrolling
+        canvas = tk.Canvas(tab0a, background='#f0f0f0')
+        scrollbar = ttk.Scrollbar(tab0a, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Pack scrolling components
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Add padding frame
+        content_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="20 10 20 10")
+        content_frame.pack(fill='both', expand=True)
+
+        # Create sections
+        row = 0
+
+        # === Section 1: Data Sources List ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "📋 Data Sources",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        # TreeView for data sources
+        tree_frame = ttk.Frame(section_content)
+        tree_frame.pack(fill='both', expand=True, pady=5)
+
+        # Create TreeView with columns
+        columns = ('Name', 'Format', 'Samples', 'Wavelengths', 'Range', 'Y', 'Metadata')
+        self.data_sources_tree = ttk.Treeview(tree_frame, columns=columns, height=8, show='tree headings')
+
+        # Configure columns
+        self.data_sources_tree.column('#0', width=50, minwidth=50)
+        self.data_sources_tree.column('Name', width=150, minwidth=100)
+        self.data_sources_tree.column('Format', width=80, minwidth=60)
+        self.data_sources_tree.column('Samples', width=80, minwidth=60)
+        self.data_sources_tree.column('Wavelengths', width=100, minwidth=80)
+        self.data_sources_tree.column('Range', width=150, minwidth=100)
+        self.data_sources_tree.column('Y', width=50, minwidth=40)
+        self.data_sources_tree.column('Metadata', width=70, minwidth=50)
+
+        # Set headings
+        self.data_sources_tree.heading('#0', text='ID')
+        self.data_sources_tree.heading('Name', text='Name')
+        self.data_sources_tree.heading('Format', text='Format')
+        self.data_sources_tree.heading('Samples', text='Samples')
+        self.data_sources_tree.heading('Wavelengths', text='Wavelengths')
+        self.data_sources_tree.heading('Range', text='Range (nm)')
+        self.data_sources_tree.heading('Y', text='Y')
+        self.data_sources_tree.heading('Metadata', text='Metadata')
+
+        # Add scrollbars
+        tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical', command=self.data_sources_tree.yview)
+        tree_scroll_x = ttk.Scrollbar(tree_frame, orient='horizontal', command=self.data_sources_tree.xview)
+        self.data_sources_tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
+
+        # Pack TreeView and scrollbars
+        self.data_sources_tree.grid(row=0, column=0, sticky='nsew')
+        tree_scroll_y.grid(row=0, column=1, sticky='ns')
+        tree_scroll_x.grid(row=1, column=0, sticky='ew')
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        # Buttons for source management
+        button_frame = ttk.Frame(section_content)
+        button_frame.pack(fill='x', pady=5)
+
+        tk.Button(button_frame, text="➕ Add Source", command=self._add_data_source,
+                 bg='#0078D4', fg='white', font=('TkDefaultFont', 10, 'bold'),
+                 relief='raised', bd=2, padx=15, pady=8).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="➖ Remove Source", command=self._remove_data_source).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="🔄 Refresh", command=self._refresh_sources_tree).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="💾 Save Config", command=self._save_source_config).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="📂 Load Config", command=self._load_source_config).pack(side='left', padx=2)
+        ttk.Button(button_frame, text="🗑️ Clear All", command=self._clear_all_sources).pack(side='left', padx=2)
+
+        # === Section 2: Add New Source ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "➕ Add New Source",
+            expanded=False
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        # Source loading controls (similar to Tab 1)
+        load_frame = ttk.LabelFrame(section_content, text="Load Data", padding="10")
+        load_frame.pack(fill='x', pady=5)
+
+        # Info label
+        info_text = "Supports: Directories (ASD/CSV/SPC) • Combined Files (CSV/Excel)"
+        ttk.Label(load_frame, text=info_text, font=('TkDefaultFont', 8), foreground='gray').grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=5, pady=(0, 5))
+
+        # Spectral data directory or file
+        ttk.Label(load_frame, text="Spectral Data:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        self.dm_spectra_path_var = tk.StringVar()
+        ttk.Entry(load_frame, textvariable=self.dm_spectra_path_var, width=50).grid(row=1, column=1, padx=5, pady=2)
+        ttk.Button(load_frame, text="Browse", command=self._browse_dm_spectra).grid(row=1, column=2, padx=5, pady=2)
+
+        # Reference CSV or Excel (optional - only for directories)
+        ttk.Label(load_frame, text="Reference (CSV/Excel):").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        ttk.Label(load_frame, text="(optional, for directories only)", font=('TkDefaultFont', 8), foreground='gray').grid(
+            row=2, column=1, sticky='w', padx=5, pady=0)
+        self.dm_reference_path_var = tk.StringVar()
+        ttk.Entry(load_frame, textvariable=self.dm_reference_path_var, width=50).grid(row=3, column=1, padx=5, pady=2)
+        ttk.Button(load_frame, text="Browse", command=self._browse_dm_reference).grid(row=3, column=2, padx=5, pady=2)
+
+        # Source name
+        ttk.Label(load_frame, text="Source Name:").grid(row=4, column=0, sticky='w', padx=5, pady=2)
+        self.dm_source_name_var = tk.StringVar()
+        ttk.Entry(load_frame, textvariable=self.dm_source_name_var, width=50).grid(row=4, column=1, padx=5, pady=2)
+
+        # Load button
+        tk.Button(load_frame, text="Load Source", command=self._load_dm_source,
+                 bg='#0078D4', fg='white', font=('TkDefaultFont', 10, 'bold'),
+                 relief='raised', bd=2, padx=15, pady=8).grid(row=5, column=1, pady=10)
+
+        # === Section 3: Source Details ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "📊 Source Details",
+            expanded=False
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        # Details text widget
+        self.source_details_text = tk.Text(section_content, height=10, width=60, wrap='word')
+        self.source_details_text.pack(fill='both', expand=True, pady=5)
+
+        # === Section 4: Quick Actions ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "⚡ Quick Actions",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        # Quick action buttons
+        action_frame = ttk.Frame(section_content)
+        action_frame.pack(fill='x', pady=5)
+
+        tk.Button(action_frame, text="🚀 Use for Analysis",
+                 command=self._use_for_analysis,
+                 bg='#0078D4', fg='white', font=('TkDefaultFont', 11, 'bold'),
+                 relief='raised', bd=2, padx=20, pady=10).pack(side='left', padx=5)
+
+        ttk.Label(action_frame, text="← Sends selected data to analysis pipeline").pack(side='left', padx=5)
+
+    def _create_tab0b_merge_combine(self):
+        """Subtab 0B: Merge & Combine - Merge multiple data sources."""
+        tab0b = ttk.Frame(self.data_mgmt_notebook, style='TFrame')
+        self.data_mgmt_notebook.add(tab0b, text='  🔗 Merge & Combine  ')
+
+        # Create scrollable frame
+        canvas = tk.Canvas(tab0b, background='#f0f0f0')
+        scrollbar = ttk.Scrollbar(tab0b, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        content_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="20 10 20 10")
+        content_frame.pack(fill='both', expand=True)
+
+        row = 0
+
+        # === Section 1: Source Selection ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "📋 Select Sources to Merge",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        # Checkboxes for source selection (will be populated dynamically)
+        self.merge_source_vars = {}
+        self.merge_sources_frame = ttk.Frame(section_content)
+        self.merge_sources_frame.pack(fill='both', expand=True, pady=5)
+
+        # === Section 2: Merge Strategy ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "🎯 Merge Strategy",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        strategy_frame = ttk.LabelFrame(section_content, text="Wavelength Alignment", padding="10")
+        strategy_frame.pack(fill='x', pady=5)
+
+        ttk.Radiobutton(strategy_frame, text="Intersection (common wavelengths only)",
+                       variable=self.merge_strategy_var, value='intersection').pack(anchor='w', pady=2)
+        ttk.Radiobutton(strategy_frame, text="Union (all wavelengths, NaN for missing)",
+                       variable=self.merge_strategy_var, value='union').pack(anchor='w', pady=2)
+        ttk.Radiobutton(strategy_frame, text="Interpolation (resample to common grid)",
+                       variable=self.merge_strategy_var, value='interpolation').pack(anchor='w', pady=2)
+
+        # Duplicate handling
+        dup_frame = ttk.LabelFrame(section_content, text="Duplicate Sample Handling", padding="10")
+        dup_frame.pack(fill='x', pady=5)
+
+        ttk.Radiobutton(dup_frame, text="Error (stop if duplicates found)",
+                       variable=self.duplicate_handling_var, value='error').pack(anchor='w', pady=2)
+        ttk.Radiobutton(dup_frame, text="Keep First",
+                       variable=self.duplicate_handling_var, value='keep_first').pack(anchor='w', pady=2)
+        ttk.Radiobutton(dup_frame, text="Keep Last",
+                       variable=self.duplicate_handling_var, value='keep_last').pack(anchor='w', pady=2)
+        ttk.Radiobutton(dup_frame, text="Rename (prefix with source name)",
+                       variable=self.duplicate_handling_var, value='rename').pack(anchor='w', pady=2)
+
+        # === Section 3: Merge Preview ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "👁️ Merge Preview",
+            expanded=False
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        # Preview text
+        self.merge_preview_text = tk.Text(section_content, height=10, width=60, wrap='word')
+        self.merge_preview_text.pack(fill='both', expand=True, pady=5)
+
+        # === Section 4: Execute Merge ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "✅ Execute Merge",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        merge_button_frame = ttk.Frame(section_content)
+        merge_button_frame.pack(fill='x', pady=5)
+
+        ttk.Button(merge_button_frame, text="Preview Merge", command=self._preview_merge).pack(side='left', padx=5)
+        tk.Button(merge_button_frame, text="Execute Merge", command=self._execute_merge,
+                 bg='#0078D4', fg='white', font=('TkDefaultFont', 10, 'bold'),
+                 relief='raised', bd=2, padx=15, pady=8).pack(side='left', padx=5)
+        ttk.Button(merge_button_frame, text="🚀 Merge & Use for Analysis", command=self._merge_and_use).pack(side='left', padx=5)
+
+    def _create_tab0c_data_manipulation(self):
+        """Subtab 0C: Data Manipulation - Filter and transform data."""
+        tab0c = ttk.Frame(self.data_mgmt_notebook, style='TFrame')
+        self.data_mgmt_notebook.add(tab0c, text='  ✂️ Data Manipulation  ')
+
+        # Create scrollable frame
+        canvas = tk.Canvas(tab0c, background='#f0f0f0')
+        scrollbar = ttk.Scrollbar(tab0c, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        content_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="20 10 20 10")
+        content_frame.pack(fill='both', expand=True)
+
+        row = 0
+
+        # === Section 1: Sample Filtering ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "🔍 Sample Filtering",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        filter_frame = ttk.LabelFrame(section_content, text="Filter Options", padding="10")
+        filter_frame.pack(fill='x', pady=5)
+
+        # Filter type
+        ttk.Label(filter_frame, text="Filter Type:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        ttk.Radiobutton(filter_frame, text="Regex Pattern",
+                       variable=self.filter_type_var, value='regex').grid(row=0, column=1, sticky='w', padx=5)
+        ttk.Radiobutton(filter_frame, text="Value Range",
+                       variable=self.filter_type_var, value='range').grid(row=0, column=2, sticky='w', padx=5)
+        ttk.Radiobutton(filter_frame, text="Sample List",
+                       variable=self.filter_type_var, value='list').grid(row=0, column=3, sticky='w', padx=5)
+
+        # Filter column (for metadata filtering)
+        ttk.Label(filter_frame, text="Column:").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        ttk.Entry(filter_frame, textvariable=self.filter_column_var, width=30).grid(row=1, column=1, columnspan=2, padx=5, pady=2)
+
+        # Filter value
+        ttk.Label(filter_frame, text="Value/Pattern:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        ttk.Entry(filter_frame, textvariable=self.filter_value_var, width=30).grid(row=2, column=1, columnspan=2, padx=5, pady=2)
+
+        ttk.Button(filter_frame, text="Apply Filter", command=self._apply_sample_filter).grid(row=3, column=1, pady=10)
+
+        # === Section 2: Wavelength Operations ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "📏 Wavelength Operations",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        wl_frame = ttk.LabelFrame(section_content, text="Wavelength Trimming", padding="10")
+        wl_frame.pack(fill='x', pady=5)
+
+        # Min wavelength
+        ttk.Label(wl_frame, text="Min Wavelength (nm):").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        ttk.Entry(wl_frame, textvariable=self.min_wavelength_var, width=15).grid(row=0, column=1, padx=5, pady=2)
+
+        # Max wavelength
+        ttk.Label(wl_frame, text="Max Wavelength (nm):").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+        ttk.Entry(wl_frame, textvariable=self.max_wavelength_var, width=15).grid(row=1, column=1, padx=5, pady=2)
+
+        ttk.Button(wl_frame, text="Trim Wavelengths", command=self._trim_wavelengths).grid(row=2, column=1, pady=10)
+
+        # === Section 3: Export Options ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "💾 Export Options",
+            expanded=False
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        export_frame = ttk.Frame(section_content)
+        export_frame.pack(fill='x', pady=5)
+
+        ttk.Button(export_frame, text="Export to CSV", command=self._export_to_csv).pack(side='left', padx=5)
+        ttk.Button(export_frame, text="Export to Excel", command=self._export_to_excel).pack(side='left', padx=5)
 
     def _create_tab1_import_preview(self):
         """Tab 1: Import & Preview - Data loading + spectral plots."""
@@ -5725,6 +6141,707 @@ class SpectralPredictApp:
         if not self._updating_from_tier and self.model_tier.get() != "custom":
             self.model_tier.set("custom")
 
+    # === TAB 0 HELPER METHODS: Data Management ===
+
+    def _add_data_source(self):
+        """Open dialog to add a new data source."""
+        # This will be handled by the load source button
+        messagebox.showinfo("Add Source", "Use the 'Add New Source' section to load data")
+
+    def _remove_data_source(self):
+        """Remove selected data source."""
+        if not self.data_source_manager:
+            return
+
+        selected = self.data_sources_tree.selection()
+        if not selected:
+            messagebox.showwarning("No Selection", "Please select a source to remove")
+            return
+
+        source_id = self.data_sources_tree.item(selected[0])['text']
+
+        if messagebox.askyesno("Confirm", f"Remove source {source_id}?"):
+            self.data_source_manager.remove_source(source_id)
+            self._refresh_sources_tree()
+
+    def _refresh_sources_tree(self):
+        """Refresh the data sources TreeView."""
+        if not self.data_source_manager:
+            return
+
+        # Clear tree
+        for item in self.data_sources_tree.get_children():
+            self.data_sources_tree.delete(item)
+
+        # Populate with sources
+        for source in self.data_source_manager.sources:
+            has_y = "✓" if source.y is not None else "✗"
+            has_ref = "✓" if source.ref is not None else "✗"
+            wl_range = f"{source.wavelength_range[0]:.1f}-{source.wavelength_range[1]:.1f}"
+
+            self.data_sources_tree.insert('', 'end',
+                text=source.source_id,
+                values=(source.name, source.format_type, source.n_samples,
+                       len(source.wavelengths), wl_range, has_y, has_ref))
+
+        # Update merge checkboxes
+        self._update_merge_checkboxes()
+
+    def _update_merge_checkboxes(self):
+        """Update checkboxes in merge tab based on available sources."""
+        if not self.data_source_manager:
+            return
+
+        # Clear existing checkboxes
+        for widget in self.merge_sources_frame.winfo_children():
+            widget.destroy()
+
+        # Create new checkboxes
+        self.merge_source_vars = {}
+        for source in self.data_source_manager.sources:
+            var = tk.BooleanVar(value=True)
+            self.merge_source_vars[source.source_id] = var
+            ttk.Checkbutton(self.merge_sources_frame,
+                          text=f"{source.name} ({source.n_samples} samples)",
+                          variable=var).pack(anchor='w', pady=2)
+
+    def _save_source_config(self):
+        """Save data source configuration to file."""
+        if not self.data_source_manager:
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Save Configuration",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if filename:
+            self.data_source_manager.save_configuration(filename)
+            messagebox.showinfo("Success", f"Configuration saved to {filename}")
+
+    def _load_source_config(self):
+        """Load data source configuration from file."""
+        if not self.data_source_manager:
+            return
+
+        filename = filedialog.askopenfilename(
+            title="Load Configuration",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if filename:
+            config = self.data_source_manager.load_configuration(filename)
+            messagebox.showinfo("Loaded", f"Loaded configuration with {config['n_sources']} sources.\nNote: Spectral data must be reloaded.")
+
+    def _clear_all_sources(self):
+        """Clear all data sources."""
+        if not self.data_source_manager:
+            return
+
+        if self.data_source_manager.sources:
+            if messagebox.askyesno("Confirm", "Clear all data sources?"):
+                self.data_source_manager.clear_sources()
+                self._refresh_sources_tree()
+
+    def _browse_dm_spectra(self):
+        """Browse for spectral data directory or file (Data Management tab)."""
+        # Create a custom dialog that allows both files and directories
+        from tkinter import simpledialog
+
+        # First, ask user what they want to load
+        choice = messagebox.askquestion("Load Type",
+            "Load a directory of spectral files?\n\n"
+            "Yes = Directory (ASD, CSV, SPC files)\n"
+            "No = Single combined file (CSV or Excel)",
+            icon='question')
+
+        if choice == 'yes':
+            # Load directory
+            directory = filedialog.askdirectory(title="Select Spectral Data Directory")
+            if directory:
+                self.dm_spectra_path_var.set(directory)
+                # Auto-generate source name from directory
+                if not self.dm_source_name_var.get():
+                    self.dm_source_name_var.set(os.path.basename(directory))
+        else:
+            # Load single file (CSV or Excel)
+            filename = filedialog.askopenfilename(
+                title="Select Combined Data File",
+                filetypes=[
+                    ("All Supported", "*.csv *.txt *.xlsx *.xls"),
+                    ("CSV/Text files", "*.csv *.txt"),
+                    ("Excel files", "*.xlsx *.xls"),
+                    ("All files", "*.*")
+                ]
+            )
+            if filename:
+                self.dm_spectra_path_var.set(filename)
+                # Auto-generate source name from file
+                if not self.dm_source_name_var.get():
+                    self.dm_source_name_var.set(os.path.splitext(os.path.basename(filename))[0])
+
+    def _browse_dm_reference(self):
+        """Browse for reference CSV or Excel file (Data Management tab)."""
+        filename = filedialog.askopenfilename(
+            title="Select Reference CSV or Excel",
+            filetypes=[
+                ("All Supported", "*.csv *.xlsx *.xls"),
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("All files", "*.*")
+            ]
+        )
+        if filename:
+            self.dm_reference_path_var.set(filename)
+
+    def _load_dm_source(self):
+        """Load a data source in Data Management tab."""
+        if not self.data_source_manager:
+            messagebox.showerror("Error", "Data management module not available")
+            return
+
+        spectra_path = self.dm_spectra_path_var.get()
+        if not spectra_path:
+            messagebox.showwarning("No Data", "Please select spectral data directory or file")
+            return
+
+        try:
+            import os
+            from pathlib import Path
+            from spectral_predict.io import (
+                read_asd_dir, read_csv_spectra, read_spc_dir,
+                read_combined_csv, read_combined_excel, read_reference_csv, align_xy
+            )
+
+            # Check if it's a file or directory
+            is_file = os.path.isfile(spectra_path)
+
+            # Initialize variables
+            y = None
+            ref = None
+
+            if is_file:
+                # Single file - check extension
+                file_ext = os.path.splitext(spectra_path)[1].lower()
+
+                if file_ext in ['.xlsx', '.xls']:
+                    # Try to load as Excel combined format first
+                    try:
+                        X, y, metadata_df, metadata = read_combined_excel(spectra_path)
+                        format_type = 'combined_excel'
+                        ref = metadata_df
+                        print(f"Loaded as combined Excel: {len(X)} samples, {len(X.columns)} wavelengths")
+                    except Exception as e:
+                        print(f"Not a combined Excel format (error: {e}), treating as single spectrum Excel...")
+                        # This would be a single-spectrum Excel file requiring a separate reference
+                        # For now, show error - can be enhanced to support this format later
+                        import traceback
+                        error_details = traceback.format_exc()
+                        print(f"Full error:\n{error_details}")
+                        messagebox.showerror("Excel Format Error",
+                            f"Excel file is not in combined format.\n\n"
+                            f"Error: {str(e)}\n\n"
+                            f"Combined Excel format requires:\n"
+                            f"- Sample_ID column\n"
+                            f"- Numeric wavelength columns (at least 100)\n"
+                            f"- Target column (e.g., 'target', 'y')\n\n"
+                            f"For single-spectrum Excel files, use a directory instead.\n\n"
+                            f"Check console for detailed error.")
+                        return
+                elif file_ext in ['.csv', '.txt']:
+                    # Try to load as combined format CSV (preferred)
+                    try:
+                        print(f"Attempting to load {os.path.basename(spectra_path)} as combined CSV...")
+                        X, y, metadata_df, metadata = read_combined_csv(spectra_path)
+                        ref = metadata_df
+                        format_type = 'combined'
+                        print(f"✓ Loaded as combined CSV: {len(X)} samples, {len(X.columns)} wavelengths")
+                    except Exception as e:
+                        print(f"Combined CSV failed: {str(e)}")
+
+                        # Show detailed diagnostics for delimiter errors
+                        if "Could not parse file" in str(e) and "delimiters" in str(e):
+                            # Try to read first few lines to show user what we see
+                            try:
+                                with open(spectra_path, 'r') as f:
+                                    first_lines = [f.readline().strip() for _ in range(3)]
+                                print(f"First 3 lines of file:")
+                                for i, line in enumerate(first_lines, 1):
+                                    print(f"  Line {i}: {line[:200]}...")  # Show first 200 chars
+                            except:
+                                pass
+
+                        # Try single spectrum CSV format
+                        print(f"Trying single spectrum format...")
+                        try:
+                            X, metadata = read_csv_spectra(spectra_path)
+                            format_type = 'csv'
+                            print(f"✓ Loaded as single spectrum CSV: {len(X)} samples, {len(X.columns)} wavelengths")
+                        except Exception as e2:
+                            # Both formats failed - show helpful error
+                            import traceback
+                            error_details = traceback.format_exc()
+                            print(f"Full error:\n{error_details}")
+
+                            error_msg = (
+                                f"Failed to load CSV file.\n\n"
+                                f"Combined format error: {str(e)}\n\n"
+                                f"Single spectrum error: {str(e2)}\n\n"
+                                f"Please ensure your CSV is in one of these formats:\n"
+                                f"1. Combined: Sample_ID, metadata, wavelength columns, target\n"
+                                f"   - Must have at least 100 numeric wavelength columns\n"
+                                f"   - Delimiter: comma, tab, semicolon, or whitespace\n"
+                                f"2. Single spectrum: Sample_ID, numeric wavelength columns\n\n"
+                                f"Check console output for file preview and detailed errors."
+                            )
+                            messagebox.showerror("CSV Load Error", error_msg)
+                            return
+                else:
+                    messagebox.showerror("Error", f"Unsupported file type: {file_ext}")
+                    return
+            else:
+                # Directory - detect format by scanning files
+                dir_path = Path(spectra_path)
+                files = list(dir_path.iterdir())
+
+                # Check for ASD files
+                asd_files = [f for f in files if f.suffix.lower() == '.asd']
+                if asd_files:
+                    format_type = 'asd'
+                    X, metadata = read_asd_dir(spectra_path)
+                # Check for SPC files
+                elif any(f.suffix.lower() == '.spc' for f in files):
+                    format_type = 'spc'
+                    X, metadata = read_spc_dir(spectra_path)
+                # Check for CSV files
+                elif any(f.suffix.lower() == '.csv' for f in files):
+                    format_type = 'csv'
+                    X, metadata = read_csv_spectra(spectra_path)
+                else:
+                    messagebox.showerror("Error", f"No supported spectral files found in directory")
+                    return
+
+            # Load reference CSV or Excel if provided (for directory-based or single-file data that doesn't have y)
+            reference_path = self.dm_reference_path_var.get()
+            if reference_path and y is None:  # Only load reference if we don't already have y from combined format
+                # Read reference file to get column names
+                ref_ext = os.path.splitext(reference_path)[1].lower()
+                if ref_ext in ['.xlsx', '.xls']:
+                    # Read Excel file
+                    ref_df = pd.read_excel(reference_path)
+                else:
+                    # Read CSV file
+                    ref_df = pd.read_csv(reference_path)
+
+                # Auto-detect columns from reference file
+                columns = list(ref_df.columns)
+
+                # Auto-detect ID column - look for common names first
+                id_column = None
+                id_candidates = ['specimen_id', 'sample_id', 'id', 'ID', 'Sample_ID', 'Specimen_ID',
+                                'SampleID', 'SpecimenID', 'sample', 'specimen', 'filename', 'file']
+                for candidate in id_candidates:
+                    if candidate in columns:
+                        id_column = candidate
+                        break
+
+                # If no standard ID column found, look for column with unique string values
+                if not id_column:
+                    for col in columns:
+                        if ref_df[col].nunique() == len(ref_df) and not pd.api.types.is_numeric_dtype(ref_df[col]):
+                            id_column = col
+                            break
+
+                # Fallback to first column only if nothing else found
+                if not id_column:
+                    id_column = columns[0]
+
+                # Auto-detect target column - look for common names or numeric columns
+                target_column = None
+                target_candidates = ['target', 'y', 'Target', 'Y', 'value', 'Value',
+                                   'collagen', 'nitrogen', 'protein', 'class', 'label']
+                for candidate in target_candidates:
+                    if candidate in columns:
+                        target_column = candidate
+                        break
+
+                # If no standard target found, find last numeric column (excluding ID)
+                if not target_column:
+                    for col in reversed(columns):
+                        if col != id_column and pd.api.types.is_numeric_dtype(ref_df[col]):
+                            target_column = col
+                            break
+
+                # Fallback to last column if still not found
+                if not target_column:
+                    target_column = columns[-1]
+
+                print(f"Auto-detected reference columns: ID='{id_column}', Target='{target_column}'")
+
+                # Now read reference with proper ID column
+                if ref_ext in ['.xlsx', '.xls']:
+                    ref_df = pd.read_excel(reference_path)
+                    ref_df = ref_df.set_index(id_column)
+                else:
+                    ref_df = read_reference_csv(reference_path, id_column)
+
+                # Align data - CORRECTED SIGNATURE
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref_df,
+                    id_column,
+                    target_column,
+                    return_alignment_info=True
+                )
+
+                # Validate alignment
+                if not X_aligned.index.equals(y_aligned.index):
+                    raise ValueError("X and y indices don't match after alignment!")
+                if len(X_aligned) != len(y_aligned):
+                    raise ValueError(f"X has {len(X_aligned)} samples but y has {len(y_aligned)} samples!")
+
+                X = X_aligned
+                y = y_aligned
+                ref = ref_df  # Keep full reference dataframe
+
+                # Show alignment info
+                if alignment_info:
+                    print(f"Alignment: {alignment_info['matched']} matched, "
+                          f"{alignment_info['unmatched_X']} unmatched spectra, "
+                          f"{alignment_info['unmatched_y']} unmatched references")
+
+            # Validate loaded data
+            if X is None or len(X) == 0:
+                messagebox.showerror("Error", "No spectral data was loaded. Please check the file format.")
+                return
+
+            if y is not None and len(X) != len(y):
+                messagebox.showerror("Error",
+                    f"Data mismatch: {len(X)} spectra but {len(y)} target values.\n"
+                    f"Please check your reference file alignment.")
+                return
+
+            # Add source to manager
+            source_name = self.dm_source_name_var.get() or os.path.basename(spectra_path)
+            source = self.data_source_manager.add_source(
+                X=X, y=y, ref=ref,
+                path=spectra_path,
+                format_type=format_type,
+                name=source_name
+            )
+
+            # Refresh tree
+            self._refresh_sources_tree()
+
+            # Show source details
+            self.source_details_text.delete('1.0', tk.END)
+            self.source_details_text.insert('1.0',
+                f"Source: {source.name}\n"
+                f"Format: {source.format_type}\n"
+                f"Samples: {source.n_samples}\n"
+                f"Wavelengths: {len(source.wavelengths)}\n"
+                f"Range: {source.wavelength_range[0]:.1f} - {source.wavelength_range[1]:.1f} nm\n"
+                f"Has Y values: {source.y is not None}\n"
+                f"Has metadata: {source.ref is not None}\n"
+            )
+
+            messagebox.showinfo("Success", f"Loaded {source.n_samples} samples from {source.name}")
+
+            # Clear input fields
+            self.dm_spectra_path_var.set("")
+            self.dm_reference_path_var.set("")
+            self.dm_source_name_var.set("")
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Full error traceback:\n{error_details}")
+            messagebox.showerror("Load Error",
+                f"Failed to load data.\n\n"
+                f"Error: {str(e)}\n\n"
+                f"Check the console for detailed error information.")
+
+    def _use_for_analysis(self):
+        """Send selected data source to analysis pipeline."""
+        if not self.data_source_manager:
+            return
+
+        selected = self.data_sources_tree.selection()
+        if not selected:
+            # If merged data exists, use that
+            if self.data_source_manager.merged_dataset:
+                dataset = self.data_source_manager.merged_dataset
+                self.X = dataset.X
+                self.y = dataset.y
+                self.ref = dataset.ref
+                messagebox.showinfo("Success", "Merged dataset loaded for analysis")
+            else:
+                messagebox.showwarning("No Selection", "Please select a source or create a merged dataset")
+                return
+        else:
+            # Use selected source
+            source_id = self.data_sources_tree.item(selected[0])['text']
+            source = self.data_source_manager.get_source(source_id)
+            if source:
+                self.X = source.X
+                self.y = source.y
+                self.ref = source.ref
+                messagebox.showinfo("Success", f"Source '{source.name}' loaded for analysis")
+
+        # Update plots in Tab 1 if needed
+        if hasattr(self, 'plot_canvas') and self.plot_canvas:
+            self._update_spectral_plots()
+
+        # Update Data Viewer tab
+        if hasattr(self, 'sheet') and self.sheet:
+            self._update_data_viewer()
+
+        # Switch to Import & Preview tab to show the data
+        self.notebook.select(1)  # Tab 1 (Import & Preview)
+
+    def _preview_merge(self):
+        """Preview merge operation."""
+        if not self.data_source_manager:
+            return
+
+        # Get selected sources
+        selected_sources = [sid for sid, var in self.merge_source_vars.items() if var.get()]
+
+        if len(selected_sources) < 2:
+            messagebox.showwarning("Not Enough Sources", "Please select at least 2 sources to merge")
+            return
+
+        try:
+            # Preview merge without executing
+            strategy = self.merge_strategy_var.get()
+            handle_duplicates = self.duplicate_handling_var.get()
+
+            # Get source objects
+            sources = [self.data_source_manager.get_source(sid) for sid in selected_sources]
+
+            # Generate preview text
+            preview = f"Merge Preview\n{'='*50}\n\n"
+            preview += f"Sources to merge: {len(sources)}\n"
+            for source in sources:
+                preview += f"  - {source.name}: {source.n_samples} samples, {len(source.wavelengths)} wavelengths\n"
+
+            preview += f"\nStrategy: {strategy}\n"
+            preview += f"Duplicate handling: {handle_duplicates}\n\n"
+
+            # Check for wavelength compatibility
+            if strategy == 'intersection':
+                common_wl = set(sources[0].wavelengths)
+                for source in sources[1:]:
+                    common_wl = common_wl.intersection(set(source.wavelengths))
+                preview += f"Common wavelengths: {len(common_wl)}\n"
+                if len(common_wl) == 0:
+                    preview += "WARNING: No common wavelengths found!\n"
+            elif strategy == 'union':
+                all_wl = set()
+                for source in sources:
+                    all_wl.update(source.wavelengths)
+                preview += f"Total unique wavelengths: {len(all_wl)}\n"
+
+            # Check for duplicate sample IDs
+            all_ids = []
+            for source in sources:
+                all_ids.extend(source.X.index.tolist())
+            unique_ids = set(all_ids)
+            n_duplicates = len(all_ids) - len(unique_ids)
+            preview += f"\nTotal samples: {len(all_ids)}\n"
+            preview += f"Unique samples: {len(unique_ids)}\n"
+            preview += f"Duplicates: {n_duplicates}\n"
+
+            self.merge_preview_text.delete('1.0', tk.END)
+            self.merge_preview_text.insert('1.0', preview)
+
+        except Exception as e:
+            messagebox.showerror("Preview Error", f"Failed to preview merge: {str(e)}")
+
+    def _execute_merge(self):
+        """Execute merge operation."""
+        if not self.data_source_manager:
+            return
+
+        # Get selected sources
+        selected_sources = [sid for sid, var in self.merge_source_vars.items() if var.get()]
+
+        if len(selected_sources) < 2:
+            messagebox.showwarning("Not Enough Sources", "Please select at least 2 sources to merge")
+            return
+
+        try:
+            strategy = self.merge_strategy_var.get()
+            handle_duplicates = self.duplicate_handling_var.get()
+
+            # Execute merge
+            merged = self.data_source_manager.merge_sources(
+                source_ids=selected_sources,
+                strategy=strategy,
+                handle_duplicates=handle_duplicates
+            )
+
+            # Show results
+            report = merged.merge_report
+            messagebox.showinfo("Merge Complete",
+                f"Merged {len(merged.sources)} sources\n"
+                f"Result: {len(merged.X)} samples, {len(merged.X.columns)} wavelengths\n"
+                f"Strategy: {strategy}")
+
+            # Update preview
+            self.merge_preview_text.insert(tk.END, f"\n\n{'='*50}\nMERGE COMPLETED\n")
+            self.merge_preview_text.insert(tk.END, f"Report: {report}\n")
+
+        except Exception as e:
+            messagebox.showerror("Merge Error", f"Failed to merge: {str(e)}")
+
+    def _merge_and_use(self):
+        """Execute merge and immediately use for analysis."""
+        self._execute_merge()
+        if self.data_source_manager and self.data_source_manager.merged_dataset:
+            self.X = self.data_source_manager.merged_dataset.X
+            self.y = self.data_source_manager.merged_dataset.y
+            self.ref = self.data_source_manager.merged_dataset.ref
+            messagebox.showinfo("Success", "Merged dataset loaded for analysis")
+            # Switch to Import & Preview tab
+            self.notebook.select(1)
+
+    def _apply_sample_filter(self):
+        """Apply sample filter to current dataset."""
+        if not self.data_source_manager:
+            return
+
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load or select data first")
+            return
+
+        try:
+            filter_type = self.filter_type_var.get()
+            filter_value = self.filter_value_var.get()
+            filter_column = self.filter_column_var.get() if self.filter_column_var.get() else None
+
+            # Apply filter
+            X_filtered, y_filtered, ref_filtered = self.data_source_manager.filter_samples(
+                self.X, self.y, self.ref,
+                filter_type=filter_type,
+                filter_value=filter_value,
+                column=filter_column
+            )
+
+            # Update data
+            original_samples = len(self.X)
+            self.X = X_filtered
+            self.y = y_filtered
+            self.ref = ref_filtered
+
+            messagebox.showinfo("Filter Applied",
+                f"Filtered from {original_samples} to {len(self.X)} samples")
+
+        except Exception as e:
+            messagebox.showerror("Filter Error", f"Failed to apply filter: {str(e)}")
+
+    def _trim_wavelengths(self):
+        """Trim wavelength range of current dataset."""
+        if not self.data_source_manager:
+            return
+
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load or select data first")
+            return
+
+        try:
+            min_wl = self.min_wavelength_var.get() if self.min_wavelength_var.get() else None
+            max_wl = self.max_wavelength_var.get() if self.max_wavelength_var.get() else None
+
+            # Apply trimming
+            original_wl = len(self.X.columns)
+            self.X = self.data_source_manager.trim_wavelengths(self.X, min_wl, max_wl)
+
+            messagebox.showinfo("Wavelengths Trimmed",
+                f"Trimmed from {original_wl} to {len(self.X.columns)} wavelengths")
+
+        except Exception as e:
+            messagebox.showerror("Trim Error", f"Failed to trim wavelengths: {str(e)}")
+
+    def _export_to_csv(self):
+        """Export current dataset to CSV."""
+        if not self.data_source_manager:
+            return
+
+        if self.X is None:
+            messagebox.showwarning("No Data", "No data to export")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Export to CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if filename:
+            try:
+                self.data_source_manager.export_to_csv(
+                    self.X, self.y, self.ref, filename
+                )
+                messagebox.showinfo("Success", f"Data exported to {filename}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export: {str(e)}")
+
+    def _export_to_excel(self):
+        """Export current dataset to Excel."""
+        if not self.data_source_manager:
+            return
+
+        if self.X is None:
+            messagebox.showwarning("No Data", "No data to export")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Export to Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+        )
+
+        if filename:
+            try:
+                # Create Excel writer
+                with pd.ExcelWriter(filename) as writer:
+                    # Export spectral data
+                    export_df = self.X.copy()
+                    if self.y is not None:
+                        export_df.insert(0, 'Target', self.y)
+                    if self.ref is not None:
+                        for col in self.ref.columns:
+                            export_df.insert(0, col, self.ref[col])
+
+                    export_df.to_excel(writer, sheet_name='Spectral_Data')
+
+                    # Add metadata sheet
+                    metadata = pd.DataFrame({
+                        'Property': ['Samples', 'Wavelengths', 'Has_Targets', 'Has_Metadata'],
+                        'Value': [len(self.X), len(self.X.columns),
+                                self.y is not None, self.ref is not None]
+                    })
+                    metadata.to_excel(writer, sheet_name='Metadata', index=False)
+
+                messagebox.showinfo("Success", f"Data exported to {filename}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export: {str(e)}")
+
+    def _update_spectral_plots(self):
+        """Update spectral plots when data changes."""
+        # This will be called when data is loaded from Data Management tab
+        # The existing plot update logic can be reused
+        pass
+
+    def _update_data_viewer(self):
+        """Update Data Viewer tab when data changes."""
+        # This will be called when data is loaded from Data Management tab
+        # The existing data viewer update logic can be reused
+        pass
+
+    # === END OF TAB 0 HELPER METHODS ===
+
     def _load_and_plot_data(self):
         """Load data and generate spectral plots."""
         try:
@@ -8120,8 +9237,8 @@ class SpectralPredictApp:
             return
 
         # Switch to Analysis Progress tab (index 4)
-        # Tab indices: 0=Import, 1=Data Viewer, 2=Quality Check, 3=Analysis Config, 4=Analysis Progress, 5=Results, 6=Custom Model Dev
-        self.notebook.select(4)
+        # Tab indices: 0=Data Management, 1=Import, 2=Data Viewer, 3=Quality Check, 4=Analysis Config, 5=Analysis Progress, 6=Results, 7=Custom Model Dev
+        self.notebook.select(5)
 
         # Clear progress text
         self.progress_text.delete('1.0', tk.END)
@@ -9790,11 +10907,11 @@ class SpectralPredictApp:
 
         # Stop live monitoring when leaving Multi-Model tab (index 8)
         if hasattr(self, 'live_monitoring_active') and self.live_monitoring_active:
-            if current_tab != 8:  # Tab 9 (Multi-Model) is index 8
+            if current_tab != 9:  # Tab 10 (Multi-Model) is now index 9
                 self._stop_live_monitoring()
 
-        # Auto-refresh calibration transfer instruments when switching to that tab (index 9)
-        if current_tab == 9 and self.instrument_profiles:
+        # Auto-refresh calibration transfer instruments when switching to that tab (index 10)
+        if current_tab == 10 and self.instrument_profiles:
             inst_ids = list(self.instrument_profiles.keys())
             self.ct_master_instrument_combo['values'] = inst_ids
             self.ct_slave_instrument_combo['values'] = inst_ids
@@ -9982,7 +11099,7 @@ class SpectralPredictApp:
         self._load_model_for_refinement(model_config)
 
         # Switch to the Model Development tab
-        self.notebook.select(6)  # Tab 7 (index 6)
+        self.notebook.select(7)  # Tab 7 (index 7)
 
         # Always switch to Selection subtab (first subtab) when loading a model
         self.model_dev_notebook.select(0)  # Selection subtab
@@ -12193,6 +13310,79 @@ F1 Score:  {f1:.4f}
             if not selected_wl:
                 raise ValueError("No valid wavelengths selected. Please check your wavelength specification.")
 
+            # DIAGNOSTIC: Compare reconstructed wavelengths with original all_vars
+            print(f"\nDEBUG: Checking wavelength reconstruction...")
+            print(f"DEBUG: hasattr(self, 'loaded_model_config') = {hasattr(self, 'loaded_model_config')}")
+            if hasattr(self, 'loaded_model_config'):
+                print(f"DEBUG: self.loaded_model_config exists = {self.loaded_model_config is not None}")
+                if self.loaded_model_config:
+                    all_vars_str = self.loaded_model_config.get('all_vars', 'N/A')
+                    print(f"DEBUG: all_vars_str = {all_vars_str[:100] if all_vars_str and all_vars_str != 'N/A' else all_vars_str}...")
+
+            if hasattr(self, 'loaded_model_config') and self.loaded_model_config:
+                all_vars_str = self.loaded_model_config.get('all_vars', 'N/A')
+                if all_vars_str != 'N/A' and all_vars_str:
+                    try:
+                        # Parse original wavelengths from all_vars
+                        # DON'T sort - preserve order to detect ordering differences!
+                        original_wl = [float(x.strip()) for x in all_vars_str.split(',')]
+                        reconstructed_wl = list(selected_wl)  # Preserve order as parsed
+
+                        print(f"\n{'='*80}")
+                        print(f"WAVELENGTH RECONSTRUCTION DIAGNOSTIC")
+                        print(f"{'='*80}")
+                        print(f"Original wavelengths (from Results all_vars): {len(original_wl)}")
+                        print(f"Reconstructed wavelengths (from parsed spec): {len(reconstructed_wl)}")
+                        print(f"First 10 original: {original_wl[:10]}")
+                        print(f"First 10 reconstructed: {reconstructed_wl[:10]}")
+
+                        # Check for exact match (INCLUDING ORDER)
+                        if original_wl == reconstructed_wl:
+                            print(f"✓ Perfect match - wavelengths AND ORDER are identical")
+                        else:
+                            # Find differences
+                            missing = sorted(set(original_wl) - set(reconstructed_wl))
+                            extra = sorted(set(reconstructed_wl) - set(original_wl))
+
+                            # Check if just ordering differs (same set, different order)
+                            same_set = (set(original_wl) == set(reconstructed_wl))
+
+                            print(f"\n⚠️  WAVELENGTH MISMATCH DETECTED!")
+                            print(f"{'='*80}")
+
+                            if same_set:
+                                print(f"⚠️  ORDERING DIFFERENCE (same wavelengths, different order)!")
+                                print(f"  This will cause R² differences even though wavelengths match.")
+                                print(f"\n  First 10 original order:      {original_wl[:10]}")
+                                print(f"  First 10 reconstructed order: {reconstructed_wl[:10]}")
+
+                                # Find first mismatch
+                                for i, (orig, recon) in enumerate(zip(original_wl, reconstructed_wl)):
+                                    if orig != recon:
+                                        print(f"\n  First difference at position {i}:")
+                                        print(f"    Original: {orig}")
+                                        print(f"    Reconstructed: {recon}")
+                                        break
+                            else:
+                                print(f"Missing from reconstruction: {len(missing)} wavelengths")
+                                if missing:
+                                    print(f"  First 10 missing: {missing[:10]}")
+                                    if len(missing) > 10:
+                                        print(f"  ... and {len(missing)-10} more")
+
+                                print(f"\nExtra in reconstruction: {len(extra)} wavelengths")
+                                if extra:
+                                    print(f"  First 10 extra: {extra[:10]}")
+                                    if len(extra) > 10:
+                                        print(f"  ... and {len(extra)-10} more")
+
+                            print(f"\n⚠️  This explains the R² difference between Results and Model Dev!")
+                            print(f"{'='*80}")
+
+                        print(f"{'='*80}\n")
+                    except Exception as e:
+                        print(f"DEBUG: Could not compare wavelengths: {e}")
+
             # Filter data source to selected wavelengths
             # Create mapping from float wavelengths to actual column names
             if self.X is not None:
@@ -12628,8 +13818,24 @@ F1 Score:  {f1:.4f}
 
                 # 2. Preprocess FULL spectrum (all wavelengths)
                 X_full = X_base_df.values
-                print(f"DEBUG: Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
+
+                # DIAGNOSTIC: Fingerprint BEFORE preprocessing
+                import hashlib
+                X_pre_hash = hashlib.md5(X_full.tobytes()).hexdigest()[:8]
+                print(f"\nDEBUG: PRE-PREPROCESSING FINGERPRINT:")
+                print(f"  X_full hash (before preprocessing): {X_pre_hash}")
+                print(f"  X_full shape: {X_full.shape}")
+                print(f"  X_full[0,:5] (first spectrum, first 5 wavelengths): {X_full[0,:5]}")
+
+                print(f"\nDEBUG: Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
                 X_full_preprocessed = prep_pipeline.fit_transform(X_full)
+
+                # DIAGNOSTIC: Fingerprint AFTER preprocessing
+                X_post_hash = hashlib.md5(X_full_preprocessed.tobytes()).hexdigest()[:8]
+                print(f"\nDEBUG: POST-PREPROCESSING FINGERPRINT:")
+                print(f"  X_preprocessed hash (after {preprocess_name}): {X_post_hash}")
+                print(f"  X_preprocessed shape: {X_full_preprocessed.shape}")
+                print(f"  X_preprocessed[0,:5] (first spectrum, first 5 values): {X_full_preprocessed[0,:5]}")
 
                 # 3. Find indices of selected wavelengths in original data
                 all_wavelengths = X_base_df.columns.astype(float).values
@@ -12682,6 +13888,22 @@ F1 Score:  {f1:.4f}
 
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
 
+            # DATA FINGERPRINT - verify same data as search.py
+            import hashlib
+            X_hash = hashlib.md5(X_work.tobytes()).hexdigest()[:8]
+            y_hash = hashlib.md5(y_array.tobytes()).hexdigest()[:8]
+            print(f"\n{'='*80}")
+            print(f"DATA FINGERPRINT (Model Development)")
+            print(f"{'='*80}")
+            print(f"X fingerprint: {X_hash}")
+            print(f"y fingerprint: {y_hash}")
+            print(f"X shape: {X_work.shape}")
+            print(f"y shape: {y_array.shape}")
+            print(f"First 5 y values: {y_array[:5].tolist()}")
+            print(f"Last 5 y values: {y_array[-5:].tolist()}")
+            print(f"y range: [{y_array.min():.2f}, {y_array.max():.2f}]")
+            print(f"{'='*80}\n")
+
             # Collect metrics for each fold
             fold_metrics = []
             all_y_true = []
@@ -12724,6 +13946,23 @@ F1 Score:  {f1:.4f}
                     r2 = r2_score(y_test, y_pred)
                     mae = mean_absolute_error(y_test, y_pred)
                     fold_metrics.append({"rmse": rmse, "r2": r2, "mae": mae})
+
+                    # FOLD-LEVEL DIAGNOSTIC
+                    print(f"\n{'='*80}")
+                    print(f"FOLD {fold_idx+1}/{n_folds} DIAGNOSTIC (Model Development)")
+                    print(f"{'='*80}")
+                    print(f"Train indices: n={len(train_idx)}, first 10: {train_idx[:10].tolist()}")
+                    print(f"Test indices:  n={len(test_idx)}, all: {test_idx.tolist()}")
+                    print(f"Test y values (first 5): {y_test[:5].tolist()}")
+                    print(f"Predictions (first 5):   {y_pred[:5].tolist()}")
+                    print(f"Test y values (last 5):  {y_test[-5:].tolist() if len(y_test) >= 5 else y_test.tolist()}")
+                    print(f"Predictions (last 5):    {y_pred[-5:].tolist() if len(y_pred) >= 5 else y_pred.tolist()}")
+                    print(f"y_test range: [{y_test.min():.2f}, {y_test.max():.2f}]")
+                    print(f"y_pred range: [{y_pred.min():.2f}, {y_pred.max():.2f}]")
+                    print(f"Fold RMSE: {rmse:.4f}")
+                    print(f"Fold R²:   {r2:.4f}")
+                    print(f"Fold MAE:  {mae:.4f}")
+                    print(f"{'='*80}\n")
                 else:
                     acc = accuracy_score(y_test, y_pred)
                     prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
@@ -13241,8 +14480,11 @@ Configuration:
                     # Invalid wavelength, skip
                     continue
 
-        # Remove duplicates and sort
-        selected = sorted(list(set(selected)))
+        # Remove duplicates while preserving order from available_wavelengths
+        # This matches the order used during search/training (stored in all_vars)
+        # DO NOT sort - sorting changes feature order and breaks R² reproducibility!
+        selected_set = set(selected)
+        selected = [wl for wl in available_wavelengths if wl in selected_set]
         return selected
 
     def _parse_range_specification(self, spec_string, param_name="parameter", is_float=False):
