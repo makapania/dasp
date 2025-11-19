@@ -24085,8 +24085,18 @@ Configuration:
 
         # Add performance settings panel
         if HAS_PERFORMANCE_GUI:
-            self.perf_settings_panel = PerformanceSettingsPanel(self.tab11)
-            self.perf_settings_panel.pack(fill='both', expand=True, padx=10, pady=10)
+            try:
+                self.perf_settings_panel = PerformanceSettingsPanel(self.tab11)
+                self.perf_settings_panel.pack(fill='both', expand=True, padx=10, pady=10)
+            except Exception as e:
+                # Fallback if panel initialization fails
+                error_frame = ttk.Frame(self.tab11, style='TFrame', padding="30")
+                error_frame.pack(fill='both', expand=True)
+                ttk.Label(error_frame,
+                         text=f"⚠️ Performance Settings initialization failed\n\nError: {str(e)}\n\nThe application will use default performance settings.",
+                         style='Subheading.TLabel',
+                         foreground=self.colors['error']).pack(pady=20)
+                print(f"Warning: Performance Settings panel failed to initialize: {e}")
         else:
             # Fallback if performance GUI not available
             error_frame = ttk.Frame(self.tab11, style='TFrame', padding="30")
