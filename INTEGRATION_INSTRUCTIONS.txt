@@ -1,0 +1,99 @@
+# INTEGRATION INSTRUCTIONS FOR PERFORMANCE SETTINGS GUI
+# Add these changes to spectral_predict_gui_optimized.py
+
+## STEP 1: Add import at the top of the file (after other imports)
+# Add this around line 50-100 where other imports are:
+
+from performance_settings_gui import PerformanceSettingsPanel
+
+## STEP 2: Add Performance Settings Tab
+# Find where tabs are created (around line 2550-3500)
+# Add this NEW tab after the existing tabs (e.g., after tab4 "Advanced Model Configuration")
+
+# Around line 3500 (after your last existing tab):
+
+# ============================================================
+# TAB: PERFORMANCE SETTINGS
+# ============================================================
+self.tab_performance = ttk.Frame(self.notebook, style='TFrame')
+self.notebook.add(self.tab_performance, text='  ⚡ Performance  ')
+
+# Add performance settings panel
+self.perf_settings_panel = PerformanceSettingsPanel(self.tab_performance)
+self.perf_settings_panel.pack(fill='both', expand=True, padx=10, pady=10)
+
+## STEP 3: Modify run_search call
+# Find line 11184 where run_search is called
+# ADD this line BEFORE the run_search call (around line 11183):
+
+# Get performance config from GUI
+perf_config = self.perf_settings_panel.get_config()
+print(f"\n⚡ Using performance settings:")
+print(f"   Mode: {perf_config.mode_name if hasattr(perf_config, 'mode_name') else perf_config.mode}")
+print(f"   CPU: {perf_config.max_cpu_percent}% ({perf_config.n_workers} workers)")
+print(f"   GPU: {'Enabled' if perf_config.use_gpu else 'Disabled'}")
+print(f"   Parallel Grid: {'Enabled' if perf_config.parallel_grid else 'Disabled'}")
+
+# THEN modify the run_search call to include perf_config
+# Change line 11184 from:
+#     results_df, label_encoder = run_search(
+# To:
+results_df, label_encoder = run_search(
+    X_filtered,
+    y_filtered,
+    task_type=task_type,
+    perf_config=perf_config,  # ← ADD THIS LINE
+    folds=self.folds.get(),
+    # ... rest of parameters stay the same ...
+)
+
+## COMPLETE EXAMPLE:
+"""
+Around line 11180-11184, change from:
+
+    n_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
+    n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
+    n_total_original = len(self.X)
+
+    results_df, label_encoder = run_search(
+        X_filtered,
+        y_filtered,
+        task_type=task_type,
+        folds=self.folds.get(),
+        ...
+
+TO:
+
+    n_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
+    n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
+    n_total_original = len(self.X)
+
+    # Get performance config from GUI
+    perf_config = self.perf_settings_panel.get_config()
+    print(f"\n⚡ Performance Settings:")
+    print(f"   Mode: {perf_config.mode_name if hasattr(perf_config, 'mode_name') else perf_config.mode}")
+    print(f"   CPU: {perf_config.max_cpu_percent}% ({perf_config.n_workers} workers)")
+    print(f"   GPU: {'Enabled' if perf_config.use_gpu else 'Disabled'}")
+    print(f"   Parallel Grid: {'Enabled' if perf_config.parallel_grid else 'Disabled'}")
+
+    results_df, label_encoder = run_search(
+        X_filtered,
+        y_filtered,
+        task_type=task_type,
+        perf_config=perf_config,  # ← ADD THIS
+        folds=self.folds.get(),
+        ...
+"""
+
+## THAT'S IT!
+# Just 3 changes:
+# 1. Import PerformanceSettingsPanel at top
+# 2. Add performance tab with the panel
+# 3. Get config and pass to run_search
+
+# The panel will automatically:
+# - Detect hardware
+# - Show appropriate settings
+# - Save user preferences
+# - Provide runtime estimates
+# - Enable GPU + parallel grid acceleration
