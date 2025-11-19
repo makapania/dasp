@@ -149,9 +149,10 @@ def _detect_gpu(verbose=True):
                 warnings.simplefilter("ignore")
 
                 # Try to create a GPU model and run a tiny fit
+                # XGBoost 3.1+ uses device='cuda' instead of gpu_id
                 test_model = xgb.XGBRegressor(
-                    tree_method='gpu_hist',
-                    gpu_id=0,
+                    device='cuda',
+                    tree_method='hist',
                     n_estimators=1,
                     verbosity=0
                 )
@@ -169,7 +170,7 @@ def _detect_gpu(verbose=True):
             sys.stderr = old_stderr
 
         if verbose:
-            print("GPU: ✓ NVIDIA CUDA detected (XGBoost GPU enabled)")
+            print("GPU: [OK] NVIDIA CUDA detected (XGBoost GPU enabled)")
 
     except Exception as e:
         # GPU not available or not working
@@ -178,7 +179,7 @@ def _detect_gpu(verbose=True):
 
         if verbose:
             error_msg = str(e)
-            print("GPU: ✗ Not detected or not working")
+            print("GPU: [X] Not detected or not working")
             if len(error_msg) > 80:
                 print(f"     Reason: {error_msg[:80]}...")
             else:
@@ -214,14 +215,13 @@ def get_model_params(model_name, hw_config, base_params=None):
     # XGBoost
     if model_name == 'XGBoost':
         if hw_config['use_gpu']:
-            # Use GPU
-            params['tree_method'] = 'gpu_hist'
-            params['gpu_id'] = 0
-            params['predictor'] = 'gpu_predictor'
+            # Use GPU (XGBoost 3.1+ API)
+            params['device'] = 'cuda'
+            params['tree_method'] = 'hist'
         else:
             # Use optimized CPU histogram method
+            params['device'] = 'cpu'
             params['tree_method'] = 'hist'
-            params['predictor'] = 'cpu_predictor'
 
         # Use available threads
         if 'n_jobs' not in params:
@@ -373,27 +373,27 @@ def print_performance_tips(hw_config):
     if hw_config['tier'] == 1:
         print("Your system is running in STANDARD MODE.")
         print("\nTo improve performance, consider:")
-        print("  • Upgrading RAM (currently {:.1f}GB, recommend 16GB+)".format(
+        print("  - Upgrading RAM (currently {:.1f}GB, recommend 16GB+)".format(
             hw_config['memory_gb']))
         if hw_config['n_cores'] < 4:
-            print("  • Upgrading CPU (currently {} cores, recommend 4+)".format(
+            print("  - Upgrading CPU (currently {} cores, recommend 4+)".format(
                 hw_config['n_cores']))
         if not hw_config['gpu_available']:
-            print("  • Adding a GPU (NVIDIA with CUDA support)")
+            print("  - Adding a GPU (NVIDIA with CUDA support)")
 
     elif hw_config['tier'] == 2:
         print("Your system is running in PARALLEL MODE (good performance).")
         print("\nTo further improve performance:")
         if not hw_config['gpu_available']:
-            print("  • Add a GPU for 5-10x additional speedup")
+            print("  - Add a GPU for 5-10x additional speedup")
             print("    (NVIDIA with CUDA support recommended)")
 
     elif hw_config['tier'] == 3:
         print("Your system is running in POWER MODE (maximum performance).")
-        print("\n✓ You have optimal hardware configuration!")
-        print("  • GPU: Available")
-        print("  • CPU: {} cores".format(hw_config['n_cores']))
-        print("  • RAM: {:.1f} GB".format(hw_config['memory_gb']))
+        print("\n[OK] You have optimal hardware configuration!")
+        print("  - GPU: Available")
+        print("  - CPU: {} cores".format(hw_config['n_cores']))
+        print("  - RAM: {:.1f} GB".format(hw_config['memory_gb']))
 
     print("=" * 70 + "\n")
 
@@ -424,4 +424,4 @@ if __name__ == '__main__':
     safe, estimated = estimate_memory_usage(X_test, y_test, hw_config)
     print(f"Data size: {(X_test.nbytes + y_test.nbytes)/(1024**3):.2f} GB")
     print(f"Estimated usage: {estimated:.2f} GB")
-    print(f"Safe: {'✓' if safe else '✗'}")
+    print(f"Safe: {'[OK]' if safe else '[X]'}")
