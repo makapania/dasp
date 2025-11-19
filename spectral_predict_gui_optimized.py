@@ -1351,7 +1351,10 @@ class SpectralPredictApp:
         Returns list of options: ['None', 'Y Value', ...metadata columns]
         """
         options = ['None', 'Y Value']
-        if self.ref is not None and len(self.ref.columns) > 0:
+        # Check combined file metadata first, then reference file metadata
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and len(self.combined_metadata_df.columns) > 0:
+            options.extend(sorted(self.combined_metadata_df.columns.tolist()))
+        elif self.ref is not None and len(self.ref.columns) > 0:
             options.extend(sorted(self.ref.columns.tolist()))
         return options
 
@@ -1375,11 +1378,15 @@ class SpectralPredictApp:
         elif variable_name == 'None':
             return False
         else:
-            # Check metadata column
+            # Check metadata column (from combined file or reference file)
             if values is None:
-                if self.ref is None or variable_name not in self.ref.columns:
+                # Check combined file metadata first
+                if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and variable_name in self.combined_metadata_df.columns:
+                    values = self.combined_metadata_df[variable_name]
+                elif self.ref is not None and variable_name in self.ref.columns:
+                    values = self.ref[variable_name]
+                else:
                     return False
-                values = self.ref[variable_name]
 
             # Check dtype
             if hasattr(values, 'dtype'):
@@ -1461,13 +1468,19 @@ class SpectralPredictApp:
                 return scatter, False
 
         else:
-            # Color by metadata column
-            if self.ref is None or color_by not in self.ref.columns:
+            # Color by metadata column (from combined file or reference file)
+            metadata_source = None
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and color_by in self.combined_metadata_df.columns:
+                metadata_source = self.combined_metadata_df
+            elif self.ref is not None and color_by in self.ref.columns:
+                metadata_source = self.ref
+
+            if metadata_source is None:
                 # Fallback to no color
                 scatter = ax.scatter(x_data, y_data, color='steelblue', **default_kwargs)
                 return scatter, False
 
-            metadata_values = self.ref[color_by].iloc[indices].values if len(indices) <= len(self.ref) else self.ref[color_by].values
+            metadata_values = metadata_source[color_by].iloc[indices].values if len(indices) <= len(metadata_source) else metadata_source[color_by].values
 
             if self._is_categorical_variable(color_by, metadata_values):
                 # Categorical metadata: discrete colors
@@ -5902,6 +5915,41 @@ class SpectralPredictApp:
                 self.combined_metadata = metadata
                 self.combined_metadata_df = metadata_df
 
+                # Populate column mapping dropdowns with all non-wavelength columns
+                # This allows manual override of auto-detected columns
+                available_cols = []
+
+                # Add metadata columns if present
+                if metadata.get('metadata_cols'):
+                    available_cols.extend(metadata['metadata_cols'])
+
+                # Add target column
+                if metadata.get('y_col'):
+                    available_cols.append(metadata['y_col'])
+
+                # Add specimen ID column if not auto-generated
+                if not metadata.get('generated_ids') and metadata.get('specimen_id_col'):
+                    if metadata['specimen_id_col'] not in available_cols:
+                        available_cols.append(metadata['specimen_id_col'])
+
+                # Sort for consistent display
+                available_cols = sorted(available_cols)
+
+                # Populate dropdowns
+                if available_cols:
+                    self.spectral_file_combo['values'] = available_cols  # Not used for combined files but populate anyway
+                    self.id_combo['values'] = ['N/A - Use Filename'] + available_cols
+                    self.target_combo['values'] = available_cols
+
+                    # Pre-select auto-detected values
+                    if metadata.get('generated_ids'):
+                        self.id_column.set('N/A - Use Filename')
+                    elif metadata.get('specimen_id_col'):
+                        self.id_column.set(metadata['specimen_id_col'])
+
+                    if metadata.get('y_col'):
+                        self.target_column.set(metadata['y_col'])
+
                 # Update status with detailed info
                 if metadata['generated_ids']:
                     id_info = "Generated IDs (Sample_1, Sample_2, ...)"
@@ -7132,7 +7180,11 @@ class SpectralPredictApp:
                     export_df = self.X.copy()
                     if self.y is not None:
                         export_df.insert(0, 'Target', self.y)
-                    if self.ref is not None:
+                    # Add metadata columns (from combined file or reference file)
+                    if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                        for col in self.combined_metadata_df.columns:
+                            export_df.insert(0, col, self.combined_metadata_df[col])
+                    elif self.ref is not None:
                         for col in self.ref.columns:
                             export_df.insert(0, col, self.ref[col])
 
@@ -8293,22 +8345,29 @@ class SpectralPredictApp:
             specimen_id = self.y.index[specimen_idx]
             lines.append(f"Specimen: {specimen_id}")
 
-        # Add ALL metadata columns if available
-        if specimen_id is not None and self.ref is not None and len(self.ref.columns) > 0:
-            try:
-                metadata_row = self.ref.loc[specimen_id]
-                for col in sorted(self.ref.columns):
-                    value = metadata_row[col]
-                    if pd.notna(value):
-                        if isinstance(value, (float, np.floating)):
-                            lines.append(f"{col}: {value:.4f}")
+        # Add ALL metadata columns if available (from combined file or reference file)
+        if specimen_id is not None:
+            metadata_source = None
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and len(self.combined_metadata_df.columns) > 0:
+                metadata_source = self.combined_metadata_df
+            elif self.ref is not None and len(self.ref.columns) > 0:
+                metadata_source = self.ref
+
+            if metadata_source is not None:
+                try:
+                    metadata_row = metadata_source.loc[specimen_id]
+                    for col in sorted(metadata_source.columns):
+                        value = metadata_row[col]
+                        if pd.notna(value):
+                            if isinstance(value, (float, np.floating)):
+                                lines.append(f"{col}: {value:.4f}")
+                            else:
+                                lines.append(f"{col}: {value}")
                         else:
-                            lines.append(f"{col}: {value}")
-                    else:
-                        lines.append(f"{col}: N/A")
-            except KeyError:
-                # Specimen not in metadata
-                pass
+                            lines.append(f"{col}: N/A")
+                except KeyError:
+                    # Specimen not in metadata
+                    pass
 
         # Format Y value (handle both regression and classification)
         if y_value is not None:
@@ -8760,13 +8819,20 @@ class SpectralPredictApp:
             color_label = None
         else:
             # Metadata column - need to align with y_values using specimen IDs
-            if self.ref is not None and color_by in self.ref.columns:
+            # Check combined file metadata first, then reference file metadata
+            metadata_source = None
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and color_by in self.combined_metadata_df.columns:
+                metadata_source = self.combined_metadata_df
+            elif self.ref is not None and color_by in self.ref.columns:
+                metadata_source = self.ref
+
+            if metadata_source is not None:
                 # Get specimen IDs from y (which aligns with scores)
                 specimen_ids = self.y.index
 
                 # Align metadata with these specimen IDs
                 try:
-                    color_values = self.ref.loc[specimen_ids, color_by].values
+                    color_values = metadata_source.loc[specimen_ids, color_by].values
                 except KeyError:
                     # Some specimen IDs not in ref - shouldn't happen but handle it
                     print(f"Warning: Some specimen IDs not found in metadata")
@@ -12274,10 +12340,20 @@ class SpectralPredictApp:
                 display_y = self.y[mask].copy()
                 excluded_indices = []
 
-            # Check if metadata columns exist (from self.ref)
+            # Check if metadata columns exist (from self.ref or self.combined_metadata_df)
             metadata_cols = []
             display_metadata = None
-            if self.ref is not None and len(self.ref.columns) > 0:
+
+            # For combined files, metadata is in combined_metadata_df
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and len(self.combined_metadata_df.columns) > 0:
+                # Filter metadata to match displayed samples
+                if show_excluded:
+                    display_metadata = self.combined_metadata_df.copy()
+                else:
+                    display_metadata = self.combined_metadata_df[mask].copy()
+                metadata_cols = list(self.combined_metadata_df.columns)
+            # For separate spectral + reference files, metadata is in self.ref
+            elif self.ref is not None and len(self.ref.columns) > 0:
                 # Filter metadata to match displayed samples
                 if show_excluded:
                     display_metadata = self.ref.copy()
@@ -12402,8 +12478,13 @@ class SpectralPredictApp:
             export_df = self.X.copy()
 
             # Add metadata columns if available (insert before target column)
+            # Check combined file metadata first, then reference file metadata
             insert_position = 0
-            if self.ref is not None and len(self.ref.columns) > 0:
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and len(self.combined_metadata_df.columns) > 0:
+                for col in self.combined_metadata_df.columns:
+                    export_df.insert(insert_position, col, self.combined_metadata_df[col])
+                    insert_position += 1
+            elif self.ref is not None and len(self.ref.columns) > 0:
                 for col in self.ref.columns:
                     export_df.insert(insert_position, col, self.ref[col])
                     insert_position += 1
