@@ -1047,30 +1047,30 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                         for min_child_weight in xgb_min_child_weight_list:
                                             for gamma in xgb_gamma_list:
                                                 # Base grid parameters
-                                                                                                base_params = {
-                                                            'n_estimators': n_est,
-                                                            'learning_rate': lr,
-                                                            'max_depth': max_depth,
-                                                            'subsample': subsample,
-                                                            'colsample_bytree': colsample,
-                                                            'reg_alpha': reg_alpha,
-                                                            'reg_lambda': reg_lambda,
-                                                            'min_child_weight': min_child_weight,
-                                                            'gamma': gamma,
-                                                            'random_state': 42,
-                                                            'verbosity': 0
-                                                        }
+                                                base_params = {
+                                                    'n_estimators': n_est,
+                                                    'learning_rate': lr,
+                                                    'max_depth': max_depth,
+                                                    'subsample': subsample,
+                                                    'colsample_bytree': colsample,
+                                                    'reg_alpha': reg_alpha,
+                                                    'reg_lambda': reg_lambda,
+                                                    'min_child_weight': min_child_weight,
+                                                    'gamma': gamma,
+                                                    'random_state': 42,
+                                                    'verbosity': 0
+                                                }
 
-                                                        # Apply performance config for GPU/threading
-                                                        if perf_config is not None and HAS_PERF_CONFIG:
-                                                            model_params = perf_config.get_model_params('XGBoost', base_params)
-                                                        else:
-                                                            # Default CPU-only mode
-                                                            model_params = base_params.copy()
-                                                            model_params['tree_method'] = 'hist'
-                                                            model_params['n_jobs'] = -1
+                                                # Apply performance config for GPU/threading
+                                                if perf_config is not None and HAS_PERF_CONFIG:
+                                                    model_params = perf_config.get_model_params('XGBoost', base_params)
+                                                else:
+                                                    # Default CPU-only mode
+                                                    model_params = base_params.copy()
+                                                    model_params['tree_method'] = 'hist'
+                                                    model_params['n_jobs'] = -1
 
-                                                        xgb_configs.append(
+                                                xgb_configs.append(
                                                     (
                                                         XGBRegressor(**model_params),
                                                         {

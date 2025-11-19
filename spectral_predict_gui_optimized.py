@@ -98,8 +98,14 @@ try:
 except ImportError:
     HAS_DATA_MANAGEMENT = False
     DataSource = None
-    MergedDataset = None
-    DataSourceManager = None
+
+# Import performance settings GUI
+try:
+    from performance_settings_gui import PerformanceSettingsPanel
+    HAS_PERFORMANCE_GUI = True
+except ImportError:
+    HAS_PERFORMANCE_GUI = False
+    PerformanceSettingsPanel = None
 
 # Import calibration transfer and instrument profile modules
 try:
@@ -2539,6 +2545,7 @@ class SpectralPredictApp:
         self._create_tab8_model_prediction()
         self._create_tab9_multi_model_comparison()
         self._create_tab10_calibration_transfer()
+        self._create_tab11_performance_settings()  # NEW: Performance Settings tab
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -11181,10 +11188,24 @@ class SpectralPredictApp:
             n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
             n_total_original = len(self.X)  # Total samples before filtering
 
+            # Get performance config from GUI
+            if HAS_PERFORMANCE_GUI and hasattr(self, 'perf_settings_panel'):
+                perf_config = self.perf_settings_panel.get_config()
+                self._log_progress(f"\n⚡ Performance Settings:")
+                mode_name = perf_config.mode_name if hasattr(perf_config, 'mode_name') else perf_config.mode
+                self._log_progress(f"   Mode: {mode_name}")
+                self._log_progress(f"   CPU: {perf_config.max_cpu_percent}% ({perf_config.n_workers} workers)")
+                self._log_progress(f"   GPU: {'Enabled' if perf_config.use_gpu else 'Disabled'}")
+                self._log_progress(f"   Parallel Grid: {'Enabled' if perf_config.parallel_grid else 'Disabled'}\n")
+            else:
+                perf_config = None
+                self._log_progress(f"\n⚡ Performance Settings: Using defaults (no GUI panel)\n")
+
             results_df, label_encoder = run_search(
                 X_filtered,
                 y_filtered,
                 task_type=task_type,
+                perf_config=perf_config,
                 folds=self.folds.get(),
                 excluded_count=n_excluded,
                 validation_count=n_validation,
@@ -23935,6 +23956,23 @@ Configuration:
         # Initialize UI state
         self._on_step1_mode_changed()
 
+    def _create_tab11_performance_settings(self):
+        """Tab 11: Performance Settings - GPU and parallelization controls."""
+        self.tab11 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab11, text='  ⚡ Performance  ')
+
+        # Add performance settings panel
+        if HAS_PERFORMANCE_GUI:
+            self.perf_settings_panel = PerformanceSettingsPanel(self.tab11)
+            self.perf_settings_panel.pack(fill='both', expand=True, padx=10, pady=10)
+        else:
+            # Fallback if performance GUI not available
+            error_frame = ttk.Frame(self.tab11, style='TFrame', padding="30")
+            error_frame.pack(fill='both', expand=True)
+            ttk.Label(error_frame,
+                     text="⚠️ Performance Settings GUI not available\n\nPlease ensure performance_settings_gui.py is in the project directory.",
+                     style='Subheading.TLabel',
+                     foreground=self.colors['error']).pack(pady=20)
 
 
 def main():
