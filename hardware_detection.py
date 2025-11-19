@@ -134,25 +134,39 @@ def _detect_gpu(verbose=True):
     try:
         import xgboost as xgb
         import numpy as np
+        import sys
+        from io import StringIO
 
-        # Suppress XGBoost warnings during detection
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        # Suppress ALL output during detection
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
 
-            # Try to create a GPU model and run a tiny fit
-            test_model = xgb.XGBRegressor(
-                tree_method='gpu_hist',
-                gpu_id=0,
-                n_estimators=1,
-                verbosity=0
-            )
-            X_test = np.random.randn(10, 10)
-            y_test = np.random.randn(10)
-            test_model.fit(X_test, y_test)
+        try:
+            # Suppress XGBoost warnings during detection
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
 
-        # If we got here, GPU works!
-        gpu_info['available'] = True
-        gpu_info['type'] = 'NVIDIA'  # XGBoost GPU requires CUDA (NVIDIA)
+                # Try to create a GPU model and run a tiny fit
+                test_model = xgb.XGBRegressor(
+                    tree_method='gpu_hist',
+                    gpu_id=0,
+                    n_estimators=1,
+                    verbosity=0
+                )
+                X_test = np.random.randn(10, 10).astype(np.float32)
+                y_test = np.random.randn(10).astype(np.float32)
+                test_model.fit(X_test, y_test, verbose=False)
+
+            # If we got here, GPU works!
+            gpu_info['available'] = True
+            gpu_info['type'] = 'NVIDIA'  # XGBoost GPU requires CUDA (NVIDIA)
+
+        finally:
+            # Restore stdout/stderr
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
         if verbose:
             print("GPU: ✓ NVIDIA CUDA detected (XGBoost GPU enabled)")
@@ -163,8 +177,13 @@ def _detect_gpu(verbose=True):
         gpu_info['type'] = None
 
         if verbose:
+            error_msg = str(e)
             print("GPU: ✗ Not detected or not working")
-            print(f"     (Reason: {str(e)[:60]}...)")
+            if len(error_msg) > 80:
+                print(f"     Reason: {error_msg[:80]}...")
+            else:
+                print(f"     Reason: {error_msg}")
+            print("     Note: Ensure NVIDIA drivers and CUDA are installed, and XGBoost is built with GPU support")
 
     return gpu_info
 

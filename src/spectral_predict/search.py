@@ -38,8 +38,7 @@ def _run_model_config_batch(configs_batch, X_np, y_np, wavelengths, preprocess_c
     results : list of tuples
         List of (model_name, params, result_dict) tuples
     """
-    from .scoring import _run_single_config
-
+    # _run_single_config is defined later in this module, no import needed
     results = []
     for model, params, model_name in configs_batch:
         result = _run_single_config(
