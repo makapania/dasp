@@ -16,8 +16,15 @@ Usage:
 """
 
 import multiprocessing
-import psutil
 import warnings
+
+# psutil is optional - used for RAM detection
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+    print("Note: psutil not available. RAM detection will use estimates.")
 
 
 def detect_hardware(verbose=True):
@@ -62,7 +69,11 @@ def detect_hardware(verbose=True):
         print(f"CPU: {config['n_cores']} cores detected")
 
     # Detect RAM
-    config['memory_gb'] = psutil.virtual_memory().total / (1024**3)
+    if HAS_PSUTIL:
+        config['memory_gb'] = psutil.virtual_memory().total / (1024**3)
+    else:
+        # Estimate based on core count (rough heuristic)
+        config['memory_gb'] = max(4, config['n_cores'] * 2)
 
     if verbose:
         print(f"RAM: {config['memory_gb']:.1f} GB")

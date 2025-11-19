@@ -52,7 +52,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
                tier='standard', enabled_models=None,
-               analysis_wl_min=None, analysis_wl_max=None):
+               analysis_wl_min=None, analysis_wl_max=None, perf_config=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
