@@ -18,6 +18,47 @@ from .variable_selection import spa_selection, uve_selection, uve_spa_selection,
 from .model_registry import supports_subset_analysis, supports_feature_importance
 
 
+def _run_model_config_batch(configs_batch, X_np, y_np, wavelengths, preprocess_cfg,
+                             cv_splitter, task_type, is_binary_classification,
+                             excluded_count, validation_count, total_samples_original, folds):
+    """
+    Run a batch of model configurations sequentially within a parallel worker.
+
+    This function is called by joblib.Parallel to process a batch of configs
+    in a single worker process, enabling grid parallelization.
+
+    Parameters
+    ----------
+    configs_batch : list of tuples
+        List of (model, params, model_name) tuples to test
+    ... (other parameters same as _run_single_config)
+
+    Returns
+    -------
+    results : list of tuples
+        List of (model_name, params, result_dict) tuples
+    """
+    from .scoring import _run_single_config
+
+    results = []
+    for model, params, model_name in configs_batch:
+        result = _run_single_config(
+            X_np, y_np, wavelengths,
+            model, model_name, params,
+            preprocess_cfg, cv_splitter,
+            task_type, is_binary_classification,
+            subset_indices=None, subset_tag="full",
+            top_n_vars=30, skip_preprocessing=False,
+            excluded_count=excluded_count,
+            validation_count=validation_count,
+            total_samples_original=total_samples_original,
+            folds=folds
+        )
+        results.append((model_name, params, result))
+
+    return results
+
+
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=3, complexity_penalty=5,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
@@ -52,7 +93,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
                tier='standard', enabled_models=None,
-               analysis_wl_min=None, analysis_wl_max=None):
+               analysis_wl_min=None, analysis_wl_max=None, perf_config=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -253,7 +294,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                    mlp_batch_size_list=mlp_batch_size_list,
                                    mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
                                    mlp_momentum_list=mlp_momentum_list,
-                                   tier=tier, enabled_models=enabled_models)
+                                   tier=tier, enabled_models=enabled_models, perf_config=perf_config)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
@@ -415,69 +456,57 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 # traceback.print_exc()
                 region_subsets = []
 
-        for model_name, model_configs in model_grids.items():
-            for model, params in model_configs:
+        # Determine if parallel grid search is enabled
+        use_parallel_grid = perf_config.parallel_grid if perf_config is not None else False
+        n_workers = perf_config.n_workers if (perf_config is not None and use_parallel_grid) else 1
+
+        if use_parallel_grid and n_workers > 1:
+            # PARALLEL MODE: Collect all configs and run in parallel batches
+            print(f"\n🚀 Parallel grid search enabled: {n_workers} workers")
+
+            # Collect all configs for this preprocessing
+            all_configs = []
+            for model_name, model_configs in model_grids.items():
+                for model, params in model_configs:
+                    all_configs.append((model, params, model_name))
+
+            # Split into batches for parallel execution
+            batch_size = max(1, len(all_configs) // n_workers)
+            config_batches = [all_configs[i:i + batch_size] for i in range(0, len(all_configs), batch_size)]
+
+            print(f"Running {len(all_configs)} model configs in {len(config_batches)} parallel batches...")
+
+            # Run batches in parallel
+            batch_results = Parallel(n_jobs=n_workers, backend='loky', verbose=0)(
+                delayed(_run_model_config_batch)(
+                    batch, X_np, y_np, wavelengths, preprocess_cfg,
+                    cv_splitter, task_type, is_binary_classification,
+                    excluded_count, validation_count, total_samples_original, folds
+                )
+                for batch in config_batches
+            )
+
+            # Flatten results
+            all_results = []
+            for batch_result in batch_results:
+                all_results.extend(batch_result)
+
+            # Process results (add to dataframe, track best, show progress)
+            for model_name, params, result in all_results:
                 current_config += 1
 
-                # Progress update
+                # Add result
+                df_results = add_result(df_results, result)
+
+                # Show result
                 prep_name = preprocess_cfg["name"]
                 if preprocess_cfg["deriv"]:
                     prep_name += f"_d{preprocess_cfg['deriv']}"
 
-                # Show parameters being tested (more informative)
-                param_str = ", ".join([f"{k}={v}" for k, v in list(params.items())[:2]])  # Show first 2 params
-                if len(params) > 2:
-                    param_str += "..."
-
-                progress_msg = f"Testing {model_name} ({param_str}) + {prep_name}"
-
-                # Add best model so far to progress
-                best_info = ""
-                if best_model_so_far is not None:
-                    if task_type == "regression":
-                        best_info = f" | Best: R²={best_model_so_far['R2']:.3f}, RMSE={best_model_so_far['RMSE']:.3f}"
-                    else:
-                        best_info = f" | Best: AUC={best_model_so_far.get('ROC_AUC', 0):.3f}"
-
-                print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
-
-                if progress_callback:
-                    progress_callback({
-                        'stage': 'model_testing',
-                        'message': progress_msg,
-                        'current': current_config,
-                        'total': total_configs,
-                        'best_model': best_model_so_far
-                    })
-
-                # Run full model first
-                result = _run_single_config(
-                    X_np,
-                    y_np,
-                    wavelengths,
-                    model,
-                    model_name,
-                    params,
-                    preprocess_cfg,
-                    cv_splitter,
-                    task_type,
-                    is_binary_classification,
-                    subset_indices=None,
-                    subset_tag="full",
-                    top_n_vars=30,
-                    skip_preprocessing=False,
-                    excluded_count=excluded_count,
-                    validation_count=validation_count,
-                    total_samples_original=total_samples_original,
-                    folds=folds,
-                )
-                df_results = add_result(df_results, result)
-
-                # Show full model result
                 if task_type == "regression":
-                    print(f"     Full model: R²={result['R2']:.3f}, RMSE={result['RMSE']:.3f}")
+                    print(f"[{current_config}/{total_configs}] {model_name} + {prep_name}: R²={result['R2']:.3f}, RMSE={result['RMSE']:.3f}")
                 else:
-                    print(f"     Full model: AUC={result.get('ROC_AUC', 0):.3f}, Acc={result.get('Accuracy', 0):.3f}")
+                    print(f"[{current_config}/{total_configs}] {model_name} + {prep_name}: AUC={result.get('ROC_AUC', 0):.3f}, Acc={result.get('Accuracy', 0):.3f}")
 
                 # Update best model tracker
                 if best_model_so_far is None:
@@ -490,14 +519,104 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         if result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
                             best_model_so_far = result
 
-                # For models that support feature importance: compute importances and run subsets
-                # IMPORTANT: Importances are computed on PREPROCESSED data, ensuring that
-                # wavelength selection reflects the actual transformed features the model sees
-                if supports_subset_analysis(model_name):
-                    if not enable_variable_subsets:
-                        print(f"  -> Skipping subset analysis for {model_name} (variable subsets disabled)")
+                if progress_callback:
+                    progress_callback({
+                        'stage': 'model_testing',
+                        'message': f"{model_name} + {prep_name}",
+                        'current': current_config,
+                        'total': total_configs,
+                        'best_model': best_model_so_far
+                    })
+
+            # Note: Subset analysis skipped in parallel mode for simplicity
+            # (can be added back if needed, but typically parallel mode is for speed)
+            print(f"✓ Parallel batch complete ({len(all_results)} models tested)")
+
+        else:
+            # SEQUENTIAL MODE: Original loop (supports subset analysis)
+            for model_name, model_configs in model_grids.items():
+                for model, params in model_configs:
+                    current_config += 1
+
+                    # Progress update
+                    prep_name = preprocess_cfg["name"]
+                    if preprocess_cfg["deriv"]:
+                        prep_name += f"_d{preprocess_cfg['deriv']}"
+
+                    # Show parameters being tested (more informative)
+                    param_str = ", ".join([f"{k}={v}" for k, v in list(params.items())[:2]])  # Show first 2 params
+                    if len(params) > 2:
+                        param_str += "..."
+
+                    progress_msg = f"Testing {model_name} ({param_str}) + {prep_name}"
+
+                    # Add best model so far to progress
+                    best_info = ""
+                    if best_model_so_far is not None:
+                        if task_type == "regression":
+                            best_info = f" | Best: R²={best_model_so_far['R2']:.3f}, RMSE={best_model_so_far['RMSE']:.3f}"
+                        else:
+                            best_info = f" | Best: AUC={best_model_so_far.get('ROC_AUC', 0):.3f}"
+
+                    print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
+
+                    if progress_callback:
+                        progress_callback({
+                            'stage': 'model_testing',
+                            'message': progress_msg,
+                            'current': current_config,
+                            'total': total_configs,
+                            'best_model': best_model_so_far
+                        })
+
+                    # Run full model first
+                    result = _run_single_config(
+                        X_np,
+                        y_np,
+                        wavelengths,
+                        model,
+                        model_name,
+                        params,
+                        preprocess_cfg,
+                        cv_splitter,
+                        task_type,
+                        is_binary_classification,
+                        subset_indices=None,
+                        subset_tag="full",
+                        top_n_vars=30,
+                        skip_preprocessing=False,
+                        excluded_count=excluded_count,
+                        validation_count=validation_count,
+                        total_samples_original=total_samples_original,
+                        folds=folds,
+                    )
+                    df_results = add_result(df_results, result)
+
+                    # Show full model result
+                    if task_type == "regression":
+                        print(f"     Full model: R²={result['R2']:.3f}, RMSE={result['RMSE']:.3f}")
                     else:
-                        print(f"  -> Computing feature importances for {model_name} subset analysis...")
+                        print(f"     Full model: AUC={result.get('ROC_AUC', 0):.3f}, Acc={result.get('Accuracy', 0):.3f}")
+
+                    # Update best model tracker
+                    if best_model_so_far is None:
+                        best_model_so_far = result
+                    else:
+                        if task_type == "regression":
+                            if result["RMSE"] < best_model_so_far["RMSE"]:
+                                best_model_so_far = result
+                        else:  # classification
+                            if result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                                best_model_so_far = result
+
+                    # For models that support feature importance: compute importances and run subsets
+                    # IMPORTANT: Importances are computed on PREPROCESSED data, ensuring that
+                    # wavelength selection reflects the actual transformed features the model sees
+                    if supports_subset_analysis(model_name):
+                        if not enable_variable_subsets:
+                            print(f"  -> Skipping subset analysis for {model_name} (variable subsets disabled)")
+                        else:
+                            print(f"  -> Computing feature importances for {model_name} subset analysis...")
 
                         # Refit on full data to get importances
                         pipe_steps = build_preprocessing_pipeline(

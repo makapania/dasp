@@ -30,6 +30,18 @@ from .model_config import (
     get_hyperparameters
 )
 
+# Import performance configuration for GPU acceleration
+try:
+    import sys
+    from pathlib import Path
+    # Add parent directory to path to import performance_config
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from performance_config import PerformanceConfig
+    HAS_PERF_CONFIG = True
+except ImportError:
+    PerformanceConfig = None
+    HAS_PERF_CONFIG = False
+
 
 class PLSTransformer(BaseEstimator, TransformerMixin):
     """Wrapper for PLSRegression that ensures transform() returns 2D output for classification.
@@ -103,7 +115,7 @@ class PLSTransformer(BaseEstimator, TransformerMixin):
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}' (model not fitted)")
 
 
-def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500):
+def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500, perf_config=None):
     """
     Get a single model instance with default hyperparameters.
 
@@ -119,6 +131,8 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for neural network models
+    perf_config : PerformanceConfig, optional
+        Performance configuration for GPU/CPU settings. If None, uses CPU defaults.
 
     Returns
     -------
@@ -178,47 +192,81 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return SVR(kernel='rbf', C=1.0, gamma='scale')
 
         elif model_name == "XGBoost":
-            return XGBRegressor(
-                n_estimators=100,
-                learning_rate=0.1,
-                max_depth=6,  # XGBoost default (original working value)
-                subsample=0.8,  # Original working value for spectroscopy
-                colsample_bytree=0.8,  # Original working value for high-dim data
-                reg_alpha=0.1,  # Light L1 regularization for feature selection
-                reg_lambda=1.0,  # XGBoost default L2 regularization
-                tree_method='hist',  # Faster for high-dimensional data
-                random_state=42,
-                n_jobs=-1,
-                verbosity=0
-            )
+            # Base parameters
+            base_params = {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'max_depth': 6,  # XGBoost default (original working value)
+                'subsample': 0.8,  # Original working value for spectroscopy
+                'colsample_bytree': 0.8,  # Original working value for high-dim data
+                'reg_alpha': 0.1,  # Light L1 regularization for feature selection
+                'reg_lambda': 1.0,  # XGBoost default L2 regularization
+                'random_state': 42,
+                'verbosity': 0
+            }
+
+            # Apply performance configuration for GPU/threading
+            if perf_config is not None and HAS_PERF_CONFIG:
+                params = perf_config.get_model_params('XGBoost', base_params)
+            else:
+                # Default: CPU-only mode
+                params = base_params.copy()
+                params['tree_method'] = 'hist'
+                params['n_jobs'] = -1
+
+            return XGBRegressor(**params)
 
         elif model_name == "LightGBM":
-            return LGBMRegressor(
-                n_estimators=100,
-                learning_rate=0.1,
-                num_leaves=31,  # LightGBM default
-                max_depth=-1,  # No depth limit (controlled by num_leaves)
-                min_child_samples=5,  # Reduced for small datasets (was 20 - caused negative R2)
-                subsample=0.8,  # Row sampling to prevent overfitting (like XGBoost)
-                bagging_freq=1,  # Required when subsample < 1.0
-                colsample_bytree=0.8,  # Feature sampling for high-dim data (like XGBoost)
-                reg_alpha=0.1,  # L1 regularization for feature selection (like XGBoost)
-                reg_lambda=1.0,  # L2 regularization to prevent overfitting (like XGBoost)
-                random_state=42,
-                n_jobs=-1,
-                verbosity=-1
-            )
+            # Base parameters
+            base_params = {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'num_leaves': 31,  # LightGBM default
+                'max_depth': -1,  # No depth limit (controlled by num_leaves)
+                'min_child_samples': 5,  # Reduced for small datasets (was 20 - caused negative R2)
+                'subsample': 0.8,  # Row sampling to prevent overfitting (like XGBoost)
+                'bagging_freq': 1,  # Required when subsample < 1.0
+                'colsample_bytree': 0.8,  # Feature sampling for high-dim data (like XGBoost)
+                'reg_alpha': 0.1,  # L1 regularization for feature selection (like XGBoost)
+                'reg_lambda': 1.0,  # L2 regularization to prevent overfitting (like XGBoost)
+                'random_state': 42,
+                'verbosity': -1
+            }
+
+            # Apply performance configuration for GPU/threading
+            if perf_config is not None and HAS_PERF_CONFIG:
+                params = perf_config.get_model_params('LightGBM', base_params)
+            else:
+                # Default: CPU-only mode
+                params = base_params.copy()
+                params['device'] = 'cpu'
+                params['n_jobs'] = -1
+
+            return LGBMRegressor(**params)
 
         elif model_name == "CatBoost":
             if not HAS_CATBOOST:
                 raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
-            return CatBoostRegressor(
-                iterations=100,
-                learning_rate=0.1,
-                depth=6,
-                random_state=42,
-                verbose=False
-            )
+
+            # Base parameters
+            base_params = {
+                'iterations': 100,
+                'learning_rate': 0.1,
+                'depth': 6,
+                'random_state': 42,
+                'verbose': False
+            }
+
+            # Apply performance configuration for GPU/threading
+            if perf_config is not None and HAS_PERF_CONFIG:
+                params = perf_config.get_model_params('CatBoost', base_params)
+            else:
+                # Default: CPU-only mode with threading
+                params = base_params.copy()
+                params['task_type'] = 'CPU'
+                params['thread_count'] = -1
+
+            return CatBoostRegressor(**params)
 
         else:
             raise ValueError(f"Unknown regression model: {model_name}")
@@ -267,46 +315,80 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=42)
 
         elif model_name == "XGBoost":
-            return XGBClassifier(
-                n_estimators=100,
-                learning_rate=0.1,
-                max_depth=6,
-                subsample=0.8,  # Better default for spectroscopy (correlated samples)
-                colsample_bytree=0.8,  # Better default for 2000+ features (tree diversity)
-                reg_alpha=0.1,  # L1 regularization for implicit feature selection
-                tree_method='hist',  # Faster for high-dimensional data
-                random_state=42,
-                n_jobs=-1,
-                verbosity=0
-            )
+            # Base parameters
+            base_params = {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'max_depth': 6,
+                'subsample': 0.8,  # Better default for spectroscopy (correlated samples)
+                'colsample_bytree': 0.8,  # Better default for 2000+ features (tree diversity)
+                'reg_alpha': 0.1,  # L1 regularization for implicit feature selection
+                'random_state': 42,
+                'verbosity': 0
+            }
+
+            # Apply performance configuration for GPU/threading
+            if perf_config is not None and HAS_PERF_CONFIG:
+                params = perf_config.get_model_params('XGBoost', base_params)
+            else:
+                # Default: CPU-only mode
+                params = base_params.copy()
+                params['tree_method'] = 'hist'
+                params['n_jobs'] = -1
+
+            return XGBClassifier(**params)
 
         elif model_name == "LightGBM":
-            return LGBMClassifier(
-                n_estimators=100,
-                learning_rate=0.1,
-                num_leaves=15,  # Reduced for small datasets (was 31)
-                max_depth=-1,  # No limit (controlled by num_leaves)
-                min_child_samples=5,  # Reduced for small datasets (was 20)
-                subsample=0.8,  # Row sampling like XGBoost
-                bagging_freq=1,  # Required when subsample < 1.0
-                colsample_bytree=0.8,  # Feature sampling for high-dimensional data
-                reg_alpha=0.1,  # L1 regularization
-                reg_lambda=1.0,  # L2 regularization
-                random_state=42,
-                n_jobs=-1,
-                verbosity=-1
-            )
+            # Base parameters
+            base_params = {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'num_leaves': 15,  # Reduced for small datasets (was 31)
+                'max_depth': -1,  # No limit (controlled by num_leaves)
+                'min_child_samples': 5,  # Reduced for small datasets (was 20)
+                'subsample': 0.8,  # Row sampling like XGBoost
+                'bagging_freq': 1,  # Required when subsample < 1.0
+                'colsample_bytree': 0.8,  # Feature sampling for high-dimensional data
+                'reg_alpha': 0.1,  # L1 regularization
+                'reg_lambda': 1.0,  # L2 regularization
+                'random_state': 42,
+                'verbosity': -1
+            }
+
+            # Apply performance configuration for GPU/threading
+            if perf_config is not None and HAS_PERF_CONFIG:
+                params = perf_config.get_model_params('LightGBM', base_params)
+            else:
+                # Default: CPU-only mode
+                params = base_params.copy()
+                params['device'] = 'cpu'
+                params['n_jobs'] = -1
+
+            return LGBMClassifier(**params)
 
         elif model_name == "CatBoost":
             if not HAS_CATBOOST:
                 raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
-            return CatBoostClassifier(
-                iterations=100,
-                learning_rate=0.1,
-                depth=6,
-                random_state=42,
-                verbose=False
-            )
+
+            # Base parameters
+            base_params = {
+                'iterations': 100,
+                'learning_rate': 0.1,
+                'depth': 6,
+                'random_state': 42,
+                'verbose': False
+            }
+
+            # Apply performance configuration for GPU/threading
+            if perf_config is not None and HAS_PERF_CONFIG:
+                params = perf_config.get_model_params('CatBoost', base_params)
+            else:
+                # Default: CPU-only mode with threading
+                params = base_params.copy()
+                params['task_type'] = 'CPU'
+                params['thread_count'] = -1
+
+            return CatBoostClassifier(**params)
 
         else:
             raise ValueError(f"Unknown classification model: {model_name}")
@@ -341,7 +423,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
                     mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
                     mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
-                    tier='standard', enabled_models=None):
+                    tier='standard', enabled_models=None, perf_config=None):
     """
     Get model grids for hyperparameter search with tiered defaults.
 
@@ -964,23 +1046,33 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                     for reg_lambda in xgb_reg_lambda:
                                         for min_child_weight in xgb_min_child_weight_list:
                                             for gamma in xgb_gamma_list:
-                                                xgb_configs.append(
+                                                # Base grid parameters
+                                                                                                base_params = {
+                                                            'n_estimators': n_est,
+                                                            'learning_rate': lr,
+                                                            'max_depth': max_depth,
+                                                            'subsample': subsample,
+                                                            'colsample_bytree': colsample,
+                                                            'reg_alpha': reg_alpha,
+                                                            'reg_lambda': reg_lambda,
+                                                            'min_child_weight': min_child_weight,
+                                                            'gamma': gamma,
+                                                            'random_state': 42,
+                                                            'verbosity': 0
+                                                        }
+
+                                                        # Apply performance config for GPU/threading
+                                                        if perf_config is not None and HAS_PERF_CONFIG:
+                                                            model_params = perf_config.get_model_params('XGBoost', base_params)
+                                                        else:
+                                                            # Default CPU-only mode
+                                                            model_params = base_params.copy()
+                                                            model_params['tree_method'] = 'hist'
+                                                            model_params['n_jobs'] = -1
+
+                                                        xgb_configs.append(
                                                     (
-                                                        XGBRegressor(
-                                                            n_estimators=n_est,
-                                                            learning_rate=lr,
-                                                            max_depth=max_depth,
-                                                            subsample=subsample,
-                                                            colsample_bytree=colsample,
-                                                            reg_alpha=reg_alpha,
-                                                            reg_lambda=reg_lambda,
-                                                            min_child_weight=min_child_weight,
-                                                            gamma=gamma,
-                                                            tree_method='hist',  # Faster for high-dimensional data
-                                                            random_state=42,
-                                                            n_jobs=-1,
-                                                            verbosity=0
-                                                        ),
+                                                        XGBRegressor(**model_params),
                                                         {
                                                             "n_estimators": n_est,
                                                             "learning_rate": lr,
@@ -1009,23 +1101,34 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                     for colsample_bytree in lightgbm_colsample_bytree_list:
                                         for reg_alpha in lightgbm_reg_alpha_list:
                                             for reg_lambda in lightgbm_reg_lambda_list:
+                                                # Base grid parameters
+                                                base_params = {
+                                                    'n_estimators': n_est,
+                                                    'learning_rate': lr,
+                                                    'num_leaves': num_leaves,
+                                                    'max_depth': max_depth,
+                                                    'min_child_samples': min_child_samples,
+                                                    'subsample': subsample,
+                                                    'bagging_freq': 1,  # Required when subsample < 1.0
+                                                    'colsample_bytree': colsample_bytree,
+                                                    'reg_alpha': reg_alpha,
+                                                    'reg_lambda': reg_lambda,
+                                                    'random_state': 42,
+                                                    'verbosity': -1
+                                                }
+
+                                                # Apply performance config for GPU/threading
+                                                if perf_config is not None and HAS_PERF_CONFIG:
+                                                    model_params = perf_config.get_model_params('LightGBM', base_params)
+                                                else:
+                                                    # Default CPU-only mode
+                                                    model_params = base_params.copy()
+                                                    model_params['device'] = 'cpu'
+                                                    model_params['n_jobs'] = -1
+
                                                 lgbm_configs.append(
                                                     (
-                                                        LGBMRegressor(
-                                                            n_estimators=n_est,
-                                                            learning_rate=lr,
-                                                            num_leaves=num_leaves,
-                                                            max_depth=max_depth,
-                                                            min_child_samples=min_child_samples,
-                                                            subsample=subsample,
-                                                            bagging_freq=1,  # Required when subsample < 1.0
-                                                            colsample_bytree=colsample_bytree,
-                                                            reg_alpha=reg_alpha,
-                                                            reg_lambda=reg_lambda,
-                                                            random_state=42,
-                                                            n_jobs=-1,
-                                                            verbosity=-1
-                                                        ),
+                                                        LGBMRegressor(**model_params),
                                                         {
                                                             "n_estimators": n_est,
                                                             "learning_rate": lr,
@@ -1052,19 +1155,31 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                             for border_count in catboost_border_count_list:
                                 for bagging_temp in catboost_bagging_temperature_list:
                                     for random_str in catboost_random_strength_list:
+                                        # Base grid parameters
+                                        base_params = {
+                                            'iterations': iterations,
+                                            'learning_rate': lr,
+                                            'depth': depth,
+                                            'l2_leaf_reg': l2_leaf_reg,
+                                            'border_count': border_count,
+                                            'bagging_temperature': bagging_temp,
+                                            'random_strength': random_str,
+                                            'random_state': 42,
+                                            'verbose': False
+                                        }
+
+                                        # Apply performance config for GPU/threading
+                                        if perf_config is not None and HAS_PERF_CONFIG:
+                                            model_params = perf_config.get_model_params('CatBoost', base_params)
+                                        else:
+                                            # Default CPU-only mode
+                                            model_params = base_params.copy()
+                                            model_params['task_type'] = 'CPU'
+                                            model_params['thread_count'] = -1
+
                                         catboost_configs.append(
                                             (
-                                                CatBoostRegressor(
-                                                    iterations=iterations,
-                                                    learning_rate=lr,
-                                                    depth=depth,
-                                                    l2_leaf_reg=l2_leaf_reg,
-                                                    border_count=border_count,
-                                                    bagging_temperature=bagging_temp,
-                                                    random_strength=random_str,
-                                                    random_state=42,
-                                                    verbose=False
-                                                ),
+                                                CatBoostRegressor(**model_params),
                                                 {
                                                     "iterations": iterations,
                                                     "learning_rate": lr,
@@ -1289,21 +1404,31 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                             for colsample in xgb_colsample_bytree:
                                 for reg_alpha in xgb_reg_alpha:
                                     for reg_lambda in xgb_reg_lambda:
+                                        # Base grid parameters
+                                        base_params = {
+                                            'n_estimators': n_est,
+                                            'learning_rate': lr,
+                                            'max_depth': max_depth,
+                                            'subsample': subsample,
+                                            'colsample_bytree': colsample,
+                                            'reg_alpha': reg_alpha,
+                                            'reg_lambda': reg_lambda,
+                                            'random_state': 42,
+                                            'verbosity': 0
+                                        }
+
+                                        # Apply performance config for GPU/threading
+                                        if perf_config is not None and HAS_PERF_CONFIG:
+                                            model_params = perf_config.get_model_params('XGBoost', base_params)
+                                        else:
+                                            # Default CPU-only mode
+                                            model_params = base_params.copy()
+                                            model_params['tree_method'] = 'hist'
+                                            model_params['n_jobs'] = -1
+
                                         xgb_configs.append(
                                             (
-                                                XGBClassifier(
-                                                    n_estimators=n_est,
-                                                    learning_rate=lr,
-                                                    max_depth=max_depth,
-                                                    subsample=subsample,
-                                                    colsample_bytree=colsample,
-                                                    reg_alpha=reg_alpha,
-                                                    reg_lambda=reg_lambda,
-                                                    tree_method='hist',  # Faster for high-dimensional data
-                                                    random_state=42,
-                                                    n_jobs=-1,
-                                                    verbosity=0
-                                                ),
+                                                XGBClassifier(**model_params),
                                                 {
                                                     "n_estimators": n_est,
                                                     "learning_rate": lr,
@@ -1330,23 +1455,34 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                     for colsample_bytree in lightgbm_colsample_bytree_list:
                                         for reg_alpha in lightgbm_reg_alpha_list:
                                             for reg_lambda in lightgbm_reg_lambda_list:
+                                                # Base grid parameters
+                                                base_params = {
+                                                    'n_estimators': n_est,
+                                                    'learning_rate': lr,
+                                                    'num_leaves': num_leaves,
+                                                    'max_depth': max_depth,
+                                                    'min_child_samples': min_child_samples,
+                                                    'subsample': subsample,
+                                                    'bagging_freq': 1,  # Required when subsample < 1.0
+                                                    'colsample_bytree': colsample_bytree,
+                                                    'reg_alpha': reg_alpha,
+                                                    'reg_lambda': reg_lambda,
+                                                    'random_state': 42,
+                                                    'verbosity': -1
+                                                }
+
+                                                # Apply performance config for GPU/threading
+                                                if perf_config is not None and HAS_PERF_CONFIG:
+                                                    model_params = perf_config.get_model_params('LightGBM', base_params)
+                                                else:
+                                                    # Default CPU-only mode
+                                                    model_params = base_params.copy()
+                                                    model_params['device'] = 'cpu'
+                                                    model_params['n_jobs'] = -1
+
                                                 lgbm_configs.append(
                                                     (
-                                                        LGBMClassifier(
-                                                            n_estimators=n_est,
-                                                            learning_rate=lr,
-                                                            num_leaves=num_leaves,
-                                                            max_depth=max_depth,
-                                                            min_child_samples=min_child_samples,
-                                                            subsample=subsample,
-                                                            bagging_freq=1,  # Required when subsample < 1.0
-                                                            colsample_bytree=colsample_bytree,
-                                                            reg_alpha=reg_alpha,
-                                                            reg_lambda=reg_lambda,
-                                                            random_state=42,
-                                                            n_jobs=-1,
-                                                            verbosity=-1
-                                                        ),
+                                                        LGBMClassifier(**model_params),
                                                         {
                                                             "n_estimators": n_est,
                                                             "learning_rate": lr,
@@ -1369,15 +1505,27 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for iterations in catboost_iterations_list:
                 for lr in catboost_learning_rates:
                     for depth in catboost_depths:
+                        # Base grid parameters
+                        base_params = {
+                            'iterations': iterations,
+                            'learning_rate': lr,
+                            'depth': depth,
+                            'random_state': 42,
+                            'verbose': False
+                        }
+
+                        # Apply performance config for GPU/threading
+                        if perf_config is not None and HAS_PERF_CONFIG:
+                            model_params = perf_config.get_model_params('CatBoost', base_params)
+                        else:
+                            # Default CPU-only mode
+                            model_params = base_params.copy()
+                            model_params['task_type'] = 'CPU'
+                            model_params['thread_count'] = -1
+
                         catboost_configs.append(
                             (
-                                CatBoostClassifier(
-                                    iterations=iterations,
-                                    learning_rate=lr,
-                                    depth=depth,
-                                    random_state=42,
-                                    verbose=False
-                                ),
+                                CatBoostClassifier(**model_params),
                                 {"iterations": iterations, "learning_rate": lr, "depth": depth}
                             )
                         )
