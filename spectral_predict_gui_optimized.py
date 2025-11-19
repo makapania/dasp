@@ -98,6 +98,8 @@ try:
 except ImportError:
     HAS_DATA_MANAGEMENT = False
     DataSource = None
+    MergedDataset = None
+    DataSourceManager = None
 
 # Import performance settings GUI
 try:
