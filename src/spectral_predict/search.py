@@ -18,6 +18,47 @@ from .variable_selection import spa_selection, uve_selection, uve_spa_selection,
 from .model_registry import supports_subset_analysis, supports_feature_importance
 
 
+def _run_model_config_batch(configs_batch, X_np, y_np, wavelengths, preprocess_cfg,
+                             cv_splitter, task_type, is_binary_classification,
+                             excluded_count, validation_count, total_samples_original, folds):
+    """
+    Run a batch of model configurations in parallel.
+
+    This helper function enables grid parallelization by running multiple
+    model configurations simultaneously.
+
+    Parameters
+    ----------
+    configs_batch : list of tuples
+        List of (model, params, model_name) tuples to test
+    ... (other parameters same as _run_single_config)
+
+    Returns
+    -------
+    results : list of dict
+        List of result dictionaries from each config
+    """
+    from .scoring import _run_single_config
+
+    results = []
+    for model, params, model_name in configs_batch:
+        result = _run_single_config(
+            X_np, y_np, wavelengths,
+            model, model_name, params,
+            preprocess_cfg, cv_splitter,
+            task_type, is_binary_classification,
+            subset_indices=None, subset_tag="full",
+            top_n_vars=30, skip_preprocessing=False,
+            excluded_count=excluded_count,
+            validation_count=validation_count,
+            total_samples_original=total_samples_original,
+            folds=folds
+        )
+        results.append((model_name, params, result))
+
+    return results
+
+
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=3, complexity_penalty=5,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
@@ -253,7 +294,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                    mlp_batch_size_list=mlp_batch_size_list,
                                    mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
                                    mlp_momentum_list=mlp_momentum_list,
-                                   tier=tier, enabled_models=enabled_models)
+                                   tier=tier, enabled_models=enabled_models, perf_config=perf_config)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
