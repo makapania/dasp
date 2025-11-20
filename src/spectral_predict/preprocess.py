@@ -106,7 +106,8 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
         return X_deriv
 
 
-def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None):
+def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None,
+                                 imbalance_method=None, imbalance_params=None, task_type=None):
     """
     Build a preprocessing pipeline from a configuration.
 
@@ -120,31 +121,76 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         Window size (for deriv-based pipelines)
     polyorder : int, optional
         Polynomial order (for deriv-based pipelines)
+    imbalance_method : str, optional
+        Imbalance handling method ('smote', 'adasyn', 'binning', etc.)
+        If None, no imbalance handling is applied (default behavior)
+    imbalance_params : dict, optional
+        Parameters for imbalance method (e.g., {'k_neighbors': 5})
+    task_type : str, optional
+        'classification' or 'regression' (required if imbalance_method is specified)
 
     Returns
     -------
     steps : list
         List of (name, transformer) tuples
+
+    Notes
+    -----
+    Imbalance handling is applied AFTER spectral preprocessing (SNV/derivatives)
+    but BEFORE the model. This ensures resampling operates on preprocessed spectra.
     """
     from sklearn.pipeline import Pipeline
 
+    steps = []
+
+    # Step 1: Spectral preprocessing
     if preprocess_name == "raw":
-        return []
+        pass  # No preprocessing
 
     elif preprocess_name == "snv":
-        return [("snv", SNV())]
+        steps.append(("snv", SNV()))
 
     elif preprocess_name == "deriv":
         savgol = SavgolDerivative(deriv=deriv, window=window, polyorder=polyorder)
-        return [("savgol", savgol)]
+        steps.append(("savgol", savgol))
 
     elif preprocess_name == "snv_deriv":
         savgol = SavgolDerivative(deriv=deriv, window=window, polyorder=polyorder)
-        return [("snv", SNV()), ("savgol", savgol)]
+        steps.append(("snv", SNV()))
+        steps.append(("savgol", savgol))
 
     elif preprocess_name == "deriv_snv":
         savgol = SavgolDerivative(deriv=deriv, window=window, polyorder=polyorder)
-        return [("savgol", savgol), ("snv", SNV())]
+        steps.append(("savgol", savgol))
+        steps.append(("snv", SNV()))
 
     else:
         raise ValueError(f"Unknown preprocess: {preprocess_name}")
+
+    # Step 2: Imbalance handling (optional, added only if user enables it)
+    if imbalance_method is not None:
+        if task_type is None:
+            raise ValueError("task_type must be specified when using imbalance_method")
+
+        # Import imbalance module
+        try:
+            from spectral_predict.imbalance import build_imbalance_transformer
+        except ImportError:
+            raise ImportError(
+                "Imbalance handling requires the imbalance module. "
+                "Ensure src/spectral_predict/imbalance.py is available."
+            )
+
+        # Build imbalance transformer
+        if imbalance_params is None:
+            imbalance_params = {}
+
+        imbalance_transformer = build_imbalance_transformer(
+            method=imbalance_method,
+            task_type=task_type,
+            **imbalance_params
+        )
+
+        steps.append(("imbalance", imbalance_transformer))
+
+    return steps

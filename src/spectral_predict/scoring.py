@@ -319,6 +319,7 @@ def create_results_dataframe(task_type):
         "n_vars",
         "full_vars",
         "SubsetTag",
+        "Imbalance",
     ]
 
     if task_type == "regression":
@@ -350,3 +351,135 @@ def add_result(df_results, result_dict):
     # Convert to DataFrame and append
     df_new = pd.DataFrame([result_dict])
     return pd.concat([df_results, df_new], ignore_index=True)
+
+
+# ============================================================================
+# IMBALANCE-AWARE METRICS
+# ============================================================================
+
+def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
+    """
+    Compute metrics appropriate for imbalanced classification.
+
+    These metrics provide better insight into model performance on imbalanced
+    datasets compared to standard accuracy.
+
+    Parameters
+    ----------
+    y_true : array-like
+        True labels
+    y_pred : array-like
+        Predicted labels
+    y_pred_proba : array-like, optional
+        Predicted probabilities (for ROC AUC)
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with:
+        - 'balanced_accuracy': Macro-averaged recall (equal weight per class)
+        - 'f1_weighted': F1 score weighted by class frequency
+        - 'f1_macro': F1 score macro-averaged (equal weight per class)
+        - 'precision_weighted': Weighted precision
+        - 'recall_weighted': Weighted recall
+        - 'roc_auc': ROC AUC score (if y_pred_proba provided)
+
+    Example
+    -------
+    >>> from sklearn.ensemble import RandomForestClassifier
+    >>> rf = RandomForestClassifier()
+    >>> rf.fit(X_train, y_train)
+    >>> y_pred = rf.predict(X_test)
+    >>> y_proba = rf.predict_proba(X_test)
+    >>> metrics = compute_imbalance_metrics(y_test, y_pred, y_proba)
+    >>> print(f"Balanced Accuracy: {metrics['balanced_accuracy']:.3f}")
+    """
+    from sklearn.metrics import (
+        balanced_accuracy_score,
+        f1_score,
+        precision_score,
+        recall_score,
+        roc_auc_score
+    )
+
+    metrics = {}
+
+    # Balanced accuracy (macro-averaged recall)
+    # Adjusts for class imbalance - treats all classes equally
+    metrics['balanced_accuracy'] = balanced_accuracy_score(y_true, y_pred)
+
+    # F1 scores
+    # Weighted: accounts for class frequency in the dataset
+    # Macro: treats all classes equally regardless of frequency
+    try:
+        metrics['f1_weighted'] = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+        metrics['f1_macro'] = f1_score(y_true, y_pred, average='macro', zero_division=0)
+    except:
+        metrics['f1_weighted'] = 0.0
+        metrics['f1_macro'] = 0.0
+
+    # Precision and recall (weighted)
+    try:
+        metrics['precision_weighted'] = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+        metrics['recall_weighted'] = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+    except:
+        metrics['precision_weighted'] = 0.0
+        metrics['recall_weighted'] = 0.0
+
+    # ROC AUC (if probabilities provided)
+    if y_pred_proba is not None:
+        try:
+            n_classes = len(np.unique(y_true))
+            if n_classes == 2:
+                # Binary classification - use proba for positive class
+                metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba[:, 1])
+            else:
+                # Multiclass - use one-vs-rest
+                metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba,
+                                                   multi_class='ovr', average='weighted')
+        except:
+            metrics['roc_auc'] = None
+    else:
+        metrics['roc_auc'] = None
+
+    return metrics
+
+
+def print_imbalance_metrics_report(metrics, dataset_name="Test Set"):
+    """
+    Print a formatted report of imbalance-aware metrics.
+
+    Parameters
+    ----------
+    metrics : dict
+        Metrics dictionary from compute_imbalance_metrics()
+    dataset_name : str
+        Name of the dataset (for display purposes)
+
+    Example
+    -------
+    >>> metrics = compute_imbalance_metrics(y_test, y_pred, y_proba)
+    >>> print_imbalance_metrics_report(metrics, "Validation Set")
+    """
+    print("\n" + "="*60)
+    print(f"Imbalance-Aware Metrics Report: {dataset_name}")
+    print("="*60)
+
+    print(f"\n{'Metric':<30} {'Value':>10}")
+    print("-" * 42)
+
+    print(f"{'Balanced Accuracy':<30} {metrics['balanced_accuracy']:>10.4f}")
+    print(f"{'F1 Score (Weighted)':<30} {metrics['f1_weighted']:>10.4f}")
+    print(f"{'F1 Score (Macro)':<30} {metrics['f1_macro']:>10.4f}")
+    print(f"{'Precision (Weighted)':<30} {metrics['precision_weighted']:>10.4f}")
+    print(f"{'Recall (Weighted)':<30} {metrics['recall_weighted']:>10.4f}")
+
+    if metrics['roc_auc'] is not None:
+        print(f"{'ROC AUC':<30} {metrics['roc_auc']:>10.4f}")
+
+    print("="*60)
+    print("\nNotes:")
+    print("- Balanced Accuracy: Macro-averaged recall (equal weight per class)")
+    print("- Weighted metrics: Account for class frequency in dataset")
+    print("- Macro metrics: Treat all classes equally regardless of frequency")
+    print("="*60 + "\n")

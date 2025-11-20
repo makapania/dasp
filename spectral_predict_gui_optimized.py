@@ -727,7 +727,7 @@ class SpectralPredictApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("ASP - Automated Spectroscopy Platform (OPTIMIZED)")
+        self.root.title("ASP - Advanced Spectral Prediction (OPTIMIZED)")
 
         # Set window size - use zoomed/maximized for better visibility
         try:
@@ -1253,6 +1253,7 @@ class SpectralPredictApp:
         self.catboost_iterations_custom = tk.StringVar(value="")
 
         # learning_rate
+        self.catboost_lr_005 = tk.BooleanVar(value=True)  # 0.05 ⭐ standard
         self.catboost_lr_01 = tk.BooleanVar(value=True)  # 0.1 ⭐ standard
         self.catboost_lr_custom = tk.StringVar(value="")
 
@@ -1370,6 +1371,101 @@ class SpectralPredictApp:
         self.mlp_momentum_09 = tk.BooleanVar(value=True)  # 0.9 ⭐ standard
         self.mlp_momentum_095 = tk.BooleanVar(value=False)
         self.mlp_momentum_099 = tk.BooleanVar(value=False)
+
+        # ========== MODEL DEVELOPMENT TAB HYPERPARAMETERS (Single Value Selection) ==========
+        # These variables control hyperparameters for single model training in Model Development tab
+        # Unlike Analysis Config (checkboxes for grid search), these use single values (Combobox/Spinbox)
+
+        # PLS Hyperparameters
+        self.refine_pls_n_components = tk.IntVar(value=10)  # Number of components
+        self.refine_pls_max_iter = tk.IntVar(value=500)  # Max iterations
+        self.refine_pls_tol = tk.StringVar(value="1e-6")  # Convergence tolerance
+
+        # Ridge Regression Hyperparameters
+        self.refine_ridge_alpha = tk.StringVar(value="1.0")  # Regularization strength
+        self.refine_ridge_solver = tk.StringVar(value="auto")  # Solver algorithm
+        self.refine_ridge_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
+
+        # Lasso Regression Hyperparameters
+        self.refine_lasso_alpha = tk.StringVar(value="1.0")  # Regularization strength
+        self.refine_lasso_selection = tk.StringVar(value="cyclic")  # Feature selection method
+        self.refine_lasso_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
+        self.refine_lasso_max_iter = tk.IntVar(value=1000)  # Max iterations for convergence
+
+        # ElasticNet Hyperparameters
+        self.refine_elasticnet_alpha = tk.StringVar(value="1.0")  # Regularization strength
+        self.refine_elasticnet_l1_ratio = tk.StringVar(value="0.5")  # L1 vs L2 mix ratio
+        self.refine_elasticnet_selection = tk.StringVar(value="cyclic")  # Feature selection method
+        self.refine_elasticnet_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
+        self.refine_elasticnet_max_iter = tk.IntVar(value=1000)  # Max iterations for convergence
+
+        # RandomForest Hyperparameters
+        self.refine_rf_n_estimators = tk.IntVar(value=200)  # Number of trees
+        self.refine_rf_max_depth = tk.StringVar(value="None")  # Maximum tree depth
+        self.refine_rf_min_samples_split = tk.IntVar(value=2)  # Min samples to split
+        self.refine_rf_min_samples_leaf = tk.IntVar(value=1)  # Min samples at leaf
+        self.refine_rf_max_features = tk.StringVar(value="sqrt")  # Max features per split
+        self.refine_rf_bootstrap = tk.BooleanVar(value=True)  # Bootstrap sampling
+        self.refine_rf_max_leaf_nodes = tk.StringVar(value="None")  # Max leaf nodes
+        self.refine_rf_min_impurity_decrease = tk.DoubleVar(value=0.0)  # Min impurity decrease
+
+        # XGBoost Hyperparameters
+        self.refine_xgb_n_estimators = tk.IntVar(value=100)  # Number of boosting rounds
+        self.refine_xgb_learning_rate = tk.DoubleVar(value=0.1)  # Learning rate (eta)
+        self.refine_xgb_max_depth = tk.IntVar(value=6)  # Maximum tree depth
+        self.refine_xgb_subsample = tk.DoubleVar(value=0.8)  # Row subsample ratio
+        self.refine_xgb_colsample_bytree = tk.DoubleVar(value=0.8)  # Column subsample ratio
+        self.refine_xgb_reg_alpha = tk.DoubleVar(value=0.1)  # L1 regularization
+        self.refine_xgb_reg_lambda = tk.DoubleVar(value=1.0)  # L2 regularization
+        self.refine_xgb_min_child_weight = tk.IntVar(value=1)  # Min sum of instance weight in child
+        self.refine_xgb_gamma = tk.DoubleVar(value=0.0)  # Min loss reduction to split
+
+        # LightGBM Hyperparameters
+        self.refine_lgbm_n_estimators = tk.IntVar(value=100)  # Number of boosting rounds
+        self.refine_lgbm_learning_rate = tk.DoubleVar(value=0.1)  # Learning rate
+        self.refine_lgbm_num_leaves = tk.IntVar(value=31)  # Max number of leaves
+        self.refine_lgbm_max_depth = tk.IntVar(value=-1)  # Maximum tree depth (-1 = no limit)
+        self.refine_lgbm_min_child_samples = tk.IntVar(value=5)  # Min samples in leaf
+        self.refine_lgbm_subsample = tk.DoubleVar(value=0.8)  # Row subsample ratio
+        self.refine_lgbm_colsample_bytree = tk.DoubleVar(value=0.8)  # Column subsample ratio
+        self.refine_lgbm_reg_alpha = tk.DoubleVar(value=0.1)  # L1 regularization
+        self.refine_lgbm_reg_lambda = tk.DoubleVar(value=1.0)  # L2 regularization
+
+        # CatBoost Hyperparameters
+        self.refine_catboost_iterations = tk.IntVar(value=100)  # Number of boosting iterations
+        self.refine_catboost_learning_rate = tk.DoubleVar(value=0.1)  # Learning rate
+        self.refine_catboost_depth = tk.IntVar(value=6)  # Tree depth
+        self.refine_catboost_l2_leaf_reg = tk.DoubleVar(value=3.0)  # L2 regularization
+        self.refine_catboost_border_count = tk.IntVar(value=128)  # Number of splits for numerical features
+        self.refine_catboost_bagging_temperature = tk.DoubleVar(value=1.0)  # Bayesian bootstrap intensity
+        self.refine_catboost_random_strength = tk.DoubleVar(value=1.0)  # Randomness for scoring splits
+
+        # SVR Hyperparameters
+        self.refine_svr_kernel = tk.StringVar(value="rbf")  # Kernel type
+        self.refine_svr_C = tk.DoubleVar(value=1.0)  # Regularization parameter
+        self.refine_svr_gamma = tk.StringVar(value="scale")  # Kernel coefficient
+        self.refine_svr_epsilon = tk.DoubleVar(value=0.1)  # Epsilon-tube width
+        self.refine_svr_degree = tk.IntVar(value=3)  # Degree for polynomial kernel
+        self.refine_svr_coef0 = tk.DoubleVar(value=0.0)  # Independent term in kernel
+        self.refine_svr_shrinking = tk.BooleanVar(value=True)  # Use shrinking heuristic
+
+        # MLP Hyperparameters
+        self.refine_mlp_hidden_layer_sizes = tk.StringVar(value="(64,)")  # Hidden layer architecture
+        self.refine_mlp_alpha = tk.StringVar(value="0.001")  # L2 regularization
+        self.refine_mlp_learning_rate_init = tk.StringVar(value="0.001")  # Initial learning rate
+        self.refine_mlp_activation = tk.StringVar(value="relu")  # Activation function
+        self.refine_mlp_solver = tk.StringVar(value="adam")  # Weight optimization solver
+        self.refine_mlp_batch_size = tk.StringVar(value="auto")  # Minibatch size
+        self.refine_mlp_learning_rate = tk.StringVar(value="constant")  # Learning rate schedule
+        self.refine_mlp_momentum = tk.DoubleVar(value=0.9)  # Momentum for SGD solver
+        self.refine_mlp_max_iter = tk.IntVar(value=200)  # Maximum iterations
+
+        # NeuralBoosted Hyperparameters
+        self.refine_neuralboosted_n_estimators = tk.IntVar(value=100)  # Number of boosting stages
+        self.refine_neuralboosted_learning_rate = tk.DoubleVar(value=0.1)  # Learning rate
+        self.refine_neuralboosted_hidden_layer_size = tk.IntVar(value=3)  # Hidden layer size
+        self.refine_neuralboosted_activation = tk.StringVar(value="tanh")  # Activation function
+        self.refine_neuralboosted_early_stopping = tk.BooleanVar(value=False)  # Early stopping
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -1977,12 +2073,12 @@ class SpectralPredictApp:
         self.logo_label = self._create_logo_label(title_frame, size=150)
         self.logo_label.pack(side='left', padx=(0, 15), pady=0)
 
-        # "Automated Spectroscopy" text to the right of logo - larger, single line
+        # "Advanced Spectral Prediction" text to the right of logo - larger, single line
         text_frame = tk.Frame(title_frame, bg=self.colors['bg'])
         text_frame.pack(side='left', fill='y', pady=40)
 
         tk.Label(text_frame,
-                text="Automated Spectroscopy",
+                text="Advanced Spectral Prediction",
                 font=('Segoe UI', 24, 'bold'),
                 fg=self.colors['text'],
                 bg=self.colors['bg']).pack(anchor='w')
@@ -3451,6 +3547,102 @@ class SpectralPredictApp:
         self.y_dist_plot_frame = ttk.Frame(self.outlier_plot_notebook)
         self.outlier_plot_notebook.add(self.y_dist_plot_frame, text="Y Distribution")
 
+        # === SECTION 2.5: Class/Target Distribution Analysis ===
+        ttk.Label(content_frame, text="2.5 Class/Target Distribution Analysis", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        # Distribution info frame
+        dist_frame = ttk.LabelFrame(content_frame, text="Distribution Analysis", padding="20")
+        dist_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Distribution summary label
+        self.dist_summary_label = ttk.Label(dist_frame, text="Run analysis to see class/target distribution",
+                                           style='Caption.TLabel', wraplength=800, justify='left')
+        self.dist_summary_label.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+        # Warning label (hidden by default)
+        self.imbalance_warning_label = ttk.Label(dist_frame, text="",
+                                                 foreground='#ff6b6b', font=('Segoe UI', 10, 'bold'),
+                                                 wraplength=800, justify='left')
+        self.imbalance_warning_label.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=5)
+
+        # Recommendation label
+        self.imbalance_recommendation_label = ttk.Label(dist_frame, text="",
+                                                        style='Caption.TLabel', wraplength=800, justify='left')
+        self.imbalance_recommendation_label.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=5)
+
+        # === SECTION 2.6: Imbalance Handling (Optional) ===
+        ttk.Label(content_frame, text="2.6 Imbalance Handling (Optional)", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        imbalance_frame = ttk.LabelFrame(content_frame, text="Imbalance Handling Settings", padding="20")
+        imbalance_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Enable checkbox
+        self.enable_imbalance_handling = tk.BooleanVar(value=False)
+        ttk.Checkbutton(imbalance_frame, text="Enable imbalance handling",
+                       variable=self.enable_imbalance_handling,
+                       command=self._toggle_imbalance_controls).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+        # Method selection
+        ttk.Label(imbalance_frame, text="Method:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(20, 10))
+        self.imbalance_method = tk.StringVar(value="smote")
+        self.imbalance_method_combo = ttk.Combobox(imbalance_frame, textvariable=self.imbalance_method,
+                                                   state='disabled', width=25)
+        self.imbalance_method_combo['values'] = [
+            'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+            'tomek_links', 'smote_tomek', 'class_weight',
+            'binning', 'rare_boost', 'balanced'
+        ]
+        self.imbalance_method_combo.grid(row=1, column=1, sticky=tk.W, pady=8)
+        self.imbalance_method_combo.bind('<<ComboboxSelected>>', self._update_imbalance_method_description)
+
+        # Method description
+        self.imbalance_method_desc = ttk.Label(imbalance_frame, text="SMOTE - Synthetic oversampling (standard)",
+                                              style='Caption.TLabel', wraplength=400, justify='left')
+        self.imbalance_method_desc.grid(row=1, column=2, sticky=tk.W, padx=10)
+
+        # Parameters frame (method-specific)
+        params_subframe = ttk.Frame(imbalance_frame)
+        params_subframe.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10, padx=(20, 0))
+
+        # SMOTE/ADASYN parameters
+        self.k_neighbors_label = ttk.Label(params_subframe, text="k_neighbors:")
+        self.k_neighbors_label.grid(row=0, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+        self.k_neighbors = tk.IntVar(value=5)
+        self.k_neighbors_spin = ttk.Spinbox(params_subframe, from_=1, to=20, textvariable=self.k_neighbors,
+                                           width=10, state='disabled')
+        self.k_neighbors_spin.grid(row=0, column=1, sticky=tk.W)
+        self.k_neighbors_desc = ttk.Label(params_subframe, text="Number of nearest neighbors for SMOTE",
+                                         style='Caption.TLabel')
+        self.k_neighbors_desc.grid(row=0, column=2, sticky=tk.W, padx=10)
+
+        # Binning parameters (for regression)
+        self.n_bins_label = ttk.Label(params_subframe, text="n_bins:")
+        self.n_bins = tk.IntVar(value=5)
+        self.n_bins_spin = ttk.Spinbox(params_subframe, from_=3, to=10, textvariable=self.n_bins,
+                                      width=10, state='disabled')
+
+        # Boost factor (for rare_boost)
+        self.boost_factor_label = ttk.Label(params_subframe, text="boost_factor:")
+        self.boost_factor = tk.DoubleVar(value=2.0)
+        self.boost_factor_spin = ttk.Spinbox(params_subframe, from_=1.1, to=5.0, increment=0.1,
+                                            textvariable=self.boost_factor, width=10, state='disabled')
+
+        # Store references for easy access
+        self.imbalance_widgets = {
+            'method_combo': self.imbalance_method_combo,
+            'k_neighbors_label': self.k_neighbors_label,
+            'k_neighbors_spin': self.k_neighbors_spin,
+            'k_neighbors_desc': self.k_neighbors_desc,
+            'n_bins_label': self.n_bins_label,
+            'n_bins_spin': self.n_bins_spin,
+            'boost_factor_label': self.boost_factor_label,
+            'boost_factor_spin': self.boost_factor_spin
+        }
+
         # === SECTION 3: Summary Table ===
         ttk.Label(content_frame, text="3. Outlier Summary", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
         row += 1
@@ -4283,9 +4475,35 @@ class SpectralPredictApp:
         ttk.Entry(ridge_alpha_frame, textvariable=self.ridge_alpha_custom, width=10).grid(row=0, column=6, padx=5)
         ttk.Label(ridge_alpha_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
 
+        # Solver (optimization algorithm)
+        ridge_solver_label = ttk.Label(ridge_content_frame, text="Solver (Optimization Algorithm):", style='Subheading.TLabel')
+        ridge_solver_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ridge_solver_frame = ttk.Frame(ridge_content_frame)
+        ridge_solver_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(ridge_solver_frame, text="auto ⭐", variable=self.ridge_solver_auto).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ridge_solver_frame, text="svd", variable=self.ridge_solver_svd).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ridge_solver_frame, text="cholesky", variable=self.ridge_solver_cholesky).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(ridge_solver_frame, text="lsqr", variable=self.ridge_solver_lsqr).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(ridge_solver_frame, text="sag", variable=self.ridge_solver_sag).grid(row=0, column=4, padx=5)
+        ttk.Label(ridge_solver_frame, text="(default: auto)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # Tolerance (convergence criterion)
+        ridge_tol_label = ttk.Label(ridge_content_frame, text="Tolerance (Convergence Criterion):", style='Subheading.TLabel')
+        ridge_tol_label.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ridge_tol_frame = ttk.Frame(ridge_content_frame)
+        ridge_tol_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(ridge_tol_frame, text="1e-4 ⭐", variable=self.ridge_tol_1e4).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ridge_tol_frame, text="1e-3", variable=self.ridge_tol_1e3).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ridge_tol_frame, text="1e-5", variable=self.ridge_tol_1e5).grid(row=0, column=2, padx=5)
+        ttk.Label(ridge_tol_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ridge_tol_frame, textvariable=self.ridge_tol_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ridge_tol_frame, text="(default: 1e-4)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
         # Info label
         ttk.Label(ridge_content_frame, text="💡 Lower alpha = less regularization (closer to OLS). Higher alpha = more shrinkage.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
         # Lasso Regression Hyperparameters - collapsible
         lasso_section, lasso_content = self._create_collapsible_section(content_frame,
@@ -4318,9 +4536,32 @@ class SpectralPredictApp:
         ttk.Entry(lasso_alpha_frame, textvariable=self.lasso_alpha_custom, width=10).grid(row=0, column=5, padx=5)
         ttk.Label(lasso_alpha_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
+        # Selection (coordinate descent algorithm)
+        lasso_selection_label = ttk.Label(lasso_content_frame, text="Selection (Coordinate Descent Algorithm):", style='Subheading.TLabel')
+        lasso_selection_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lasso_selection_frame = ttk.Frame(lasso_content_frame)
+        lasso_selection_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lasso_selection_frame, text="cyclic ⭐", variable=self.lasso_selection_cyclic).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lasso_selection_frame, text="random", variable=self.lasso_selection_random).grid(row=0, column=1, padx=5)
+        ttk.Label(lasso_selection_frame, text="(default: cyclic)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        # Tolerance (convergence criterion)
+        lasso_tol_label = ttk.Label(lasso_content_frame, text="Tolerance (Convergence Criterion):", style='Subheading.TLabel')
+        lasso_tol_label.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lasso_tol_frame = ttk.Frame(lasso_content_frame)
+        lasso_tol_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lasso_tol_frame, text="1e-4 ⭐", variable=self.lasso_tol_1e4).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lasso_tol_frame, text="1e-3", variable=self.lasso_tol_1e3).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lasso_tol_frame, text="1e-5", variable=self.lasso_tol_1e5).grid(row=0, column=2, padx=5)
+        ttk.Label(lasso_tol_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lasso_tol_frame, textvariable=self.lasso_tol_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lasso_tol_frame, text="(default: 1e-4)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
         # Info label
         ttk.Label(lasso_content_frame, text="💡 Lasso encourages sparse solutions (sets weak coefficients to zero). Higher alpha = more sparsity.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
         # ElasticNet Hyperparameters - collapsible
         elasticnet_section, elasticnet_content = self._create_collapsible_section(content_frame,
@@ -4366,11 +4607,34 @@ class SpectralPredictApp:
         ttk.Entry(elasticnet_l1_frame, textvariable=self.elasticnet_l1_ratio_custom, width=10).grid(row=0, column=4, padx=5)
         ttk.Label(elasticnet_l1_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
+        # Selection (coordinate descent algorithm)
+        elasticnet_selection_label = ttk.Label(elasticnet_content_frame, text="Selection (Coordinate Descent Algorithm):", style='Subheading.TLabel')
+        elasticnet_selection_label.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        elasticnet_selection_frame = ttk.Frame(elasticnet_content_frame)
+        elasticnet_selection_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(elasticnet_selection_frame, text="cyclic ⭐", variable=self.elasticnet_selection_cyclic).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(elasticnet_selection_frame, text="random", variable=self.elasticnet_selection_random).grid(row=0, column=1, padx=5)
+        ttk.Label(elasticnet_selection_frame, text="(default: cyclic)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        # Tolerance (convergence criterion)
+        elasticnet_tol_label = ttk.Label(elasticnet_content_frame, text="Tolerance (Convergence Criterion):", style='Subheading.TLabel')
+        elasticnet_tol_label.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        elasticnet_tol_frame = ttk.Frame(elasticnet_content_frame)
+        elasticnet_tol_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(elasticnet_tol_frame, text="1e-4 ⭐", variable=self.elasticnet_tol_1e4).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(elasticnet_tol_frame, text="1e-3", variable=self.elasticnet_tol_1e3).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(elasticnet_tol_frame, text="1e-5", variable=self.elasticnet_tol_1e5).grid(row=0, column=2, padx=5)
+        ttk.Label(elasticnet_tol_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(elasticnet_tol_frame, textvariable=self.elasticnet_tol_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(elasticnet_tol_frame, text="(default: 1e-4)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
         # Info labels
         ttk.Label(elasticnet_content_frame, text="💡 ElasticNet combines Ridge (L2) and Lasso (L1) regularization.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
         ttk.Label(elasticnet_content_frame, text="   L1 ratio: 0.0=Ridge only, 0.5=balanced, 1.0=Lasso only",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
 
         # PLS Hyperparameters - collapsible
         pls_section, pls_content = self._create_collapsible_section(content_frame,
@@ -4670,26 +4934,71 @@ class SpectralPredictApp:
         lgbm_reg_alpha_frame = ttk.Frame(lgbm_content_frame)
         lgbm_reg_alpha_frame.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=5)
 
-        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.0 ⭐", variable=self.lightgbm_reg_alpha_00).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.1", variable=self.lightgbm_reg_alpha_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.0", variable=self.lightgbm_reg_alpha_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.1 ⭐", variable=self.lightgbm_reg_alpha_01).grid(row=0, column=1, padx=5)
         ttk.Checkbutton(lgbm_reg_alpha_frame, text="0.5", variable=self.lightgbm_reg_alpha_05).grid(row=0, column=2, padx=5)
         ttk.Checkbutton(lgbm_reg_alpha_frame, text="1.0", variable=self.lightgbm_reg_alpha_10).grid(row=0, column=3, padx=5)
         ttk.Label(lgbm_reg_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
         ttk.Entry(lgbm_reg_alpha_frame, textvariable=self.lightgbm_reg_alpha_custom, width=10).grid(row=0, column=5, padx=5)
-        ttk.Label(lgbm_reg_alpha_frame, text="(default: 0.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+        ttk.Label(lgbm_reg_alpha_frame, text="(default: 0.1)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         # reg_lambda (L2 regularization)
         ttk.Label(lgbm_content_frame, text="L2 Regularization (reg_lambda):", style='Subheading.TLabel').grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         lgbm_reg_lambda_frame = ttk.Frame(lgbm_content_frame)
         lgbm_reg_lambda_frame.grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=5)
 
-        ttk.Checkbutton(lgbm_reg_lambda_frame, text="0.0 ⭐", variable=self.lightgbm_reg_lambda_00).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_reg_lambda_frame, text="0.0", variable=self.lightgbm_reg_lambda_00).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(lgbm_reg_lambda_frame, text="0.5", variable=self.lightgbm_reg_lambda_05).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(lgbm_reg_lambda_frame, text="1.0", variable=self.lightgbm_reg_lambda_10).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_reg_lambda_frame, text="1.0 ⭐", variable=self.lightgbm_reg_lambda_10).grid(row=0, column=2, padx=5)
         ttk.Checkbutton(lgbm_reg_lambda_frame, text="2.0", variable=self.lightgbm_reg_lambda_20).grid(row=0, column=3, padx=5)
         ttk.Label(lgbm_reg_lambda_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
         ttk.Entry(lgbm_reg_lambda_frame, textvariable=self.lightgbm_reg_lambda_custom, width=10).grid(row=0, column=5, padx=5)
-        ttk.Label(lgbm_reg_lambda_frame, text="(default: 0.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+        ttk.Label(lgbm_reg_lambda_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        # n_estimators (number of boosting rounds)
+        ttk.Label(lgbm_content_frame, text="Number of Boosting Rounds (n_estimators):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_n_estimators_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_n_estimators_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_n_estimators_frame, text="50", variable=self.lightgbm_n_estimators_50).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_n_estimators_frame, text="100 ⭐", variable=self.lightgbm_n_estimators_100).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_n_estimators_frame, text="200 ⭐", variable=self.lightgbm_n_estimators_200).grid(row=0, column=2, padx=5)
+        ttk.Label(lgbm_n_estimators_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgbm_n_estimators_frame, textvariable=self.lightgbm_n_estimators_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_n_estimators_frame, text="(default: 100, 200)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(lgbm_content_frame, text="💡 More rounds = better fit but slower training",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # learning_rate (step size shrinkage)
+        ttk.Label(lgbm_content_frame, text="Learning Rate (learning_rate):", style='Subheading.TLabel').grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_lr_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_lr_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_lr_frame, text="0.05", variable=self.lightgbm_lr_005).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_lr_frame, text="0.1 ⭐", variable=self.lightgbm_lr_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_lr_frame, text="0.2", variable=self.lightgbm_lr_02).grid(row=0, column=2, padx=5)
+        ttk.Label(lgbm_lr_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgbm_lr_frame, textvariable=self.lightgbm_lr_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_lr_frame, text="(default: 0.1)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(lgbm_content_frame, text="💡 Lower = more conservative but needs more rounds",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # num_leaves (max number of leaves in one tree)
+        ttk.Label(lgbm_content_frame, text="Maximum Number of Leaves (num_leaves):", style='Subheading.TLabel').grid(row=21, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        lgbm_num_leaves_frame = ttk.Frame(lgbm_content_frame)
+        lgbm_num_leaves_frame.grid(row=22, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(lgbm_num_leaves_frame, text="31 ⭐", variable=self.lightgbm_num_leaves_31).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lgbm_num_leaves_frame, text="50 ⭐", variable=self.lightgbm_num_leaves_50).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lgbm_num_leaves_frame, text="70", variable=self.lightgbm_num_leaves_70).grid(row=0, column=2, padx=5)
+        ttk.Label(lgbm_num_leaves_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lgbm_num_leaves_frame, textvariable=self.lightgbm_num_leaves_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_num_leaves_frame, text="(default: 31, 50)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(lgbm_content_frame, text="💡 Controls tree complexity (2^max_depth in XGBoost terms)",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=23, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # CatBoost Hyperparameters - collapsible
         catboost_section, catboost_content = self._create_collapsible_section(content_frame,
@@ -4707,10 +5016,52 @@ class SpectralPredictApp:
         catboost_content_frame = ttk.Frame(catboost_frame)
         catboost_content_frame.pack(fill='both', expand=True)
 
+        # iterations (number of boosting rounds, equivalent to n_estimators)
+        ttk.Label(catboost_content_frame, text="Number of Boosting Rounds (iterations):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        catboost_iterations_frame = ttk.Frame(catboost_content_frame)
+        catboost_iterations_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_iterations_frame, text="100 ⭐", variable=self.catboost_iterations_100).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_iterations_frame, text="200 ⭐", variable=self.catboost_iterations_200).grid(row=0, column=1, padx=5)
+        ttk.Label(catboost_iterations_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(catboost_iterations_frame, textvariable=self.catboost_iterations_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_iterations_frame, text="(default: 100, 200)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(catboost_content_frame, text="💡 More iterations = better fit but slower training",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # learning_rate (step size shrinkage)
+        ttk.Label(catboost_content_frame, text="Learning Rate (learning_rate):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_lr_frame = ttk.Frame(catboost_content_frame)
+        catboost_lr_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_lr_frame, text="0.05 ⭐", variable=self.catboost_lr_005).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_lr_frame, text="0.1 ⭐", variable=self.catboost_lr_01).grid(row=0, column=1, padx=5)
+        ttk.Label(catboost_lr_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(catboost_lr_frame, textvariable=self.catboost_lr_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_lr_frame, text="(default: 0.05, 0.1)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(catboost_content_frame, text="💡 Lower = more conservative, higher = faster learning",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # depth (tree depth)
+        ttk.Label(catboost_content_frame, text="Tree Depth (depth):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_depth_frame = ttk.Frame(catboost_content_frame)
+        catboost_depth_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(catboost_depth_frame, text="4 ⭐", variable=self.catboost_depth_4).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(catboost_depth_frame, text="6 ⭐", variable=self.catboost_depth_6).grid(row=0, column=1, padx=5)
+        ttk.Label(catboost_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(catboost_depth_frame, textvariable=self.catboost_depth_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(catboost_depth_frame, text="(default: 4, 6)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(catboost_content_frame, text="💡 Deeper trees = more complex model, may overfit",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
         # l2_leaf_reg (L2 regularization coefficient)
-        ttk.Label(catboost_content_frame, text="L2 Leaf Regularization (l2_leaf_reg):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ttk.Label(catboost_content_frame, text="L2 Leaf Regularization (l2_leaf_reg):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         catboost_l2_leaf_reg_frame = ttk.Frame(catboost_content_frame)
-        catboost_l2_leaf_reg_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+        catboost_l2_leaf_reg_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(catboost_l2_leaf_reg_frame, text="1.0", variable=self.catboost_l2_leaf_reg_10).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(catboost_l2_leaf_reg_frame, text="3.0 ⭐", variable=self.catboost_l2_leaf_reg_30).grid(row=0, column=1, padx=5)
@@ -4721,9 +5072,9 @@ class SpectralPredictApp:
         ttk.Label(catboost_l2_leaf_reg_frame, text="(default: 3.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         # border_count (number of splits for numerical features)
-        ttk.Label(catboost_content_frame, text="Border Count (border_count):", style='Subheading.TLabel').grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(catboost_content_frame, text="Border Count (border_count):", style='Subheading.TLabel').grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         catboost_border_count_frame = ttk.Frame(catboost_content_frame)
-        catboost_border_count_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
+        catboost_border_count_frame.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(catboost_border_count_frame, text="32", variable=self.catboost_border_count_32).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(catboost_border_count_frame, text="64", variable=self.catboost_border_count_64).grid(row=0, column=1, padx=5)
@@ -4734,12 +5085,12 @@ class SpectralPredictApp:
         ttk.Label(catboost_border_count_frame, text="(default: 254)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         ttk.Label(catboost_content_frame, text="💡 Higher = more precise but slower",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # bagging_temperature (Bayesian bagging intensity)
-        ttk.Label(catboost_content_frame, text="Bagging Temperature (bagging_temperature):", style='Subheading.TLabel').grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(catboost_content_frame, text="Bagging Temperature (bagging_temperature):", style='Subheading.TLabel').grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         catboost_bagging_temp_frame = ttk.Frame(catboost_content_frame)
-        catboost_bagging_temp_frame.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=5)
+        catboost_bagging_temp_frame.grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(catboost_bagging_temp_frame, text="0.0", variable=self.catboost_bagging_temperature_00).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(catboost_bagging_temp_frame, text="0.5", variable=self.catboost_bagging_temperature_05).grid(row=0, column=1, padx=5)
@@ -4750,12 +5101,12 @@ class SpectralPredictApp:
         ttk.Label(catboost_bagging_temp_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         ttk.Label(catboost_content_frame, text="💡 Higher = more aggressive sampling",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # random_strength (randomness for scoring splits)
-        ttk.Label(catboost_content_frame, text="Random Strength (random_strength):", style='Subheading.TLabel').grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(catboost_content_frame, text="Random Strength (random_strength):", style='Subheading.TLabel').grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         catboost_random_strength_frame = ttk.Frame(catboost_content_frame)
-        catboost_random_strength_frame.grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=5)
+        catboost_random_strength_frame.grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(catboost_random_strength_frame, text="0.5", variable=self.catboost_random_strength_05).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(catboost_random_strength_frame, text="1.0 ⭐", variable=self.catboost_random_strength_10).grid(row=0, column=1, padx=5)
@@ -4781,10 +5132,50 @@ class SpectralPredictApp:
         mlp_content_frame = ttk.Frame(mlp_frame)
         mlp_content_frame.pack(fill='both', expand=True)
 
+        # Hidden layer sizes (network architecture)
+        ttk.Label(mlp_content_frame, text="Hidden Layer Sizes (hidden_layer_sizes):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        mlp_hidden_frame = ttk.Frame(mlp_content_frame)
+        mlp_hidden_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_hidden_frame, text="(64,) ⭐", variable=self.mlp_hidden_64).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mlp_hidden_frame, text="(128,64) ⭐", variable=self.mlp_hidden_128_64).grid(row=0, column=1, padx=5)
+        ttk.Label(mlp_hidden_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(mlp_hidden_frame, textvariable=self.mlp_hidden_custom, width=15).grid(row=0, column=3, padx=5)
+        ttk.Label(mlp_hidden_frame, text='(e.g., "100,50,25")', style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 Tuple of hidden layer sizes, e.g., (64,) = 1 layer with 64 neurons",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Alpha (L2 regularization penalty)
+        ttk.Label(mlp_content_frame, text="L2 Regularization (alpha):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_alpha_frame = ttk.Frame(mlp_content_frame)
+        mlp_alpha_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_alpha_frame, text="0.001 ⭐", variable=self.mlp_alpha_1e3).grid(row=0, column=0, padx=5)
+        ttk.Label(mlp_alpha_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
+        ttk.Entry(mlp_alpha_frame, textvariable=self.mlp_alpha_custom, width=10).grid(row=0, column=2, padx=5)
+        ttk.Label(mlp_alpha_frame, text="(default: 0.001)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 Higher values = more regularization (prevents overfitting)",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Learning rate initial value
+        ttk.Label(mlp_content_frame, text="Initial Learning Rate (learning_rate_init):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_lr_init_frame = ttk.Frame(mlp_content_frame)
+        mlp_lr_init_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(mlp_lr_init_frame, text="0.001 ⭐", variable=self.mlp_lr_init_1e3).grid(row=0, column=0, padx=5)
+        ttk.Label(mlp_lr_init_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
+        ttk.Entry(mlp_lr_init_frame, textvariable=self.mlp_lr_init_custom, width=10).grid(row=0, column=2, padx=5)
+        ttk.Label(mlp_lr_init_frame, text="(default: 0.001)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        ttk.Label(mlp_content_frame, text="💡 Controls step size for weight updates during training",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
         # Activation function
-        ttk.Label(mlp_content_frame, text="Activation Function:", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ttk.Label(mlp_content_frame, text="Activation Function:", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         mlp_activation_frame = ttk.Frame(mlp_content_frame)
-        mlp_activation_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+        mlp_activation_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(mlp_activation_frame, text="relu ⭐", variable=self.mlp_activation_relu).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(mlp_activation_frame, text="tanh", variable=self.mlp_activation_tanh).grid(row=0, column=1, padx=5)
@@ -4793,12 +5184,12 @@ class SpectralPredictApp:
         ttk.Label(mlp_activation_frame, text="(default: relu)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         ttk.Label(mlp_content_frame, text="💡 relu = rectified linear, tanh = hyperbolic tangent",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Solver
-        ttk.Label(mlp_content_frame, text="Weight Optimization Solver:", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(mlp_content_frame, text="Weight Optimization Solver:", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         mlp_solver_frame = ttk.Frame(mlp_content_frame)
-        mlp_solver_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+        mlp_solver_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(mlp_solver_frame, text="adam ⭐", variable=self.mlp_solver_adam).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(mlp_solver_frame, text="sgd", variable=self.mlp_solver_sgd).grid(row=0, column=1, padx=5)
@@ -4806,12 +5197,12 @@ class SpectralPredictApp:
         ttk.Label(mlp_solver_frame, text="(default: adam)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
 
         ttk.Label(mlp_content_frame, text="💡 adam is usually best, sgd allows momentum parameter",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Batch size
-        ttk.Label(mlp_content_frame, text="Batch Size (mini-batches):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(mlp_content_frame, text="Batch Size (mini-batches):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         mlp_batch_frame = ttk.Frame(mlp_content_frame)
-        mlp_batch_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+        mlp_batch_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(mlp_batch_frame, text="auto ⭐", variable=self.mlp_batch_auto).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(mlp_batch_frame, text="32", variable=self.mlp_batch_32).grid(row=0, column=1, padx=5)
@@ -4821,12 +5212,12 @@ class SpectralPredictApp:
         ttk.Label(mlp_batch_frame, text="(default: auto)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         ttk.Label(mlp_content_frame, text="💡 auto = min(200, n_samples)",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Learning rate schedule
-        ttk.Label(mlp_content_frame, text="Learning Rate Schedule:", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(mlp_content_frame, text="Learning Rate Schedule:", style='Subheading.TLabel').grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         mlp_lr_sched_frame = ttk.Frame(mlp_content_frame)
-        mlp_lr_sched_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
+        mlp_lr_sched_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(mlp_lr_sched_frame, text="constant ⭐", variable=self.mlp_lr_schedule_constant).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(mlp_lr_sched_frame, text="invscaling", variable=self.mlp_lr_schedule_invscaling).grid(row=0, column=1, padx=5)
@@ -4834,12 +5225,12 @@ class SpectralPredictApp:
         ttk.Label(mlp_lr_sched_frame, text="(default: constant)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
 
         ttk.Label(mlp_content_frame, text="💡 constant = fixed rate, adaptive = reduces when loss plateaus",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Momentum (for SGD solver)
-        ttk.Label(mlp_content_frame, text="Momentum (for SGD solver only):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(mlp_content_frame, text="Momentum (for SGD solver only):", style='Subheading.TLabel').grid(row=21, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         mlp_momentum_frame = ttk.Frame(mlp_content_frame)
-        mlp_momentum_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
+        mlp_momentum_frame.grid(row=22, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(mlp_momentum_frame, text="0.7", variable=self.mlp_momentum_07).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(mlp_momentum_frame, text="0.8", variable=self.mlp_momentum_08).grid(row=0, column=1, padx=5)
@@ -4849,19 +5240,19 @@ class SpectralPredictApp:
         ttk.Label(mlp_momentum_frame, text="(default: 0.9)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         ttk.Label(mlp_content_frame, text="💡 Only used when solver='sgd', should be in [0, 1]",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=23, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Max Iterations
-        ttk.Label(mlp_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(mlp_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=24, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         mlp_maxiter_frame = ttk.Frame(mlp_content_frame)
-        mlp_maxiter_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
+        mlp_maxiter_frame.grid(row=25, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Label(mlp_maxiter_frame, text="Max iterations:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
         ttk.Spinbox(mlp_maxiter_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=10).grid(row=0, column=1, padx=5)
         ttk.Label(mlp_maxiter_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
 
         ttk.Label(mlp_content_frame, text="💡 Maximum number of training iterations. Higher values may improve convergence but increase training time.",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=26, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # SVR/SVM Hyperparameters - collapsible
         svr_section, svr_content = self._create_collapsible_section(content_frame,
@@ -4879,10 +5270,50 @@ class SpectralPredictApp:
         svr_content_frame = ttk.Frame(svr_frame)
         svr_content_frame.pack(fill='both', expand=True)
 
+        # Kernel type
+        ttk.Label(svr_content_frame, text="Kernel Type (kernel):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        svr_kernel_frame = ttk.Frame(svr_content_frame)
+        svr_kernel_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_kernel_frame, text="rbf ⭐", variable=self.svr_kernel_rbf).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_kernel_frame, text="linear ⭐", variable=self.svr_kernel_linear).grid(row=0, column=1, padx=5)
+        ttk.Label(svr_kernel_frame, text="(default: rbf, linear)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 rbf = radial basis function (non-linear), linear = linear kernel",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # C (regularization parameter)
+        ttk.Label(svr_content_frame, text="Regularization Parameter (C):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_C_frame = ttk.Frame(svr_content_frame)
+        svr_C_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_C_frame, text="1.0 ⭐", variable=self.svr_C_10).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_C_frame, text="10.0 ⭐", variable=self.svr_C_100).grid(row=0, column=1, padx=5)
+        ttk.Label(svr_C_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(svr_C_frame, textvariable=self.svr_C_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(svr_C_frame, text="(default: 1.0, 10.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 Higher C = less regularization (may overfit)",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
+        # Gamma (kernel coefficient)
+        ttk.Label(svr_content_frame, text="Gamma (kernel coefficient):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_gamma_frame = ttk.Frame(svr_content_frame)
+        svr_gamma_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(svr_gamma_frame, text="scale ⭐", variable=self.svr_gamma_scale).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(svr_gamma_frame, text="auto", variable=self.svr_gamma_auto).grid(row=0, column=1, padx=5)
+        ttk.Label(svr_gamma_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(svr_gamma_frame, textvariable=self.svr_gamma_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(svr_gamma_frame, text="(default: scale)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        ttk.Label(svr_content_frame, text="💡 scale = 1/(n_features * X.var()), auto = 1/n_features",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+
         # Epsilon
-        ttk.Label(svr_content_frame, text="Epsilon (epsilon-insensitive tube width):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ttk.Label(svr_content_frame, text="Epsilon (epsilon-insensitive tube width):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         svr_epsilon_frame = ttk.Frame(svr_content_frame)
-        svr_epsilon_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
+        svr_epsilon_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(svr_epsilon_frame, text="0.01", variable=self.svr_epsilon_001).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(svr_epsilon_frame, text="0.05", variable=self.svr_epsilon_005).grid(row=0, column=1, padx=5)
@@ -4892,12 +5323,12 @@ class SpectralPredictApp:
         ttk.Label(svr_epsilon_frame, text="(default: 0.1)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         ttk.Label(svr_content_frame, text="💡 Width of epsilon-insensitive tube",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Degree (for polynomial kernel)
-        ttk.Label(svr_content_frame, text="Degree (for polynomial kernel only):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(svr_content_frame, text="Degree (for polynomial kernel only):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         svr_degree_frame = ttk.Frame(svr_content_frame)
-        svr_degree_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
+        svr_degree_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(svr_degree_frame, text="2", variable=self.svr_degree_2).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(svr_degree_frame, text="3 ⭐", variable=self.svr_degree_3).grid(row=0, column=1, padx=5)
@@ -4906,12 +5337,12 @@ class SpectralPredictApp:
         ttk.Label(svr_degree_frame, text="(default: 3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         ttk.Label(svr_content_frame, text="💡 Only used with kernel='poly'",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Coef0 (independent term in kernel)
-        ttk.Label(svr_content_frame, text="Coef0 (independent term in kernel function):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(svr_content_frame, text="Coef0 (independent term in kernel function):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         svr_coef0_frame = ttk.Frame(svr_content_frame)
-        svr_coef0_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
+        svr_coef0_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(svr_coef0_frame, text="0.0 ⭐", variable=self.svr_coef0_00).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(svr_coef0_frame, text="0.5", variable=self.svr_coef0_05).grid(row=0, column=1, padx=5)
@@ -4920,19 +5351,19 @@ class SpectralPredictApp:
         ttk.Label(svr_coef0_frame, text="(default: 0.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         ttk.Label(svr_content_frame, text="💡 Used with poly and sigmoid kernels",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Shrinking heuristic
-        ttk.Label(svr_content_frame, text="Shrinking Heuristic:", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        ttk.Label(svr_content_frame, text="Shrinking Heuristic:", style='Subheading.TLabel').grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
         svr_shrinking_frame = ttk.Frame(svr_content_frame)
-        svr_shrinking_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
+        svr_shrinking_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(svr_shrinking_frame, text="True ⭐", variable=self.svr_shrinking_true).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(svr_shrinking_frame, text="False", variable=self.svr_shrinking_false).grid(row=0, column=1, padx=5)
         ttk.Label(svr_shrinking_frame, text="(default: True)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
 
         ttk.Label(svr_content_frame, text="💡 Can speed up training",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
@@ -5627,6 +6058,7 @@ class SpectralPredictApp:
         # Model Type
         ttk.Label(model_frame, text="Model Type:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         self.refine_model_type = tk.StringVar(value='PLS')
+        self.refine_model_type.trace_add('write', self._on_refine_model_changed)  # Bind callback for dynamic hyperparameter display
         self.refine_model_combo = ttk.Combobox(model_frame, textvariable=self.refine_model_type, width=25, state='readonly')
         # Use central model registry for consistency
         if get_supported_models is not None:
@@ -5644,6 +6076,321 @@ class SpectralPredictApp:
         task_frame.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Radiobutton(task_frame, text="Regression", variable=self.refine_task_type, value='regression').pack(side='left', padx=5)
         ttk.Radiobutton(task_frame, text="Classification", variable=self.refine_task_type, value='classification').pack(side='left', padx=5)
+
+        # === Model Hyperparameters (Dynamic per Model) ===
+        hyperparams_outer_frame = ttk.LabelFrame(content_frame, text="Model Hyperparameters", padding="20")
+        hyperparams_outer_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Store all hyperparameter frames for show/hide logic
+        self.refine_hyperparam_frames = {}
+
+        # === PLS Hyperparameters ===
+        self.refine_hyperparam_frames['PLS'] = ttk.Frame(hyperparams_outer_frame)
+        pls_frame = self.refine_hyperparam_frames['PLS']
+
+        ttk.Label(pls_frame, text="Number of Components:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Spinbox(pls_frame, from_=1, to=30, textvariable=self.refine_pls_n_components, width=12).grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(pls_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(pls_frame, from_=100, to=5000, increment=100, textvariable=self.refine_pls_max_iter, width=12).grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(pls_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        tol_combo = ttk.Combobox(pls_frame, textvariable=self.refine_pls_tol, width=12, state='readonly')
+        tol_combo['values'] = ['1e-7', '1e-6', '1e-5', '1e-4']
+        tol_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        # === Ridge Hyperparameters ===
+        self.refine_hyperparam_frames['Ridge'] = ttk.Frame(hyperparams_outer_frame)
+        ridge_frame = self.refine_hyperparam_frames['Ridge']
+
+        ttk.Label(ridge_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        alpha_combo = ttk.Combobox(ridge_frame, textvariable=self.refine_ridge_alpha, width=12, state='readonly')
+        alpha_combo['values'] = ['0.001', '0.01', '0.1', '1.0', '10.0', '100.0']
+        alpha_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(ridge_frame, text="Solver:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        solver_combo = ttk.Combobox(ridge_frame, textvariable=self.refine_ridge_solver, width=12, state='readonly')
+        solver_combo['values'] = ['auto', 'svd', 'cholesky', 'lsqr', 'sag']
+        solver_combo.grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(ridge_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        tol_combo = ttk.Combobox(ridge_frame, textvariable=self.refine_ridge_tol, width=12, state='readonly')
+        tol_combo['values'] = ['1e-5', '1e-4', '1e-3']
+        tol_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        # === Lasso Hyperparameters ===
+        self.refine_hyperparam_frames['Lasso'] = ttk.Frame(hyperparams_outer_frame)
+        lasso_frame = self.refine_hyperparam_frames['Lasso']
+
+        ttk.Label(lasso_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        alpha_combo = ttk.Combobox(lasso_frame, textvariable=self.refine_lasso_alpha, width=12, state='readonly')
+        alpha_combo['values'] = ['0.001', '0.01', '0.1', '1.0', '10.0']
+        alpha_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lasso_frame, text="Selection Method:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        selection_combo = ttk.Combobox(lasso_frame, textvariable=self.refine_lasso_selection, width=12, state='readonly')
+        selection_combo['values'] = ['cyclic', 'random']
+        selection_combo.grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lasso_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        tol_combo = ttk.Combobox(lasso_frame, textvariable=self.refine_lasso_tol, width=12, state='readonly')
+        tol_combo['values'] = ['1e-5', '1e-4', '1e-3']
+        tol_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lasso_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lasso_frame, from_=100, to=5000, increment=100, textvariable=self.refine_lasso_max_iter, width=12).grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        # === ElasticNet Hyperparameters ===
+        self.refine_hyperparam_frames['ElasticNet'] = ttk.Frame(hyperparams_outer_frame)
+        elasticnet_frame = self.refine_hyperparam_frames['ElasticNet']
+
+        ttk.Label(elasticnet_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        alpha_combo = ttk.Combobox(elasticnet_frame, textvariable=self.refine_elasticnet_alpha, width=12, state='readonly')
+        alpha_combo['values'] = ['0.01', '0.1', '1.0', '10.0']
+        alpha_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(elasticnet_frame, text="L1 Ratio:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        l1_combo = ttk.Combobox(elasticnet_frame, textvariable=self.refine_elasticnet_l1_ratio, width=12, state='readonly')
+        l1_combo['values'] = ['0.1', '0.3', '0.5', '0.7', '0.9']
+        l1_combo.grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(elasticnet_frame, text="Selection Method:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        selection_combo = ttk.Combobox(elasticnet_frame, textvariable=self.refine_elasticnet_selection, width=12, state='readonly')
+        selection_combo['values'] = ['cyclic', 'random']
+        selection_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(elasticnet_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        tol_combo = ttk.Combobox(elasticnet_frame, textvariable=self.refine_elasticnet_tol, width=12, state='readonly')
+        tol_combo['values'] = ['1e-5', '1e-4', '1e-3']
+        tol_combo.grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(elasticnet_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(elasticnet_frame, from_=100, to=5000, increment=100, textvariable=self.refine_elasticnet_max_iter, width=12).grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        # === RandomForest Hyperparameters ===
+        self.refine_hyperparam_frames['RandomForest'] = ttk.Frame(hyperparams_outer_frame)
+        rf_frame = self.refine_hyperparam_frames['RandomForest']
+
+        ttk.Label(rf_frame, text="Number of Trees:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Spinbox(rf_frame, from_=50, to=1000, increment=50, textvariable=self.refine_rf_n_estimators, width=12).grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Max Depth:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        depth_combo = ttk.Combobox(rf_frame, textvariable=self.refine_rf_max_depth, width=12, state='readonly')
+        depth_combo['values'] = ['None', '10', '20', '30', '50']
+        depth_combo.grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Min Samples Split:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(rf_frame, from_=2, to=50, textvariable=self.refine_rf_min_samples_split, width=12).grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Min Samples Leaf:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(rf_frame, from_=1, to=20, textvariable=self.refine_rf_min_samples_leaf, width=12).grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Max Features:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        features_combo = ttk.Combobox(rf_frame, textvariable=self.refine_rf_max_features, width=12, state='readonly')
+        features_combo['values'] = ['sqrt', 'log2', 'None']
+        features_combo.grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Bootstrap Sampling:", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Checkbutton(rf_frame, text="Enable Bootstrap", variable=self.refine_rf_bootstrap).grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Max Leaf Nodes:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        leafnodes_combo = ttk.Combobox(rf_frame, textvariable=self.refine_rf_max_leaf_nodes, width=12, state='readonly')
+        leafnodes_combo['values'] = ['None', '50', '100', '200', '500']
+        leafnodes_combo.grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(rf_frame, text="Min Impurity Decrease:", style='Subheading.TLabel').grid(row=14, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(rf_frame, from_=0.0, to=1.0, increment=0.01, textvariable=self.refine_rf_min_impurity_decrease, width=12, format="%.3f").grid(row=15, column=0, sticky=tk.W, pady=5)
+
+        # === XGBoost Hyperparameters ===
+        self.refine_hyperparam_frames['XGBoost'] = ttk.Frame(hyperparams_outer_frame)
+        xgb_frame = self.refine_hyperparam_frames['XGBoost']
+
+        ttk.Label(xgb_frame, text="Number of Estimators:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Spinbox(xgb_frame, from_=50, to=1000, increment=50, textvariable=self.refine_xgb_n_estimators, width=12).grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Learning Rate:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.refine_xgb_learning_rate, width=12, format="%.2f").grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Max Depth:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=1, to=20, textvariable=self.refine_xgb_max_depth, width=12).grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Subsample Ratio:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=0.1, to=1.0, increment=0.1, textvariable=self.refine_xgb_subsample, width=12, format="%.1f").grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Column Sample Ratio:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=0.1, to=1.0, increment=0.1, textvariable=self.refine_xgb_colsample_bytree, width=12, format="%.1f").grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Reg Alpha (L1):", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_xgb_reg_alpha, width=12, format="%.1f").grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Reg Lambda (L2):", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_xgb_reg_lambda, width=12, format="%.1f").grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Min Child Weight:", style='Subheading.TLabel').grid(row=14, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=1, to=20, textvariable=self.refine_xgb_min_child_weight, width=12).grid(row=15, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(xgb_frame, text="Gamma (Min Split Loss):", style='Subheading.TLabel').grid(row=16, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(xgb_frame, from_=0.0, to=5.0, increment=0.1, textvariable=self.refine_xgb_gamma, width=12, format="%.1f").grid(row=17, column=0, sticky=tk.W, pady=5)
+
+        # === LightGBM Hyperparameters ===
+        self.refine_hyperparam_frames['LightGBM'] = ttk.Frame(hyperparams_outer_frame)
+        lgbm_frame = self.refine_hyperparam_frames['LightGBM']
+
+        ttk.Label(lgbm_frame, text="Number of Estimators:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Spinbox(lgbm_frame, from_=50, to=1000, increment=50, textvariable=self.refine_lgbm_n_estimators, width=12).grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Learning Rate:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.refine_lgbm_learning_rate, width=12, format="%.2f").grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Num Leaves:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=10, to=200, increment=5, textvariable=self.refine_lgbm_num_leaves, width=12).grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Max Depth (-1 = no limit):", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=-1, to=50, textvariable=self.refine_lgbm_max_depth, width=12).grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Min Child Samples:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=1, to=200, increment=5, textvariable=self.refine_lgbm_min_child_samples, width=12).grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Subsample Ratio:", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=0.1, to=1.0, increment=0.1, textvariable=self.refine_lgbm_subsample, width=12, format="%.1f").grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Column Sample Ratio:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=0.1, to=1.0, increment=0.1, textvariable=self.refine_lgbm_colsample_bytree, width=12, format="%.1f").grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Reg Alpha (L1):", style='Subheading.TLabel').grid(row=14, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_lgbm_reg_alpha, width=12, format="%.1f").grid(row=15, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lgbm_frame, text="Reg Lambda (L2):", style='Subheading.TLabel').grid(row=16, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(lgbm_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_lgbm_reg_lambda, width=12, format="%.1f").grid(row=17, column=0, sticky=tk.W, pady=5)
+
+        # === CatBoost Hyperparameters ===
+        self.refine_hyperparam_frames['CatBoost'] = ttk.Frame(hyperparams_outer_frame)
+        catboost_frame = self.refine_hyperparam_frames['CatBoost']
+
+        ttk.Label(catboost_frame, text="Iterations:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Spinbox(catboost_frame, from_=50, to=1000, increment=50, textvariable=self.refine_catboost_iterations, width=12).grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Learning Rate:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.refine_catboost_learning_rate, width=12, format="%.2f").grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Depth:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=1, to=16, textvariable=self.refine_catboost_depth, width=12).grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="L2 Leaf Regularization:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=0.1, to=30.0, increment=0.5, textvariable=self.refine_catboost_l2_leaf_reg, width=12, format="%.1f").grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Border Count:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=1, to=255, increment=1, textvariable=self.refine_catboost_border_count, width=12).grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Bagging Temperature:", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_catboost_bagging_temperature, width=12, format="%.1f").grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Random Strength:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_catboost_random_strength, width=12, format="%.1f").grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        # === SVR Hyperparameters ===
+        self.refine_hyperparam_frames['SVR'] = ttk.Frame(hyperparams_outer_frame)
+        svr_frame = self.refine_hyperparam_frames['SVR']
+
+        ttk.Label(svr_frame, text="Kernel:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        kernel_combo = ttk.Combobox(svr_frame, textvariable=self.refine_svr_kernel, width=12, state='readonly')
+        kernel_combo['values'] = ['rbf', 'linear', 'poly', 'sigmoid']
+        kernel_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(svr_frame, text="C (Regularization):", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(svr_frame, from_=0.01, to=100.0, increment=0.5, textvariable=self.refine_svr_C, width=12, format="%.2f").grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(svr_frame, text="Gamma:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        gamma_combo = ttk.Combobox(svr_frame, textvariable=self.refine_svr_gamma, width=12, state='readonly')
+        gamma_combo['values'] = ['scale', 'auto']
+        gamma_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(svr_frame, text="Epsilon:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(svr_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.refine_svr_epsilon, width=12, format="%.2f").grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(svr_frame, text="Degree (for poly kernel):", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(svr_frame, from_=1, to=10, textvariable=self.refine_svr_degree, width=12).grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(svr_frame, text="Coef0 (kernel independent term):", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(svr_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_svr_coef0, width=12, format="%.1f").grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(svr_frame, text="Shrinking Heuristic:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Checkbutton(svr_frame, text="Enable Shrinking", variable=self.refine_svr_shrinking).grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        # === MLP Hyperparameters ===
+        self.refine_hyperparam_frames['MLP'] = ttk.Frame(hyperparams_outer_frame)
+        mlp_frame = self.refine_hyperparam_frames['MLP']
+
+        ttk.Label(mlp_frame, text="Hidden Layer Sizes:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        layers_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_hidden_layer_sizes, width=12, state='readonly')
+        layers_combo['values'] = ['(32,)', '(64,)', '(128,)', '(64,32)', '(128,64)', '(256,128)']
+        layers_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Alpha (L2 Regularization):", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        alpha_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_alpha, width=12, state='readonly')
+        alpha_combo['values'] = ['0.0001', '0.001', '0.01', '0.1']
+        alpha_combo.grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Activation Function:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        activation_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_activation, width=12, state='readonly')
+        activation_combo['values'] = ['relu', 'tanh', 'logistic', 'identity']
+        activation_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Solver:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        solver_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_solver, width=12, state='readonly')
+        solver_combo['values'] = ['adam', 'sgd', 'lbfgs']
+        solver_combo.grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Learning Rate (Initial):", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        lr_init_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_learning_rate_init, width=12, state='readonly')
+        lr_init_combo['values'] = ['0.0001', '0.0005', '0.001', '0.005', '0.01']
+        lr_init_combo.grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Batch Size:", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        batch_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_batch_size, width=12, state='readonly')
+        batch_combo['values'] = ['auto', '32', '64', '128', '256']
+        batch_combo.grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Learning Rate Schedule:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        lr_schedule_combo = ttk.Combobox(mlp_frame, textvariable=self.refine_mlp_learning_rate, width=12, state='readonly')
+        lr_schedule_combo['values'] = ['constant', 'invscaling', 'adaptive']
+        lr_schedule_combo.grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Momentum (for SGD):", style='Subheading.TLabel').grid(row=14, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(mlp_frame, from_=0.1, to=1.0, increment=0.05, textvariable=self.refine_mlp_momentum, width=12, format="%.2f").grid(row=15, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(mlp_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=16, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(mlp_frame, from_=100, to=1000, increment=50, textvariable=self.refine_mlp_max_iter, width=12).grid(row=17, column=0, sticky=tk.W, pady=5)
+
+        # === NeuralBoosted Hyperparameters ===
+        self.refine_hyperparam_frames['NeuralBoosted'] = ttk.Frame(hyperparams_outer_frame)
+        neuralboosted_frame = self.refine_hyperparam_frames['NeuralBoosted']
+
+        ttk.Label(neuralboosted_frame, text="Number of Estimators:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Spinbox(neuralboosted_frame, from_=10, to=500, increment=10, textvariable=self.refine_neuralboosted_n_estimators, width=12).grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(neuralboosted_frame, text="Learning Rate:", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(neuralboosted_frame, from_=0.01, to=1.0, increment=0.01, textvariable=self.refine_neuralboosted_learning_rate, width=12, format="%.2f").grid(row=3, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(neuralboosted_frame, text="Hidden Layer Size:", style='Subheading.TLabel').grid(row=4, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(neuralboosted_frame, from_=1, to=20, textvariable=self.refine_neuralboosted_hidden_layer_size, width=12).grid(row=5, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(neuralboosted_frame, text="Activation:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        activation_combo = ttk.Combobox(neuralboosted_frame, textvariable=self.refine_neuralboosted_activation, width=12, state='readonly')
+        activation_combo['values'] = ['tanh', 'relu', 'identity', 'logistic']
+        activation_combo.grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(neuralboosted_frame, text="Early Stopping:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Checkbutton(neuralboosted_frame, text="Enable Early Stopping", variable=self.refine_neuralboosted_early_stopping).grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        # Initially hide all hyperparameter frames - will show the one matching selected model
+        for frame in self.refine_hyperparam_frames.values():
+            frame.grid_forget()
+
+        # Show hyperparameters for the default model (PLS)
+        if 'PLS' in self.refine_hyperparam_frames:
+            self.refine_hyperparam_frames['PLS'].grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
 
         # === Training Parameters ===
         training_frame = ttk.LabelFrame(content_frame, text="Training Parameters", padding="20")
@@ -6315,6 +7062,19 @@ class SpectralPredictApp:
 
         # Refresh tier selection to use correct model set
         self._on_tier_changed()
+
+    def _on_refine_model_changed(self, *args):
+        """Handle model type changes in Model Development tab - show/hide appropriate hyperparameter section."""
+        selected_model = self.refine_model_type.get()
+
+        # Hide all hyperparameter frames
+        if hasattr(self, 'refine_hyperparam_frames'):
+            for frame in self.refine_hyperparam_frames.values():
+                frame.grid_forget()
+
+            # Show the frame for the selected model
+            if selected_model in self.refine_hyperparam_frames:
+                self.refine_hyperparam_frames[selected_model].grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
 
     def _on_refine_task_type_changed(self):
         """Handle task type changes in Refine tab - update model dropdown to show only appropriate models."""
@@ -8862,6 +9622,9 @@ class SpectralPredictApp:
                 text=f"Detection complete: {n_high} high confidence, {n_moderate} moderate, {n_low} low confidence outliers"
             )
 
+            # Run imbalance detection
+            self._detect_and_display_imbalance()
+
             # Outlier detection complete - results shown in UI
 
         except Exception as e:
@@ -9588,6 +10351,225 @@ class SpectralPredictApp:
             messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
 
     # ========== END OUTLIER DETECTION METHODS ==========
+
+    # ========== IMBALANCE HANDLING METHODS ==========
+
+    def _detect_and_display_imbalance(self):
+        """Detect class/target imbalance and update UI with recommendations."""
+        if self.y is None:
+            return
+
+        try:
+            # Import imbalance detection functions
+            import sys
+            from pathlib import Path
+            src_path = Path(__file__).parent / "src"
+            if str(src_path) not in sys.path:
+                sys.path.insert(0, str(src_path))
+
+            from spectral_predict.imbalance import (
+                detect_class_imbalance,
+                detect_regression_imbalance,
+                recommend_imbalance_method
+            )
+
+            task_type_setting = self.task_type.get()
+            y_values = self.y.values
+
+            # Auto-detect task type if set to "auto"
+            if task_type_setting == "auto":
+                # Auto-detect task type (same logic as analysis)
+                if self.y.nunique() == 2:
+                    task_type = "classification"
+                elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                    task_type = "classification"
+                else:
+                    task_type = "regression"
+            else:
+                task_type = task_type_setting
+
+            # Update method dropdown based on task type
+            if task_type == 'classification':
+                classification_methods = [
+                    'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                    'tomek_links', 'smote_tomek', 'class_weight'
+                ]
+                self.imbalance_method_combo['values'] = classification_methods
+                # Set default if current selection is not valid
+                if self.imbalance_method.get() not in classification_methods:
+                    self.imbalance_method.set('smote')
+            else:  # regression
+                regression_methods = ['undersample', 'binning', 'rare_boost', 'balanced']
+                self.imbalance_method_combo['values'] = regression_methods
+                # Set default if current selection is not valid
+                if self.imbalance_method.get() not in regression_methods:
+                    self.imbalance_method.set('undersample')
+
+            if task_type == 'classification':
+                # Detect class imbalance
+                info = detect_class_imbalance(y_values)
+                recommendation = recommend_imbalance_method(y_values, task_type='classification')
+
+                # Build summary text
+                class_counts_str = ', '.join([f"{k}: {v}" for k, v in info['class_counts'].items()])
+                summary = f"Class distribution: {class_counts_str}\n"
+                summary += f"Imbalance ratio: {info['imbalance_ratio']:.2f}:1"
+
+                if info['majority_class'] is not None:
+                    summary += f" (majority: {info['majority_class']}, minority: {info['minority_class']})"
+
+                self.dist_summary_label.config(text=summary)
+
+                # Show warning if imbalanced
+                if info['is_imbalanced']:
+                    severity_colors = {
+                        'moderate': '#ff9800',  # Orange
+                        'severe': '#ff6b6b',    # Red
+                        'extreme': '#d32f2f'    # Dark red
+                    }
+                    warning_text = f"⚠ {info['severity'].upper()} IMBALANCE DETECTED"
+                    self.imbalance_warning_label.config(
+                        text=warning_text,
+                        foreground=severity_colors.get(info['severity'], '#ff6b6b')
+                    )
+
+                    # Show recommendation
+                    rec_text = f"Recommendation: {recommendation['reason']}"
+                    if recommendation['recommended_method']:
+                        rec_text += f"\nSuggested method: {recommendation['recommended_method']}"
+                        # Auto-select recommended method
+                        self.imbalance_method.set(recommendation['recommended_method'])
+                        self._update_imbalance_method_description(None)
+
+                    if recommendation.get('warnings'):
+                        rec_text += "\n\nWarnings:\n" + "\n".join(f"• {w}" for w in recommendation['warnings'])
+
+                    self.imbalance_recommendation_label.config(text=rec_text)
+                else:
+                    self.imbalance_warning_label.config(text="✓ Data is balanced")
+                    self.imbalance_recommendation_label.config(text=info['recommendation'])
+
+            else:  # regression
+                # Detect target imbalance
+                info = detect_regression_imbalance(y_values)
+                recommendation = recommend_imbalance_method(y_values, task_type='regression')
+
+                # Build summary text
+                summary = f"Target range: {info['target_range'][0]:.2f} to {info['target_range'][1]:.2f}\n"
+                summary += f"Number of samples: {info['n_samples']}\n"
+                summary += f"Coverage metric: {info['coverage']:.2f}"
+
+                self.dist_summary_label.config(text=summary)
+
+                # Show warning if imbalanced
+                if info['is_imbalanced']:
+                    warning_text = f"⚠ {info['severity'].upper()} TARGET IMBALANCE"
+                    self.imbalance_warning_label.config(text=warning_text, foreground='#ff9800')
+
+                    # Show recommendation
+                    rec_text = f"Recommendation: {recommendation['reason']}"
+                    if recommendation['recommended_method']:
+                        rec_text += f"\nSuggested method: {recommendation['recommended_method']}"
+                        # Auto-select recommended method
+                        self.imbalance_method.set(recommendation['recommended_method'])
+                        self._update_imbalance_method_description(None)
+
+                    if recommendation.get('warnings'):
+                        rec_text += "\n\nWarnings:\n" + "\n".join(f"• {w}" for w in recommendation['warnings'])
+
+                    self.imbalance_recommendation_label.config(text=rec_text)
+                else:
+                    self.imbalance_warning_label.config(text="✓ Target is balanced")
+                    self.imbalance_recommendation_label.config(text=info['recommendation'])
+
+        except Exception as e:
+            self.dist_summary_label.config(text=f"Error detecting imbalance: {str(e)}")
+
+    def _toggle_imbalance_controls(self):
+        """Enable/disable imbalance handling controls based on checkbox."""
+        enabled = self.enable_imbalance_handling.get()
+        state = 'normal' if enabled else 'disabled'
+
+        # Enable/disable all imbalance controls
+        self.imbalance_method_combo.config(state='readonly' if enabled else 'disabled')
+
+        # Update parameter controls based on current method
+        if enabled:
+            self._update_imbalance_method_description(None)
+        else:
+            # Disable all parameter controls
+            for widget_name in ['k_neighbors_spin', 'n_bins_spin', 'boost_factor_spin']:
+                self.imbalance_widgets[widget_name].config(state='disabled')
+
+    def _update_imbalance_method_description(self, event):
+        """Update method description and show/hide relevant parameters."""
+        method = self.imbalance_method.get()
+
+        # Method descriptions
+        descriptions = {
+            'smote': 'SMOTE - Synthetic oversampling (standard)',
+            'adasyn': 'ADASYN - Adaptive synthetic sampling',
+            'borderline_smote': 'BorderlineSMOTE - Focus on borderline cases',
+            'random_undersampler': 'Random undersampling of majority class',
+            'tomek_links': 'Tomek Links - Remove boundary noise',
+            'smote_tomek': 'SMOTETomek - Combined over/undersampling',
+            'class_weight': 'Class weights - No resampling, weight loss function',
+            'undersample': 'Undersample over-represented ranges (ideal for many zeros)',
+            'binning': 'Target binning - Weight by target frequency (regression)',
+            'rare_boost': 'Rare-value boost - Emphasize uncommon targets (regression)',
+            'balanced': 'Balanced - Simple inverse frequency (regression)'
+        }
+
+        self.imbalance_method_desc.config(text=descriptions.get(method, ''))
+
+        # Show/hide parameters based on method
+        # First hide all
+        for widget_name in ['k_neighbors_label', 'k_neighbors_spin', 'k_neighbors_desc',
+                           'n_bins_label', 'n_bins_spin', 'boost_factor_label', 'boost_factor_spin']:
+            widget = self.imbalance_widgets[widget_name]
+            widget.grid_remove()
+
+        # Show relevant parameters
+        enabled = self.enable_imbalance_handling.get()
+        if enabled:
+            if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek']:
+                # Show k_neighbors parameter
+                self.imbalance_widgets['k_neighbors_label'].grid()
+                self.imbalance_widgets['k_neighbors_spin'].config(state='normal')
+                self.imbalance_widgets['k_neighbors_spin'].grid()
+                self.imbalance_widgets['k_neighbors_desc'].grid()
+
+            elif method in ['undersample', 'binning']:
+                # Show n_bins parameter (for both undersample and binning)
+                self.imbalance_widgets['n_bins_label'].grid(row=0, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+                self.imbalance_widgets['n_bins_spin'].config(state='normal')
+                self.imbalance_widgets['n_bins_spin'].grid(row=0, column=1, sticky=tk.W)
+
+            elif method == 'rare_boost':
+                # Show boost_factor parameter
+                self.imbalance_widgets['boost_factor_label'].grid(row=0, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+                self.imbalance_widgets['boost_factor_spin'].config(state='normal')
+                self.imbalance_widgets['boost_factor_spin'].grid(row=0, column=1, sticky=tk.W)
+
+    def _get_imbalance_params(self):
+        """Get current imbalance handling parameters for analysis."""
+        if not self.enable_imbalance_handling.get():
+            return None, None
+
+        method = self.imbalance_method.get()
+
+        # Build parameter dict based on method
+        params = {}
+        if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek']:
+            params['k_neighbors'] = self.k_neighbors.get()
+        elif method in ['undersample', 'binning']:
+            params['n_bins'] = self.n_bins.get()
+        elif method == 'rare_boost':
+            params['boost_factor'] = self.boost_factor.get()
+
+        return method, params
+
+    # ========== END IMBALANCE HANDLING METHODS ==========
 
     def _export_preprocessed_csv(self, window_size=None):
         """
@@ -11360,6 +12342,8 @@ class SpectralPredictApp:
 
             # learning_rate
             catboost_learning_rates = []
+            if self.catboost_lr_005.get():
+                catboost_learning_rates.append(0.05)
             if self.catboost_lr_01.get():
                 catboost_learning_rates.append(0.1)
 
@@ -11379,6 +12363,8 @@ class SpectralPredictApp:
 
             # depth (max tree depth)
             catboost_depths = []
+            if self.catboost_depth_4.get():
+                catboost_depths.append(4)
             if self.catboost_depth_6.get():
                 catboost_depths.append(6)
 
@@ -11900,6 +12886,11 @@ class SpectralPredictApp:
             n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
             n_total_original = len(self.X)  # Total samples before filtering
 
+            # Get imbalance handling parameters (if enabled)
+            imbalance_method, imbalance_params = self._get_imbalance_params()
+            if imbalance_method:
+                self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
+
             results_df, label_encoder = run_search(
                 X_filtered,
                 y_filtered,
@@ -11996,7 +12987,10 @@ class SpectralPredictApp:
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
                 # Wavelength restriction for variable selection only (preprocessing uses full spectrum)
                 analysis_wl_min=analysis_wl_min_value,
-                analysis_wl_max=analysis_wl_max_value
+                analysis_wl_max=analysis_wl_max_value,
+                # Imbalance handling (NEW - Phase 2 implementation)
+                imbalance_method=imbalance_method,
+                imbalance_params=imbalance_params
             )
 
             # Store label_encoder for saving with models
@@ -13360,6 +14354,256 @@ class SpectralPredictApp:
 
         return True
 
+    def _collect_refine_hyperparams(self, model_name):
+        """
+        Collect hyperparameter values from Model Development tab widgets.
+
+        Unlike Analysis Config (which collects lists for grid search), this collects
+        single values for direct model training.
+
+        Args:
+            model_name: Name of the model (e.g., 'PLS', 'Ridge', 'XGBoost')
+
+        Returns:
+            dict: Hyperparameters ready for model.set_params(**params)
+                  Returns empty dict if no custom params or model not found
+        """
+        params = {}
+
+        # Helper function to convert string "None" to actual None
+        def parse_none(value):
+            """Convert string 'None' to Python None, otherwise return value."""
+            if isinstance(value, str) and value.strip().lower() == 'none':
+                return None
+            return value
+
+        # Helper function to parse tuple strings like "(100, 50)" or "100"
+        def parse_hidden_layer_sizes(value):
+            """Parse MLP hidden layer sizes from string."""
+            if isinstance(value, str):
+                value = value.strip()
+                if value.lower() == 'none':
+                    return None
+                # Try to parse as tuple
+                try:
+                    # Handle formats: "(100, 50)", "(100,)", "100"
+                    if value.startswith('(') and value.endswith(')'):
+                        # Remove parentheses and split
+                        inner = value[1:-1].strip()
+                        if not inner:
+                            return ()
+                        parts = [int(x.strip()) for x in inner.split(',') if x.strip()]
+                        return tuple(parts)
+                    else:
+                        # Single value "100" -> (100,)
+                        return (int(value),)
+                except (ValueError, AttributeError):
+                    print(f"WARNING: Could not parse hidden_layer_sizes '{value}', using default")
+                    return None
+            return value
+
+        # ========== PLS ==========
+        if model_name == 'PLS' or model_name == 'PLS-DA':
+            params['n_components'] = self.refine_pls_n_components.get()
+            params['max_iter'] = self.refine_pls_max_iter.get()
+
+            tol_str = self.refine_pls_tol.get().strip()
+            try:
+                params['tol'] = float(tol_str)
+            except ValueError:
+                print(f"WARNING: Invalid PLS tol '{tol_str}', using default")
+
+        # ========== Ridge ==========
+        elif model_name == 'Ridge':
+            alpha_str = self.refine_ridge_alpha.get().strip()
+            try:
+                params['alpha'] = float(alpha_str)
+            except ValueError:
+                print(f"WARNING: Invalid Ridge alpha '{alpha_str}', using default")
+
+            params['solver'] = self.refine_ridge_solver.get()
+
+            tol_str = self.refine_ridge_tol.get().strip()
+            try:
+                params['tol'] = float(tol_str)
+            except ValueError:
+                print(f"WARNING: Invalid Ridge tol '{tol_str}', using default")
+
+        # ========== Lasso ==========
+        elif model_name == 'Lasso':
+            alpha_str = self.refine_lasso_alpha.get().strip()
+            try:
+                params['alpha'] = float(alpha_str)
+            except ValueError:
+                print(f"WARNING: Invalid Lasso alpha '{alpha_str}', using default")
+
+            params['selection'] = self.refine_lasso_selection.get()
+
+            tol_str = self.refine_lasso_tol.get().strip()
+            try:
+                params['tol'] = float(tol_str)
+            except ValueError:
+                print(f"WARNING: Invalid Lasso tol '{tol_str}', using default")
+
+            params['max_iter'] = self.refine_lasso_max_iter.get()
+
+        # ========== ElasticNet ==========
+        elif model_name == 'ElasticNet':
+            alpha_str = self.refine_elasticnet_alpha.get().strip()
+            try:
+                params['alpha'] = float(alpha_str)
+            except ValueError:
+                print(f"WARNING: Invalid ElasticNet alpha '{alpha_str}', using default")
+
+            params['l1_ratio'] = self.refine_elasticnet_l1_ratio.get()
+            params['selection'] = self.refine_elasticnet_selection.get()
+
+            tol_str = self.refine_elasticnet_tol.get().strip()
+            try:
+                params['tol'] = float(tol_str)
+            except ValueError:
+                print(f"WARNING: Invalid ElasticNet tol '{tol_str}', using default")
+
+            params['max_iter'] = self.refine_elasticnet_max_iter.get()
+
+        # ========== RandomForest ==========
+        elif model_name == 'RandomForest':
+            params['n_estimators'] = self.refine_rf_n_estimators.get()
+
+            max_depth = parse_none(self.refine_rf_max_depth.get())
+            if max_depth is not None:
+                try:
+                    params['max_depth'] = int(max_depth)
+                except ValueError:
+                    pass
+            else:
+                params['max_depth'] = None
+
+            params['min_samples_split'] = self.refine_rf_min_samples_split.get()
+            params['min_samples_leaf'] = self.refine_rf_min_samples_leaf.get()
+            params['max_features'] = self.refine_rf_max_features.get()
+            params['bootstrap'] = self.refine_rf_bootstrap.get()
+
+            max_leaf_nodes = parse_none(self.refine_rf_max_leaf_nodes.get())
+            if max_leaf_nodes is not None:
+                try:
+                    params['max_leaf_nodes'] = int(max_leaf_nodes)
+                except ValueError:
+                    pass
+            else:
+                params['max_leaf_nodes'] = None
+
+            params['min_impurity_decrease'] = self.refine_rf_min_impurity_decrease.get()
+
+        # ========== XGBoost ==========
+        elif model_name == 'XGBoost':
+            params['n_estimators'] = self.refine_xgb_n_estimators.get()
+            params['learning_rate'] = self.refine_xgb_learning_rate.get()
+            params['max_depth'] = self.refine_xgb_max_depth.get()
+            params['subsample'] = self.refine_xgb_subsample.get()
+            params['colsample_bytree'] = self.refine_xgb_colsample_bytree.get()
+            params['reg_alpha'] = self.refine_xgb_reg_alpha.get()
+            params['reg_lambda'] = self.refine_xgb_reg_lambda.get()
+            params['min_child_weight'] = self.refine_xgb_min_child_weight.get()
+            params['gamma'] = self.refine_xgb_gamma.get()
+
+        # ========== LightGBM ==========
+        elif model_name == 'LightGBM':
+            params['n_estimators'] = self.refine_lgbm_n_estimators.get()
+            params['learning_rate'] = self.refine_lgbm_learning_rate.get()
+            params['num_leaves'] = self.refine_lgbm_num_leaves.get()
+            params['max_depth'] = self.refine_lgbm_max_depth.get()
+            params['min_child_samples'] = self.refine_lgbm_min_child_samples.get()
+            params['subsample'] = self.refine_lgbm_subsample.get()
+            params['colsample_bytree'] = self.refine_lgbm_colsample_bytree.get()
+            params['reg_alpha'] = self.refine_lgbm_reg_alpha.get()
+            params['reg_lambda'] = self.refine_lgbm_reg_lambda.get()
+
+        # ========== CatBoost ==========
+        elif model_name == 'CatBoost':
+            params['iterations'] = self.refine_catboost_iterations.get()
+            params['learning_rate'] = self.refine_catboost_learning_rate.get()
+            params['depth'] = self.refine_catboost_depth.get()
+            params['l2_leaf_reg'] = self.refine_catboost_l2_leaf_reg.get()
+            params['border_count'] = self.refine_catboost_border_count.get()
+            params['bagging_temperature'] = self.refine_catboost_bagging_temperature.get()
+            params['random_strength'] = self.refine_catboost_random_strength.get()
+
+        # ========== SVR / SVM ==========
+        elif model_name == 'SVR' or model_name == 'SVM':
+            c_str = self.refine_svr_C.get().strip()
+            try:
+                params['C'] = float(c_str)
+            except ValueError:
+                print(f"WARNING: Invalid SVR/SVM C '{c_str}', using default")
+
+            params['kernel'] = self.refine_svr_kernel.get()
+
+            gamma_val = self.refine_svr_gamma.get()
+            # Handle 'scale' and 'auto' as strings, numeric values as floats
+            if gamma_val in ['scale', 'auto']:
+                params['gamma'] = gamma_val
+            else:
+                try:
+                    params['gamma'] = float(gamma_val)
+                except ValueError:
+                    print(f"WARNING: Invalid SVR/SVM gamma '{gamma_val}', using default")
+
+            params['epsilon'] = self.refine_svr_epsilon.get()
+
+            params['degree'] = self.refine_svr_degree.get()
+            params['coef0'] = self.refine_svr_coef0.get()
+            params['shrinking'] = self.refine_svr_shrinking.get()
+
+        # ========== MLP ==========
+        elif model_name == 'MLP':
+            # Hidden layer sizes - special parsing for tuple format
+            hidden_layers_str = self.refine_mlp_hidden_layer_sizes.get()
+            hidden_layers = parse_hidden_layer_sizes(hidden_layers_str)
+            if hidden_layers is not None:
+                params['hidden_layer_sizes'] = hidden_layers
+
+            params['activation'] = self.refine_mlp_activation.get()
+            params['solver'] = self.refine_mlp_solver.get()
+            params['alpha'] = self.refine_mlp_alpha.get()
+            params['max_iter'] = self.refine_mlp_max_iter.get()
+
+            # Learning rate init
+            lr_init_str = self.refine_mlp_learning_rate_init.get().strip()
+            try:
+                params['learning_rate_init'] = float(lr_init_str)
+            except ValueError:
+                print(f"WARNING: Invalid MLP learning_rate_init '{lr_init_str}', using default")
+
+            # Batch size - handle 'auto' or numeric
+            batch_size_val = self.refine_mlp_batch_size.get()
+            if batch_size_val == 'auto':
+                params['batch_size'] = 'auto'
+            else:
+                try:
+                    params['batch_size'] = int(batch_size_val)
+                except ValueError:
+                    print(f"WARNING: Invalid MLP batch_size '{batch_size_val}', using default")
+
+            params['learning_rate'] = self.refine_mlp_learning_rate.get()
+            params['momentum'] = self.refine_mlp_momentum.get()
+
+        # ========== NeuralBoosted ==========
+        elif model_name == 'NeuralBoosted':
+            params['n_estimators'] = self.refine_neuralboosted_n_estimators.get()
+            params['learning_rate'] = self.refine_neuralboosted_learning_rate.get()
+
+            # Hidden layer sizes - special parsing for tuple format
+            hidden_layers_str = self.refine_neuralboosted_hidden_layer_size.get()
+            hidden_layers = parse_hidden_layer_sizes(hidden_layers_str)
+            if hidden_layers is not None:
+                params['hidden_layer_size'] = hidden_layers
+
+            params['activation'] = self.refine_neuralboosted_activation.get()
+            params['early_stopping'] = self.refine_neuralboosted_early_stopping.get()
+
+        return params
+
     def _estimate_grid_size(self, param_dict):
         """
         Calculate total grid size from parameter dictionary.
@@ -13495,6 +14739,231 @@ class SpectralPredictApp:
                       f"Consider using random search or Bayesian optimization instead.")
             return (True, message)
 
+    def _populate_refine_hyperparams(self, model_name, params_dict):
+        """
+        Populate Model Development tab hyperparameter widgets from saved parameters.
+
+        This is the reverse of _collect_refine_hyperparams() - it takes a dictionary
+        of parameters and populates the appropriate UI widgets.
+
+        Args:
+            model_name: Name of the model (e.g., 'PLS', 'Ridge', 'XGBoost')
+            params_dict: Dictionary of hyperparameters {param_name: value}
+        """
+        if not params_dict:
+            print(f"DEBUG: No hyperparameters to populate for {model_name}")
+            return
+
+        print(f"\n{'='*80}")
+        print(f"POPULATING UI HYPERPARAMETERS FOR {model_name}")
+        print(f"{'='*80}")
+        print(f"Loading {len(params_dict)} parameters from saved model:")
+        for key, val in sorted(params_dict.items()):
+            print(f"  {key}: {val}")
+        print(f"{'='*80}\n")
+
+        try:
+            # ========== PLS ==========
+            if model_name == 'PLS' or model_name == 'PLS-DA':
+                if 'n_components' in params_dict:
+                    self.refine_pls_n_components.set(int(params_dict['n_components']))
+                if 'max_iter' in params_dict:
+                    self.refine_pls_max_iter.set(int(params_dict['max_iter']))
+                if 'tol' in params_dict:
+                    self.refine_pls_tol.set(str(params_dict['tol']))
+
+            # ========== Ridge ==========
+            elif model_name == 'Ridge':
+                if 'alpha' in params_dict:
+                    self.refine_ridge_alpha.set(str(params_dict['alpha']))
+                if 'solver' in params_dict:
+                    self.refine_ridge_solver.set(str(params_dict['solver']))
+                if 'tol' in params_dict:
+                    self.refine_ridge_tol.set(str(params_dict['tol']))
+
+            # ========== Lasso ==========
+            elif model_name == 'Lasso':
+                if 'alpha' in params_dict:
+                    self.refine_lasso_alpha.set(str(params_dict['alpha']))
+                if 'selection' in params_dict:
+                    self.refine_lasso_selection.set(str(params_dict['selection']))
+                if 'tol' in params_dict:
+                    self.refine_lasso_tol.set(str(params_dict['tol']))
+                if 'max_iter' in params_dict:
+                    self.refine_lasso_max_iter.set(int(params_dict['max_iter']))
+
+            # ========== ElasticNet ==========
+            elif model_name == 'ElasticNet':
+                if 'alpha' in params_dict:
+                    self.refine_elasticnet_alpha.set(str(params_dict['alpha']))
+                if 'l1_ratio' in params_dict:
+                    self.refine_elasticnet_l1_ratio.set(str(params_dict['l1_ratio']))
+                if 'selection' in params_dict:
+                    self.refine_elasticnet_selection.set(str(params_dict['selection']))
+                if 'tol' in params_dict:
+                    self.refine_elasticnet_tol.set(str(params_dict['tol']))
+                if 'max_iter' in params_dict:
+                    self.refine_elasticnet_max_iter.set(int(params_dict['max_iter']))
+
+            # ========== RandomForest ==========
+            elif model_name == 'RandomForest':
+                if 'n_estimators' in params_dict:
+                    self.refine_rf_n_estimators.set(int(params_dict['n_estimators']))
+                if 'max_depth' in params_dict:
+                    val = params_dict['max_depth']
+                    self.refine_rf_max_depth.set('None' if val is None else str(val))
+                if 'min_samples_split' in params_dict:
+                    self.refine_rf_min_samples_split.set(int(params_dict['min_samples_split']))
+                if 'min_samples_leaf' in params_dict:
+                    self.refine_rf_min_samples_leaf.set(int(params_dict['min_samples_leaf']))
+                if 'max_features' in params_dict:
+                    self.refine_rf_max_features.set(str(params_dict['max_features']))
+                if 'bootstrap' in params_dict:
+                    self.refine_rf_bootstrap.set(bool(params_dict['bootstrap']))
+                if 'max_leaf_nodes' in params_dict:
+                    val = params_dict['max_leaf_nodes']
+                    self.refine_rf_max_leaf_nodes.set('None' if val is None else str(val))
+                if 'min_impurity_decrease' in params_dict:
+                    self.refine_rf_min_impurity_decrease.set(float(params_dict['min_impurity_decrease']))
+
+            # ========== XGBoost ==========
+            elif model_name == 'XGBoost':
+                if 'n_estimators' in params_dict:
+                    self.refine_xgb_n_estimators.set(int(params_dict['n_estimators']))
+                if 'learning_rate' in params_dict:
+                    self.refine_xgb_learning_rate.set(float(params_dict['learning_rate']))
+                if 'max_depth' in params_dict:
+                    self.refine_xgb_max_depth.set(int(params_dict['max_depth']))
+                if 'subsample' in params_dict:
+                    self.refine_xgb_subsample.set(float(params_dict['subsample']))
+                if 'colsample_bytree' in params_dict:
+                    self.refine_xgb_colsample_bytree.set(float(params_dict['colsample_bytree']))
+                if 'reg_alpha' in params_dict:
+                    self.refine_xgb_reg_alpha.set(float(params_dict['reg_alpha']))
+                if 'reg_lambda' in params_dict:
+                    self.refine_xgb_reg_lambda.set(float(params_dict['reg_lambda']))
+                if 'min_child_weight' in params_dict:
+                    self.refine_xgb_min_child_weight.set(int(params_dict['min_child_weight']))
+                if 'gamma' in params_dict:
+                    self.refine_xgb_gamma.set(float(params_dict['gamma']))
+
+            # ========== LightGBM ==========
+            elif model_name == 'LightGBM':
+                if 'n_estimators' in params_dict:
+                    self.refine_lgbm_n_estimators.set(int(params_dict['n_estimators']))
+                if 'learning_rate' in params_dict:
+                    self.refine_lgbm_learning_rate.set(float(params_dict['learning_rate']))
+                if 'num_leaves' in params_dict:
+                    self.refine_lgbm_num_leaves.set(int(params_dict['num_leaves']))
+                if 'max_depth' in params_dict:
+                    self.refine_lgbm_max_depth.set(int(params_dict['max_depth']))
+                if 'min_child_samples' in params_dict:
+                    self.refine_lgbm_min_child_samples.set(int(params_dict['min_child_samples']))
+                if 'subsample' in params_dict:
+                    self.refine_lgbm_subsample.set(float(params_dict['subsample']))
+                if 'colsample_bytree' in params_dict:
+                    self.refine_lgbm_colsample_bytree.set(float(params_dict['colsample_bytree']))
+                if 'reg_alpha' in params_dict:
+                    self.refine_lgbm_reg_alpha.set(float(params_dict['reg_alpha']))
+                if 'reg_lambda' in params_dict:
+                    self.refine_lgbm_reg_lambda.set(float(params_dict['reg_lambda']))
+
+            # ========== CatBoost ==========
+            elif model_name == 'CatBoost':
+                if 'iterations' in params_dict:
+                    self.refine_catboost_iterations.set(int(params_dict['iterations']))
+                if 'learning_rate' in params_dict:
+                    self.refine_catboost_learning_rate.set(float(params_dict['learning_rate']))
+                if 'depth' in params_dict:
+                    self.refine_catboost_depth.set(int(params_dict['depth']))
+                if 'l2_leaf_reg' in params_dict:
+                    self.refine_catboost_l2_leaf_reg.set(float(params_dict['l2_leaf_reg']))
+                if 'border_count' in params_dict:
+                    self.refine_catboost_border_count.set(int(params_dict['border_count']))
+                if 'bagging_temperature' in params_dict:
+                    self.refine_catboost_bagging_temperature.set(float(params_dict['bagging_temperature']))
+                if 'random_strength' in params_dict:
+                    self.refine_catboost_random_strength.set(float(params_dict['random_strength']))
+
+            # ========== SVR / SVM ==========
+            elif model_name == 'SVR' or model_name == 'SVM':
+                if 'C' in params_dict:
+                    self.refine_svr_C.set(str(params_dict['C']))
+                if 'kernel' in params_dict:
+                    self.refine_svr_kernel.set(str(params_dict['kernel']))
+                if 'gamma' in params_dict:
+                    self.refine_svr_gamma.set(str(params_dict['gamma']))
+                if 'epsilon' in params_dict:
+                    self.refine_svr_epsilon.set(float(params_dict['epsilon']))
+                if 'degree' in params_dict:
+                    self.refine_svr_degree.set(int(params_dict['degree']))
+                if 'coef0' in params_dict:
+                    self.refine_svr_coef0.set(float(params_dict['coef0']))
+                if 'shrinking' in params_dict:
+                    self.refine_svr_shrinking.set(bool(params_dict['shrinking']))
+
+            # ========== MLP ==========
+            elif model_name == 'MLP':
+                if 'hidden_layer_sizes' in params_dict:
+                    val = params_dict['hidden_layer_sizes']
+                    # Convert tuple to string format
+                    if isinstance(val, tuple):
+                        if len(val) == 1:
+                            self.refine_mlp_hidden_layer_sizes.set(f"({val[0]},)")
+                        else:
+                            self.refine_mlp_hidden_layer_sizes.set(str(val))
+                    else:
+                        self.refine_mlp_hidden_layer_sizes.set(str(val))
+                if 'activation' in params_dict:
+                    self.refine_mlp_activation.set(str(params_dict['activation']))
+                if 'solver' in params_dict:
+                    self.refine_mlp_solver.set(str(params_dict['solver']))
+                if 'alpha' in params_dict:
+                    self.refine_mlp_alpha.set(float(params_dict['alpha']))
+                if 'learning_rate_init' in params_dict:
+                    self.refine_mlp_learning_rate_init.set(str(params_dict['learning_rate_init']))
+                if 'batch_size' in params_dict:
+                    self.refine_mlp_batch_size.set(str(params_dict['batch_size']))
+                if 'learning_rate' in params_dict:
+                    self.refine_mlp_learning_rate.set(str(params_dict['learning_rate']))
+                if 'momentum' in params_dict:
+                    self.refine_mlp_momentum.set(float(params_dict['momentum']))
+                if 'max_iter' in params_dict:
+                    self.refine_mlp_max_iter.set(int(params_dict['max_iter']))
+
+            # ========== NeuralBoosted ==========
+            elif model_name == 'NeuralBoosted':
+                if 'n_estimators' in params_dict:
+                    self.refine_neuralboosted_n_estimators.set(int(params_dict['n_estimators']))
+                if 'learning_rate' in params_dict:
+                    self.refine_neuralboosted_learning_rate.set(float(params_dict['learning_rate']))
+                # Check for both singular and plural naming (backwards compatibility)
+                if 'hidden_layer_size' in params_dict:
+                    val = params_dict['hidden_layer_size']
+                    # NeuralBoosted uses hidden_layer_size (singular) - convert from tuple to int
+                    if isinstance(val, tuple) and len(val) > 0:
+                        self.refine_neuralboosted_hidden_layer_size.set(int(val[0]))
+                    elif isinstance(val, int):
+                        self.refine_neuralboosted_hidden_layer_size.set(int(val))
+                elif 'hidden_layer_sizes' in params_dict:
+                    val = params_dict['hidden_layer_sizes']
+                    # Backwards compatibility with old plural naming
+                    if isinstance(val, tuple) and len(val) > 0:
+                        self.refine_neuralboosted_hidden_layer_size.set(int(val[0]))
+                    elif isinstance(val, int):
+                        self.refine_neuralboosted_hidden_layer_size.set(int(val))
+                if 'activation' in params_dict:
+                    self.refine_neuralboosted_activation.set(str(params_dict['activation']))
+                if 'early_stopping' in params_dict:
+                    self.refine_neuralboosted_early_stopping.set(bool(params_dict['early_stopping']))
+
+            print(f"✓ Successfully populated {model_name} hyperparameters in UI")
+
+        except Exception as e:
+            print(f"WARNING: Error populating hyperparameters for {model_name}: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _load_model_for_refinement(self, config):
         """Load a model configuration into the Model Development tab."""
         # Store config for use in _run_refined_model_thread
@@ -13540,6 +15009,7 @@ class SpectralPredictApp:
 Preprocessing: {config.get('Preprocess', 'N/A')}
 Subset: {config.get('SubsetTag', config.get('Subset', 'N/A'))}
 Window Size: {config.get('Window', 'N/A')}
+Imbalance Handling: {config.get('Imbalance', '—')}
 """
 
         # Add performance metrics
@@ -13776,6 +15246,40 @@ Performance (Classification):
         # Update mode label to indicate loaded from results
         rank = config.get('Rank', 'N/A')
         self.refine_mode_label.config(text=f"Mode: Loaded from Results (Rank {rank})")
+
+        # Populate hyperparameters from saved model config
+        # This allows users to see and modify the exact hyperparameters used in the selected model
+        model_name = config.get('Model', 'Unknown')
+        if 'Params' in config and config['Params']:
+            try:
+                import ast
+                raw_params = config.get('Params')
+                if isinstance(raw_params, str) and raw_params.strip():
+                    # Parse the params string (e.g., "{'n_estimators': 100, 'learning_rate': 0.1}")
+                    params_dict = ast.literal_eval(raw_params)
+                    if isinstance(params_dict, dict):
+                        print(f"\n{'='*80}")
+                        print(f"AUTO-POPULATING HYPERPARAMETERS FROM RESULTS TAB")
+                        print(f"{'='*80}")
+                        print(f"Model: {model_name}")
+                        print(f"Rank: {rank}")
+                        print(f"Loaded {len(params_dict)} hyperparameters from saved model")
+                        print(f"{'='*80}\n")
+
+                        # Populate the UI widgets with saved parameters
+                        self._populate_refine_hyperparams(model_name, params_dict)
+                    else:
+                        print(f"DEBUG: Params is not a dict: {type(params_dict)}")
+                else:
+                    print(f"DEBUG: No valid Params string to parse")
+            except (ValueError, SyntaxError) as e:
+                print(f"WARNING: Could not parse saved hyperparameters: {e}")
+            except Exception as e:
+                print(f"WARNING: Error loading hyperparameters: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"DEBUG: No 'Params' field in config for {model_name}")
 
         # Update the wavelength count display
         self._update_wavelength_count()
@@ -15187,6 +16691,44 @@ F1 Score:  {f1:.4f}
 
                 except Exception as e:
                     print(f"WARNING: Failed to apply saved parameters {params_from_search}: {e}")
+
+            # Apply hyperparameters from UI widgets (overrides loaded params if present)
+            # This allows users to adjust hyperparameters in the GUI after loading from Results tab
+            try:
+                ui_params = self._collect_refine_hyperparams(model_name)
+
+                if ui_params:
+                    print(f"\n{'='*80}")
+                    print(f"HYPERPARAMETERS FROM UI (Model Development Tab)")
+                    print(f"{'='*80}")
+                    print(f"Applying {len(ui_params)} hyperparameters from UI widgets:")
+                    for key in sorted(ui_params.keys()):
+                        print(f"  {key}: {ui_params[key]}")
+                    print(f"\nNote: UI values override loaded parameters from Results tab")
+                    print(f"{'='*80}\n")
+
+                    model.set_params(**ui_params)
+                    print(f"DEBUG: Successfully applied {len(ui_params)} UI hyperparameters to {model_name} model")
+
+                    # Final parameter verification
+                    final_params = model.get_params()
+                    print(f"\n{'='*80}")
+                    print(f"FINAL {model_name} PARAMETERS (After UI Application)")
+                    print(f"{'='*80}")
+                    for key in sorted(final_params.keys()):
+                        # Highlight parameters that came from UI
+                        if key in ui_params:
+                            print(f"  {key}: {final_params[key]} ← from UI")
+                        else:
+                            print(f"  {key}: {final_params[key]}")
+                    print(f"{'='*80}\n")
+                else:
+                    print(f"DEBUG: No UI hyperparameters collected for {model_name} (using defaults or loaded params)")
+
+            except Exception as e:
+                print(f"WARNING: Failed to apply UI hyperparameters: {e}")
+                import traceback
+                traceback.print_exc()
 
             # Build preprocessing pipeline and prepare data
             from spectral_predict.preprocess import build_preprocessing_pipeline

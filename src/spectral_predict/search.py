@@ -10,12 +10,67 @@ from sklearn.preprocessing import label_binarize
 from sklearn.base import clone
 from joblib import Parallel, delayed
 
+# Try to import imblearn Pipeline for resampling support
+try:
+    from imblearn.pipeline import Pipeline as ImbPipeline
+    HAS_IMBLEARN = True
+except ImportError:
+    ImbPipeline = None
+    HAS_IMBLEARN = False
+
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
+
+
+def _needs_resampling_pipeline(imbalance_method, task_type):
+    """
+    Determine if we need imblearn Pipeline for resampling.
+
+    Standard sklearn Pipeline doesn't support fit_resample() methods.
+    We need imblearn.pipeline.Pipeline for:
+    - Classification: SMOTE, ADASYN, RandomUnderSampler, TomekLinks, etc.
+    - Regression: RegressionUndersampler (undersample method)
+
+    We DON'T need it for:
+    - Classification: class_weight (handled by model parameter)
+    - Regression: binning, rare_boost, balanced (use RegressionSampleWeighter which only uses fit/transform)
+
+    Parameters
+    ----------
+    imbalance_method : str or None
+        The imbalance handling method
+    task_type : str
+        'classification' or 'regression'
+
+    Returns
+    -------
+    bool
+        True if imblearn Pipeline is needed
+    """
+    if imbalance_method is None:
+        return False
+
+    # class_weight doesn't need resampling pipeline (it's a model parameter)
+    if imbalance_method == 'class_weight':
+        return False
+
+    # Classification resampling methods need imblearn Pipeline
+    if task_type == 'classification':
+        resampling_methods = ['smote', 'adasyn', 'borderline_smote',
+                              'random_undersampler', 'tomek_links',
+                              'smote_tomek', 'smote_enn']
+        return imbalance_method.lower().replace('-', '_') in resampling_methods
+
+    # Regression: only 'undersample' needs imblearn Pipeline
+    # 'binning', 'rare_boost', 'balanced' use RegressionSampleWeighter (fit/transform only)
+    if task_type == 'regression':
+        return imbalance_method == 'undersample'
+
+    return False
 
 
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
@@ -53,7 +108,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
                tier='standard', enabled_models=None,
-               analysis_wl_min=None, analysis_wl_max=None):
+               analysis_wl_min=None, analysis_wl_max=None,
+               imbalance_method=None, imbalance_params=None, enable_class_weight=False):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -392,6 +448,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     preprocess_cfg["deriv"],
                     preprocess_cfg["window"],
                     preprocess_cfg["polyorder"],
+                    imbalance_method=None,  # No resampling for region computation
+                    imbalance_params=None,
+                    task_type=task_type
                 )
 
                 # Transform X through preprocessing
@@ -470,6 +529,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     top_n_vars=30,
                     skip_preprocessing=False,
                     excluded_count=excluded_count,
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params,
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
@@ -508,6 +569,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             preprocess_cfg["deriv"],
                             preprocess_cfg["window"],
                             preprocess_cfg["polyorder"],
+                            imbalance_method=None,  # No resampling for importance computation
+                            imbalance_params=None,
+                            task_type=task_type
                         )
                         pipe_steps.append(("model", model))
                         pipe = Pipeline(pipe_steps) if pipe_steps else model
@@ -663,6 +727,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             top_n_vars=30,
                                             skip_preprocessing=True,  # Flag to skip reapplying
                                             excluded_count=excluded_count,
+                                            imbalance_method=imbalance_method,
+                                            imbalance_params=imbalance_params,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
@@ -689,6 +755,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            imbalance_method=imbalance_method,
+                                            imbalance_params=imbalance_params,
                                         )
                                     df_results = add_result(df_results, subset_result)
 
@@ -741,6 +809,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 validation_count=validation_count,
                                 total_samples_original=total_samples_original,
                                 folds=folds,
+                                imbalance_method=imbalance_method,
+                                imbalance_params=imbalance_params,
                             )
                         else:
                             # For raw/SNV: use raw data, reapply preprocessing
@@ -763,6 +833,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 validation_count=validation_count,
                                 total_samples_original=total_samples_original,
                                 folds=folds,
+                                imbalance_method=imbalance_method,
+                                imbalance_params=imbalance_params,
                             )
                         df_results = add_result(df_results, region_result)
 
@@ -883,6 +955,8 @@ def _run_single_config(
     validation_count=0,
     total_samples_original=None,
     folds=5,
+    imbalance_method=None,
+    imbalance_params=None,
 ):
     """
     Run a single model configuration with CV.
@@ -916,16 +990,48 @@ def _run_single_config(
             preprocess_cfg["deriv"],
             preprocess_cfg["window"],
             preprocess_cfg["polyorder"],
+            imbalance_method=imbalance_method,
+            imbalance_params=imbalance_params,
+            task_type=task_type
         )
+
+    # Handle class_weight for imbalanced classification
+    # Only apply if user selected 'class_weight' method AND model supports it
+    if imbalance_method == 'class_weight' and task_type == 'classification':
+        if hasattr(model, 'class_weight'):
+            try:
+                model.set_params(class_weight='balanced')
+            except:
+                pass  # Some models may not support set_params
 
     # For PLS-DA, we need PLS + LogisticRegression
     if model_name == "PLS-DA":
         pipe_steps.append(("pls", model))
-        pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=42)))
+        # Apply class_weight to LogisticRegression if requested
+        if imbalance_method == 'class_weight' and task_type == 'classification':
+            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')))
+        else:
+            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=42)))
     else:
         pipe_steps.append(("model", model))
 
-    pipe = Pipeline(pipe_steps) if pipe_steps else model
+    # Choose correct Pipeline class based on whether resampling is needed
+    # Standard sklearn Pipeline doesn't support fit_resample() methods
+    # Use imblearn Pipeline for resampling transformers (SMOTE, RegressionUndersampler, etc.)
+    if pipe_steps:
+        needs_resampling = _needs_resampling_pipeline(imbalance_method, task_type)
+
+        if needs_resampling:
+            if not HAS_IMBLEARN:
+                raise ImportError(
+                    f"Imbalance method '{imbalance_method}' requires imbalanced-learn. "
+                    f"Install with: pip install imbalanced-learn"
+                )
+            pipe = ImbPipeline(pipe_steps)
+        else:
+            pipe = Pipeline(pipe_steps)
+    else:
+        pipe = model
 
     # For multiclass classification, compute all classes for label_binarize
     all_classes = np.unique(y) if task_type == "classification" and not is_binary_classification else None
@@ -937,6 +1043,13 @@ def _run_single_config(
         )
         for train_idx, test_idx in cv_splitter.split(X, y)
     )
+
+    # Print summary if imbalance handling was used
+    if imbalance_method is not None:
+        if imbalance_method == 'class_weight':
+            print(f"  ✓ Imbalance handling: class_weight applied to model")
+        else:
+            print(f"  ✓ Imbalance handling: {imbalance_method} applied successfully")
 
     # Average metrics
     if task_type == "regression":
@@ -1029,6 +1142,14 @@ def _run_single_config(
     # Extract LVs (for PLS models) - must be done before building result dict
     lvs = params.get("n_components", np.nan)
 
+    # Format imbalance handling indicator for display
+    if imbalance_method is None:
+        imbalance_display = "—"
+    elif imbalance_method == 'class_weight':
+        imbalance_display = "class_weight"
+    else:
+        imbalance_display = imbalance_method
+
     # Build result dictionary AFTER capturing complete params
     result = {
         "Task": task_type,
@@ -1042,6 +1163,7 @@ def _run_single_config(
         "n_vars": n_vars,
         "full_vars": full_vars,
         "SubsetTag": subset_tag,
+        "Imbalance": imbalance_display,
     }
 
     # Add training configuration for tracking data state
