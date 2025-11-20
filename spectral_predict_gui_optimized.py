@@ -323,10 +323,18 @@ TOOLTIP_CONTENT = {
             "Higher values (0.2-0.3) = faster learning but risk overfitting. "
             "Range 0.1-0.3 works well for most spectroscopy applications."
         ),
-        'neuralboosted_subsample': (
-            "Fraction of training samples used per boosting round. Values <1.0 add randomness "
-            "(stochastic gradient boosting) to prevent overfitting. 1.0 = use all samples (deterministic). "
-            "0.7-0.85 = good balance of randomness and stability. Lower values increase training time."
+        'neuralboosted_hidden_layer_size': (
+            "Number of neurons in the hidden layer of each weak learner neural network. "
+            "Keep small (3-5) to maintain weak learner properties and ensemble diversity. "
+            "Larger values (7-10) create stronger learners but may reduce benefit of boosting. "
+            "Default: 3 and 5 (grid search explores both options)."
+        ),
+        'neuralboosted_activation': (
+            "Activation function for the hidden layer in weak learner neural networks. "
+            "tanh = Smooth sigmoid-like nonlinear function (default, good for spectral data). "
+            "identity = Linear activation (fast, simple baseline). "
+            "relu = Rectified Linear Unit (standard deep learning activation). "
+            "logistic = Sigmoid function (0 to 1 output range)."
         ),
         'neuralboosted_max_iter': (
             "Maximum iterations for each neural base learner during training. Controls how long each "
@@ -991,11 +999,16 @@ class SpectralPredictApp:
         self.lr_02 = tk.BooleanVar(value=True)  # Default
         self.lr_03 = tk.BooleanVar(value=True)  # Default - OPTIMAL per empirical analysis
 
-        # NeuralBoosted subsample (fraction of samples for each boosting iteration)
-        self.neuralboosted_subsample_05 = tk.BooleanVar(value=False)  # 0.5
-        self.neuralboosted_subsample_07 = tk.BooleanVar(value=False)  # 0.7
-        self.neuralboosted_subsample_085 = tk.BooleanVar(value=False)  # 0.85
-        self.neuralboosted_subsample_10 = tk.BooleanVar(value=True)   # 1.0 ⭐ standard
+        # NeuralBoosted hidden_layer_size (MLP hidden layer neurons)
+        self.neuralboosted_hidden_3 = tk.BooleanVar(value=True)   # 3 ⭐ standard
+        self.neuralboosted_hidden_5 = tk.BooleanVar(value=True)   # 5 ⭐ standard
+        self.neuralboosted_hidden_custom = tk.StringVar(value="")
+
+        # NeuralBoosted activation function
+        self.neuralboosted_activation_tanh = tk.BooleanVar(value=True)      # tanh ⭐ standard
+        self.neuralboosted_activation_identity = tk.BooleanVar(value=True)  # identity ⭐ standard
+        self.neuralboosted_activation_relu = tk.BooleanVar(value=False)     # relu
+        self.neuralboosted_activation_logistic = tk.BooleanVar(value=False) # logistic
 
         # Random Forest options
         self.rf_n_trees_100 = tk.BooleanVar(value=True)  # Default
@@ -3998,24 +4011,36 @@ class SpectralPredictApp:
         ttk.Checkbutton(lr_frame, text="0.3 ⭐", variable=self.lr_03).grid(row=0, column=3, padx=5)
         ttk.Label(lr_frame, text="(default: 0.1, 0.2, 0.3)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
-        # Subsample options
-        nb_subsample_label = ttk.Label(advanced_content, text="Subsample (fraction of samples per iteration):", style='Subheading.TLabel')
-        nb_subsample_label.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
-        CreateToolTip(nb_subsample_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_subsample'], delay=500)
-        subsample_frame = ttk.Frame(advanced_content)
-        subsample_frame.grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=5)
-        ttk.Checkbutton(subsample_frame, text="0.5", variable=self.neuralboosted_subsample_05).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(subsample_frame, text="0.7", variable=self.neuralboosted_subsample_07).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(subsample_frame, text="0.85", variable=self.neuralboosted_subsample_085).grid(row=0, column=2, padx=5)
-        ttk.Checkbutton(subsample_frame, text="1.0 ⭐", variable=self.neuralboosted_subsample_10).grid(row=0, column=3, padx=5)
-        ttk.Label(subsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        # Hidden Layer Size options
+        nb_hidden_label = ttk.Label(advanced_content, text="Hidden Layer Size (neurons per weak learner):", style='Subheading.TLabel')
+        nb_hidden_label.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(nb_hidden_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_hidden_layer_size'], delay=500)
+        hidden_frame = ttk.Frame(advanced_content)
+        hidden_frame.grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Checkbutton(hidden_frame, text="3 ⭐", variable=self.neuralboosted_hidden_3).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(hidden_frame, text="5 ⭐", variable=self.neuralboosted_hidden_5).grid(row=0, column=1, padx=5)
+        ttk.Label(hidden_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(hidden_frame, textvariable=self.neuralboosted_hidden_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(hidden_frame, text="(default: 3, 5)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # Activation Function options
+        nb_activation_label = ttk.Label(advanced_content, text="Activation Function:", style='Subheading.TLabel')
+        nb_activation_label.grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(nb_activation_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_activation'], delay=500)
+        activation_frame = ttk.Frame(advanced_content)
+        activation_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Checkbutton(activation_frame, text="tanh ⭐", variable=self.neuralboosted_activation_tanh).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(activation_frame, text="identity ⭐", variable=self.neuralboosted_activation_identity).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(activation_frame, text="relu", variable=self.neuralboosted_activation_relu).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(activation_frame, text="logistic", variable=self.neuralboosted_activation_logistic).grid(row=0, column=3, padx=5)
+        ttk.Label(activation_frame, text="(default: tanh, identity)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # Max Iterations (for neural base learner)
         nb_maxiter_label = ttk.Label(advanced_content, text="Max Iterations (neural base learner):", style='Subheading.TLabel')
-        nb_maxiter_label.grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        nb_maxiter_label.grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
         CreateToolTip(nb_maxiter_label, text=TOOLTIP_CONTENT['hyperparameters']['neuralboosted_max_iter'], delay=500)
         nb_maxiter_frame = ttk.Frame(advanced_content)
-        nb_maxiter_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=5)
+        nb_maxiter_frame.grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Label(nb_maxiter_frame, text="Max iterations:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
         ttk.Spinbox(nb_maxiter_frame, from_=100, to=5000, increment=100, textvariable=self.max_iter, width=10).grid(row=0, column=1, padx=5)
@@ -10276,6 +10301,43 @@ class SpectralPredictApp:
             if not learning_rates:
                 learning_rates = [0.1, 0.2, 0.3]
 
+            # Collect NeuralBoosted hidden_layer_size
+            neuralboosted_hidden_sizes = []
+            if self.neuralboosted_hidden_3.get():
+                neuralboosted_hidden_sizes.append(3)
+            if self.neuralboosted_hidden_5.get():
+                neuralboosted_hidden_sizes.append(5)
+
+            custom_hidden = self.neuralboosted_hidden_custom.get().strip()
+            if custom_hidden:
+                try:
+                    custom_val = int(custom_hidden)
+                    if custom_val > 0 and custom_val not in neuralboosted_hidden_sizes:
+                        neuralboosted_hidden_sizes.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid NeuralBoosted hidden_layer_size '{custom_hidden}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom NeuralBoosted hidden_layer_size '{custom_hidden}', ignoring")
+
+            # Default to [3, 5] if none selected
+            if not neuralboosted_hidden_sizes:
+                neuralboosted_hidden_sizes = [3, 5]
+
+            # Collect NeuralBoosted activation functions
+            neuralboosted_activations = []
+            if self.neuralboosted_activation_tanh.get():
+                neuralboosted_activations.append('tanh')
+            if self.neuralboosted_activation_identity.get():
+                neuralboosted_activations.append('identity')
+            if self.neuralboosted_activation_relu.get():
+                neuralboosted_activations.append('relu')
+            if self.neuralboosted_activation_logistic.get():
+                neuralboosted_activations.append('logistic')
+
+            # Default to ['tanh', 'identity'] if none selected
+            if not neuralboosted_activations:
+                neuralboosted_activations = ['tanh', 'identity']
+
             # Collect Random Forest n_estimators (number of trees)
             rf_n_trees_list = []
             if self.rf_n_trees_100.get():
@@ -11264,6 +11326,8 @@ class SpectralPredictApp:
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,
                 learning_rates=learning_rates,
+                neuralboosted_hidden_sizes=neuralboosted_hidden_sizes,
+                neuralboosted_activations=neuralboosted_activations,
                 rf_n_trees_list=rf_n_trees_list,
                 rf_max_depth_list=rf_max_depth_list,
                 ridge_alphas_list=ridge_alphas_list,
