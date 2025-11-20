@@ -477,6 +477,72 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 # traceback.print_exc()
                 region_subsets = []
 
+        # ═══════════════════════════════════════════════════════════════════════════
+        # GLOBAL WAVELENGTH FILTERING
+        # Preprocess full spectrum first (SNV/derivatives need full range)
+        # Then apply wavelength filtering for analysis
+        # This ensures ALL models (full + subsets) use the same filtered data
+        # ═══════════════════════════════════════════════════════════════════════════
+
+        # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
+        prep_pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["name"],
+            preprocess_cfg["deriv"],
+            preprocess_cfg["window"],
+            preprocess_cfg["polyorder"],
+            imbalance_method=None,  # Imbalance will be added later inside CV folds
+            imbalance_params=None,
+            task_type=task_type
+        )
+
+        # Step 2: Apply preprocessing to full spectrum
+        X_preprocessed = X_np.copy()
+        if prep_pipe_steps:
+            prep_pipeline = Pipeline(prep_pipe_steps)
+            X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
+
+        # Step 3: Apply wavelength filtering to preprocessed data
+        if analysis_wl_min is not None or analysis_wl_max is not None:
+            wavelengths_float = wavelengths.astype(float)
+            wl_mask = np.ones(len(wavelengths), dtype=bool)
+
+            if analysis_wl_min is not None:
+                wl_mask &= (wavelengths_float >= analysis_wl_min)
+            if analysis_wl_max is not None:
+                wl_mask &= (wavelengths_float <= analysis_wl_max)
+
+            # Validate non-empty selection
+            n_wavelengths_selected = wl_mask.sum()
+            if n_wavelengths_selected == 0:
+                raise ValueError(
+                    f"Wavelength range {analysis_wl_min}-{analysis_wl_max} nm excludes all wavelengths. "
+                    f"Available range: {wavelengths_float.min():.1f}-{wavelengths_float.max():.1f} nm"
+                )
+
+            # Create filtered variables (scoped to this preprocessing config)
+            X_for_models = X_preprocessed[:, wl_mask]
+            wavelengths_for_models = wavelengths[wl_mask]
+
+            # Generate preprocessing name for display
+            prep_display = preprocess_cfg["name"]
+            if preprocess_cfg["deriv"] is not None:
+                prep_display += f"_d{preprocess_cfg['deriv']}"
+
+            # Print filtering summary (shown once per preprocessing method)
+            print(f"\n{'='*70}")
+            print(f"WAVELENGTH FILTERING (after {prep_display} preprocessing)")
+            print(f"{'='*70}")
+            print(f"  Range: {analysis_wl_min or 'min'} - {analysis_wl_max or 'max'} nm")
+            print(f"  Wavelengths kept: {len(wavelengths_for_models)} of {len(wavelengths)}")
+            print(f"  Note: Preprocessing applied to FULL spectrum before filtering")
+            print(f"{'='*70}\n")
+        else:
+            # No filtering - use preprocessed data as-is
+            X_for_models = X_preprocessed
+            wavelengths_for_models = wavelengths
+
+        # End of wavelength filtering block
+
         for model_name, model_configs in model_grids.items():
             for model, params in model_configs:
                 current_config += 1
@@ -512,11 +578,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         'best_model': best_model_so_far
                     })
 
-                # Run full model first
+                # Run full model first (using preprocessed + filtered data)
                 result = _run_single_config(
-                    X_np,
+                    X_for_models,           # Preprocessed + filtered data
                     y_np,
-                    wavelengths,
+                    wavelengths_for_models, # Filtered wavelengths
                     model,
                     model_name,
                     params,
@@ -528,6 +594,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     subset_tag="full",
                     top_n_vars=30,
                     skip_preprocessing=False,
+                    skip_spectral_preprocessing=True,  # Skip spectral preprocessing (already done), keep imbalance handling
                     excluded_count=excluded_count,
                     imbalance_method=imbalance_method,
                     imbalance_params=imbalance_params,
@@ -563,65 +630,21 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     else:
                         print(f"  -> Computing feature importances for {model_name} subset analysis...")
 
-                        # Refit on full data to get importances
-                        pipe_steps = build_preprocessing_pipeline(
-                            preprocess_cfg["name"],
-                            preprocess_cfg["deriv"],
-                            preprocess_cfg["window"],
-                            preprocess_cfg["polyorder"],
-                            imbalance_method=None,  # No resampling for importance computation
-                            imbalance_params=None,
-                            task_type=task_type
-                        )
+                        # Build model-only pipeline (data is already preprocessed and filtered)
+                        pipe_steps = []
                         pipe_steps.append(("model", model))
-                        pipe = Pipeline(pipe_steps) if pipe_steps else model
+                        pipe = Pipeline(pipe_steps)
 
-                        pipe.fit(X_np, y_np)
+                        # Fit on preprocessed+filtered data
+                        pipe.fit(X_for_models, y_np)
 
                         # Get model from pipeline
-                        fitted_model = (
-                            pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
-                        )
+                        fitted_model = pipe.named_steps["model"]
 
-                        # Get transformed X for importance calculation
-                        # This ensures importances are based on PREPROCESSED features
-                        if hasattr(pipe, "named_steps") and len(pipe_steps) > 1:
-                            # Transform through preprocessing
-                            X_transformed = X_np
-                            for step_name, transformer in pipe.steps[:-1]:
-                                X_transformed = transformer.transform(X_transformed)
-                        else:
-                            X_transformed = X_np
-
-                        # Apply wavelength restriction for variable selection (if specified)
-                        # This happens AFTER preprocessing, so derivatives/SNV used full spectrum
-                        # Create LOCAL COPIES - do NOT mutate the original arrays (needed for next model)
-                        if analysis_wl_min is not None or analysis_wl_max is not None:
-                            wavelengths_float = wavelengths.astype(float)
-                            wl_mask = np.ones(len(wavelengths), dtype=bool)
-
-                            if analysis_wl_min is not None:
-                                wl_mask &= (wavelengths_float >= analysis_wl_min)
-                            if analysis_wl_max is not None:
-                                wl_mask &= (wavelengths_float <= analysis_wl_max)
-
-                            # Create filtered COPIES for variable selection (don't mutate originals!)
-                            wavelengths_varsel = wavelengths[wl_mask]
-                            X_transformed_varsel = X_transformed[:, wl_mask]
-                            n_features_varsel = X_transformed_varsel.shape[1]
-
-                            print(f"\n{'='*70}")
-                            print(f"WAVELENGTH FILTERING (after preprocessing)")
-                            print(f"{'='*70}")
-                            print(f"Filtered to: {analysis_wl_min or 'min'} - {analysis_wl_max or 'max'} nm")
-                            print(f"Remaining wavelengths for variable selection: {n_features_varsel}")
-                            print(f"Note: Preprocessing was applied to FULL spectrum first")
-                            print(f"{'='*70}\n")
-                        else:
-                            # No filtering - use original arrays
-                            wavelengths_varsel = wavelengths
-                            X_transformed_varsel = X_transformed
-                            n_features_varsel = n_features
+                        # X_for_models is already preprocessed and filtered - use directly
+                        X_transformed = X_for_models
+                        wavelengths_varsel = wavelengths_for_models
+                        n_features_varsel = X_for_models.shape[1]
 
                         # Loop over each selected variable selection method
                         for varsel_method in selected_methods:
@@ -709,10 +732,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     # We must use the TRANSFORMED data and skip reapplying preprocessing
                                     # Otherwise window size (e.g., 17) > n_features (e.g., 10) causes errors
                                     if preprocess_cfg["deriv"] is not None:
-                                        # Use preprocessed data, skip reprocessing
+                                        # Use preprocessed+filtered data (already done globally)
                                         # Keep original preprocess_cfg for correct labeling in results
                                         subset_result = _run_single_config(
-                                            X_transformed_varsel,
+                                            X_transformed,  # Already preprocessed + filtered
                                             y_np,
                                             wavelengths_varsel,
                                             model,
@@ -725,7 +748,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             subset_indices=top_indices,
                                             subset_tag=f"top{n_top}_{varsel_method}",
                                             top_n_vars=30,
-                                            skip_preprocessing=True,  # Flag to skip reapplying
+                                            skip_preprocessing=False,
+                                            skip_spectral_preprocessing=True,  # Spectral already done, keep imbalance
                                             excluded_count=excluded_count,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
@@ -735,9 +759,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
-                                        # Must use X_transformed_varsel because importances were computed on filtered data
+                                        # Data is already preprocessed and filtered globally
                                         subset_result = _run_single_config(
-                                            X_transformed_varsel,
+                                            X_transformed,  # Already preprocessed + filtered
                                             y_np,
                                             wavelengths_varsel,
                                             model,
@@ -750,7 +774,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             subset_indices=top_indices,
                                             subset_tag=f"top{n_top}_{varsel_method}",
                                             top_n_vars=30,
-                                            skip_preprocessing=True,  # Already preprocessed (SNV/raw applied)
+                                            skip_preprocessing=False,
+                                            skip_spectral_preprocessing=True,  # Spectral already done, keep imbalance
                                             excluded_count=excluded_count,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
@@ -907,8 +932,31 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    # Fit and predict
-    pipe_clone.fit(X_train, y_train)
+    # Check if pipeline has sample weighting transformer
+    # This handles regression weighting methods (rare_boost, binning, balanced)
+    sample_weight_train = None
+    if hasattr(pipe_clone, 'named_steps') and 'imbalance' in pipe_clone.named_steps:
+        imbalance_step = pipe_clone.named_steps['imbalance']
+        if hasattr(imbalance_step, 'sample_weight_'):
+            # This is a weighting transformer (RegressionSampleWeighter)
+            # Fit the pipeline first to compute weights on this fold's training data
+            pipe_clone.fit(X_train, y_train)
+
+            # Extract computed weights (they're for the training fold)
+            sample_weight_train = imbalance_step.sample_weight_
+
+            # Get transformed X by applying all transformers except the model
+            X_train_transformed = X_train
+            for step_name, step in pipe_clone.steps[:-1]:
+                X_train_transformed = step.transform(X_train_transformed)
+
+            # Refit ONLY the final model step with weights
+            final_model = pipe_clone.steps[-1][1]
+            final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+
+    # Standard path: fit if not already done above
+    if sample_weight_train is None:
+        pipe_clone.fit(X_train, y_train)
 
     if task_type == "regression":
         y_pred = pipe_clone.predict(X_test)
@@ -951,6 +999,7 @@ def _run_single_config(
     subset_tag="full",
     top_n_vars=30,
     skip_preprocessing=False,
+    skip_spectral_preprocessing=False,
     excluded_count=0,
     validation_count=0,
     total_samples_original=None,
@@ -983,8 +1032,26 @@ def _run_single_config(
 
     # Build preprocessing pipeline (skip if data is already preprocessed)
     if skip_preprocessing:
+        # Old behavior: skip everything (for backward compatibility)
         pipe_steps = []
+    elif skip_spectral_preprocessing:
+        # NEW: Skip spectral preprocessing but ADD imbalance handling
+        # This is used when spectral preprocessing (SNV/deriv) was already done globally,
+        # but we still need to add imbalance transformers inside CV folds
+        pipe_steps = []
+        if imbalance_method is not None and imbalance_method != 'class_weight':
+            # Add ONLY imbalance handling (spectral preprocessing already done)
+            from spectral_predict.imbalance import build_imbalance_transformer
+            if imbalance_params is None:
+                imbalance_params = {}
+            imbalance_transformer = build_imbalance_transformer(
+                method=imbalance_method,
+                task_type=task_type,
+                **imbalance_params
+            )
+            pipe_steps.append(("imbalance", imbalance_transformer))
     else:
+        # Normal behavior: build full pipeline (spectral + imbalance)
         pipe_steps = build_preprocessing_pipeline(
             preprocess_cfg["name"],
             preprocess_cfg["deriv"],
