@@ -14455,7 +14455,12 @@ class SpectralPredictApp:
             except ValueError:
                 print(f"WARNING: Invalid ElasticNet alpha '{alpha_str}', using default")
 
-            params['l1_ratio'] = self.refine_elasticnet_l1_ratio.get()
+            l1_ratio_str = self.refine_elasticnet_l1_ratio.get().strip()
+            try:
+                params['l1_ratio'] = float(l1_ratio_str)
+            except ValueError:
+                print(f"WARNING: Invalid ElasticNet l1_ratio '{l1_ratio_str}', using default")
+
             params['selection'] = self.refine_elasticnet_selection.get()
 
             tol_str = self.refine_elasticnet_tol.get().strip()
@@ -14531,11 +14536,8 @@ class SpectralPredictApp:
 
         # ========== SVR / SVM ==========
         elif model_name == 'SVR' or model_name == 'SVM':
-            c_str = self.refine_svr_C.get().strip()
-            try:
-                params['C'] = float(c_str)
-            except ValueError:
-                print(f"WARNING: Invalid SVR/SVM C '{c_str}', using default")
+            # C is a DoubleVar, already returns float
+            params['C'] = self.refine_svr_C.get()
 
             params['kernel'] = self.refine_svr_kernel.get()
 
@@ -14549,8 +14551,10 @@ class SpectralPredictApp:
                 except ValueError:
                     print(f"WARNING: Invalid SVR/SVM gamma '{gamma_val}', using default")
 
+            # epsilon, coef0 are DoubleVars, already return floats
             params['epsilon'] = self.refine_svr_epsilon.get()
 
+            # degree is IntVar, already returns int
             params['degree'] = self.refine_svr_degree.get()
             params['coef0'] = self.refine_svr_coef0.get()
             params['shrinking'] = self.refine_svr_shrinking.get()
@@ -14565,7 +14569,14 @@ class SpectralPredictApp:
 
             params['activation'] = self.refine_mlp_activation.get()
             params['solver'] = self.refine_mlp_solver.get()
-            params['alpha'] = self.refine_mlp_alpha.get()
+
+            # Alpha (L2 regularization)
+            alpha_str = self.refine_mlp_alpha.get().strip()
+            try:
+                params['alpha'] = float(alpha_str)
+            except ValueError:
+                print(f"WARNING: Invalid MLP alpha '{alpha_str}', using default")
+
             params['max_iter'] = self.refine_mlp_max_iter.get()
 
             # Learning rate init
