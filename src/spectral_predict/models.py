@@ -24,11 +24,7 @@ except ImportError:
     print("Warning: CatBoost not available (requires Visual Studio 2022 on Windows). CatBoost models will be disabled.")
 
 # Import tiered configuration
-from .model_config import (
-    OPTIMIZED_HYPERPARAMETERS,
-    get_tier_models,
-    get_hyperparameters
-)
+from .model_config import get_tier_models, get_hyperparameters
 
 
 class PLSTransformer(BaseEstimator, TransformerMixin):
@@ -316,6 +312,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
 def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     n_estimators_list=None, learning_rates=None,
+                    neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
                     pls_max_iter_list=None, pls_tol_list=None,
                     rf_n_trees_list=None,
                     rf_max_depth_list=None, rf_min_samples_split_list=None,
@@ -817,11 +814,11 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                             )
             grids["MLP"] = mlp_configs
 
-        # Neural Boosted Regression (tier-aware)
+        # Neural Boosted Regression (GUI-controlled)
         if 'NeuralBoosted' in enabled_models:
-            nb_config = get_hyperparameters('NeuralBoosted', tier)
-            hidden_sizes = nb_config.get('hidden_layer_size', [3, 5])
-            activations = nb_config.get('activation', ['tanh', 'identity'])
+            # Use GUI-provided parameters (single source of truth)
+            hidden_sizes = neuralboosted_hidden_sizes if neuralboosted_hidden_sizes is not None else [3, 5]
+            activations = neuralboosted_activations if neuralboosted_activations is not None else ['tanh', 'identity']
 
             nbr_configs = []
             for n_est in n_estimators_list:
@@ -1212,11 +1209,11 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                             )
             grids["MLP"] = mlp_configs
 
-        # Neural Boosted Classifier - tier-aware (optimized grid size)
+        # Neural Boosted Classifier (GUI-controlled, optimized grid size)
         if 'NeuralBoosted' in enabled_models:
-            nb_config = get_hyperparameters('NeuralBoosted', tier)
-            hidden_sizes = nb_config.get('hidden_layer_size', [3, 5])  # Aligned with regression
-            activations = nb_config.get('activation', ['tanh', 'identity'])  # Aligned with regression
+            # Use GUI-provided parameters (single source of truth, aligned with regression)
+            hidden_sizes = neuralboosted_hidden_sizes if neuralboosted_hidden_sizes is not None else [3, 5]
+            activations = neuralboosted_activations if neuralboosted_activations is not None else ['tanh', 'identity']
 
             nbc_configs = []
             for n_est in n_estimators_list:

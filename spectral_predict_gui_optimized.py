@@ -1019,6 +1019,42 @@ class SpectralPredictApp:
         self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
         self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
 
+        # RandomForest min_samples_split (minimum samples required to split a node)
+        self.rf_min_samples_split_2 = tk.BooleanVar(value=True)  # 2 ⭐ standard (models.py default)
+        self.rf_min_samples_split_5 = tk.BooleanVar(value=False)  # 5
+        self.rf_min_samples_split_10 = tk.BooleanVar(value=False)  # 10
+        self.rf_min_samples_split_20 = tk.BooleanVar(value=False)  # 20
+        self.rf_min_samples_split_custom = tk.StringVar(value="")  # Custom value
+
+        # RandomForest min_samples_leaf (minimum samples required at a leaf node)
+        self.rf_min_samples_leaf_1 = tk.BooleanVar(value=True)  # 1 ⭐ standard (models.py default)
+        self.rf_min_samples_leaf_2 = tk.BooleanVar(value=False)  # 2
+        self.rf_min_samples_leaf_5 = tk.BooleanVar(value=False)  # 5
+        self.rf_min_samples_leaf_10 = tk.BooleanVar(value=False)  # 10
+        self.rf_min_samples_leaf_custom = tk.StringVar(value="")  # Custom value
+
+        # RandomForest max_features (number of features to consider for splits)
+        self.rf_max_features_sqrt = tk.BooleanVar(value=True)  # 'sqrt' ⭐ standard (models.py default)
+        self.rf_max_features_log2 = tk.BooleanVar(value=False)  # 'log2'
+        self.rf_max_features_none = tk.BooleanVar(value=False)  # None (all features)
+        self.rf_max_features_custom = tk.StringVar(value="")  # Custom value (float 0-1 or int)
+
+        # RandomForest bootstrap (whether to use bootstrap samples)
+        self.rf_bootstrap_true = tk.BooleanVar(value=True)  # True ⭐ standard (models.py default)
+        self.rf_bootstrap_false = tk.BooleanVar(value=False)  # False (use all samples)
+
+        # RandomForest max_leaf_nodes (maximum number of leaf nodes)
+        self.rf_max_leaf_nodes_none = tk.BooleanVar(value=True)  # None ⭐ standard (unlimited, models.py default)
+        self.rf_max_leaf_nodes_50 = tk.BooleanVar(value=False)  # 50
+        self.rf_max_leaf_nodes_100 = tk.BooleanVar(value=False)  # 100
+        self.rf_max_leaf_nodes_custom = tk.StringVar(value="")  # Custom value
+
+        # RandomForest min_impurity_decrease (minimum impurity decrease to split)
+        self.rf_min_impurity_decrease_0 = tk.BooleanVar(value=True)  # 0.0 ⭐ standard (no threshold, models.py default)
+        self.rf_min_impurity_decrease_001 = tk.BooleanVar(value=False)  # 0.01
+        self.rf_min_impurity_decrease_01 = tk.BooleanVar(value=False)  # 0.1
+        self.rf_min_impurity_decrease_custom = tk.StringVar(value="")  # Custom value
+
         # Ridge Regression alpha options (default: all checked per models.py)
         self.ridge_alpha_0001 = tk.BooleanVar(value=True)   # 0.001
         self.ridge_alpha_001 = tk.BooleanVar(value=True)    # 0.01
@@ -1027,12 +1063,35 @@ class SpectralPredictApp:
         self.ridge_alpha_10 = tk.BooleanVar(value=True)     # 10.0
         self.ridge_alpha_custom = tk.StringVar(value="")    # Custom value
 
+        # Ridge solver (optimization algorithm)
+        self.ridge_solver_auto = tk.BooleanVar(value=True)  # 'auto' ⭐ standard (models.py default)
+        self.ridge_solver_svd = tk.BooleanVar(value=False)  # 'svd' (exact solution)
+        self.ridge_solver_cholesky = tk.BooleanVar(value=False)  # 'cholesky' (fast for n_samples > n_features)
+        self.ridge_solver_lsqr = tk.BooleanVar(value=False)  # 'lsqr' (iterative, good for large datasets)
+        self.ridge_solver_sag = tk.BooleanVar(value=False)  # 'sag' (stochastic average gradient)
+
+        # Ridge tol (tolerance for stopping criterion)
+        self.ridge_tol_1e4 = tk.BooleanVar(value=True)  # 1e-4 ⭐ standard (models.py default)
+        self.ridge_tol_1e3 = tk.BooleanVar(value=False)  # 1e-3
+        self.ridge_tol_1e5 = tk.BooleanVar(value=False)  # 1e-5
+        self.ridge_tol_custom = tk.StringVar(value="")  # Custom value
+
         # Lasso Regression alpha options (default: all checked per models.py)
         self.lasso_alpha_0001 = tk.BooleanVar(value=True)   # 0.001
         self.lasso_alpha_001 = tk.BooleanVar(value=True)    # 0.01
         self.lasso_alpha_01 = tk.BooleanVar(value=True)     # 0.1
         self.lasso_alpha_1 = tk.BooleanVar(value=True)      # 1.0
         self.lasso_alpha_custom = tk.StringVar(value="")    # Custom value
+
+        # Lasso selection (coordinate descent algorithm variant)
+        self.lasso_selection_cyclic = tk.BooleanVar(value=True)  # 'cyclic' ⭐ standard (models.py default)
+        self.lasso_selection_random = tk.BooleanVar(value=False)  # 'random' (can be faster for large datasets)
+
+        # Lasso tol (tolerance for stopping criterion)
+        self.lasso_tol_1e4 = tk.BooleanVar(value=True)  # 1e-4 ⭐ standard (models.py default)
+        self.lasso_tol_1e3 = tk.BooleanVar(value=False)  # 1e-3
+        self.lasso_tol_1e5 = tk.BooleanVar(value=False)  # 1e-5
+        self.lasso_tol_custom = tk.StringVar(value="")  # Custom value
 
         # XGBoost Hyperparameters (spectroscopy-optimized defaults)
         # n_estimators (number of boosting rounds)
@@ -1100,6 +1159,16 @@ class SpectralPredictApp:
         self.elasticnet_l1_ratio_07 = tk.BooleanVar(value=True)  # 0.7 ⭐ standard
         self.elasticnet_l1_ratio_custom = tk.StringVar(value="")
 
+        # ElasticNet selection (coordinate descent algorithm variant)
+        self.elasticnet_selection_cyclic = tk.BooleanVar(value=True)  # 'cyclic' ⭐ standard (models.py default)
+        self.elasticnet_selection_random = tk.BooleanVar(value=False)  # 'random' (can be faster for large datasets)
+
+        # ElasticNet tol (tolerance for stopping criterion)
+        self.elasticnet_tol_1e4 = tk.BooleanVar(value=True)  # 1e-4 ⭐ standard (models.py default)
+        self.elasticnet_tol_1e3 = tk.BooleanVar(value=False)  # 1e-3
+        self.elasticnet_tol_1e5 = tk.BooleanVar(value=False)  # 1e-5
+        self.elasticnet_tol_custom = tk.StringVar(value="")  # Custom value
+
         # PLS Hyperparameters
         # max_iter (maximum number of iterations)
         self.pls_max_iter_500 = tk.BooleanVar(value=True)   # 500 ⭐ standard (default)
@@ -1150,28 +1219,30 @@ class SpectralPredictApp:
         # subsample (fraction of data to use for each tree)
         self.lightgbm_subsample_05 = tk.BooleanVar(value=False)  # 0.5
         self.lightgbm_subsample_07 = tk.BooleanVar(value=False)  # 0.7
+        self.lightgbm_subsample_08 = tk.BooleanVar(value=True)  # 0.8 ⭐ standard (models.py default)
         self.lightgbm_subsample_085 = tk.BooleanVar(value=False)  # 0.85
-        self.lightgbm_subsample_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard (no subsampling)
+        self.lightgbm_subsample_10 = tk.BooleanVar(value=False)  # 1.0 (no subsampling)
         self.lightgbm_subsample_custom = tk.StringVar(value="")
 
         # colsample_bytree (fraction of features to use per tree)
         self.lightgbm_colsample_bytree_05 = tk.BooleanVar(value=False)  # 0.5
         self.lightgbm_colsample_bytree_07 = tk.BooleanVar(value=False)  # 0.7
+        self.lightgbm_colsample_bytree_08 = tk.BooleanVar(value=True)  # 0.8 ⭐ standard (models.py default)
         self.lightgbm_colsample_bytree_085 = tk.BooleanVar(value=False)  # 0.85
-        self.lightgbm_colsample_bytree_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard (all features)
+        self.lightgbm_colsample_bytree_10 = tk.BooleanVar(value=False)  # 1.0 (all features)
         self.lightgbm_colsample_bytree_custom = tk.StringVar(value="")
 
         # reg_alpha (L1 regularization)
-        self.lightgbm_reg_alpha_00 = tk.BooleanVar(value=True)  # 0.0 ⭐ standard (no L1)
-        self.lightgbm_reg_alpha_01 = tk.BooleanVar(value=False)  # 0.1
+        self.lightgbm_reg_alpha_00 = tk.BooleanVar(value=False)  # 0.0 (no L1)
+        self.lightgbm_reg_alpha_01 = tk.BooleanVar(value=True)  # 0.1 ⭐ standard (models.py default)
         self.lightgbm_reg_alpha_05 = tk.BooleanVar(value=False)  # 0.5
         self.lightgbm_reg_alpha_10 = tk.BooleanVar(value=False)  # 1.0
         self.lightgbm_reg_alpha_custom = tk.StringVar(value="")
 
         # reg_lambda (L2 regularization)
-        self.lightgbm_reg_lambda_00 = tk.BooleanVar(value=True)  # 0.0 ⭐ standard (no L2)
+        self.lightgbm_reg_lambda_00 = tk.BooleanVar(value=False)  # 0.0 (no L2)
         self.lightgbm_reg_lambda_05 = tk.BooleanVar(value=False)  # 0.5
-        self.lightgbm_reg_lambda_10 = tk.BooleanVar(value=False)  # 1.0
+        self.lightgbm_reg_lambda_10 = tk.BooleanVar(value=True)  # 1.0 ⭐ standard (models.py default)
         self.lightgbm_reg_lambda_20 = tk.BooleanVar(value=False)  # 2.0
         self.lightgbm_reg_lambda_custom = tk.StringVar(value="")
 
@@ -4567,11 +4638,12 @@ class SpectralPredictApp:
 
         ttk.Checkbutton(lgbm_subsample_frame, text="0.5", variable=self.lightgbm_subsample_05).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(lgbm_subsample_frame, text="0.7", variable=self.lightgbm_subsample_07).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(lgbm_subsample_frame, text="0.85", variable=self.lightgbm_subsample_085).grid(row=0, column=2, padx=5)
-        ttk.Checkbutton(lgbm_subsample_frame, text="1.0 ⭐", variable=self.lightgbm_subsample_10).grid(row=0, column=3, padx=5)
-        ttk.Label(lgbm_subsample_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
-        ttk.Entry(lgbm_subsample_frame, textvariable=self.lightgbm_subsample_custom, width=10).grid(row=0, column=5, padx=5)
-        ttk.Label(lgbm_subsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+        ttk.Checkbutton(lgbm_subsample_frame, text="0.8 ⭐", variable=self.lightgbm_subsample_08).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_subsample_frame, text="0.85", variable=self.lightgbm_subsample_085).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(lgbm_subsample_frame, text="1.0", variable=self.lightgbm_subsample_10).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_subsample_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(lgbm_subsample_frame, textvariable=self.lightgbm_subsample_custom, width=10).grid(row=0, column=6, padx=5)
+        ttk.Label(lgbm_subsample_frame, text="(default: 0.8)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
 
         ttk.Label(lgbm_content_frame, text="💡 Also called bagging_fraction",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
@@ -4583,11 +4655,12 @@ class SpectralPredictApp:
 
         ttk.Checkbutton(lgbm_colsample_frame, text="0.5", variable=self.lightgbm_colsample_bytree_05).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(lgbm_colsample_frame, text="0.7", variable=self.lightgbm_colsample_bytree_07).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(lgbm_colsample_frame, text="0.85", variable=self.lightgbm_colsample_bytree_085).grid(row=0, column=2, padx=5)
-        ttk.Checkbutton(lgbm_colsample_frame, text="1.0 ⭐", variable=self.lightgbm_colsample_bytree_10).grid(row=0, column=3, padx=5)
-        ttk.Label(lgbm_colsample_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
-        ttk.Entry(lgbm_colsample_frame, textvariable=self.lightgbm_colsample_bytree_custom, width=10).grid(row=0, column=5, padx=5)
-        ttk.Label(lgbm_colsample_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+        ttk.Checkbutton(lgbm_colsample_frame, text="0.8 ⭐", variable=self.lightgbm_colsample_bytree_08).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lgbm_colsample_frame, text="0.85", variable=self.lightgbm_colsample_bytree_085).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(lgbm_colsample_frame, text="1.0", variable=self.lightgbm_colsample_bytree_10).grid(row=0, column=4, padx=5)
+        ttk.Label(lgbm_colsample_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(lgbm_colsample_frame, textvariable=self.lightgbm_colsample_bytree_custom, width=10).grid(row=0, column=6, padx=5)
+        ttk.Label(lgbm_colsample_frame, text="(default: 0.8)", style='Caption.TLabel').grid(row=0, column=7, padx=10)
 
         ttk.Label(lgbm_content_frame, text="💡 Also called feature_fraction",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
@@ -10396,6 +10469,152 @@ class SpectralPredictApp:
             # Sort for consistent ordering (None sorts first)
             rf_max_depth_list = sorted(rf_max_depth_list, key=lambda x: (x is not None, x))
 
+            # Collect Random Forest min_samples_split
+            rf_min_samples_split_list = []
+            if self.rf_min_samples_split_2.get():
+                rf_min_samples_split_list.append(2)
+            if self.rf_min_samples_split_5.get():
+                rf_min_samples_split_list.append(5)
+            if self.rf_min_samples_split_10.get():
+                rf_min_samples_split_list.append(10)
+            if self.rf_min_samples_split_20.get():
+                rf_min_samples_split_list.append(20)
+
+            custom_min_split = self.rf_min_samples_split_custom.get().strip()
+            if custom_min_split:
+                try:
+                    custom_val = int(custom_min_split)
+                    if custom_val >= 2 and custom_val not in rf_min_samples_split_list:
+                        rf_min_samples_split_list.append(custom_val)
+                    elif custom_val < 2:
+                        print(f"WARNING: Invalid RF min_samples_split '{custom_min_split}' (must be >= 2), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid RF min_samples_split '{custom_min_split}', ignoring")
+
+            if not rf_min_samples_split_list:
+                rf_min_samples_split_list = None
+            else:
+                rf_min_samples_split_list = sorted(rf_min_samples_split_list)
+
+            # Collect Random Forest min_samples_leaf
+            rf_min_samples_leaf_list = []
+            if self.rf_min_samples_leaf_1.get():
+                rf_min_samples_leaf_list.append(1)
+            if self.rf_min_samples_leaf_2.get():
+                rf_min_samples_leaf_list.append(2)
+            if self.rf_min_samples_leaf_5.get():
+                rf_min_samples_leaf_list.append(5)
+            if self.rf_min_samples_leaf_10.get():
+                rf_min_samples_leaf_list.append(10)
+
+            custom_min_leaf = self.rf_min_samples_leaf_custom.get().strip()
+            if custom_min_leaf:
+                try:
+                    custom_val = int(custom_min_leaf)
+                    if custom_val >= 1 and custom_val not in rf_min_samples_leaf_list:
+                        rf_min_samples_leaf_list.append(custom_val)
+                    elif custom_val < 1:
+                        print(f"WARNING: Invalid RF min_samples_leaf '{custom_min_leaf}' (must be >= 1), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid RF min_samples_leaf '{custom_min_leaf}', ignoring")
+
+            if not rf_min_samples_leaf_list:
+                rf_min_samples_leaf_list = None
+            else:
+                rf_min_samples_leaf_list = sorted(rf_min_samples_leaf_list)
+
+            # Collect Random Forest max_features
+            rf_max_features_list = []
+            if self.rf_max_features_sqrt.get():
+                rf_max_features_list.append('sqrt')
+            if self.rf_max_features_log2.get():
+                rf_max_features_list.append('log2')
+            if self.rf_max_features_none.get():
+                rf_max_features_list.append(None)
+
+            custom_max_feat = self.rf_max_features_custom.get().strip()
+            if custom_max_feat:
+                if custom_max_feat.lower() == 'none':
+                    if None not in rf_max_features_list:
+                        rf_max_features_list.append(None)
+                elif custom_max_feat.lower() in ['sqrt', 'log2']:
+                    if custom_max_feat.lower() not in rf_max_features_list:
+                        rf_max_features_list.append(custom_max_feat.lower())
+                else:
+                    try:
+                        custom_val = float(custom_max_feat)
+                        if custom_val not in rf_max_features_list:
+                            rf_max_features_list.append(custom_val)
+                    except ValueError:
+                        print(f"WARNING: Invalid RF max_features '{custom_max_feat}', ignoring")
+
+            if not rf_max_features_list:
+                rf_max_features_list = None
+
+            # Collect Random Forest bootstrap
+            rf_bootstrap_list = []
+            if self.rf_bootstrap_true.get():
+                rf_bootstrap_list.append(True)
+            if self.rf_bootstrap_false.get():
+                rf_bootstrap_list.append(False)
+
+            if not rf_bootstrap_list:
+                rf_bootstrap_list = None
+
+            # Collect Random Forest max_leaf_nodes
+            rf_max_leaf_nodes_list = []
+            if self.rf_max_leaf_nodes_none.get():
+                rf_max_leaf_nodes_list.append(None)
+            if self.rf_max_leaf_nodes_50.get():
+                rf_max_leaf_nodes_list.append(50)
+            if self.rf_max_leaf_nodes_100.get():
+                rf_max_leaf_nodes_list.append(100)
+
+            custom_max_leaf = self.rf_max_leaf_nodes_custom.get().strip()
+            if custom_max_leaf:
+                if custom_max_leaf.lower() == 'none':
+                    if None not in rf_max_leaf_nodes_list:
+                        rf_max_leaf_nodes_list.append(None)
+                else:
+                    try:
+                        custom_val = int(custom_max_leaf)
+                        if custom_val > 0 and custom_val not in rf_max_leaf_nodes_list:
+                            rf_max_leaf_nodes_list.append(custom_val)
+                        elif custom_val <= 0:
+                            print(f"WARNING: Invalid RF max_leaf_nodes '{custom_max_leaf}' (must be > 0), ignoring")
+                    except ValueError:
+                        print(f"WARNING: Invalid RF max_leaf_nodes '{custom_max_leaf}', ignoring")
+
+            if not rf_max_leaf_nodes_list:
+                rf_max_leaf_nodes_list = None
+            else:
+                rf_max_leaf_nodes_list = sorted(rf_max_leaf_nodes_list, key=lambda x: (x is not None, x))
+
+            # Collect Random Forest min_impurity_decrease
+            rf_min_impurity_decrease_list = []
+            if self.rf_min_impurity_decrease_0.get():
+                rf_min_impurity_decrease_list.append(0.0)
+            if self.rf_min_impurity_decrease_001.get():
+                rf_min_impurity_decrease_list.append(0.01)
+            if self.rf_min_impurity_decrease_01.get():
+                rf_min_impurity_decrease_list.append(0.1)
+
+            custom_min_impurity = self.rf_min_impurity_decrease_custom.get().strip()
+            if custom_min_impurity:
+                try:
+                    custom_val = float(custom_min_impurity)
+                    if custom_val >= 0.0 and custom_val not in rf_min_impurity_decrease_list:
+                        rf_min_impurity_decrease_list.append(custom_val)
+                    elif custom_val < 0.0:
+                        print(f"WARNING: Invalid RF min_impurity_decrease '{custom_min_impurity}' (must be >= 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid RF min_impurity_decrease '{custom_min_impurity}', ignoring")
+
+            if not rf_min_impurity_decrease_list:
+                rf_min_impurity_decrease_list = None
+            else:
+                rf_min_impurity_decrease_list = sorted(rf_min_impurity_decrease_list)
+
             # Collect Ridge alpha values
             ridge_alphas_list = []
             if self.ridge_alpha_0001.get():
@@ -10428,6 +10647,47 @@ class SpectralPredictApp:
             # Sort for consistent ordering
             ridge_alphas_list = sorted(ridge_alphas_list)
 
+            # Collect Ridge solver values
+            ridge_solver_list = []
+            if self.ridge_solver_auto.get():
+                ridge_solver_list.append('auto')
+            if self.ridge_solver_svd.get():
+                ridge_solver_list.append('svd')
+            if self.ridge_solver_cholesky.get():
+                ridge_solver_list.append('cholesky')
+            if self.ridge_solver_lsqr.get():
+                ridge_solver_list.append('lsqr')
+            if self.ridge_solver_sag.get():
+                ridge_solver_list.append('sag')
+
+            if not ridge_solver_list:
+                ridge_solver_list = None
+
+            # Collect Ridge tol values
+            ridge_tol_list = []
+            if self.ridge_tol_1e4.get():
+                ridge_tol_list.append(1e-4)
+            if self.ridge_tol_1e3.get():
+                ridge_tol_list.append(1e-3)
+            if self.ridge_tol_1e5.get():
+                ridge_tol_list.append(1e-5)
+
+            custom_ridge_tol = self.ridge_tol_custom.get().strip()
+            if custom_ridge_tol:
+                try:
+                    custom_val = float(custom_ridge_tol)
+                    if custom_val > 0 and custom_val not in ridge_tol_list:
+                        ridge_tol_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid Ridge tol '{custom_ridge_tol}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid Ridge tol '{custom_ridge_tol}', ignoring")
+
+            if not ridge_tol_list:
+                ridge_tol_list = None
+            else:
+                ridge_tol_list = sorted(ridge_tol_list)
+
             # Collect Lasso alpha values
             lasso_alphas_list = []
             if self.lasso_alpha_0001.get():
@@ -10457,6 +10717,41 @@ class SpectralPredictApp:
 
             # Sort for consistent ordering
             lasso_alphas_list = sorted(lasso_alphas_list)
+
+            # Collect Lasso selection values
+            lasso_selection_list = []
+            if self.lasso_selection_cyclic.get():
+                lasso_selection_list.append('cyclic')
+            if self.lasso_selection_random.get():
+                lasso_selection_list.append('random')
+
+            if not lasso_selection_list:
+                lasso_selection_list = None
+
+            # Collect Lasso tol values
+            lasso_tol_list = []
+            if self.lasso_tol_1e4.get():
+                lasso_tol_list.append(1e-4)
+            if self.lasso_tol_1e3.get():
+                lasso_tol_list.append(1e-3)
+            if self.lasso_tol_1e5.get():
+                lasso_tol_list.append(1e-5)
+
+            custom_lasso_tol = self.lasso_tol_custom.get().strip()
+            if custom_lasso_tol:
+                try:
+                    custom_val = float(custom_lasso_tol)
+                    if custom_val > 0 and custom_val not in lasso_tol_list:
+                        lasso_tol_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid Lasso tol '{custom_lasso_tol}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid Lasso tol '{custom_lasso_tol}', ignoring")
+
+            if not lasso_tol_list:
+                lasso_tol_list = None
+            else:
+                lasso_tol_list = sorted(lasso_tol_list)
 
             # Collect ElasticNet alpha values
             elasticnet_alphas_list = []
@@ -10513,6 +10808,41 @@ class SpectralPredictApp:
 
             # Sort for consistent ordering
             elasticnet_l1_ratios_list = sorted(elasticnet_l1_ratios_list)
+
+            # Collect ElasticNet selection values
+            elasticnet_selection_list = []
+            if self.elasticnet_selection_cyclic.get():
+                elasticnet_selection_list.append('cyclic')
+            if self.elasticnet_selection_random.get():
+                elasticnet_selection_list.append('random')
+
+            if not elasticnet_selection_list:
+                elasticnet_selection_list = None
+
+            # Collect ElasticNet tol values
+            elasticnet_tol_list = []
+            if self.elasticnet_tol_1e4.get():
+                elasticnet_tol_list.append(1e-4)
+            if self.elasticnet_tol_1e3.get():
+                elasticnet_tol_list.append(1e-3)
+            if self.elasticnet_tol_1e5.get():
+                elasticnet_tol_list.append(1e-5)
+
+            custom_elasticnet_tol = self.elasticnet_tol_custom.get().strip()
+            if custom_elasticnet_tol:
+                try:
+                    custom_val = float(custom_elasticnet_tol)
+                    if custom_val > 0 and custom_val not in elasticnet_tol_list:
+                        elasticnet_tol_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid ElasticNet tol '{custom_elasticnet_tol}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid ElasticNet tol '{custom_elasticnet_tol}', ignoring")
+
+            if not elasticnet_tol_list:
+                elasticnet_tol_list = None
+            else:
+                elasticnet_tol_list = sorted(elasticnet_tol_list)
 
             # Collect PLS max_iter values
             pls_max_iters_list = []
@@ -10908,6 +11238,8 @@ class SpectralPredictApp:
                 lightgbm_subsample_list.append(0.5)
             if self.lightgbm_subsample_07.get():
                 lightgbm_subsample_list.append(0.7)
+            if self.lightgbm_subsample_08.get():
+                lightgbm_subsample_list.append(0.8)
             if self.lightgbm_subsample_085.get():
                 lightgbm_subsample_list.append(0.85)
             if self.lightgbm_subsample_10.get():
@@ -10933,6 +11265,8 @@ class SpectralPredictApp:
                 lightgbm_colsample_bytree_list.append(0.5)
             if self.lightgbm_colsample_bytree_07.get():
                 lightgbm_colsample_bytree_list.append(0.7)
+            if self.lightgbm_colsample_bytree_08.get():
+                lightgbm_colsample_bytree_list.append(0.8)
             if self.lightgbm_colsample_bytree_085.get():
                 lightgbm_colsample_bytree_list.append(0.85)
             if self.lightgbm_colsample_bytree_10.get():
@@ -11003,6 +11337,65 @@ class SpectralPredictApp:
                 lightgbm_reg_lambda_list = sorted(lightgbm_reg_lambda_list)
 
             # Collect CatBoost hyperparameters (NEW PHASE 1)
+            # iterations (n_estimators equivalent)
+            catboost_iterations_list = []
+            if self.catboost_iterations_100.get():
+                catboost_iterations_list.append(100)
+            if self.catboost_iterations_200.get():
+                catboost_iterations_list.append(200)
+
+            custom_cb_iterations = self.catboost_iterations_custom.get().strip()
+            if custom_cb_iterations:
+                try:
+                    custom_val = int(custom_cb_iterations)
+                    if custom_val > 0 and custom_val not in catboost_iterations_list:
+                        catboost_iterations_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost iterations '{custom_cb_iterations}', ignoring")
+
+            if not catboost_iterations_list:
+                catboost_iterations_list = None
+            else:
+                catboost_iterations_list = sorted(catboost_iterations_list)
+
+            # learning_rate
+            catboost_learning_rates = []
+            if self.catboost_lr_01.get():
+                catboost_learning_rates.append(0.1)
+
+            custom_cb_lr = self.catboost_lr_custom.get().strip()
+            if custom_cb_lr:
+                try:
+                    custom_val = float(custom_cb_lr)
+                    if 0 < custom_val <= 1.0 and custom_val not in catboost_learning_rates:
+                        catboost_learning_rates.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost learning_rate '{custom_cb_lr}', ignoring")
+
+            if not catboost_learning_rates:
+                catboost_learning_rates = None
+            else:
+                catboost_learning_rates = sorted(catboost_learning_rates)
+
+            # depth (max tree depth)
+            catboost_depths = []
+            if self.catboost_depth_6.get():
+                catboost_depths.append(6)
+
+            custom_cb_depth = self.catboost_depth_custom.get().strip()
+            if custom_cb_depth:
+                try:
+                    custom_val = int(custom_cb_depth)
+                    if custom_val > 0 and custom_val not in catboost_depths:
+                        catboost_depths.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom CatBoost depth '{custom_cb_depth}', ignoring")
+
+            if not catboost_depths:
+                catboost_depths = None
+            else:
+                catboost_depths = sorted(catboost_depths)
+
             # l2_leaf_reg
             catboost_l2_leaf_reg_list = []
             if self.catboost_l2_leaf_reg_10.get():
@@ -11102,6 +11495,204 @@ class SpectralPredictApp:
                 catboost_random_strength_list = None
             else:
                 catboost_random_strength_list = sorted(catboost_random_strength_list)
+
+            # Collect SVR hyperparameters (NEW PHASE 1 - CRITICAL FIX)
+            # kernel
+            svr_kernels = []
+            if self.svr_kernel_rbf.get():
+                svr_kernels.append('rbf')
+            if self.svr_kernel_linear.get():
+                svr_kernels.append('linear')
+            if not svr_kernels:
+                svr_kernels = ['rbf', 'linear']  # Default
+
+            # C (regularization parameter)
+            svr_C_list = []
+            if self.svr_C_10.get():
+                svr_C_list.append(1.0)
+            if self.svr_C_100.get():
+                svr_C_list.append(10.0)
+            custom_svr_C = self.svr_C_custom.get().strip()
+            if custom_svr_C:
+                try:
+                    custom_val = float(custom_svr_C)
+                    if custom_val > 0 and custom_val not in svr_C_list:
+                        svr_C_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom SVR C '{custom_svr_C}', ignoring")
+            if not svr_C_list:
+                svr_C_list = [1.0, 10.0]  # Default
+
+            # gamma (kernel coefficient)
+            svr_gamma_list = []
+            if self.svr_gamma_scale.get():
+                svr_gamma_list.append('scale')
+            if self.svr_gamma_auto.get():
+                svr_gamma_list.append('auto')
+            custom_svr_gamma = self.svr_gamma_custom.get().strip()
+            if custom_svr_gamma:
+                try:
+                    custom_val = float(custom_svr_gamma)
+                    if custom_val > 0 and custom_val not in svr_gamma_list:
+                        svr_gamma_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom SVR gamma '{custom_svr_gamma}', ignoring")
+            if not svr_gamma_list:
+                svr_gamma_list = ['scale']  # Default
+
+            # epsilon (tube width)
+            svr_epsilon_list = []
+            if self.svr_epsilon_001.get():
+                svr_epsilon_list.append(0.01)
+            if self.svr_epsilon_005.get():
+                svr_epsilon_list.append(0.05)
+            if self.svr_epsilon_01.get():
+                svr_epsilon_list.append(0.1)
+            if self.svr_epsilon_02.get():
+                svr_epsilon_list.append(0.2)
+            if self.svr_epsilon_05.get():
+                svr_epsilon_list.append(0.5)
+            if not svr_epsilon_list:
+                svr_epsilon_list = [0.1]  # Default
+
+            # degree (for poly kernel)
+            svr_degree_list = []
+            if self.svr_degree_2.get():
+                svr_degree_list.append(2)
+            if self.svr_degree_3.get():
+                svr_degree_list.append(3)
+            if self.svr_degree_4.get():
+                svr_degree_list.append(4)
+            if self.svr_degree_5.get():
+                svr_degree_list.append(5)
+            if not svr_degree_list:
+                svr_degree_list = [3]  # Default
+
+            # coef0 (independent term in kernel)
+            svr_coef0_list = []
+            if self.svr_coef0_00.get():
+                svr_coef0_list.append(0.0)
+            if self.svr_coef0_05.get():
+                svr_coef0_list.append(0.5)
+            if self.svr_coef0_10.get():
+                svr_coef0_list.append(1.0)
+            if self.svr_coef0_20.get():
+                svr_coef0_list.append(2.0)
+            if not svr_coef0_list:
+                svr_coef0_list = [0.0]  # Default
+
+            # shrinking (use shrinking heuristic)
+            svr_shrinking_list = []
+            if self.svr_shrinking_true.get():
+                svr_shrinking_list.append(True)
+            if self.svr_shrinking_false.get():
+                svr_shrinking_list.append(False)
+            if not svr_shrinking_list:
+                svr_shrinking_list = [True]  # Default
+
+            # Collect MLP hyperparameters (NEW PHASE 1 - CRITICAL FIX)
+            # hidden_layer_sizes
+            mlp_hidden_layer_sizes_list = []
+            if self.mlp_hidden_64.get():
+                mlp_hidden_layer_sizes_list.append((64,))
+            if self.mlp_hidden_128_64.get():
+                mlp_hidden_layer_sizes_list.append((128, 64))
+            custom_mlp_hidden = self.mlp_hidden_custom.get().strip()
+            if custom_mlp_hidden:
+                try:
+                    # Parse "100,50,25" → (100, 50, 25)
+                    sizes = tuple(int(x.strip()) for x in custom_mlp_hidden.split(','))
+                    if all(s > 0 for s in sizes) and sizes not in mlp_hidden_layer_sizes_list:
+                        mlp_hidden_layer_sizes_list.append(sizes)
+                except ValueError:
+                    print(f"WARNING: Invalid custom MLP hidden_layer_sizes '{custom_mlp_hidden}', ignoring")
+            if not mlp_hidden_layer_sizes_list:
+                mlp_hidden_layer_sizes_list = [(64,), (128, 64)]  # Default
+
+            # alpha (L2 regularization)
+            mlp_alphas_list = []
+            if self.mlp_alpha_1e3.get():
+                mlp_alphas_list.append(0.001)
+            custom_mlp_alpha = self.mlp_alpha_custom.get().strip()
+            if custom_mlp_alpha:
+                try:
+                    custom_val = float(custom_mlp_alpha)
+                    if custom_val > 0 and custom_val not in mlp_alphas_list:
+                        mlp_alphas_list.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom MLP alpha '{custom_mlp_alpha}', ignoring")
+            if not mlp_alphas_list:
+                mlp_alphas_list = [0.001]  # Default
+
+            # learning_rate_init
+            mlp_learning_rate_inits = []
+            if self.mlp_lr_init_1e3.get():
+                mlp_learning_rate_inits.append(0.001)
+            custom_mlp_lr_init = self.mlp_lr_init_custom.get().strip()
+            if custom_mlp_lr_init:
+                try:
+                    custom_val = float(custom_mlp_lr_init)
+                    if custom_val > 0 and custom_val not in mlp_learning_rate_inits:
+                        mlp_learning_rate_inits.append(custom_val)
+                except ValueError:
+                    print(f"WARNING: Invalid custom MLP learning_rate_init '{custom_mlp_lr_init}', ignoring")
+            if not mlp_learning_rate_inits:
+                mlp_learning_rate_inits = [0.001]  # Default
+
+            # activation
+            mlp_activation_list = []
+            if self.mlp_activation_relu.get():
+                mlp_activation_list.append('relu')
+            if self.mlp_activation_tanh.get():
+                mlp_activation_list.append('tanh')
+            if self.mlp_activation_logistic.get():
+                mlp_activation_list.append('logistic')
+            if self.mlp_activation_identity.get():
+                mlp_activation_list.append('identity')
+            if not mlp_activation_list:
+                mlp_activation_list = ['relu']  # Default
+
+            # solver
+            mlp_solver_list = []
+            if self.mlp_solver_adam.get():
+                mlp_solver_list.append('adam')
+            if self.mlp_solver_lbfgs.get():
+                mlp_solver_list.append('lbfgs')
+            if self.mlp_solver_sgd.get():
+                mlp_solver_list.append('sgd')
+            if not mlp_solver_list:
+                mlp_solver_list = ['adam']  # Default
+
+            # batch_size
+            mlp_batch_size_list = []
+            if self.mlp_batch_auto.get():
+                mlp_batch_size_list.append('auto')
+            if self.mlp_batch_32.get():
+                mlp_batch_size_list.append(32)
+            if self.mlp_batch_64.get():
+                mlp_batch_size_list.append(64)
+            if self.mlp_batch_128.get():
+                mlp_batch_size_list.append(128)
+            if not mlp_batch_size_list:
+                mlp_batch_size_list = ['auto']  # Default
+
+            # learning_rate_schedule
+            mlp_learning_rate_schedule_list = []
+            if self.mlp_lr_schedule_constant.get():
+                mlp_learning_rate_schedule_list.append('constant')
+            if self.mlp_lr_schedule_invscaling.get():
+                mlp_learning_rate_schedule_list.append('invscaling')
+            if self.mlp_lr_schedule_adaptive.get():
+                mlp_learning_rate_schedule_list.append('adaptive')
+            if not mlp_learning_rate_schedule_list:
+                mlp_learning_rate_schedule_list = ['constant']  # Default
+
+            # momentum
+            mlp_momentum_list = []
+            if self.mlp_momentum_09.get():
+                mlp_momentum_list.append(0.9)
+            if not mlp_momentum_list:
+                mlp_momentum_list = [0.9]  # Default
 
             self._log_progress(f"\n{'='*70}")
             self._log_progress(f"ANALYSIS CONFIGURATION")
@@ -11330,10 +11921,22 @@ class SpectralPredictApp:
                 neuralboosted_activations=neuralboosted_activations,
                 rf_n_trees_list=rf_n_trees_list,
                 rf_max_depth_list=rf_max_depth_list,
+                rf_min_samples_split_list=rf_min_samples_split_list,
+                rf_min_samples_leaf_list=rf_min_samples_leaf_list,
+                rf_max_features_list=rf_max_features_list,
+                rf_bootstrap_list=rf_bootstrap_list,
+                rf_max_leaf_nodes_list=rf_max_leaf_nodes_list,
+                rf_min_impurity_decrease_list=rf_min_impurity_decrease_list,
                 ridge_alphas_list=ridge_alphas_list,
+                ridge_solver_list=ridge_solver_list,
+                ridge_tol_list=ridge_tol_list,
                 lasso_alphas_list=lasso_alphas_list,
+                lasso_selection_list=lasso_selection_list,
+                lasso_tol_list=lasso_tol_list,
                 elasticnet_alphas_list=elasticnet_alphas_list,
                 elasticnet_l1_ratios=elasticnet_l1_ratios_list,
+                elasticnet_selection_list=elasticnet_selection_list,
+                elasticnet_tol_list=elasticnet_tol_list,
                 pls_max_iter_list=pls_max_iters_list,
                 pls_tol_list=pls_tols_list,
                 xgb_n_estimators_list=xgb_n_estimators_list,
@@ -11354,10 +11957,28 @@ class SpectralPredictApp:
                 lightgbm_colsample_bytree_list=lightgbm_colsample_bytree_list,
                 lightgbm_reg_alpha_list=lightgbm_reg_alpha_list,
                 lightgbm_reg_lambda_list=lightgbm_reg_lambda_list,
+                catboost_iterations_list=catboost_iterations_list,
+                catboost_learning_rates=catboost_learning_rates,
+                catboost_depths=catboost_depths,
                 catboost_l2_leaf_reg_list=catboost_l2_leaf_reg_list,
                 catboost_border_count_list=catboost_border_count_list,
                 catboost_bagging_temperature_list=catboost_bagging_temperature_list,
                 catboost_random_strength_list=catboost_random_strength_list,
+                svr_kernels=svr_kernels,
+                svr_C_list=svr_C_list,
+                svr_gamma_list=svr_gamma_list,
+                svr_epsilon_list=svr_epsilon_list,
+                svr_degree_list=svr_degree_list,
+                svr_coef0_list=svr_coef0_list,
+                svr_shrinking_list=svr_shrinking_list,
+                mlp_hidden_layer_sizes_list=mlp_hidden_layer_sizes_list,
+                mlp_alphas_list=mlp_alphas_list,
+                mlp_learning_rate_inits=mlp_learning_rate_inits,
+                mlp_activation_list=mlp_activation_list,
+                mlp_solver_list=mlp_solver_list,
+                mlp_batch_size_list=mlp_batch_size_list,
+                mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
+                mlp_momentum_list=mlp_momentum_list,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
