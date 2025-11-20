@@ -437,46 +437,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     for preprocess_cfg in preprocess_configs:
         # Compute region subsets on preprocessed data for this preprocessing method
         # This ensures regions are based on the actual preprocessed features
-        # Region subsets now work for ALL preprocessing types including derivatives
-        region_subsets = []
-        X_preprocessed_for_regions = None
-        if enable_region_subsets:
-            try:
-                # Build preprocessing pipeline
-                prep_pipe_steps = build_preprocessing_pipeline(
-                    preprocess_cfg["name"],
-                    preprocess_cfg["deriv"],
-                    preprocess_cfg["window"],
-                    preprocess_cfg["polyorder"],
-                    imbalance_method=None,  # No resampling for region computation
-                    imbalance_params=None,
-                    task_type=task_type
-                )
-
-                # Transform X through preprocessing
-                X_preprocessed_for_regions = X_np.copy()
-                if prep_pipe_steps:
-                    prep_pipeline = Pipeline(prep_pipe_steps)
-                    X_preprocessed_for_regions = prep_pipeline.fit_transform(X_preprocessed_for_regions, y_np)
-
-                # Compute region subsets on preprocessed data
-                # For derivatives: regions will be in derivative feature space
-                # Convert wavelengths to float (they come from DataFrame columns as strings)
-                wavelengths_float = np.array([float(w) for w in wavelengths])
-                region_subsets = create_region_subsets(X_preprocessed_for_regions, y_np, wavelengths_float, n_top_regions=n_top_regions)
-
-                if len(region_subsets) > 0:
-                    prep_name = str(preprocess_cfg.get("name", "unknown"))
-                    deriv_info = f"_d{preprocess_cfg['deriv']}" if preprocess_cfg["deriv"] else ""
-                    print(f"  Region analysis for {prep_name}{deriv_info}: Identified {len(region_subsets)} region-based subsets")
-            except Exception as e:
-                prep_name = str(preprocess_cfg.get("name", "unknown"))
-                print(f"  Warning: Could not compute region subsets for {prep_name}: {e}")
-                # Uncomment for debugging:
-                # import traceback
-                # traceback.print_exc()
-                region_subsets = []
-
         # ═══════════════════════════════════════════════════════════════════════════
         # GLOBAL WAVELENGTH FILTERING
         # Preprocess full spectrum first (SNV/derivatives need full range)
@@ -542,6 +502,37 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             wavelengths_for_models = wavelengths
 
         # End of wavelength filtering block
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # REGION SUBSET COMPUTATION (after wavelength filtering)
+        # Compute regions on filtered+preprocessed data
+        # This ensures regions respect user's wavelength range selection
+        # ═══════════════════════════════════════════════════════════════════════════
+        region_subsets = []
+        if enable_region_subsets:
+            try:
+                # Use filtered wavelengths for region computation
+                wavelengths_float = wavelengths_for_models.astype(float)
+                region_subsets = create_region_subsets(
+                    X_for_models,              # Use filtered+preprocessed data
+                    y_np,
+                    wavelengths_float,         # Use filtered wavelengths
+                    n_top_regions=n_top_regions
+                )
+
+                if len(region_subsets) > 0:
+                    prep_name = str(preprocess_cfg.get("name", "unknown"))
+                    deriv_info = f"_d{preprocess_cfg['deriv']}" if preprocess_cfg["deriv"] else ""
+                    print(f"  Region analysis for {prep_name}{deriv_info}: Identified {len(region_subsets)} region-based subsets")
+            except Exception as e:
+                prep_name = str(preprocess_cfg.get("name", "unknown"))
+                print(f"  Warning: Could not compute region subsets for {prep_name}: {e}")
+                # Uncomment for debugging:
+                # import traceback
+                # traceback.print_exc()
+                region_subsets = []
+
+        # End of region computation block
 
         for model_name, model_configs in model_grids.items():
             for model, params in model_configs:
@@ -642,7 +633,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         fitted_model = pipe.named_steps["model"]
 
                         # X_for_models is already preprocessed and filtered - use directly
-                        X_transformed = X_for_models
+                        X_transformed_varsel = X_for_models
                         wavelengths_varsel = wavelengths_for_models
                         n_features_varsel = X_for_models.shape[1]
 
@@ -812,55 +803,31 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     print(f"  -> Testing {len(region_subsets)} spectral regions:")
                     for i, region_subset in enumerate(region_subsets, 1):
                         print(f"     Region {i}/{len(region_subsets)} ({region_subset['tag']})...", end=" ")
-                        if preprocess_cfg["deriv"] is not None:
-                            # For derivatives: use preprocessed data, skip reprocessing
-                            # Keep original preprocess_cfg for correct labeling
-                            region_result = _run_single_config(
-                                X_preprocessed_for_regions,
-                                y_np,
-                                wavelengths,
-                                model,
-                                model_name,
-                                params,
-                                preprocess_cfg,  # Keep original config for labeling
-                                cv_splitter,
-                                task_type,
-                                is_binary_classification,
-                                subset_indices=region_subset['indices'],
-                                subset_tag=region_subset['tag'],
-                                top_n_vars=30,
-                                skip_preprocessing=True,  # Flag to skip reapplying
-                                excluded_count=excluded_count,
-                                validation_count=validation_count,
-                                total_samples_original=total_samples_original,
-                                folds=folds,
-                                imbalance_method=imbalance_method,
-                                imbalance_params=imbalance_params,
-                            )
-                        else:
-                            # For raw/SNV: use raw data, reapply preprocessing
-                            region_result = _run_single_config(
-                                X_np,
-                                y_np,
-                                wavelengths,
-                                model,
-                                model_name,
-                                params,
-                                preprocess_cfg,
-                                cv_splitter,
-                                task_type,
-                                is_binary_classification,
-                                subset_indices=region_subset['indices'],
-                                subset_tag=region_subset['tag'],
-                                top_n_vars=30,
-                                skip_preprocessing=False,
-                                excluded_count=excluded_count,
-                                validation_count=validation_count,
-                                total_samples_original=total_samples_original,
-                                folds=folds,
-                                imbalance_method=imbalance_method,
-                                imbalance_params=imbalance_params,
-                            )
+                        # Use filtered+preprocessed data for ALL preprocessing types
+                        # Region indices were computed on filtered data, so this is correct
+                        region_result = _run_single_config(
+                            X_for_models,              # Filtered+preprocessed data
+                            y_np,
+                            wavelengths_for_models,    # Filtered wavelengths
+                            model,
+                            model_name,
+                            params,
+                            preprocess_cfg,  # Keep original config for labeling
+                            cv_splitter,
+                            task_type,
+                            is_binary_classification,
+                            subset_indices=region_subset['indices'],
+                            subset_tag=region_subset['tag'],
+                            top_n_vars=30,
+                            skip_preprocessing=False,
+                            skip_spectral_preprocessing=True,  # Spectral preprocessing already done
+                            excluded_count=excluded_count,
+                            validation_count=validation_count,
+                            total_samples_original=total_samples_original,
+                            folds=folds,
+                            imbalance_method=imbalance_method,
+                            imbalance_params=imbalance_params,
+                        )
                         df_results = add_result(df_results, region_result)
 
                         # Show result immediately
