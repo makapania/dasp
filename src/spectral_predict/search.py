@@ -461,6 +461,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             prep_pipeline = Pipeline(prep_pipe_steps)
             X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
 
+        # Store original wavelength count before filtering (needed for Model Dev tab)
+        n_original_wavelengths = len(wavelengths)
+
         # Step 3: Apply wavelength filtering to preprocessed data
         if analysis_wl_min is not None or analysis_wl_max is not None:
             wavelengths_float = wavelengths.astype(float)
@@ -592,6 +595,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
+                    full_vars_original=n_original_wavelengths,
                 )
                 df_results = add_result(df_results, result)
 
@@ -747,6 +751,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            full_vars_original=n_original_wavelengths,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -773,6 +778,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             folds=folds,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
+                                            full_vars_original=n_original_wavelengths,
                                         )
                                     df_results = add_result(df_results, subset_result)
 
@@ -827,6 +833,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             folds=folds,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
+                            full_vars_original=n_original_wavelengths,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -973,6 +980,7 @@ def _run_single_config(
     folds=5,
     imbalance_method=None,
     imbalance_params=None,
+    full_vars_original=None,
 ):
     """
     Run a single model configuration with CV.
@@ -995,7 +1003,9 @@ def _run_single_config(
     else:
         n_vars = X.shape[1]
 
-    full_vars = len(wavelengths)
+    # Use original wavelength count if provided (for wavelength filtering case)
+    # Otherwise use current wavelength array length
+    full_vars = full_vars_original if full_vars_original is not None else len(wavelengths)
 
     # Build preprocessing pipeline (skip if data is already preprocessed)
     if skip_preprocessing:
