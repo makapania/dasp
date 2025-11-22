@@ -6570,7 +6570,7 @@ class SpectralPredictApp:
         # Priority: ASD > CSV > SPC
 
         # Check for ASD files (case insensitive, includes .sig format)
-        asd_files = (list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
+        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
                      list(path.glob("*.sig")) + list(path.glob("*.SIG")))
         if asd_files:
             self.detected_type = "asd"
@@ -6580,7 +6580,7 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
             if len(ref_files) == 1:
                 self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
@@ -6594,7 +6594,7 @@ class SpectralPredictApp:
             return
 
         # Check for CSV files
-        csv_files = list(path.glob("*.csv"))
+        csv_files = sorted(list(path.glob("*.csv")))
         if csv_files:
             if len(csv_files) == 1:
                 # Single CSV - use as spectral data
@@ -6616,7 +6616,7 @@ class SpectralPredictApp:
             return
 
         # Check for SPC files (GRAMS/Thermo Galactic) - case insensitive
-        spc_files = list(path.glob("*.spc")) + list(path.glob("*.SPC"))
+        spc_files = sorted(list(path.glob("*.spc")) + list(path.glob("*.SPC")))
         if spc_files:
             self.detected_type = "spc"
             self.detection_status.config(
@@ -6625,7 +6625,7 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
             if len(ref_files) == 1:
                 self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
@@ -6639,7 +6639,7 @@ class SpectralPredictApp:
             return
 
         # Check for JCAMP-DX files (.jdx, .dx)
-        jcamp_files = list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX"))
+        jcamp_files = sorted(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX")))
         if jcamp_files:
             self.detected_type = "jcamp"
             self.detection_status.config(
@@ -6648,7 +6648,7 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
             if len(ref_files) == 1:
                 self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
@@ -6660,7 +6660,7 @@ class SpectralPredictApp:
             return
 
         # Check for ASCII variant files (.dpt, .dat, .asc)
-        ascii_files = (list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
+        ascii_files = sorted(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
                        list(path.glob("*.DPT")) + list(path.glob("*.DAT")) + list(path.glob("*.ASC")))
         if ascii_files:
             self.detected_type = "ascii"
@@ -6670,7 +6670,7 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
             if len(ref_files) == 1:
                 self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
@@ -6693,7 +6693,7 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
             if len(ref_files) == 1:
                 self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
@@ -6705,7 +6705,7 @@ class SpectralPredictApp:
             return
 
         # Check for PerkinElmer files (.sp)
-        sp_files = list(path.glob("*.sp")) + list(path.glob("*.SP"))
+        sp_files = sorted(list(path.glob("*.sp")) + list(path.glob("*.SP")))
         if sp_files:
             self.detected_type = "perkinelmer"
             self.detection_status.config(
@@ -6714,7 +6714,7 @@ class SpectralPredictApp:
             )
 
             # Auto-detect reference CSV/Excel
-            ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
             if len(ref_files) == 1:
                 self.reference_file.set(str(ref_files[0]))
                 self._auto_detect_columns()
@@ -6831,7 +6831,7 @@ class SpectralPredictApp:
             return
 
         # Check for Excel files (fallback if not combined format)
-        xlsx_files = list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+        xlsx_files = sorted(list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
         if xlsx_files:
             if len(xlsx_files) == 1:
                 # Single Excel file - use as spectral data (requires separate reference)
@@ -6843,7 +6843,7 @@ class SpectralPredictApp:
                 )
 
                 # Auto-detect reference file (CSV or Excel)
-                ref_files = list(path.glob("*.csv")) + [f for f in (list(path.glob("*.xlsx")) + list(path.glob("*.xls"))) if f not in xlsx_files]
+                ref_files = sorted(list(path.glob("*.csv")) + [f for f in (list(path.glob("*.xlsx")) + list(path.glob("*.xls"))) if f not in xlsx_files])
                 if len(ref_files) == 1:
                     self.reference_file.set(str(ref_files[0]))
                     self._auto_detect_columns()
@@ -18519,10 +18519,10 @@ Configuration:
 
             if source == 'directory':
                 # Try to detect file type
-                asd_files = list(path.glob("*.asd"))
-                spc_files = list(path.glob("*.spc"))
-                jcamp_files = list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX"))
-                ascii_files = (list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
+                asd_files = sorted(list(path.glob("*.asd")))
+                spc_files = sorted(list(path.glob("*.spc")))
+                jcamp_files = sorted(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX")))
+                ascii_files = sorted(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
                                list(path.glob("*.DPT")) + list(path.glob("*.DAT")) + list(path.glob("*.ASC")))
 
                 if asd_files:
@@ -22215,9 +22215,9 @@ Configuration:
         import glob
 
         # Try to detect file type
-        asd_files = glob.glob(os.path.join(directory, "*.asd"))
-        csv_files = glob.glob(os.path.join(directory, "*.csv"))
-        spc_files = glob.glob(os.path.join(directory, "*.spc"))
+        asd_files = sorted(glob.glob(os.path.join(directory, "*.asd")))
+        csv_files = sorted(glob.glob(os.path.join(directory, "*.csv")))
+        spc_files = sorted(glob.glob(os.path.join(directory, "*.spc")))
 
         if asd_files:
             # Load ASD files
@@ -22852,9 +22852,9 @@ Configuration:
 
         # Auto-detect file type (priority order)
         path = Path(directory)
-        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
-        csv_files = list(path.glob("*.csv"))
-        spc_files = list(path.glob("*.spc"))
+        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        csv_files = sorted(list(path.glob("*.csv")))
+        spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
             self.ct_master_detected_type = "asd"
@@ -22989,9 +22989,9 @@ Configuration:
 
         # Auto-detect file type (priority order)
         path = Path(directory)
-        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
-        csv_files = list(path.glob("*.csv"))
-        spc_files = list(path.glob("*.spc"))
+        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        csv_files = sorted(list(path.glob("*.csv")))
+        spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
             self.ct_master_detected_type = "asd"
@@ -23020,7 +23020,7 @@ Configuration:
             return
 
         # Auto-detect reference CSV/Excel in same folder
-        ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+        ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
         # Filter out files that are spectra
         ref_files = [f for f in ref_files if f not in csv_files]
 
@@ -23171,9 +23171,9 @@ Configuration:
 
         # Auto-detect file type (priority order)
         path = Path(directory)
-        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
-        csv_files = list(path.glob("*.csv"))
-        spc_files = list(path.glob("*.spc"))
+        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        csv_files = sorted(list(path.glob("*.csv")))
+        spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
             self.ct_slave_detected_type = "asd"
@@ -23213,9 +23213,9 @@ Configuration:
 
         # Auto-detect file type
         path = Path(directory)
-        asd_files = list(path.glob("*.asd")) + list(path.glob("*.sig"))
-        csv_files = list(path.glob("*.csv"))
-        spc_files = list(path.glob("*.spc"))
+        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        csv_files = sorted(list(path.glob("*.csv")))
+        spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
             self.ct_slave_detected_type = "asd"
@@ -23244,7 +23244,7 @@ Configuration:
             return
 
         # Auto-detect reference CSV/Excel
-        ref_files = list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls"))
+        ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
         ref_files = [f for f in ref_files if f not in csv_files]
 
         if len(ref_files) == 1:

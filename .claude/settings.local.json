@@ -35,7 +35,10 @@
       "Bash(git -C \"C:\\Users\\mspon\\git\\dasp\" show --stat 8a48ec2)",
       "Bash(git show:*)",
       "Bash(if exist nul del nul)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "WebSearch",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

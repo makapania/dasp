@@ -721,7 +721,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 for n_top in valid_variable_counts:
                                     print(f"  -> Testing top-{n_top} vars ({varsel_method})...", end=" ")
                                     # Select top N most important features based on preprocessed importances
-                                    top_indices = np.argsort(importances)[-n_top:][::-1]
+                                    # Use stable sort to ensure deterministic feature ordering when importances are tied
+                                    top_indices = np.argsort(importances, kind='stable')[-n_top:][::-1]
 
                                     # For derivative preprocessing: importances are computed on transformed features
                                     # We must use the TRANSFORMED data and skip reapplying preprocessing
@@ -1268,7 +1269,8 @@ def _run_single_config(
 
             # Get top N features for display purposes (always top 30)
             n_to_select = min(top_n_vars, len(importances))
-            top_indices = np.argsort(importances)[-n_to_select:][::-1]
+            # Use stable sort to ensure deterministic feature ordering when importances are tied
+            top_indices = np.argsort(importances, kind='stable')[-n_to_select:][::-1]
 
             # Map back to original wavelengths
             if subset_indices is not None:
