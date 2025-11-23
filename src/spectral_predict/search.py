@@ -1157,6 +1157,62 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
             {'name': 'snv', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
             {'name': 'none', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
         ]
+    elif isinstance(preprocessing_methods, dict):
+        # Convert GUI dictionary format {'raw': True, 'snv': True, ...} to list format
+        # This handles the format passed from the GUI
+        preprocess_configs = []
+
+        # Add raw if selected
+        if preprocessing_methods.get('raw', False):
+            preprocess_configs.append({
+                'name': 'raw',
+                'deriv': 0,
+                'window': 0,
+                'polyorder': 0,
+                'interference': None
+            })
+
+        # Add SNV if selected
+        if preprocessing_methods.get('snv', False):
+            preprocess_configs.append({
+                'name': 'snv',
+                'deriv': 0,
+                'window': 0,
+                'polyorder': 0,
+                'interference': None
+            })
+
+        # Add SG1 (1st derivative) if selected
+        if preprocessing_methods.get('sg1', False):
+            preprocess_configs.append({
+                'name': 'snv',
+                'deriv': 1,
+                'window': 15,
+                'polyorder': 2,
+                'interference': None
+            })
+
+        # Add SG2 (2nd derivative) if selected
+        if preprocessing_methods.get('sg2', False):
+            preprocess_configs.append({
+                'name': 'snv',
+                'deriv': 2,
+                'window': 15,
+                'polyorder': 2,
+                'interference': None
+            })
+
+        # Add deriv_snv if selected
+        if preprocessing_methods.get('deriv_snv', False):
+            preprocess_configs.append({
+                'name': 'deriv_snv',
+                'deriv': 2,
+                'window': 15,
+                'polyorder': 2,
+                'interference': None
+            })
+
+        preprocessing_methods = preprocess_configs
 
     # Default models based on tier
     if models_to_test is None:
