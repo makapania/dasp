@@ -363,6 +363,7 @@ def build_model(model_name, params, task_type='regression'):
             return MLPRegressor(
                 random_state=42,
                 early_stopping=True,
+                max_iter=1000,  # Increase from sklearn default (100) for spectral data
                 **params
             )
 
@@ -424,6 +425,7 @@ def build_model(model_name, params, task_type='regression'):
             return MLPClassifier(
                 random_state=42,
                 early_stopping=True,
+                max_iter=1000,  # Increase from sklearn default (100) for spectral data
                 **params
             )
 
