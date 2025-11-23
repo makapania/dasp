@@ -74,7 +74,7 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
 
 
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
-               total_samples_original=None, variable_penalty=3, complexity_penalty=5,
+               total_samples_original=None, variable_penalty=0, complexity_penalty=0,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
                interference_settings=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
@@ -110,7 +110,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                spa_n_random_starts=10, ipls_n_intervals=20,
                tier='standard', enabled_models=None,
                analysis_wl_min=None, analysis_wl_max=None,
-               imbalance_method=None, imbalance_params=None, enable_class_weight=False):
+               imbalance_method=None, imbalance_params=None, enable_class_weight=False,
+               reproducible=False, random_state=42):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -170,12 +171,62 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     enabled_models : list of str, optional
         List of specific models to include. If None, uses all models in tier.
         Takes precedence over tier if both are specified.
+    reproducible : bool, default=False
+        Enable reproducible mode for scientific research. When True:
+        - Runs CV folds serially (n_jobs=1) instead of in parallel
+        - Sets BLAS/LAPACK threads to 1 (deterministic linear algebra)
+        - Ensures all RNG operations use fixed random_state
+        - Passes n_jobs=1 to all models (RandomForest, XGBoost, etc.)
+        WARNING: Reproducible mode is ~3-5x slower than default parallel execution.
+        Use this mode when exact result reproducibility is required for scientific papers.
+    random_state : int, default=42
+        Random seed for reproducibility. Controls:
+        - CV fold splits
+        - Variable selection methods (UVE noise generation, etc.)
+        - Model initialization
+        All stochastic operations use this seed for consistent results.
 
     Returns
     -------
     df_ranked : pd.DataFrame
         Ranked results with all model runs
     """
+    # =========================================================================
+    # REPRODUCIBILITY CONTROLS
+    # =========================================================================
+    # Save original environment for restoration later
+    _saved_blas_env = None
+
+    if reproducible:
+        # Import reproducibility utilities
+        from .reproducibility import set_blas_threads
+
+        # Save current BLAS environment variables before modifying
+        _saved_blas_env = {}
+        for var in ['OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                    'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS']:
+            _saved_blas_env[var] = os.environ.get(var, None)
+
+        # Set BLAS/LAPACK to single-threaded for deterministic linear algebra
+        set_blas_threads(1)
+
+        # Use serial execution for all parallel operations
+        n_jobs = 1
+        print("\n" + "="*80)
+        print("REPRODUCIBLE MODE ENABLED")
+        print("="*80)
+        print("Settings:")
+        print("  - BLAS threads: 1 (deterministic linear algebra)")
+        print("  - CV execution: Serial (n_jobs=1)")
+        print("  - Model parallelism: Disabled (n_jobs=1)")
+        print(f"  - Random seed: {random_state}")
+        print("WARNING: Reproducible mode is ~3-5x slower than parallel execution.")
+        print("After this run completes, BLAS settings will be restored automatically.")
+        print("="*80 + "\n")
+    else:
+        # Fast mode: use all cores
+        n_jobs = -1
+
     X_np = X.values
     y_np = y.values
     wavelengths = X.columns.values
@@ -313,7 +364,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                    mlp_batch_size_list=mlp_batch_size_list,
                                    mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
                                    mlp_momentum_list=mlp_momentum_list,
-                                   tier=tier, enabled_models=enabled_models)
+                                   tier=tier, enabled_models=enabled_models, n_jobs=n_jobs)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
@@ -483,9 +534,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
     # Create CV splitter
     if task_type == "regression":
-        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=42)
+        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
     else:
-        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
 
     print(f"Running {task_type} search with {folds}-fold CV...")
     print(f"Models: {list(model_grids.keys())}")
@@ -681,6 +732,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     total_samples_original=total_samples_original,
                     folds=folds,
                     full_vars_original=n_original_wavelengths,
+                    n_jobs_cv=n_jobs,
                 )
                 df_results = add_result(df_results, result)
 
@@ -743,7 +795,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         X_transformed_varsel, y_np,
                                         n_features=n_to_select,
                                         n_random_starts=spa_n_random_starts,
-                                        cv_folds=folds
+                                        cv_folds=folds,
+                                        random_state=random_state
                                     )
 
                                 elif varsel_method == 'uve':
@@ -752,7 +805,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         X_transformed_varsel, y_np,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         n_components=uve_n_components,
-                                        cv_folds=folds
+                                        cv_folds=folds,
+                                        random_state=random_state
                                     )
 
                                 elif varsel_method == 'uve_spa':
@@ -765,7 +819,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         uve_n_components=uve_n_components,
                                         uve_cv_folds=folds,
                                         spa_n_random_starts=spa_n_random_starts,
-                                        spa_cv_folds=folds
+                                        spa_cv_folds=folds,
+                                        random_state=random_state
                                     )
 
                                 elif varsel_method == 'ipls':
@@ -774,7 +829,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         X_transformed_varsel, y_np,
                                         n_intervals=ipls_n_intervals,
                                         n_components=uve_n_components,
-                                        cv_folds=folds
+                                        cv_folds=folds,
+                                        random_state=random_state
                                     )
 
                                 else:
@@ -838,6 +894,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
+                                            n_jobs_cv=n_jobs,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -865,6 +922,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
+                                            n_jobs_cv=n_jobs,
                                         )
                                     df_results = add_result(df_results, subset_result)
 
@@ -920,6 +978,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
+                            n_jobs_cv=n_jobs,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -954,6 +1013,22 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             print("  Consider filtering by SubsetTag before ranking for fairer comparison.\n")
 
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
+
+    # =========================================================================
+    # RESTORE BLAS SETTINGS (if they were changed for reproducibility)
+    # =========================================================================
+    if _saved_blas_env is not None:
+        import os
+        for var, value in _saved_blas_env.items():
+            if value is None:
+                # Variable wasn't set before, remove it
+                os.environ.pop(var, None)
+            else:
+                # Restore original value
+                os.environ[var] = value
+        print("\n" + "="*80)
+        print("BLAS thread settings restored to original values")
+        print("="*80 + "\n")
 
     # Return results along with label_encoder (for classification with text labels)
     return df_ranked, label_encoder
@@ -1067,6 +1142,7 @@ def _run_single_config(
     imbalance_method=None,
     imbalance_params=None,
     full_vars_original=None,
+    n_jobs_cv=1,
 ):
     """
     Run a single model configuration with CV.
@@ -1171,13 +1247,23 @@ def _run_single_config(
     # For multiclass classification, compute all classes for label_binarize
     all_classes = np.unique(y) if task_type == "classification" and not is_binary_classification else None
 
-    # Run CV in parallel (use n_jobs=-1 to use all available cores)
-    cv_metrics = Parallel(n_jobs=-1, backend='loky')(
-        delayed(_run_single_fold)(
-            pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes
+    # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
+    if n_jobs_cv == 1:
+        # Serial execution for reproducibility (deterministic fold ordering)
+        cv_metrics = [
+            _run_single_fold(
+                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes
+            )
+            for train_idx, test_idx in cv_splitter.split(X, y)
+        ]
+    else:
+        # Parallel execution for speed
+        cv_metrics = Parallel(n_jobs=n_jobs_cv, backend='loky')(
+            delayed(_run_single_fold)(
+                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes
+            )
+            for train_idx, test_idx in cv_splitter.split(X, y)
         )
-        for train_idx, test_idx in cv_splitter.split(X, y)
-    )
 
     # Print summary if imbalance handling was used
     if imbalance_method is not None:

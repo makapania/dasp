@@ -4,15 +4,19 @@ import numpy as np
 import pandas as pd
 
 
-def compute_composite_score(df_results, task_type, variable_penalty=2, complexity_penalty=2, verbose=False):
+def compute_composite_score(df_results, task_type, variable_penalty=0, complexity_penalty=0, verbose=False):
     """
     Compute composite score with user-friendly penalty system.
 
     NEW: User-friendly 0-10 penalty system
     - variable_penalty (0-10): Penalty for using many variables
     - complexity_penalty (0-10): Penalty for model complexity (LVs, etc.)
-    - 0 = only performance (R²) matters
+    - 0 = only performance (R²) matters (DEFAULT - changed from 2)
     - 10 = strong penalty for variables/complexity
+
+    REPRODUCIBILITY FIX: When both penalties are 0 (default), rank directly by
+    primary metric instead of using z-scores. This prevents z-score normalization
+    from amplifying tiny floating-point differences into ranking changes.
 
     Parameters
     ----------
@@ -22,8 +26,10 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
     Formula: Score = performance_score + variable_penalty_term + complexity_penalty_term
 
     Performance score (lower is better):
-    - Regression: 0.5*z(RMSE) - 0.5*z(R2)  [combine both metrics]
-    - Classification: -z(ROC_AUC) - 0.3*z(Accuracy)
+    - When penalties = 0: Direct metric (no z-score normalization)
+    - When penalties > 0:
+        - Regression: 0.5*z(RMSE) - 0.5*z(R2)  [combine both metrics]
+        - Classification: -z(ROC_AUC) - 0.3*z(Accuracy)
 
     Penalty terms scale linearly with user settings (0-10).
 
@@ -36,11 +42,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
     task_type : str
         'regression' or 'classification'
     variable_penalty : int (0-10)
-        Penalty for using many variables (default: 2)
+        Penalty for using many variables (default: 0)
         0 = ignore variable count, 10 = strongly penalize many variables
         Uses cubic scaling for gentle penalty at low values (exploration-friendly)
     complexity_penalty : int (0-10)
-        Penalty for model complexity (default: 2)
+        Penalty for model complexity (default: 0)
         0 = ignore complexity, 10 = strongly penalize complex models
 
     Returns
@@ -50,31 +56,46 @@ def compute_composite_score(df_results, task_type, variable_penalty=2, complexit
     """
     df = df_results.copy()
 
+    # REPRODUCIBILITY FIX: When both penalties are 0, skip z-score normalization
+    # Z-scores amplify tiny floating-point differences, causing ranking instability
+    # Instead, rank directly by primary metric for stable, reproducible results
+    use_zscore = (variable_penalty > 0) or (complexity_penalty > 0)
+
     # Compute performance score (combining multiple metrics)
     if task_type == "regression":
-        # Z-score for RMSE (lower is better, positive z = bad)
-        z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
-        z_rmse = z_rmse.fillna(0)
+        if use_zscore:
+            # Z-score for RMSE (lower is better, positive z = bad)
+            z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
+            z_rmse = z_rmse.fillna(0)
 
-        # Z-score for R2 (higher is better, negative z = bad)
-        z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
-        z_r2 = z_r2.fillna(0)
+            # Z-score for R2 (higher is better, negative z = bad)
+            z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
+            z_r2 = z_r2.fillna(0)
 
-        # Combined performance score (lower is better)
-        # Weight RMSE and R2 equally, but negate R2 since higher is better
-        performance_score = 0.5 * z_rmse - 0.5 * z_r2
+            # Combined performance score (lower is better)
+            # Weight RMSE and R2 equally, but negate R2 since higher is better
+            performance_score = 0.5 * z_rmse - 0.5 * z_r2
+        else:
+            # Direct metric ranking (no z-score normalization)
+            # Use negative R2 so lower is better (consistent with other scores)
+            performance_score = -df["R2"]
 
     else:  # classification
-        # Z-score for ROC_AUC (higher is better)
-        z_auc = (df["ROC_AUC"] - df["ROC_AUC"].mean()) / df["ROC_AUC"].std()
-        z_auc = z_auc.fillna(0)
+        if use_zscore:
+            # Z-score for ROC_AUC (higher is better)
+            z_auc = (df["ROC_AUC"] - df["ROC_AUC"].mean()) / df["ROC_AUC"].std()
+            z_auc = z_auc.fillna(0)
 
-        # Z-score for Accuracy (higher is better)
-        z_acc = (df["Accuracy"] - df["Accuracy"].mean()) / df["Accuracy"].std()
-        z_acc = z_acc.fillna(0)
+            # Z-score for Accuracy (higher is better)
+            z_acc = (df["Accuracy"] - df["Accuracy"].mean()) / df["Accuracy"].std()
+            z_acc = z_acc.fillna(0)
 
-        # Combined performance score (lower is better, so negate)
-        performance_score = -z_auc - 0.3 * z_acc
+            # Combined performance score (lower is better, so negate)
+            performance_score = -z_auc - 0.3 * z_acc
+        else:
+            # Direct metric ranking (no z-score normalization)
+            # Use negative ROC_AUC so lower is better (consistent with other scores)
+            performance_score = -df["ROC_AUC"]
 
     # NEW: User-friendly penalty system (0-10 scale)
     # Performance z-scores typically range ±3, so we scale penalties to be meaningful but not overwhelming

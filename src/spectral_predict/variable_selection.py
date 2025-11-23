@@ -10,7 +10,7 @@ from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold, cross_val_score
 
 
-def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5):
+def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):
     """
     Uninformative Variable Elimination (UVE) - eliminates variables that contribute no more than noise.
 
@@ -40,6 +40,8 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5):
         Number of PLS components (if None, auto-select as min(10, n_features//2, n_samples//2))
     cv_folds : int, default=5
         Number of CV folds for cross-validation
+    random_state : int, default=42
+        Random seed for noise variable generation (for reproducibility)
 
     Returns
     -------
@@ -89,7 +91,8 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5):
 
     # Step 1: Create augmented dataset with random noise variables
     # Add the same number of noise variables as real variables
-    noise_variables = np.random.randn(n_samples, n_features)
+    rng = np.random.RandomState(random_state)
+    noise_variables = rng.randn(n_samples, n_features)
     X_augmented = np.hstack([X, noise_variables])
 
     # Step 2: Build PLS models across CV folds and collect coefficients
@@ -160,7 +163,7 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5):
     return importances
 
 
-def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5):
+def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):
     """
     Calculate the UVE noise threshold for variable selection.
 
@@ -179,6 +182,8 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
         Number of PLS components
     cv_folds : int, default=5
         Number of CV folds
+    random_state : int, default=42
+        Random seed for noise variable generation (for reproducibility)
 
     Returns
     -------
@@ -217,7 +222,8 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     n_components = max(1, n_components)
 
     # Create augmented dataset
-    noise_variables = np.random.randn(n_samples, n_features)
+    rng = np.random.RandomState(random_state)
+    noise_variables = rng.randn(n_samples, n_features)
     X_augmented = np.hstack([X, noise_variables])
 
     # Collect coefficients
@@ -274,7 +280,7 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     return real_reliability, threshold, selected_mask
 
 
-def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5):
+def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state=42):
     """
     Successive Projections Algorithm (SPA) - selects minimally correlated variables.
 
@@ -303,6 +309,9 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5):
         Number of random initializations
     cv_folds : int, default=5
         Number of CV folds for quality evaluation
+    random_state : int, default=42
+        Random seed for reproducibility (currently SPA is deterministic, but
+        this parameter is included for API consistency and future enhancements)
 
     Returns
     -------
@@ -463,7 +472,7 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5):
     return importances
 
 
-def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5):
+def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_state=42):
     """
     Interval PLS (iPLS) - selects spectral variables based on interval performance.
 
@@ -489,6 +498,9 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5):
         Number of PLS components (if None, auto-select based on interval size)
     cv_folds : int, default=5
         Number of CV folds for interval evaluation
+    random_state : int, default=42
+        Random seed for reproducibility (currently iPLS is deterministic, but
+        this parameter is included for API consistency)
 
     Returns
     -------
@@ -634,7 +646,7 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5):
 
 def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
                       uve_n_components=None, uve_cv_folds=5,
-                      spa_n_random_starts=10, spa_cv_folds=5):
+                      spa_n_random_starts=10, spa_cv_folds=5, random_state=42):
     """
     UVE-SPA Hybrid - combines noise filtering (UVE) with collinearity reduction (SPA).
 
@@ -666,6 +678,8 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
         Number of random starts for SPA
     spa_cv_folds : int, default=5
         Number of CV folds for SPA evaluation
+    random_state : int, default=42
+        Random seed for noise variable generation in UVE (for reproducibility)
 
     Returns
     -------
@@ -711,7 +725,8 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
         X, y,
         cutoff_multiplier=cutoff_multiplier,
         n_components=uve_n_components,
-        cv_folds=uve_cv_folds
+        cv_folds=uve_cv_folds,
+        random_state=random_state
     )
 
     n_uve_selected = np.sum(uve_mask)
@@ -740,7 +755,8 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
         X_uve_selected, y,
         n_features=spa_n_features,
         n_random_starts=spa_n_random_starts,
-        cv_folds=spa_cv_folds
+        cv_folds=spa_cv_folds,
+        random_state=random_state
     )
 
     # Step 3: Combine UVE and SPA results

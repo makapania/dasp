@@ -99,7 +99,7 @@ class PLSTransformer(BaseEstimator, TransformerMixin):
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}' (model not fitted)")
 
 
-def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500):
+def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500, n_jobs=-1):
     """
     Get a single model instance with default hyperparameters.
 
@@ -115,6 +115,9 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for neural network models
+    n_jobs : int, default=-1
+        Number of parallel jobs for models that support it (RandomForest, XGBoost, etc.).
+        Set to 1 for reproducibility.
 
     Returns
     -------
@@ -143,7 +146,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 max_depth=None,
                 max_features=1.0,  # Use all features (explicit, matches sklearn 1.7+ default)
                 random_state=42,
-                n_jobs=-1
+                n_jobs=n_jobs
             )
 
         elif model_name == "MLP":
@@ -184,7 +187,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 reg_lambda=1.0,  # XGBoost default L2 regularization
                 tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=n_jobs,
                 verbosity=0
             )
 
@@ -201,7 +204,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 reg_alpha=0.1,  # L1 regularization for feature selection (like XGBoost)
                 reg_lambda=1.0,  # L2 regularization to prevent overfitting (like XGBoost)
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=n_jobs,
                 verbosity=-1
             )
 
@@ -230,7 +233,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 max_depth=None,
                 max_features=None,  # Use all features (critical for high-dim spectral data)
                 random_state=42,
-                n_jobs=-1
+                n_jobs=n_jobs
             )
 
         elif model_name == "MLP":
@@ -272,7 +275,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 reg_alpha=0.1,  # L1 regularization for implicit feature selection
                 tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=n_jobs,
                 verbosity=0
             )
 
@@ -289,7 +292,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 reg_alpha=0.1,  # L1 regularization
                 reg_lambda=1.0,  # L2 regularization
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=n_jobs,
                 verbosity=-1
             )
 
@@ -338,7 +341,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
                     mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
                     mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
-                    tier='standard', enabled_models=None):
+                    tier='standard', enabled_models=None, n_jobs=-1):
     """
     Get model grids for hyperparameter search with tiered defaults.
 
@@ -369,6 +372,9 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
         This sets optimized defaults for all hyperparameters
     enabled_models : list of str, optional
         List of specific models to include. If None, uses all models in tier
+    n_jobs : int, default=-1
+        Number of parallel jobs for model training (RandomForest, XGBoost, LightGBM, CatBoost).
+        -1 uses all available cores. Set to 1 for reproducibility (slower but deterministic).
 
     Returns
     -------
@@ -384,6 +390,8 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     - 'experimental': All models with full grids (45+ min)
 
     You can override any tier defaults by specifying explicit hyperparameter lists.
+
+    For reproducibility: Set n_jobs=1 to ensure deterministic model training across runs.
     """
     # Get tier-specific hyperparameters from config
     # Users can override any of these by passing explicit lists
@@ -729,7 +737,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                         max_leaf_nodes=max_leaf_nodes,
                                                         min_impurity_decrease=min_impurity_dec,
                                                         random_state=42,
-                                                        n_jobs=-1
+                                                        n_jobs=n_jobs
                                                     ),
                                                     {
                                                         "n_estimators": n_est,
@@ -975,7 +983,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             gamma=gamma,
                                                             tree_method='hist',  # Faster for high-dimensional data
                                                             random_state=42,
-                                                            n_jobs=-1,
+                                                            n_jobs=n_jobs,
                                                             verbosity=0
                                                         ),
                                                         {
@@ -1020,7 +1028,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             reg_alpha=reg_alpha,
                                                             reg_lambda=reg_lambda,
                                                             random_state=42,
-                                                            n_jobs=-1,
+                                                            n_jobs=n_jobs,
                                                             verbosity=-1
                                                         ),
                                                         {
@@ -1124,7 +1132,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                         max_leaf_nodes=max_leaf_nodes,
                                                         min_impurity_decrease=min_impurity_dec,
                                                         random_state=42,
-                                                        n_jobs=-1
+                                                        n_jobs=n_jobs
                                                     ),
                                                     {
                                                         "n_estimators": n_est,
@@ -1298,7 +1306,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                     reg_lambda=reg_lambda,
                                                     tree_method='hist',  # Faster for high-dimensional data
                                                     random_state=42,
-                                                    n_jobs=-1,
+                                                    n_jobs=n_jobs,
                                                     verbosity=0
                                                 ),
                                                 {
@@ -1341,7 +1349,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             reg_alpha=reg_alpha,
                                                             reg_lambda=reg_lambda,
                                                             random_state=42,
-                                                            n_jobs=-1,
+                                                            n_jobs=n_jobs,
                                                             verbosity=-1
                                                         ),
                                                         {
