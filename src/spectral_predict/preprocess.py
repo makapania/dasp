@@ -107,7 +107,8 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
 
 
 def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None,
-                                 imbalance_method=None, imbalance_params=None, task_type=None):
+                                 imbalance_method=None, imbalance_params=None, task_type=None,
+                                 interference=None, wavelengths=None):
     """
     Build a preprocessing pipeline from a configuration.
 
@@ -142,6 +143,140 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
     from sklearn.pipeline import Pipeline
 
     steps = []
+
+    # Step 0: Interference removal (Phase 3)
+    # Applied BEFORE standard preprocessing (SNV/derivatives)
+    if interference is not None:
+        try:
+            from spectral_predict.interference import WavelengthExcluder, MSC, OSC
+
+            # Wavelength Exclusion
+            if interference.get('wavelength_exclusion', {}).get('enabled', False):
+                exclude_ranges_str = interference['wavelength_exclusion'].get('exclude_ranges', '')
+                if exclude_ranges_str and wavelengths is not None:
+                    # Parse ranges: "1400-1500, 1900-2000" -> [(1400, 1500), (1900, 2000)]
+                    ranges = []
+                    for range_str in exclude_ranges_str.split(','):
+                        range_str = range_str.strip()
+                        if '-' in range_str:
+                            try:
+                                start, end = range_str.split('-')
+                                ranges.append((float(start.strip()), float(end.strip())))
+                            except ValueError:
+                                print(f"WARNING: Invalid wavelength range '{range_str}', ignoring")
+
+                    if ranges:
+                        steps.append(("wl_exclude", WavelengthExcluder(wavelengths, exclude_ranges=ranges)))
+
+            # MSC (Multiplicative Scatter Correction)
+            if interference.get('msc', False):
+                steps.append(("msc", MSC(reference='mean')))
+
+            # OSC (Orthogonal Signal Correction)
+            if interference.get('osc', {}).get('enabled', False):
+                n_components = interference['osc'].get('n_components', 2)
+                steps.append(("osc", OSC(n_components=n_components)))
+
+            # Phase 4: Advanced interference removal methods
+            advanced = interference.get('advanced', {})
+
+            # EPO (External Parameter Orthogonalization)
+            if advanced.get('epo', {}).get('enabled', False):
+                from spectral_predict.interference import EPO
+
+                epo_settings = advanced['epo']
+                library_name = epo_settings.get('library', '')
+                interferent_libraries = interference.get('interferent_libraries', {})
+
+                if library_name and library_name in interferent_libraries:
+                    lib = interferent_libraries[library_name]
+
+                    # EPO requires interferent spectra during fit(), not __init__()
+                    # We need a wrapper to pass X_interferents
+                    class EPOWithLibrary(EPO):
+                        """Wrapper for EPO that auto-passes interferent library during fit."""
+                        def __init__(self, interferent_library, n_components=2, center=True, svd_tol=1e-8):
+                            super().__init__(n_components=n_components, center=center, svd_tol=svd_tol)
+                            self.interferent_library = interferent_library
+
+                        def fit(self, X, y=None):
+                            # Pass interferent library automatically
+                            return super().fit(X, y, X_interferents=self.interferent_library)
+
+                    epo = EPOWithLibrary(
+                        interferent_library=lib['X'],
+                        n_components=epo_settings.get('n_components', 2),
+                        center=epo_settings.get('center', True),
+                        svd_tol=epo_settings.get('svd_tol', 1e-8)
+                    )
+                    steps.append(("epo", epo))
+                else:
+                    print(f"WARNING: EPO enabled but library '{library_name}' not found, skipping EPO")
+
+            # DOSC (Direct Orthogonal Signal Correction)
+            if advanced.get('dosc', {}).get('enabled', False):
+                from spectral_predict.interference import DOSC
+
+                dosc_settings = advanced['dosc']
+
+                # Parse n_pls_components (can be 'auto' or integer)
+                n_pls_comp = dosc_settings.get('n_pls_components', 'auto')
+                # Handle string conversion if needed (GUI passes string)
+                if isinstance(n_pls_comp, str):
+                    if n_pls_comp.lower() == 'auto':
+                        n_pls_comp = 'auto'
+                    else:
+                        try:
+                            n_pls_comp = int(n_pls_comp)
+                        except ValueError:
+                            print(f"WARNING: Invalid n_pls_components '{n_pls_comp}', using 'auto'")
+                            n_pls_comp = 'auto'
+
+                # DOSC parameters: n_components, center, n_pls_components
+                dosc = DOSC(
+                    n_components=dosc_settings.get('n_components', 1),
+                    center=dosc_settings.get('center', True),
+                    n_pls_components=n_pls_comp
+                )
+                steps.append(("dosc", dosc))
+
+            # GLSW (Generalized Least Squares Weighting)
+            if advanced.get('glsw', {}).get('enabled', False):
+                from spectral_predict.interference import GLSW
+
+                glsw_settings = advanced['glsw']
+
+                # Parse n_components (only used for residual method)
+                n_comp = glsw_settings.get('n_components', None)
+                if isinstance(n_comp, str):
+                    if n_comp.lower() in ['auto', 'none', '']:
+                        n_comp = None
+                    else:
+                        try:
+                            n_comp = int(n_comp)
+                        except ValueError:
+                            print(f"WARNING: Invalid GLSW n_components '{n_comp}', using auto")
+                            n_comp = None
+
+                # Parse regularization (convert string to float)
+                reg = glsw_settings.get('regularization', 1e-6)
+                if isinstance(reg, str):
+                    try:
+                        reg = float(reg)
+                    except ValueError:
+                        print(f"WARNING: Invalid GLSW regularization '{reg}', using 1e-6")
+                        reg = 1e-6
+
+                # GLSW parameters: method, regularization, n_components
+                glsw = GLSW(
+                    method=glsw_settings.get('method', 'covariance'),
+                    regularization=reg,
+                    n_components=n_comp
+                )
+                steps.append(("glsw", glsw))
+
+        except ImportError as e:
+            print(f"WARNING: Interference removal module not available ({e}), skipping interference removal")
 
     # Step 1: Spectral preprocessing
     if preprocess_name == "raw":

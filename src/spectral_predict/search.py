@@ -76,6 +76,7 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=3, complexity_penalty=5,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
+               interference_settings=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
                pls_max_iter_list=None, pls_tol_list=None,
@@ -338,15 +339,64 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     if window_sizes is None:
         window_sizes = [7, 19]
 
+    # Helper function to check if any interference method is actually enabled
+    def _has_enabled_interference(interference):
+        """Check if any interference removal method is actually enabled."""
+        if interference is None or not isinstance(interference, dict):
+            return False
+
+        # Check basic methods
+        if interference.get('msc', False):
+            return True
+        if interference.get('wavelength_exclusion', {}).get('enabled', False):
+            return True
+        if interference.get('osc', {}).get('enabled', False):
+            return True
+
+        # Check advanced methods
+        advanced = interference.get('advanced', {})
+        if isinstance(advanced, dict):
+            if advanced.get('epo', {}).get('enabled', False):
+                return True
+            if advanced.get('dosc', {}).get('enabled', False):
+                return True
+            if advanced.get('glsw', {}).get('enabled', False):
+                return True
+
+        return False
+
+    # Process interference removal settings (Phase 3)
+    # ONLY include interference settings if user actually enabled methods
+    # This preserves backward compatibility and reproducibility
+    if interference_settings is None or not _has_enabled_interference(interference_settings):
+        # No interference methods enabled - don't add to configs
+        # This preserves the OLD behavior (before interference code was added)
+        interference_to_add = None
+    else:
+        # Interference methods are enabled - include in configs
+        interference_to_add = interference_settings
+
     preprocess_configs = []
 
     # Add raw if selected
     if preprocessing_methods.get('raw', False):
-        preprocess_configs.append({"name": "raw", "deriv": None, "window": None, "polyorder": None})
+        preprocess_configs.append({
+            "name": "raw",
+            "deriv": None,
+            "window": None,
+            "polyorder": None,
+            "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
+        })
 
     # Add SNV if selected
     if preprocessing_methods.get('snv', False):
-        preprocess_configs.append({"name": "snv", "deriv": None, "window": None, "polyorder": None})
+        preprocess_configs.append({
+            "name": "snv",
+            "deriv": None,
+            "window": None,
+            "polyorder": None,
+            "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
+        })
 
     # Add derivative configs based on user selections
     # For each derivative type, we create:
@@ -357,49 +407,79 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     if preprocessing_methods.get('sg1', False):
         # 1st derivative only
         for window in window_sizes:
-            preprocess_configs.append(
-                {"name": "deriv", "deriv": 1, "window": window, "polyorder": 2}
-            )
+            preprocess_configs.append({
+                "name": "deriv",
+                "deriv": 1,
+                "window": window,
+                "polyorder": 2,
+                "interference": interference_to_add
+            })
 
         # If SNV is also selected, add SNV → derivative combination
         if preprocessing_methods.get('snv', False):
             for window in window_sizes:
-                preprocess_configs.append(
-                    {"name": "snv_deriv", "deriv": 1, "window": window, "polyorder": 2}
-                )
+                preprocess_configs.append({
+                    "name": "snv_deriv",
+                    "deriv": 1,
+                    "window": window,
+                    "polyorder": 2,
+                    "interference": interference_to_add
+                })
 
         # If deriv_snv is selected, add derivative → SNV combination for 1st deriv
         if preprocessing_methods.get('deriv_snv', False):
             for window in window_sizes:
-                preprocess_configs.append(
-                    {"name": "deriv_snv", "deriv": 1, "window": window, "polyorder": 2}
-                )
+                preprocess_configs.append({
+                    "name": "deriv_snv",
+                    "deriv": 1,
+                    "window": window,
+                    "polyorder": 2,
+                    "interference": interference_to_add
+                })
 
     if preprocessing_methods.get('sg2', False):
         # 2nd derivative only
         for window in window_sizes:
-            preprocess_configs.append(
-                {"name": "deriv", "deriv": 2, "window": window, "polyorder": 3}
-            )
+            preprocess_configs.append({
+                "name": "deriv",
+                "deriv": 2,
+                "window": window,
+                "polyorder": 3,
+                "interference": interference_to_add
+            })
 
         # If SNV is also selected, add SNV → derivative combination
         if preprocessing_methods.get('snv', False):
             for window in window_sizes:
-                preprocess_configs.append(
-                    {"name": "snv_deriv", "deriv": 2, "window": window, "polyorder": 3}
-                )
+                preprocess_configs.append({
+                    "name": "snv_deriv",
+                    "deriv": 2,
+                    "window": window,
+                    "polyorder": 3,
+                    "interference": interference_to_add
+                })
 
         # If deriv_snv is selected, add derivative → SNV combination for 2nd deriv
         if preprocessing_methods.get('deriv_snv', False):
             for window in window_sizes:
-                preprocess_configs.append(
-                    {"name": "deriv_snv", "deriv": 2, "window": window, "polyorder": 3}
-                )
+                preprocess_configs.append({
+                    "name": "deriv_snv",
+                    "deriv": 2,
+                    "window": window,
+                    "polyorder": 3,
+                    "interference": interference_to_add
+                })
 
     # If no preprocessing methods selected, default to raw
     if not preprocess_configs:
         print("Warning: No preprocessing methods selected. Defaulting to raw.")
-        preprocess_configs.append({"name": "raw", "deriv": None, "window": None, "polyorder": None})
+        preprocess_configs.append({
+            "name": "raw",
+            "deriv": None,
+            "window": None,
+            "polyorder": None,
+            "interference": interference_to_add
+        })
 
     # Create CV splitter
     if task_type == "regression":
@@ -445,6 +525,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # ═══════════════════════════════════════════════════════════════════════════
 
         # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
+        # Phase 3: Extract wavelengths for interference removal
+        wavelengths = X.columns.astype(float).values if hasattr(X, 'columns') else None
+
         prep_pipe_steps = build_preprocessing_pipeline(
             preprocess_cfg["name"],
             preprocess_cfg["deriv"],
@@ -452,7 +535,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             preprocess_cfg["polyorder"],
             imbalance_method=None,  # Imbalance will be added later inside CV folds
             imbalance_params=None,
-            task_type=task_type
+            task_type=task_type,
+            interference=preprocess_cfg.get("interference"),  # Phase 3
+            wavelengths=wavelengths  # Phase 3
         )
 
         # Step 2: Apply preprocessing to full spectrum
@@ -1030,6 +1115,9 @@ def _run_single_config(
             pipe_steps.append(("imbalance", imbalance_transformer))
     else:
         # Normal behavior: build full pipeline (spectral + imbalance)
+        # Phase 3: Extract wavelengths for interference removal
+        wavelengths = X.columns.astype(float).values if hasattr(X, 'columns') else None
+
         pipe_steps = build_preprocessing_pipeline(
             preprocess_cfg["name"],
             preprocess_cfg["deriv"],
@@ -1037,7 +1125,9 @@ def _run_single_config(
             preprocess_cfg["polyorder"],
             imbalance_method=imbalance_method,
             imbalance_params=imbalance_params,
-            task_type=task_type
+            task_type=task_type,
+            interference=preprocess_cfg.get("interference"),  # Phase 3
+            wavelengths=wavelengths  # Phase 3
         )
 
     # Handle class_weight for imbalanced classification

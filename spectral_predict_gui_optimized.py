@@ -72,6 +72,20 @@ except ImportError:
     CLASSIFICATION_TIERS = None
     MODEL_TIERS = None
 
+# Import interference removal methods
+try:
+    from spectral_predict.interference import (
+        WavelengthExcluder,
+        MSC,
+        OSC
+    )
+    HAS_INTERFERENCE = True
+except ImportError:
+    HAS_INTERFERENCE = False
+    WavelengthExcluder = None
+    MSC = None
+    OSC = None
+
 try:
     from spectral_predict.outlier_detection import generate_outlier_report
     HAS_OUTLIER_DETECTION = True
@@ -857,6 +871,45 @@ class SpectralPredictApp:
         self.transfer_model_registry = {}  # Dict of model_key -> TransferModel
         # model_key format: "MasterID_SlaveID_Method"
 
+        # Interference Removal Tab (Tab 11) variables - Phase 4: Advanced GUI
+        # Tab 11A: Interferent Library Management
+        self.interferent_libraries = {}  # Dict of {name: {'wavelengths': arr, 'X': arr, 'metadata': dict}}
+        self.current_interferent_library = None  # Currently selected library name
+        self.library_preview_plot = None  # Matplotlib figure for library preview
+
+        # Tab 11B: Advanced Method Configuration
+        self.advanced_interference_settings = {
+            'epo': {
+                'enabled': tk.BooleanVar(value=False),
+                'library': tk.StringVar(value=''),
+                'n_components': tk.IntVar(value=2),
+                'center': tk.BooleanVar(value=True),
+                'svd_tol': tk.DoubleVar(value=1e-10)
+            },
+            'dosc': {
+                'enabled': tk.BooleanVar(value=False),
+                'n_components': tk.IntVar(value=2),
+                'center': tk.BooleanVar(value=True),
+                'n_pls_components': tk.StringVar(value='auto')
+            },
+            'glsw': {
+                'enabled': tk.BooleanVar(value=False),
+                'method': tk.StringVar(value='covariance'),
+                'n_components': tk.StringVar(value='auto'),  # Replaced window_size with n_components
+                'regularization': tk.StringVar(value='1e-6'),
+                'apply_to_analysis': tk.BooleanVar(value=True)
+            }
+        }
+
+        # Tab 11C: Application Workflow
+        self.interference_app_data = None  # Data loaded for standalone interference removal
+        self.interference_app_corrected = None  # Corrected data from standalone workflow
+        self.interference_app_method = tk.StringVar(value='EPO')  # Selected method for application
+
+        # Tab 11D: Diagnostics & Visualization
+        self.interference_diagnostics_plot = None  # Before/after plot
+        self.interference_variance_metrics = None  # Variance explained metrics
+
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
         self.detected_type = None  # Auto-detected type: "asd", "csv", "spc", "combined", or "combined_excel"
@@ -969,6 +1022,13 @@ class SpectralPredictApp:
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
         self.use_deriv_snv = tk.BooleanVar(value=True)  # deriv_snv (derivative then SNV)
 
+        # Interference removal methods (Phase 3: Basic integration)
+        self.enable_wavelength_exclusion = tk.BooleanVar(value=False)
+        self.wavelength_exclude_ranges = tk.StringVar(value="1400-1500, 1900-2000")  # Default moisture bands
+        self.use_msc = tk.BooleanVar(value=False)  # Multiplicative Scatter Correction
+        self.use_osc = tk.BooleanVar(value=False)  # Orthogonal Signal Correction
+        self.osc_n_components = tk.IntVar(value=2)  # Number of OSC components (default: 2)
+
         # Subset Analysis options
         self.enable_variable_subsets = tk.BooleanVar(value=True)  # Top-N variable analysis
         self.enable_region_subsets = tk.BooleanVar(value=True)  # Spectral region analysis
@@ -1011,12 +1071,12 @@ class SpectralPredictApp:
         self.neuralboosted_activation_logistic = tk.BooleanVar(value=False) # logistic
 
         # Random Forest options
-        self.rf_n_trees_100 = tk.BooleanVar(value=True)  # Default
+        self.rf_n_trees_100 = tk.BooleanVar(value=False)
         self.rf_n_trees_200 = tk.BooleanVar(value=False)
-        self.rf_n_trees_500 = tk.BooleanVar(value=False)
+        self.rf_n_trees_500 = tk.BooleanVar(value=True)  # Default: only 500
         self.rf_n_trees_custom = tk.StringVar(value="")  # Custom value
-        self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: unlimited depth
-        self.rf_max_depth_30 = tk.BooleanVar(value=True)     # Default: max_depth=30
+        self.rf_max_depth_none = tk.BooleanVar(value=True)   # Default: only unlimited depth
+        self.rf_max_depth_30 = tk.BooleanVar(value=False)
         self.rf_max_depth_custom = tk.StringVar(value="")    # Custom max_depth value
 
         # RandomForest min_samples_split (minimum samples required to split a node)
@@ -2732,6 +2792,7 @@ class SpectralPredictApp:
         self._create_tab8_model_prediction()
         self._create_tab9_multi_model_comparison()
         self._create_tab10_calibration_transfer()
+        self._create_tab11_interference_removal()
 
         # Bind tab change event
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -4338,12 +4399,12 @@ class SpectralPredictApp:
         rf_trees_frame = ttk.Frame(rf_content_frame)
         rf_trees_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=5)
 
-        ttk.Checkbutton(rf_trees_frame, text="100 ⭐", variable=self.rf_n_trees_100).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="100", variable=self.rf_n_trees_100).grid(row=0, column=0, padx=5)
         ttk.Checkbutton(rf_trees_frame, text="200", variable=self.rf_n_trees_200).grid(row=0, column=1, padx=5)
-        ttk.Checkbutton(rf_trees_frame, text="500", variable=self.rf_n_trees_500).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(rf_trees_frame, text="500 ⭐", variable=self.rf_n_trees_500).grid(row=0, column=2, padx=5)
         ttk.Label(rf_trees_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
         ttk.Entry(rf_trees_frame, textvariable=self.rf_n_trees_custom, width=8).grid(row=0, column=4, padx=5)
-        ttk.Label(rf_trees_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        ttk.Label(rf_trees_frame, text="(default: 500)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # Info label
         ttk.Label(rf_content_frame, text="💡 More trees = better performance but slower training (e.g., 1000, 2000)",
@@ -4357,10 +4418,10 @@ class SpectralPredictApp:
         rf_depth_frame.grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(rf_depth_frame, text="None (unlimited) ⭐", variable=self.rf_max_depth_none).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(rf_depth_frame, text="30 ⭐", variable=self.rf_max_depth_30).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(rf_depth_frame, text="30", variable=self.rf_max_depth_30).grid(row=0, column=1, padx=5)
         ttk.Label(rf_depth_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
         ttk.Entry(rf_depth_frame, textvariable=self.rf_max_depth_custom, width=8).grid(row=0, column=3, padx=5)
-        ttk.Label(rf_depth_frame, text="(default: None, 30)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        ttk.Label(rf_depth_frame, text="(default: None)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
 
         # Info label for max_depth
         ttk.Label(rf_content_frame, text="💡 None = trees grow as deep as needed (unlimited). Lower values prevent overfitting.",
@@ -12905,6 +12966,7 @@ class SpectralPredictApp:
                 max_iter=self.max_iter.get(),
                 models_to_test=selected_models,
                 preprocessing_methods=preprocessing_methods,
+                # interference_settings=interference_settings,  # DISABLED: Code stashed (broke R² reproducibility)
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,
                 learning_rates=learning_rates,
@@ -26254,6 +26316,2617 @@ Configuration:
         # Initialize UI state
         self._on_step1_mode_changed()
 
+    def _create_tab11_interference_removal(self):
+        """Tab 11: Interference Removal (Advanced) - Phase 4
+
+        Advanced interference removal features with 4 subtabs:
+        - Tab 11A: Interferent Library Management
+        - Tab 11B: Advanced Method Configuration (EPO, DOSC, GLSW)
+        - Tab 11C: Application Workflow
+        - Tab 11D: Diagnostics & Visualization
+        """
+        # Create main tab frame
+        self.tab11 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab11, text='  🧬 Interference Removal  ')
+
+        # Create nested notebook for subtabs
+        self.interference_notebook = ttk.Notebook(self.tab11)
+        self.interference_notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+
+        # Create the 4 subtabs
+        self._create_tab11a_library_management()
+        self._create_tab11b_method_configuration()
+        self._create_tab11c_application_workflow()
+        self._create_tab11d_diagnostics()
+
+    def _create_tab11a_library_management(self):
+        """Subtab 11A: Interferent Library Management - Load/save/preview interferent spectra."""
+        tab11a = ttk.Frame(self.interference_notebook, style='TFrame')
+        self.interference_notebook.add(tab11a, text='  📚 Library Management  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab11a, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab11a, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Interferent Library Management", row=row, columnspan=2)
+        row += 1
+
+        # Section 1: Load Library
+        self._create_section_header(content_frame, "Load Interferent Library", row=row, columnspan=2)
+        row += 1
+
+        # File format selection
+        format_frame = ttk.Frame(content_frame, style='TFrame')
+        format_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(format_frame, text="Library Format:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        self.library_format = tk.StringVar(value='CSV')
+        formats = ['CSV', 'NPY', 'ASD Folder']
+        for fmt in formats:
+            ttk.Radiobutton(format_frame, text=fmt, variable=self.library_format,
+                          value=fmt, style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        # Load button
+        load_btn_frame = ttk.Frame(content_frame, style='TFrame')
+        load_btn_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(load_btn_frame, text="📂 Browse for Library File/Folder",
+                  command=self._load_interferent_library).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(load_btn_frame, text="Name:", style='TLabel').pack(side=tk.LEFT, padx=(20, 5))
+        self.library_name_entry = ttk.Entry(load_btn_frame, width=20)
+        self.library_name_entry.pack(side=tk.LEFT)
+        row += 1
+
+        # Format help
+        help_text = ("CSV: Two columns (wavelength, intensity) with header, or matrix (wavelengths as columns)\n"
+                    "NPY: NumPy array saved with np.save() - shape (n_samples, n_wavelengths)\n"
+                    "ASD Folder: Folder containing .asd files (one spectrum per file)")
+        ttk.Label(content_frame, text=help_text, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # Section 2: Loaded Libraries
+        self._create_section_header(content_frame, "Loaded Libraries", row=row, columnspan=2)
+        row += 1
+
+        # Library listbox with scrollbar
+        list_frame = ttk.Frame(content_frame, style='TFrame')
+        list_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+
+        list_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        self.library_listbox = tk.Listbox(list_frame, height=6, yscrollcommand=list_scrollbar.set,
+                                         bg=self.colors['bg'], fg=self.colors['text'],
+                                         selectbackground=self.colors['accent'],
+                                         font=('Segoe UI', 10), relief=tk.SOLID, borderwidth=1)
+        list_scrollbar.config(command=self.library_listbox.yview)
+
+        self.library_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.library_listbox.bind('<<ListboxSelect>>', self._on_library_selected)
+        row += 1
+
+        # Library info display
+        info_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        info_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.library_info_label = ttk.Label(info_frame, text="No library selected",
+                                           style='TLabel', justify=tk.LEFT)
+        self.library_info_label.pack(anchor=tk.W)
+        row += 1
+
+        # Library action buttons
+        action_frame = ttk.Frame(content_frame, style='TFrame')
+        action_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+
+        ttk.Button(action_frame, text="🗑️ Remove Selected",
+                  command=self._remove_selected_library).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(action_frame, text="💾 Save Library",
+                  command=self._save_selected_library).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="📤 Export All",
+                  command=self._export_all_libraries).pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        # Section 3: Library Preview
+        self._create_section_header(content_frame, "Library Preview", row=row, columnspan=2)
+        row += 1
+
+        # Matplotlib preview plot placeholder
+        preview_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID,
+                                 borderwidth=1, padding=10)
+        preview_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.library_preview_label = ttk.Label(preview_frame,
+                                              text="📊 Select a library to preview spectra\n\n"
+                                                   "(Preview plot will appear here showing all spectra in library)",
+                                              style='TLabel', justify=tk.CENTER)
+        self.library_preview_label.pack(expand=True, fill=tk.BOTH, pady=30)
+        row += 1
+
+        # Section 4: Example Libraries
+        self._create_section_header(content_frame, "Example Libraries", row=row, columnspan=2)
+        row += 1
+
+        ttk.Label(content_frame, text="Load pre-built interferent libraries for common use cases:",
+                 style='TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        example_frame = ttk.Frame(content_frame, style='TFrame')
+        example_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(example_frame, text="💧 Moisture (1400-1500, 1900-2000 nm)",
+                  command=lambda: self._load_example_library('moisture')).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(example_frame, text="🌊 Water Vapor",
+                  command=lambda: self._load_example_library('water')).pack(side=tk.LEFT, padx=5)
+        ttk.Button(example_frame, text="🌫️ CO2",
+                  command=lambda: self._load_example_library('co2')).pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        ttk.Label(content_frame,
+                 text="Example libraries are synthetic spectra representing typical interferents.\n"
+                      "For best results, create custom libraries from real measurements.",
+                 style='Small.TLabel', foreground='gray').grid(row=row, column=0, columnspan=2,
+                                                                sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # Section 5: Validation
+        self._create_section_header(content_frame, "Library Validation", row=row, columnspan=2)
+        row += 1
+
+        validation_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID,
+                                    borderwidth=1, padding=10)
+        validation_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.library_validation_label = ttk.Label(validation_frame,
+                                                 text="✓ No data loaded yet - validation will occur when you load training data",
+                                                 style='TLabel', foreground='gray')
+        self.library_validation_label.pack(anchor=tk.W)
+
+    def _create_tab11b_method_configuration(self):
+        """Subtab 11B: Advanced Method Configuration - EPO, DOSC, GLSW settings."""
+        tab11b = ttk.Frame(self.interference_notebook, style='TFrame')
+        self.interference_notebook.add(tab11b, text='  ⚙️ Method Configuration  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab11b, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab11b, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Advanced Method Configuration", row=row, columnspan=2)
+        row += 1
+
+        # ========================================================================
+        # EPO (External Parameter Orthogonalization)
+        # ========================================================================
+        self._create_section_header(content_frame, "EPO (External Parameter Orthogonalization)",
+                                    row=row, columnspan=2)
+        row += 1
+
+        # EPO Enable checkbox
+        ttk.Checkbutton(content_frame,
+                       text="Enable EPO",
+                       variable=self.advanced_interference_settings['epo']['enabled'],
+                       style='TCheckbutton',
+                       command=self._on_epo_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # EPO Description
+        epo_desc = ("Remove specific interferents using a reference library.\n"
+                   "Requires interferent library from Tab 11A.")
+        ttk.Label(content_frame, text=epo_desc, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # EPO Settings Frame
+        self.epo_settings_frame = ttk.LabelFrame(content_frame, text="EPO Settings",
+                                                 style='TLabelframe', padding=15)
+        self.epo_settings_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
+        row += 1
+
+        epo_row = 0
+
+        # Library selection
+        ttk.Label(self.epo_settings_frame, text="Interferent Library:",
+                 style='TLabel').grid(row=epo_row, column=0, sticky=tk.W, pady=5)
+
+        self.epo_library_combo = ttk.Combobox(self.epo_settings_frame,
+                                              textvariable=self.advanced_interference_settings['epo']['library'],
+                                              state='readonly', width=30)
+        self.epo_library_combo.grid(row=epo_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        self.epo_library_combo.bind('<<ComboboxSelected>>', self._on_epo_library_changed)
+
+        ttk.Button(self.epo_settings_frame, text="↻ Refresh",
+                  command=self._refresh_epo_library_list).grid(row=epo_row, column=2,
+                                                                padx=(10, 0), pady=5)
+        epo_row += 1
+
+        # n_components
+        ttk.Label(self.epo_settings_frame, text="Components (1-10):",
+                 style='TLabel').grid(row=epo_row, column=0, sticky=tk.W, pady=5)
+
+        epo_comp_frame = ttk.Frame(self.epo_settings_frame, style='TFrame')
+        epo_comp_frame.grid(row=epo_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        ttk.Spinbox(epo_comp_frame,
+                   textvariable=self.advanced_interference_settings['epo']['n_components'],
+                   from_=1, to=10, width=10).pack(side=tk.LEFT)
+
+        ttk.Label(epo_comp_frame, text="(higher = more aggressive removal)",
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        epo_row += 1
+
+        # Center
+        ttk.Checkbutton(self.epo_settings_frame,
+                       text="Mean-center data before EPO",
+                       variable=self.advanced_interference_settings['epo']['center'],
+                       style='TCheckbutton').grid(row=epo_row, column=0, columnspan=2,
+                                                  sticky=tk.W, pady=5)
+        epo_row += 1
+
+        # SVD tolerance
+        ttk.Label(self.epo_settings_frame, text="SVD Tolerance:",
+                 style='TLabel').grid(row=epo_row, column=0, sticky=tk.W, pady=5)
+
+        svd_tol_frame = ttk.Frame(self.epo_settings_frame, style='TFrame')
+        svd_tol_frame.grid(row=epo_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        ttk.Entry(svd_tol_frame,
+                 textvariable=self.advanced_interference_settings['epo']['svd_tol'],
+                 width=12).pack(side=tk.LEFT)
+
+        ttk.Label(svd_tol_frame, text="(default: 1e-10, increase if numerical issues)",
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        epo_row += 1
+
+        # EPO status indicator
+        self.epo_status_label = ttk.Label(self.epo_settings_frame,
+                                         text="⚠️ No library selected",
+                                         style='TLabel', foreground='orange')
+        self.epo_status_label.grid(row=epo_row, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+
+        # Disable EPO settings by default
+        self._toggle_epo_settings_state('disabled')
+
+        # ========================================================================
+        # DOSC (Direct Orthogonal Signal Correction)
+        # ========================================================================
+        self._create_section_header(content_frame, "DOSC (Direct Orthogonal Signal Correction)",
+                                    row=row, columnspan=2)
+        row += 1
+
+        # DOSC Enable checkbox
+        ttk.Checkbutton(content_frame,
+                       text="Enable DOSC",
+                       variable=self.advanced_interference_settings['dosc']['enabled'],
+                       style='TCheckbutton',
+                       command=self._on_dosc_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # DOSC Description
+        dosc_desc = ("Stable alternative to OSC for removing Y-orthogonal variation.\n"
+                    "More robust than OSC for noisy data.")
+        ttk.Label(content_frame, text=dosc_desc, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # DOSC Settings Frame
+        self.dosc_settings_frame = ttk.LabelFrame(content_frame, text="DOSC Settings",
+                                                  style='TLabelframe', padding=15)
+        self.dosc_settings_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
+        row += 1
+
+        dosc_row = 0
+
+        # n_components
+        ttk.Label(self.dosc_settings_frame, text="Components (1-10):",
+                 style='TLabel').grid(row=dosc_row, column=0, sticky=tk.W, pady=5)
+
+        dosc_comp_frame = ttk.Frame(self.dosc_settings_frame, style='TFrame')
+        dosc_comp_frame.grid(row=dosc_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        ttk.Spinbox(dosc_comp_frame,
+                   textvariable=self.advanced_interference_settings['dosc']['n_components'],
+                   from_=1, to=10, width=10).pack(side=tk.LEFT)
+
+        ttk.Label(dosc_comp_frame, text="(start with 2, increase if needed)",
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        dosc_row += 1
+
+        # Center
+        ttk.Checkbutton(self.dosc_settings_frame,
+                       text="Mean-center data before DOSC",
+                       variable=self.advanced_interference_settings['dosc']['center'],
+                       style='TCheckbutton').grid(row=dosc_row, column=0, columnspan=2,
+                                                  sticky=tk.W, pady=5)
+        dosc_row += 1
+
+        # PLS components
+        ttk.Label(self.dosc_settings_frame, text="PLS Components:",
+                 style='TLabel').grid(row=dosc_row, column=0, sticky=tk.W, pady=5)
+
+        pls_comp_frame = ttk.Frame(self.dosc_settings_frame, style='TFrame')
+        pls_comp_frame.grid(row=dosc_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        ttk.Entry(pls_comp_frame,
+                 textvariable=self.advanced_interference_settings['dosc']['n_pls_components'],
+                 width=12).pack(side=tk.LEFT)
+
+        ttk.Label(pls_comp_frame, text='("auto" or integer)',
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        dosc_row += 1
+
+        # Disable DOSC settings by default
+        self._toggle_dosc_settings_state('disabled')
+
+        # ========================================================================
+        # GLSW (Generalized Least Squares Weighting)
+        # ========================================================================
+        self._create_section_header(content_frame, "GLSW (Generalized Least Squares Weighting)",
+                                    row=row, columnspan=2)
+        row += 1
+
+        # GLSW Enable checkbox
+        ttk.Checkbutton(content_frame,
+                       text="Enable GLSW",
+                       variable=self.advanced_interference_settings['glsw']['enabled'],
+                       style='TCheckbutton',
+                       command=self._on_glsw_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # GLSW Description
+        glsw_desc = ("Noise-adaptive wavelength weighting.\n"
+                    "Down-weights noisy wavelengths automatically.")
+        ttk.Label(content_frame, text=glsw_desc, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # GLSW Settings Frame
+        self.glsw_settings_frame = ttk.LabelFrame(content_frame, text="GLSW Settings",
+                                                  style='TLabelframe', padding=15)
+        self.glsw_settings_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
+        row += 1
+
+        glsw_row = 0
+
+        # Method selection
+        ttk.Label(self.glsw_settings_frame, text="Method:",
+                 style='TLabel').grid(row=glsw_row, column=0, sticky=tk.W, pady=5)
+
+        method_frame = ttk.Frame(self.glsw_settings_frame, style='TFrame')
+        method_frame.grid(row=glsw_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        methods = [('Covariance', 'covariance'), ('Residual', 'residual')]
+        for i, (label, value) in enumerate(methods):
+            ttk.Radiobutton(method_frame, text=label,
+                          variable=self.advanced_interference_settings['glsw']['method'],
+                          value=value, style='TRadiobutton').pack(side=tk.LEFT, padx=(0 if i == 0 else 10, 0))
+        glsw_row += 1
+
+        # PLS Components (for residual method)
+        ttk.Label(self.glsw_settings_frame, text="PLS Components:",
+                 style='TLabel').grid(row=glsw_row, column=0, sticky=tk.W, pady=5)
+
+        comp_frame = ttk.Frame(self.glsw_settings_frame, style='TFrame')
+        comp_frame.grid(row=glsw_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        ttk.Entry(comp_frame,
+                 textvariable=self.advanced_interference_settings['glsw']['n_components'],
+                 width=12).pack(side=tk.LEFT)
+
+        ttk.Label(comp_frame, text='("auto" or integer, for residual method)',
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        glsw_row += 1
+
+        # Regularization parameter
+        ttk.Label(self.glsw_settings_frame, text="Regularization:",
+                 style='TLabel').grid(row=glsw_row, column=0, sticky=tk.W, pady=5)
+
+        reg_frame = ttk.Frame(self.glsw_settings_frame, style='TFrame')
+        reg_frame.grid(row=glsw_row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+
+        ttk.Entry(reg_frame,
+                 textvariable=self.advanced_interference_settings['glsw']['regularization'],
+                 width=12).pack(side=tk.LEFT)
+
+        ttk.Label(reg_frame, text='(numerical stability, default: 1e-6)',
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        glsw_row += 1
+
+        # Apply to analysis
+        ttk.Checkbutton(self.glsw_settings_frame,
+                       text="Apply GLSW weighting to model training",
+                       variable=self.advanced_interference_settings['glsw']['apply_to_analysis'],
+                       style='TCheckbutton').grid(row=glsw_row, column=0, columnspan=2,
+                                                  sticky=tk.W, pady=5)
+        glsw_row += 1
+
+        # Disable GLSW settings by default
+        self._toggle_glsw_settings_state('disabled')
+
+        # ========================================================================
+        # Apply to Analysis
+        # ========================================================================
+        self._create_section_header(content_frame, "Application Settings", row=row, columnspan=2)
+        row += 1
+
+        ttk.Label(content_frame,
+                 text="Advanced methods configured here will be applied during analysis if enabled.\n"
+                      "They work together with simple methods from Tab 4A (Wavelength Exclusion, MSC, OSC).",
+                 style='TLabel', justify=tk.LEFT).grid(row=row, column=0, columnspan=2,
+                                                       sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # Summary of enabled methods
+        summary_frame = ttk.LabelFrame(content_frame, text="Currently Enabled Methods",
+                                      style='TLabelframe', padding=15)
+        summary_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.method_summary_label = ttk.Label(summary_frame,
+                                             text="No advanced methods enabled",
+                                             style='TLabel', foreground='gray')
+        self.method_summary_label.pack(anchor=tk.W)
+        row += 1
+
+        # Update summary initially
+        self._update_method_summary()
+
+    def _create_tab11c_application_workflow(self):
+        """Subtab 11C: Application Workflow - Apply interference removal standalone."""
+        tab11c = ttk.Frame(self.interference_notebook, style='TFrame')
+        self.interference_notebook.add(tab11c, text='  🔬 Application  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab11c, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab11c, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Application Workflow", row=row, columnspan=2)
+        row += 1
+
+        # Description
+        desc_text = ("Apply interference removal to spectra independently of full analysis.\n"
+                    "Useful for exploring different methods before committing to model training.")
+        ttk.Label(content_frame, text=desc_text, style='TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # ========================================================================
+        # Section 1: Load Data
+        # ========================================================================
+        self._create_section_header(content_frame, "Load Spectra to Correct", row=row, columnspan=2)
+        row += 1
+
+        # Load buttons
+        load_btn_frame = ttk.Frame(content_frame, style='TFrame')
+        load_btn_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(load_btn_frame, text="📂 Browse Folder",
+                  command=self._app_load_spectra_folder).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(load_btn_frame, text="📋 Load from Import Tab",
+                  command=self._app_load_from_import).pack(side=tk.LEFT)
+        row += 1
+
+        # Data info display
+        data_info_frame = ttk.LabelFrame(content_frame, text="Loaded Data",
+                                        style='TLabelframe', padding=15)
+        data_info_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.app_data_info_label = ttk.Label(data_info_frame,
+                                             text="No data loaded",
+                                             style='TLabel', foreground='gray')
+        self.app_data_info_label.pack(anchor=tk.W)
+        row += 1
+
+        # ========================================================================
+        # Section 2: Select Method
+        # ========================================================================
+        self._create_section_header(content_frame, "Select Interference Removal Method",
+                                    row=row, columnspan=2)
+        row += 1
+
+        # Method selection dropdown
+        method_frame = ttk.Frame(content_frame, style='TFrame')
+        method_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(method_frame, text="Method:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+
+        self.app_method = tk.StringVar(value='EPO')
+        self.app_method_combo = ttk.Combobox(method_frame, textvariable=self.app_method,
+                                             state='readonly', width=30)
+        self.app_method_combo['values'] = [
+            'Wavelength Exclusion',
+            'MSC',
+            'OSC',
+            'EPO',
+            'DOSC',
+            'GLSW'
+        ]
+        self.app_method_combo.pack(side=tk.LEFT)
+        self.app_method_combo.bind('<<ComboboxSelected>>', self._on_app_method_changed)
+        row += 1
+
+        # Method-specific settings frame (dynamically populated)
+        self.app_method_settings_frame = ttk.LabelFrame(content_frame, text="Method Settings",
+                                                        style='TLabelframe', padding=15)
+        self.app_method_settings_frame.grid(row=row, column=0, columnspan=2,
+                                           sticky=(tk.W, tk.E), pady=(0, 15))
+        row += 1
+
+        # Populate initial settings
+        self._populate_app_method_settings(self.app_method.get())
+
+        # Apply button
+        apply_frame = ttk.Frame(content_frame, style='TFrame')
+        apply_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+
+        ttk.Button(apply_frame, text="▶ Apply Correction",
+                  command=self._app_apply_correction,
+                  style='Accent.TButton').pack(side=tk.LEFT, padx=(0, 10))
+
+        self.app_status_label = ttk.Label(apply_frame, text="",
+                                          style='TLabel', foreground='gray')
+        self.app_status_label.pack(side=tk.LEFT)
+        row += 1
+
+        # ========================================================================
+        # Section 3: Preview Results
+        # ========================================================================
+        self._create_section_header(content_frame, "Before/After Preview", row=row, columnspan=2)
+        row += 1
+
+        # Spectrum selector dropdown
+        selector_frame = ttk.Frame(content_frame, style='TFrame')
+        selector_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(selector_frame, text="View Spectrum:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+
+        self.app_spectrum_selector = tk.StringVar(value='Mean')
+        self.app_spectrum_combo = ttk.Combobox(selector_frame,
+                                               textvariable=self.app_spectrum_selector,
+                                               state='readonly', width=30)
+        self.app_spectrum_combo['values'] = ['Mean']
+        self.app_spectrum_combo.pack(side=tk.LEFT)
+        self.app_spectrum_combo.bind('<<ComboboxSelected>>', self._app_on_spectrum_selected)
+        row += 1
+
+        # Matplotlib plot frame
+        preview_frame = ttk.LabelFrame(content_frame, text="Spectrum Comparison",
+                                      style='TLabelframe', padding=15)
+        preview_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        # Create plot container
+        self.app_preview_plot_frame = ttk.Frame(preview_frame, style='TFrame')
+        self.app_preview_plot_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Initial placeholder label (replaced when data is plotted)
+        self.app_preview_label = ttk.Label(self.app_preview_plot_frame,
+                                          text="📊 Apply correction to see before/after comparison",
+                                          style='TLabel', justify=tk.CENTER)
+        self.app_preview_label.pack(expand=True, pady=30)
+
+        # Canvas and toolbar references for cleanup
+        self.app_canvas = None
+        self.app_toolbar_frame = None
+
+        # Tab 11D canvas references
+        self.diag_canvas = None
+        self.diag_toolbar_frame = None
+        row += 1
+
+        # ========================================================================
+        # Section 4: Export
+        # ========================================================================
+        self._create_section_header(content_frame, "Export Corrected Spectra", row=row, columnspan=2)
+        row += 1
+
+        # Export controls
+        export_frame = ttk.Frame(content_frame, style='TFrame')
+        export_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(export_frame, text="Format:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+
+        self.app_export_format = tk.StringVar(value='CSV')
+        for fmt in ['CSV', 'NPY']:
+            ttk.Radiobutton(export_frame, text=fmt, variable=self.app_export_format,
+                          value=fmt, style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(export_frame, text="💾 Export",
+                  command=self._app_export_corrected).pack(side=tk.LEFT, padx=(20, 0))
+        row += 1
+
+        # Export options
+        export_opts_frame = ttk.LabelFrame(content_frame, text="Export Options",
+                                          style='TLabelframe', padding=15)
+        export_opts_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.app_export_original = tk.BooleanVar(value=True)
+        self.app_export_wavelengths = tk.BooleanVar(value=True)
+        self.app_export_metadata = tk.BooleanVar(value=True)
+
+        ttk.Checkbutton(export_opts_frame, text="Include original spectra (before correction)",
+                       variable=self.app_export_original,
+                       style='TCheckbutton').pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(export_opts_frame, text="Include wavelengths as column headers",
+                       variable=self.app_export_wavelengths,
+                       style='TCheckbutton').pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(export_opts_frame, text="Save metadata file (method, parameters)",
+                       variable=self.app_export_metadata,
+                       style='TCheckbutton').pack(anchor=tk.W, pady=2)
+
+    def _create_tab11d_diagnostics(self):
+        """Subtab 11D: Diagnostics & Visualization - Before/after plots, variance metrics."""
+        tab11d = ttk.Frame(self.interference_notebook, style='TFrame')
+        self.interference_notebook.add(tab11d, text='  📊 Diagnostics  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab11d, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab11d, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Diagnostics & Visualization", row=row, columnspan=2)
+        row += 1
+
+        # Description
+        desc_text = ("Visualize the effects of interference removal on your spectra.\n"
+                    "Use diagnostics to understand what each method is doing.")
+        ttk.Label(content_frame, text=desc_text, style='TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # ========================================================================
+        # Section 1: Data Selection
+        # ========================================================================
+        self._create_section_header(content_frame, "Select Data for Diagnostics", row=row, columnspan=2)
+        row += 1
+
+        # Data source selection
+        data_source_frame = ttk.Frame(content_frame, style='TFrame')
+        data_source_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(data_source_frame, text="Data Source:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+
+        self.diag_data_source = tk.StringVar(value='Current Analysis')
+        diag_sources = ['Current Analysis', 'Application Tab (Tab 11C)', 'Load from File']
+        for source in diag_sources:
+            ttk.Radiobutton(data_source_frame, text=source,
+                          variable=self.diag_data_source,
+                          value=source, style='TRadiobutton',
+                          command=self._on_diag_source_changed).pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        # Data info
+        diag_data_frame = ttk.LabelFrame(content_frame, text="Data Information",
+                                         style='TLabelframe', padding=15)
+        diag_data_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.diag_data_info_label = ttk.Label(diag_data_frame,
+                                              text="No data available for diagnostics",
+                                              style='TLabel', foreground='gray')
+        self.diag_data_info_label.pack(anchor=tk.W)
+        row += 1
+
+        # ========================================================================
+        # Section 2: Spectrum Plots
+        # ========================================================================
+        self._create_section_header(content_frame, "Before/After Spectrum Comparison",
+                                    row=row, columnspan=2)
+        row += 1
+
+        # Plot options
+        plot_opts_frame = ttk.Frame(content_frame, style='TFrame')
+        plot_opts_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        self.diag_show_mean = tk.BooleanVar(value=True)
+        self.diag_show_individual = tk.BooleanVar(value=False)
+        self.diag_show_difference = tk.BooleanVar(value=True)
+
+        ttk.Checkbutton(plot_opts_frame, text="Show mean spectrum",
+                       variable=self.diag_show_mean,
+                       style='TCheckbutton').pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Checkbutton(plot_opts_frame, text="Show individual spectra",
+                       variable=self.diag_show_individual,
+                       style='TCheckbutton').pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Checkbutton(plot_opts_frame, text="Show difference",
+                       variable=self.diag_show_difference,
+                       style='TCheckbutton').pack(side=tk.LEFT)
+        row += 1
+
+        # Spectrum plot placeholder
+        spectrum_plot_frame = ttk.LabelFrame(content_frame, text="Spectrum Comparison Plot",
+                                            style='TLabelframe', padding=15)
+        spectrum_plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.diag_spectrum_plot_label = ttk.Label(spectrum_plot_frame,
+                                                  text="📊 Matplotlib plot placeholder\n\n"
+                                                       "Would show:\n"
+                                                       " • Original spectra (blue line)\n"
+                                                       " • Corrected spectra (red line)\n"
+                                                       " • Difference (green line)\n"
+                                                       " • Mean ± std bands",
+                                                  style='TLabel', justify=tk.CENTER)
+        self.diag_spectrum_plot_label.pack(expand=True, pady=30)
+        row += 1
+
+        # ========================================================================
+        # Section 3: Variance Metrics
+        # ========================================================================
+        self._create_section_header(content_frame, "Variance Explained", row=row, columnspan=2)
+        row += 1
+
+        # Variance metrics display
+        variance_frame = ttk.LabelFrame(content_frame, text="Component Analysis",
+                                       style='TLabelframe', padding=15)
+        variance_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.diag_variance_label = ttk.Label(variance_frame,
+                                            text="Apply interference removal to see variance metrics:\n\n"
+                                                 " • Total variance removed: X%\n"
+                                                 " • Variance per component: [X%, Y%, Z%]\n"
+                                                 " • Signal-to-noise ratio improvement: X.XX",
+                                            style='TLabel', justify=tk.LEFT)
+        self.diag_variance_label.pack(anchor=tk.W)
+        row += 1
+
+        # Variance bar chart placeholder
+        variance_plot_frame = ttk.LabelFrame(content_frame, text="Variance by Component",
+                                            style='TLabelframe', padding=15)
+        variance_plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.diag_variance_plot_label = ttk.Label(variance_plot_frame,
+                                                  text="📊 Bar chart placeholder\n\n"
+                                                       "Would show variance explained by each component",
+                                                  style='TLabel', justify=tk.CENTER)
+        self.diag_variance_plot_label.pack(expand=True, pady=30)
+        row += 1
+
+        # ========================================================================
+        # Section 4: Advanced Visualizations
+        # ========================================================================
+        self._create_section_header(content_frame, "Advanced Visualizations", row=row, columnspan=2)
+        row += 1
+
+        # Visualization options
+        vis_opts_frame = ttk.Frame(content_frame, style='TFrame')
+        vis_opts_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(vis_opts_frame, text="📈 Show PCA Plot (2D projection)",
+                  command=self._diag_show_pca).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(vis_opts_frame, text="🎯 Show Interferent Subspace",
+                  command=self._diag_show_subspace).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(vis_opts_frame, text="📊 Show Wavelength Weights (GLSW)",
+                  command=self._diag_show_weights).pack(side=tk.LEFT)
+        row += 1
+
+        # Advanced plot placeholder
+        advanced_plot_frame = ttk.LabelFrame(content_frame, text="Advanced Visualization",
+                                            style='TLabelframe', padding=15)
+        advanced_plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.diag_advanced_plot_label = ttk.Label(advanced_plot_frame,
+                                                  text="📊 Advanced visualization placeholder\n\n"
+                                                       "Click a button above to show:\n"
+                                                       " • PCA scatter plot (before vs after)\n"
+                                                       " • Interferent subspace visualization\n"
+                                                       " • Wavelength weighting profile",
+                                                  style='TLabel', justify=tk.CENTER)
+        self.diag_advanced_plot_label.pack(expand=True, pady=30)
+        row += 1
+
+        # ========================================================================
+        # Section 5: Export Diagnostics
+        # ========================================================================
+        self._create_section_header(content_frame, "Export Diagnostics", row=row, columnspan=2)
+        row += 1
+
+        export_diag_frame = ttk.Frame(content_frame, style='TFrame')
+        export_diag_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(export_diag_frame, text="💾 Save All Plots (PNG)",
+                  command=self._diag_export_plots).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(export_diag_frame, text="📄 Export Metrics (CSV)",
+                  command=self._diag_export_metrics).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(export_diag_frame, text="📋 Generate Report (HTML)",
+                  command=self._diag_export_report).pack(side=tk.LEFT)
+
+    # ========================================================================
+    # Tab 11 Helper Methods - Interferent Library Management
+    # ========================================================================
+
+    def _load_interferent_library(self):
+        """Load an interferent library from file (CSV, NPY, or ASD folder)."""
+        import numpy as np
+        import pandas as pd
+        from tkinter import filedialog, messagebox
+        import os
+
+        fmt = self.library_format.get()
+        library_name = self.library_name_entry.get().strip()
+
+        if not library_name:
+            messagebox.showerror("Error", "Please enter a library name")
+            return
+
+        if library_name in self.interferent_libraries:
+            if not messagebox.askyesno("Overwrite?", f"Library '{library_name}' already exists. Overwrite?"):
+                return
+
+        try:
+            if fmt == 'CSV':
+                filepath = filedialog.askopenfilename(
+                    title="Select CSV Library File",
+                    filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+                )
+                if not filepath:
+                    return
+
+                # Try to load CSV (handle both formats: 2-column or matrix)
+                df = pd.read_csv(filepath)
+
+                if df.shape[1] == 2:
+                    # Two-column format: wavelength, intensity
+                    wavelengths = df.iloc[:, 0].values
+                    X = df.iloc[:, 1:].values.T  # Single spectrum
+                else:
+                    # Matrix format: columns are wavelengths
+                    try:
+                        wavelengths = df.columns.astype(float).values
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(
+                            f"Could not convert column names to wavelengths (floats).\n"
+                            f"For matrix format CSV, column headers must be numeric wavelengths.\n"
+                            f"Error: {str(e)}"
+                        )
+                    X = df.values
+
+            elif fmt == 'NPY':
+                filepath = filedialog.askopenfilename(
+                    title="Select NPY Library File",
+                    filetypes=[("NumPy files", "*.npy"), ("All files", "*.*")]
+                )
+                if not filepath:
+                    return
+
+                X = np.load(filepath)
+
+                # Validate dimensions
+                if X.ndim == 1:
+                    X = X.reshape(1, -1)
+                elif X.ndim > 2:
+                    raise ValueError(
+                        f"NPY file has {X.ndim} dimensions (expected 1D or 2D).\n"
+                        f"Shape: {X.shape}\n"
+                        f"Please provide a 2D array with shape (n_samples, n_wavelengths)."
+                    )
+
+                # Assume wavelengths are indices (user should provide separately)
+                wavelengths = np.arange(X.shape[1])
+                messagebox.showinfo("Note",
+                    f"Loaded {X.shape[0]} spectra with {X.shape[1]} wavelengths.\n"
+                    f"Wavelengths set to [0, 1, 2, ...]. Load actual wavelengths from CSV if needed.")
+
+            elif fmt == 'ASD Folder':
+                folderpath = filedialog.askdirectory(title="Select ASD Folder")
+                if not folderpath:
+                    return
+
+                # Import ASD reader from spectral_predict.io
+                try:
+                    import sys
+                    from pathlib import Path
+
+                    # Add src directory to path if not already there
+                    src_path = Path(__file__).parent / 'src'
+                    if str(src_path) not in sys.path:
+                        sys.path.insert(0, str(src_path))
+
+                    from spectral_predict.io import read_asd_dir
+                except ImportError as e:
+                    messagebox.showerror("Import Error",
+                        f"Cannot import ASD reader module.\n\n"
+                        f"Error: {str(e)}\n\n"
+                        f"Please ensure spectral_predict package is properly installed.")
+                    return
+
+                # Load ASD files using existing infrastructure
+                try:
+                    # read_asd_dir returns (df, metadata) where df is wide format
+                    # df has shape (n_samples, n_wavelengths) with wavelengths as columns
+                    df, asd_metadata = read_asd_dir(folderpath, reader_mode="auto")
+
+                    # Convert to format expected by Tab 11A
+                    wavelengths = df.columns.astype(float).values
+                    X = df.values  # shape: (n_samples, n_wavelengths)
+
+                    # Build filepath for metadata (use first ASD file found)
+                    asd_files = list(Path(folderpath).glob("*.asd")) + list(Path(folderpath).glob("*.sig"))
+                    filepath = folderpath if not asd_files else str(asd_files[0])
+
+                except ValueError as e:
+                    # Specific error handling for binary ASD without SpecDAL
+                    error_msg = str(e)
+                    if "Binary ASD" in error_msg or "SpecDAL" in error_msg:
+                        messagebox.showerror("Binary ASD Detected",
+                            f"{error_msg}\n\n"
+                            f"Options:\n"
+                            f"1. Install SpecDAL: pip install specdal\n"
+                            f"2. Export ASD files to ASCII format (.sig or ASCII .asd)\n"
+                            f"3. Use CSV format instead")
+                    else:
+                        messagebox.showerror("ASD Loading Error",
+                            f"Failed to load ASD folder:\n\n{error_msg}")
+                    return
+                except Exception as e:
+                    messagebox.showerror("ASD Loading Error",
+                        f"Failed to load ASD folder:\n\n"
+                        f"{str(e)}\n\n"
+                        f"Folder: {folderpath}")
+                    return
+
+            # Store library
+            self.interferent_libraries[library_name] = {
+                'wavelengths': wavelengths,
+                'X': X,
+                'metadata': {
+                    'n_samples': X.shape[0],
+                    'n_wavelengths': X.shape[1],
+                    'wl_range': (wavelengths.min(), wavelengths.max()),
+                    'source': filepath if fmt != 'ASD Folder' else folderpath
+                }
+            }
+
+            # Update listbox
+            self._update_library_listbox()
+
+            messagebox.showinfo("Success",
+                f"Loaded library '{library_name}':\n"
+                f"  - {X.shape[0]} interferent spectra\n"
+                f"  - {X.shape[1]} wavelengths\n"
+                f"  - Range: {wavelengths.min():.1f} - {wavelengths.max():.1f} nm")
+
+        except Exception as e:
+            messagebox.showerror("Error Loading Library", f"Failed to load library:\n{str(e)}")
+
+    def _update_library_listbox(self):
+        """Update the library listbox with current libraries."""
+        self.library_listbox.delete(0, tk.END)
+        for name in sorted(self.interferent_libraries.keys()):
+            lib = self.interferent_libraries[name]
+            meta = lib['metadata']
+            display = f"{name}  ({meta['n_samples']} spectra, {meta['n_wavelengths']} wl)"
+            self.library_listbox.insert(tk.END, display)
+
+    def _on_library_selected(self, event):
+        """Handle library selection in listbox."""
+        selection = self.library_listbox.curselection()
+        if not selection:
+            return
+
+        # Extract library name from display string
+        display = self.library_listbox.get(selection[0])
+        library_name = display.split('  (')[0]
+
+        if library_name not in self.interferent_libraries:
+            return
+
+        lib = self.interferent_libraries[library_name]
+        meta = lib['metadata']
+
+        # Update info label
+        info_text = (
+            f"Library: {library_name}\n"
+            f"Samples: {meta['n_samples']}\n"
+            f"Wavelengths: {meta['n_wavelengths']}\n"
+            f"Range: {meta['wl_range'][0]:.1f} - {meta['wl_range'][1]:.1f} nm\n"
+            f"Source: {meta['source']}"
+        )
+        self.library_info_label.config(text=info_text)
+
+        # Store current selection
+        self.current_interferent_library = library_name
+
+        # Update validation
+        self._validate_library_dimensions()
+
+        # Update preview (would show matplotlib plot in production)
+        self._update_library_preview(library_name)
+
+    def _validate_library_dimensions(self):
+        """Validate library dimensions against current training data."""
+        if self.current_interferent_library is None:
+            self.library_validation_label.config(
+                text="✓ No library selected",
+                foreground='gray'
+            )
+            return
+
+        lib = self.interferent_libraries[self.current_interferent_library]
+
+        # Check if training data loaded
+        if not hasattr(self, 'X_train') or self.X_train is None:
+            self.library_validation_label.config(
+                text="⚠️ No training data loaded yet - cannot validate dimensions",
+                foreground='orange'
+            )
+            return
+
+        # Check wavelength dimension match
+        lib_wl = lib['metadata']['n_wavelengths']
+        train_wl = self.X_train.shape[1]
+
+        if lib_wl == train_wl:
+            self.library_validation_label.config(
+                text=f"✓ Library dimensions match training data ({lib_wl} wavelengths)",
+                foreground='green'
+            )
+        else:
+            self.library_validation_label.config(
+                text=f"❌ Dimension mismatch! Library: {lib_wl} wl, Training: {train_wl} wl\n"
+                     f"EPO will fail unless dimensions match.",
+                foreground='red'
+            )
+
+    def _update_library_preview(self, library_name):
+        """Update the library preview plot (placeholder for matplotlib integration)."""
+        if library_name not in self.interferent_libraries:
+            return
+
+        lib = self.interferent_libraries[library_name]
+        n_spectra = lib['metadata']['n_samples']
+
+        # Placeholder - in production, would embed matplotlib figure
+        preview_text = (
+            f"📊 Library Preview: {library_name}\n\n"
+            f"Showing {n_spectra} interferent spectr{'um' if n_spectra == 1 else 'a'}\n"
+            f"Wavelength range: {lib['metadata']['wl_range'][0]:.1f} - {lib['metadata']['wl_range'][1]:.1f} nm\n\n"
+            f"(Matplotlib plot integration coming in Phase 4 Day 16)"
+        )
+        self.library_preview_label.config(text=preview_text)
+
+    def _remove_selected_library(self):
+        """Remove the selected library."""
+        from tkinter import messagebox
+
+        if self.current_interferent_library is None:
+            messagebox.showwarning("No Selection", "Please select a library to remove")
+            return
+
+        if messagebox.askyesno("Confirm", f"Remove library '{self.current_interferent_library}'?"):
+            del self.interferent_libraries[self.current_interferent_library]
+            self.current_interferent_library = None
+            self._update_library_listbox()
+            self.library_info_label.config(text="No library selected")
+            self.library_preview_label.config(
+                text="📊 Select a library to preview spectra\n\n"
+                     "(Preview plot will appear here showing all spectra in library)"
+            )
+            self.library_validation_label.config(
+                text="✓ No data loaded yet - validation will occur when you load training data",
+                foreground='gray'
+            )
+            messagebox.showinfo("Success", "Library removed")
+
+    def _save_selected_library(self):
+        """Save the selected library to file."""
+        from tkinter import messagebox, filedialog
+        import numpy as np
+        import pandas as pd
+
+        if self.current_interferent_library is None:
+            messagebox.showwarning("No Selection", "Please select a library to save")
+            return
+
+        lib = self.interferent_libraries[self.current_interferent_library]
+
+        # Ask for format
+        fmt = self.library_format.get()
+
+        if fmt == 'CSV':
+            filepath = filedialog.asksaveasfilename(
+                title="Save Library as CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+            if not filepath:
+                return
+
+            # Save as matrix with wavelengths as columns
+            df = pd.DataFrame(lib['X'], columns=lib['wavelengths'])
+            df.to_csv(filepath, index=False)
+            messagebox.showinfo("Success", f"Library saved to {filepath}")
+
+        elif fmt == 'NPY':
+            filepath = filedialog.asksaveasfilename(
+                title="Save Library as NPY",
+                defaultextension=".npy",
+                filetypes=[("NumPy files", "*.npy"), ("All files", "*.*")]
+            )
+            if not filepath:
+                return
+
+            np.save(filepath, lib['X'])
+            messagebox.showinfo("Success",
+                f"Library saved to {filepath}\n"
+                f"Note: Wavelengths not saved. Save separately as CSV if needed.")
+
+    def _export_all_libraries(self):
+        """Export all libraries to a folder."""
+        from tkinter import messagebox, filedialog
+        import os
+        import numpy as np
+        import pandas as pd
+
+        if not self.interferent_libraries:
+            messagebox.showwarning("No Libraries", "No libraries to export")
+            return
+
+        folder = filedialog.askdirectory(title="Select Export Folder")
+        if not folder:
+            return
+
+        try:
+            for name, lib in self.interferent_libraries.items():
+                # Save as CSV
+                csv_path = os.path.join(folder, f"{name}.csv")
+                df = pd.DataFrame(lib['X'], columns=lib['wavelengths'])
+                df.to_csv(csv_path, index=False)
+
+                # Save as NPY
+                npy_path = os.path.join(folder, f"{name}.npy")
+                np.save(npy_path, lib['X'])
+
+            messagebox.showinfo("Success",
+                f"Exported {len(self.interferent_libraries)} libraries to:\n{folder}\n\n"
+                f"Formats: CSV (with wavelengths) and NPY")
+
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export libraries:\n{str(e)}")
+
+    def _load_example_library(self, example_type):
+        """Load a pre-built example interferent library."""
+        from tkinter import messagebox
+        import numpy as np
+
+        # Generate synthetic interferent spectra
+        try:
+            if example_type == 'moisture':
+                # Synthetic moisture absorption (1400-1500, 1900-2000 nm)
+                wavelengths = np.arange(350, 2501, 1)  # 350-2500 nm in 1 nm steps
+                n_samples = 10
+
+                X = np.zeros((n_samples, len(wavelengths)))
+                for i in range(n_samples):
+                    # Base spectrum (flat)
+                    spectrum = np.ones_like(wavelengths, dtype=float)
+
+                    # Add moisture bands with Gaussian peaks
+                    # Band 1: 1450 nm
+                    center1 = 1450
+                    idx1 = np.abs(wavelengths - center1).argmin()
+                    spectrum += np.random.uniform(0.1, 0.3) * np.exp(-((wavelengths - center1)**2) / (50**2))
+
+                    # Band 2: 1950 nm
+                    center2 = 1950
+                    idx2 = np.abs(wavelengths - center2).argmin()
+                    spectrum += np.random.uniform(0.1, 0.3) * np.exp(-((wavelengths - center2)**2) / (50**2))
+
+                    # Add noise
+                    spectrum += np.random.normal(0, 0.01, len(wavelengths))
+
+                    X[i] = spectrum
+
+                library_name = 'Example_Moisture'
+
+            elif example_type == 'water':
+                # Synthetic water vapor
+                wavelengths = np.arange(350, 2501, 1)
+                n_samples = 5
+
+                X = np.zeros((n_samples, len(wavelengths)))
+                for i in range(n_samples):
+                    spectrum = np.ones_like(wavelengths, dtype=float)
+
+                    # Water bands at 1400, 1900, 2700 nm (broader than moisture)
+                    for center in [1400, 1900]:
+                        spectrum += np.random.uniform(0.2, 0.5) * np.exp(-((wavelengths - center)**2) / (100**2))
+
+                    spectrum += np.random.normal(0, 0.01, len(wavelengths))
+                    X[i] = spectrum
+
+                library_name = 'Example_Water'
+
+            elif example_type == 'co2':
+                # Synthetic CO2 (2000-2400 nm)
+                wavelengths = np.arange(350, 2501, 1)
+                n_samples = 5
+
+                X = np.zeros((n_samples, len(wavelengths)))
+                for i in range(n_samples):
+                    spectrum = np.ones_like(wavelengths, dtype=float)
+
+                    # CO2 bands
+                    for center in [2000, 2050, 2100]:
+                        spectrum += np.random.uniform(0.1, 0.2) * np.exp(-((wavelengths - center)**2) / (30**2))
+
+                    spectrum += np.random.normal(0, 0.01, len(wavelengths))
+                    X[i] = spectrum
+
+                library_name = 'Example_CO2'
+
+            # Store library
+            self.interferent_libraries[library_name] = {
+                'wavelengths': wavelengths,
+                'X': X,
+                'metadata': {
+                    'n_samples': X.shape[0],
+                    'n_wavelengths': X.shape[1],
+                    'wl_range': (wavelengths.min(), wavelengths.max()),
+                    'source': f'Built-in example ({example_type})'
+                }
+            }
+
+            # Set library name in entry
+            self.library_name_entry.delete(0, tk.END)
+            self.library_name_entry.insert(0, library_name)
+
+            # Update listbox
+            self._update_library_listbox()
+
+            messagebox.showinfo("Example Library Loaded",
+                f"Loaded example {example_type} library:\n"
+                f"  - {X.shape[0]} synthetic interferent spectra\n"
+                f"  - {X.shape[1]} wavelengths (350-2500 nm)\n\n"
+                f"This is a synthetic library. For production use, create libraries from real measurements.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create example library:\n{str(e)}")
+
+    # ========================================================================
+    # Tab 11B Helper Methods - Advanced Method Configuration
+    # ========================================================================
+
+    def _on_epo_toggled(self):
+        """Handle EPO enable/disable."""
+        enabled = self.advanced_interference_settings['epo']['enabled'].get()
+        state = 'normal' if enabled else 'disabled'
+        self._toggle_epo_settings_state(state)
+        self._update_method_summary()
+
+        if enabled:
+            self._refresh_epo_library_list()
+
+    def _toggle_epo_settings_state(self, state):
+        """Enable or disable EPO settings widgets."""
+        for child in self.epo_settings_frame.winfo_children():
+            if isinstance(child, (ttk.Label, ttk.Frame)):
+                # Don't disable labels and frames, only their children
+                if isinstance(child, ttk.Frame):
+                    for subchild in child.winfo_children():
+                        try:
+                            subchild.config(state=state)
+                        except tk.TclError:
+                            pass
+            else:
+                try:
+                    child.config(state=state)
+                except tk.TclError:
+                    pass
+
+    def _refresh_epo_library_list(self):
+        """Refresh the EPO library dropdown with current libraries."""
+        library_names = sorted(self.interferent_libraries.keys())
+        self.epo_library_combo['values'] = library_names
+
+        if library_names:
+            # Select first library if none selected
+            current = self.advanced_interference_settings['epo']['library'].get()
+            if not current or current not in library_names:
+                self.epo_library_combo.current(0)
+                self._on_epo_library_changed(None)
+        else:
+            self.epo_status_label.config(text="⚠️ No libraries loaded (go to Tab 11A)",
+                                        foreground='orange')
+
+    def _on_epo_library_changed(self, event):
+        """Handle EPO library selection change."""
+        library_name = self.advanced_interference_settings['epo']['library'].get()
+
+        if not library_name or library_name not in self.interferent_libraries:
+            self.epo_status_label.config(text="⚠️ No library selected", foreground='orange')
+            return
+
+        lib = self.interferent_libraries[library_name]
+        meta = lib['metadata']
+
+        # Update status
+        self.epo_status_label.config(
+            text=f"✓ Library '{library_name}': {meta['n_samples']} spectra, {meta['n_wavelengths']} wavelengths",
+            foreground='green'
+        )
+
+    def _on_dosc_toggled(self):
+        """Handle DOSC enable/disable."""
+        enabled = self.advanced_interference_settings['dosc']['enabled'].get()
+        state = 'normal' if enabled else 'disabled'
+        self._toggle_dosc_settings_state(state)
+        self._update_method_summary()
+
+    def _toggle_dosc_settings_state(self, state):
+        """Enable or disable DOSC settings widgets."""
+        for child in self.dosc_settings_frame.winfo_children():
+            if isinstance(child, (ttk.Label, ttk.Frame)):
+                if isinstance(child, ttk.Frame):
+                    for subchild in child.winfo_children():
+                        try:
+                            subchild.config(state=state)
+                        except tk.TclError:
+                            pass
+            else:
+                try:
+                    child.config(state=state)
+                except tk.TclError:
+                    pass
+
+    def _on_glsw_toggled(self):
+        """Handle GLSW enable/disable."""
+        enabled = self.advanced_interference_settings['glsw']['enabled'].get()
+        state = 'normal' if enabled else 'disabled'
+        self._toggle_glsw_settings_state(state)
+        self._update_method_summary()
+
+    def _toggle_glsw_settings_state(self, state):
+        """Enable or disable GLSW settings widgets."""
+        for child in self.glsw_settings_frame.winfo_children():
+            if isinstance(child, (ttk.Label, ttk.Frame)):
+                if isinstance(child, ttk.Frame):
+                    for subchild in child.winfo_children():
+                        try:
+                            subchild.config(state=state)
+                        except tk.TclError:
+                            pass
+            else:
+                try:
+                    child.config(state=state)
+                except tk.TclError:
+                    pass
+
+    def _update_method_summary(self):
+        """Update the enabled methods summary."""
+        enabled_methods = []
+
+        if self.advanced_interference_settings['epo']['enabled'].get():
+            lib = self.advanced_interference_settings['epo']['library'].get()
+            comp = self.advanced_interference_settings['epo']['n_components'].get()
+            enabled_methods.append(f"EPO (library: {lib if lib else 'None'}, components: {comp})")
+
+        if self.advanced_interference_settings['dosc']['enabled'].get():
+            comp = self.advanced_interference_settings['dosc']['n_components'].get()
+            pls = self.advanced_interference_settings['dosc']['n_pls_components'].get()
+            enabled_methods.append(f"DOSC (components: {comp}, PLS: {pls})")
+
+        if self.advanced_interference_settings['glsw']['enabled'].get():
+            method = self.advanced_interference_settings['glsw']['method'].get()
+            n_comp = self.advanced_interference_settings['glsw']['n_components'].get()
+            enabled_methods.append(f"GLSW (method: {method}, PLS comp: {n_comp})")
+
+        if enabled_methods:
+            summary_text = "\n".join([f"✓ {m}" for m in enabled_methods])
+            self.method_summary_label.config(text=summary_text, foreground='green')
+        else:
+            self.method_summary_label.config(text="No advanced methods enabled", foreground='gray')
+
+    # ========================================
+    # Tab 11C: Application Workflow Helper Methods
+    # ========================================
+
+    def _app_load_spectra_folder(self):
+        """Load spectra from a folder for standalone interference removal."""
+        from tkinter import filedialog, messagebox
+        import pandas as pd
+        import os
+
+        folder = filedialog.askdirectory(title="Select Folder with Spectra Files")
+        if not folder:
+            return
+
+        try:
+            # Look for CSV files in folder
+            csv_files = [f for f in os.listdir(folder) if f.endswith('.csv')]
+            if not csv_files:
+                messagebox.showwarning("No Files", "No CSV files found in selected folder")
+                return
+
+            # Load first CSV as example to get wavelengths
+            first_file = os.path.join(folder, csv_files[0])
+            df = pd.read_csv(first_file)
+
+            # Try to determine format
+            if df.shape[1] == 2:
+                # Two-column format: wavelength, intensity
+                messagebox.showinfo(
+                    "Format Not Supported",
+                    "Two-column format detected. Please use matrix format (wavelengths as columns)."
+                )
+                return
+            else:
+                # Matrix format
+                wavelengths = df.columns.astype(float).values
+                X_list = []
+
+                for csv_file in csv_files:
+                    filepath = os.path.join(folder, csv_file)
+                    df = pd.read_csv(filepath)
+                    X_list.append(df.values)
+
+                X = np.vstack(X_list)
+
+            # Store for application workflow
+            self.app_spectra = {
+                'wavelengths': wavelengths,
+                'X': X,
+                'n_spectra': len(csv_files),
+                'source': 'folder'
+            }
+
+            self.app_data_info_label.config(
+                text=f"✓ Loaded {len(csv_files)} spectra from folder\n"
+                     f"   Shape: {X.shape}\n"
+                     f"   Wavelengths: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm",
+                foreground='green'
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error Loading Folder", f"Failed to load spectra:\n{str(e)}")
+
+    def _app_load_from_import(self):
+        """Load spectra from Import tab data."""
+        from tkinter import messagebox
+
+        if not hasattr(self, 'X_train') or self.X_train is None:
+            messagebox.showwarning(
+                "No Data",
+                "No data loaded in Import tab. Please load data first."
+            )
+            return
+
+        # Use training data from Import tab
+        self.app_spectra = {
+            'wavelengths': self.wavelengths,
+            'X': self.X_train,
+            'n_spectra': self.X_train.shape[0],
+            'source': 'import_tab'
+        }
+
+        self.app_data_info_label.config(
+            text=f"✓ Loaded {self.X_train.shape[0]} spectra from Import tab\n"
+                 f"   Shape: {self.X_train.shape}\n"
+                 f"   Wavelengths: {self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f} nm",
+            foreground='green'
+        )
+
+    def _on_app_method_changed(self, event=None):
+        """Update method settings when method selection changes."""
+        method = self.app_method_combo.get()
+        self._populate_app_method_settings(method)
+
+    def _populate_app_method_settings(self, method):
+        """Dynamically populate method-specific settings."""
+        # Clear existing settings
+        for child in self.app_method_settings_frame.winfo_children():
+            child.destroy()
+
+        if method == 'Wavelength Exclusion':
+            ttk.Label(self.app_method_settings_frame, text="Exclude Ranges (nm):").pack(anchor=tk.W, pady=2)
+            self.app_wl_exclude_entry = ttk.Entry(self.app_method_settings_frame, width=40)
+            self.app_wl_exclude_entry.pack(anchor=tk.W, pady=2)
+            self.app_wl_exclude_entry.insert(0, "1400-1500, 1900-2000")
+            ttk.Label(
+                self.app_method_settings_frame,
+                text="(Format: start1-end1, start2-end2, ...)",
+                font=('Arial', 8)
+            ).pack(anchor=tk.W)
+
+        elif method == 'MSC':
+            ttk.Label(self.app_method_settings_frame, text="MSC has no configurable parameters").pack(anchor=tk.W)
+
+        elif method == 'OSC':
+            ttk.Label(self.app_method_settings_frame, text="Number of Components:").pack(anchor=tk.W, pady=2)
+            self.app_osc_n_components = tk.IntVar(value=2)
+            ttk.Spinbox(
+                self.app_method_settings_frame,
+                from_=1, to=10,
+                textvariable=self.app_osc_n_components,
+                width=10
+            ).pack(anchor=tk.W)
+
+        elif method == 'EPO':
+            ttk.Label(self.app_method_settings_frame, text="Interferent Library:").pack(anchor=tk.W, pady=2)
+            library_names = sorted(self.interferent_libraries.keys()) if self.interferent_libraries else []
+            self.app_epo_library_combo = ttk.Combobox(
+                self.app_method_settings_frame,
+                values=library_names,
+                state='readonly',
+                width=30
+            )
+            self.app_epo_library_combo.pack(anchor=tk.W, pady=2)
+            if library_names:
+                self.app_epo_library_combo.current(0)
+
+            ttk.Label(self.app_method_settings_frame, text="Number of Components:").pack(anchor=tk.W, pady=2)
+            self.app_epo_n_components = tk.IntVar(value=2)
+            ttk.Spinbox(
+                self.app_method_settings_frame,
+                from_=1, to=10,
+                textvariable=self.app_epo_n_components,
+                width=10
+            ).pack(anchor=tk.W)
+
+        elif method == 'DOSC':
+            ttk.Label(self.app_method_settings_frame, text="Number of Components:").pack(anchor=tk.W, pady=2)
+            self.app_dosc_n_components = tk.IntVar(value=1)
+            ttk.Spinbox(
+                self.app_method_settings_frame,
+                from_=1, to=10,
+                textvariable=self.app_dosc_n_components,
+                width=10
+            ).pack(anchor=tk.W)
+
+        elif method == 'GLSW':
+            ttk.Label(self.app_method_settings_frame, text="Method:").pack(anchor=tk.W, pady=2)
+            self.app_glsw_method = tk.StringVar(value='covariance')
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Covariance",
+                variable=self.app_glsw_method,
+                value='covariance'
+            ).pack(anchor=tk.W)
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Residual",
+                variable=self.app_glsw_method,
+                value='residual'
+            ).pack(anchor=tk.W)
+
+    def _app_apply_correction(self):
+        """Apply selected interference removal method to loaded spectra."""
+        from tkinter import messagebox
+        import numpy as np
+
+        if not hasattr(self, 'app_spectra') or self.app_spectra is None:
+            messagebox.showwarning("No Data", "Please load spectra first")
+            return
+
+        method = self.app_method_combo.get()
+        if not method:
+            messagebox.showwarning("No Method", "Please select an interference removal method")
+            return
+
+        try:
+            X = self.app_spectra['X']
+            wavelengths = self.app_spectra['wavelengths']
+
+            # Apply selected method
+            if method == 'Wavelength Exclusion':
+                from spectral_predict.interference import WavelengthExcluder
+                exclude_str = self.app_wl_exclude_entry.get()
+                ranges = []
+                for range_str in exclude_str.split(','):
+                    range_str = range_str.strip()
+                    if '-' in range_str:
+                        start, end = range_str.split('-')
+                        ranges.append((float(start.strip()), float(end.strip())))
+
+                if ranges:
+                    excluder = WavelengthExcluder(wavelengths, exclude_ranges=ranges)
+                    X_corrected = excluder.fit_transform(X)
+                    wavelengths_corrected = excluder.wavelengths_kept_
+                else:
+                    messagebox.showwarning("Invalid Ranges", "No valid wavelength ranges specified")
+                    return
+
+            elif method == 'MSC':
+                from spectral_predict.interference import MSC
+                msc = MSC(reference='mean')
+                X_corrected = msc.fit_transform(X)
+                wavelengths_corrected = wavelengths
+
+            elif method == 'OSC':
+                from spectral_predict.interference import OSC
+                n_components = self.app_osc_n_components.get()
+                osc = OSC(n_components=n_components)
+                X_corrected = osc.fit_transform(X)
+                wavelengths_corrected = wavelengths
+
+            elif method == 'EPO':
+                from spectral_predict.interference import EPO
+                library_name = self.app_epo_library_combo.get()
+                if not library_name or library_name not in self.interferent_libraries:
+                    messagebox.showwarning("No Library", "Please select a valid interferent library")
+                    return
+
+                lib = self.interferent_libraries[library_name]
+                n_components = self.app_epo_n_components.get()
+                epo = EPO(n_components=n_components, center=True, svd_tol=1e-8)
+                X_corrected = epo.fit_transform(X, X_interferents=lib['X'])
+                wavelengths_corrected = wavelengths
+
+            elif method == 'DOSC':
+                from spectral_predict.interference import DOSC
+                n_components = self.app_dosc_n_components.get()
+                dosc = DOSC(n_components=n_components, center=True)
+                X_corrected = dosc.fit_transform(X)
+                wavelengths_corrected = wavelengths
+
+            elif method == 'GLSW':
+                from spectral_predict.interference import GLSW
+                glsw_method = self.app_glsw_method.get()
+                glsw = GLSW(method=glsw_method, regularization=1e-6, n_components=None)
+                X_corrected = glsw.fit_transform(X)
+                wavelengths_corrected = wavelengths
+
+            else:
+                messagebox.showwarning("Unknown Method", f"Method '{method}' not implemented")
+                return
+
+            # Store corrected spectra
+            self.app_spectra_corrected = {
+                'wavelengths': wavelengths_corrected,
+                'X': X_corrected,
+                'method': method
+            }
+
+            # Update spectrum selector dropdown (limit to first 100 for performance)
+            n_spectra = X.shape[0]
+            max_dropdown = min(n_spectra, 100)
+            spectrum_options = ['Mean'] + [f'Spectrum {i+1}' for i in range(max_dropdown)]
+            if n_spectra > max_dropdown:
+                spectrum_options.append(f'... ({n_spectra - max_dropdown} more not shown)')
+            self.app_spectrum_combo['values'] = spectrum_options
+            self.app_spectrum_selector.set('Mean')
+
+            # Update preview plot
+            self._app_update_preview_plot()
+
+            self.app_status_label.config(
+                text=f"✓ {method} applied successfully (shape: {X.shape} → {X_corrected.shape})",
+                foreground='green'
+            )
+
+            messagebox.showinfo("Success", f"{method} applied successfully!")
+
+        except Exception as e:
+            messagebox.showerror("Error Applying Method", f"Failed to apply {method}:\n{str(e)}")
+
+    def _app_export_corrected(self):
+        """Export corrected spectra to file."""
+        from tkinter import filedialog, messagebox
+        import pandas as pd
+        import numpy as np
+
+        if not hasattr(self, 'app_spectra_corrected') or self.app_spectra_corrected is None:
+            messagebox.showwarning("No Data", "Please apply correction first")
+            return
+
+        fmt = self.app_export_format.get()
+        X = self.app_spectra_corrected['X']
+        wavelengths = self.app_spectra_corrected['wavelengths']
+
+        try:
+            if fmt == 'CSV':
+                filepath = filedialog.asksaveasfilename(
+                    title="Export Corrected Spectra as CSV",
+                    defaultextension=".csv",
+                    filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+                )
+                if not filepath:
+                    return
+
+                df = pd.DataFrame(X, columns=wavelengths)
+                df.to_csv(filepath, index=False)
+                messagebox.showinfo("Success", f"Exported to {filepath}")
+
+            elif fmt == 'NPY':
+                filepath = filedialog.asksaveasfilename(
+                    title="Export Corrected Spectra as NPY",
+                    defaultextension=".npy",
+                    filetypes=[("NumPy files", "*.npy"), ("All files", "*.*")]
+                )
+                if not filepath:
+                    return
+
+                np.save(filepath, X)
+                messagebox.showinfo("Success", f"Exported to {filepath}")
+
+        except Exception as e:
+            messagebox.showerror("Error Exporting", f"Failed to export:\n{str(e)}")
+
+    def _app_update_preview_plot(self):
+        """Update the before/after preview plot with matplotlib."""
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
+        # Validate data exists
+        if not hasattr(self, 'app_spectra') or self.app_spectra is None:
+            return
+        if not hasattr(self, 'app_spectra_corrected') or self.app_spectra_corrected is None:
+            return
+
+        try:
+            # Get data
+            X_original = self.app_spectra['X']
+            wavelengths_original = self.app_spectra['wavelengths']
+            X_corrected = self.app_spectra_corrected['X']
+            wavelengths_corrected = self.app_spectra_corrected['wavelengths']
+            method = self.app_spectra_corrected.get('method', 'Unknown')
+
+            # Handle empty data
+            if X_original.size == 0 or X_corrected.size == 0:
+                return
+
+            # Check for NaN or Inf values
+            if not np.all(np.isfinite(X_original)) or not np.all(np.isfinite(X_corrected)):
+                # Filter out non-finite values by replacing with 0 (for plotting only)
+                X_original = np.nan_to_num(X_original, nan=0.0, posinf=0.0, neginf=0.0)
+                X_corrected = np.nan_to_num(X_corrected, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Get selected spectrum
+            selection = self.app_spectrum_selector.get()
+
+            # Clear previous canvas and toolbar if exist
+            if self.app_toolbar_frame is not None:
+                self.app_toolbar_frame.destroy()
+                self.app_toolbar_frame = None
+
+            if self.app_canvas is not None:
+                self.app_canvas.get_tk_widget().destroy()
+                self.app_canvas = None
+
+            # Hide placeholder label if visible
+            if hasattr(self, 'app_preview_label'):
+                self.app_preview_label.pack_forget()
+
+            # Create figure with 3 subplots
+            fig = Figure(figsize=(10, 10), dpi=100, facecolor='white')
+
+            # Subplot 1: Mean spectra comparison
+            ax1 = fig.add_subplot(3, 1, 1)
+            mean_original = np.mean(X_original, axis=0)
+            mean_corrected = np.mean(X_corrected, axis=0)
+
+            ax1.plot(wavelengths_original, mean_original, 'b-', linewidth=1.5,
+                    label='Original (Mean)', alpha=0.8)
+            ax1.plot(wavelengths_corrected, mean_corrected, 'r-', linewidth=1.5,
+                    label=f'Corrected (Mean) - {method}', alpha=0.8)
+            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_ylabel('Intensity', fontsize=10)
+            ax1.set_title('Mean Spectra Comparison', fontsize=12, fontweight='bold')
+            ax1.legend(loc='best', fontsize=9)
+            ax1.grid(True, alpha=0.3, linestyle='--')
+
+            # Subplot 2: Individual spectrum comparison
+            ax2 = fig.add_subplot(3, 1, 2)
+
+            if selection == 'Mean':
+                # Same as subplot 1 but with different styling
+                ax2.plot(wavelengths_original, mean_original, 'b-', linewidth=1.5,
+                        label='Original (Mean)', alpha=0.8)
+                ax2.plot(wavelengths_corrected, mean_corrected, 'r-', linewidth=1.5,
+                        label=f'Corrected (Mean)', alpha=0.8)
+                title = 'Selected: Mean Spectrum'
+            else:
+                # Extract spectrum index
+                try:
+                    idx = int(selection.split()[-1]) - 1  # "Spectrum 1" -> index 0
+                    if 0 <= idx < X_original.shape[0]:
+                        spec_original = X_original[idx, :]
+                        spec_corrected = X_corrected[idx, :]
+
+                        ax2.plot(wavelengths_original, spec_original, 'b-', linewidth=1.5,
+                                label=f'Original (Spectrum {idx+1})', alpha=0.8)
+                        ax2.plot(wavelengths_corrected, spec_corrected, 'r-', linewidth=1.5,
+                                label=f'Corrected (Spectrum {idx+1})', alpha=0.8)
+                        title = f'Selected: Spectrum {idx+1}'
+                    else:
+                        # Fallback to mean if index invalid
+                        ax2.plot(wavelengths_original, mean_original, 'b-', linewidth=1.5,
+                                label='Original (Mean)', alpha=0.8)
+                        ax2.plot(wavelengths_corrected, mean_corrected, 'r-', linewidth=1.5,
+                                label=f'Corrected (Mean)', alpha=0.8)
+                        title = 'Selected: Mean Spectrum (Invalid Index)'
+                except (ValueError, IndexError):
+                    # Fallback to mean
+                    ax2.plot(wavelengths_original, mean_original, 'b-', linewidth=1.5,
+                            label='Original (Mean)', alpha=0.8)
+                    ax2.plot(wavelengths_corrected, mean_corrected, 'r-', linewidth=1.5,
+                            label=f'Corrected (Mean)', alpha=0.8)
+                    title = 'Selected: Mean Spectrum'
+
+            ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax2.set_ylabel('Intensity', fontsize=10)
+            ax2.set_title(title, fontsize=12, fontweight='bold')
+            ax2.legend(loc='best', fontsize=9)
+            ax2.grid(True, alpha=0.3, linestyle='--')
+
+            # Subplot 3: Difference plot (mean spectra)
+            ax3 = fig.add_subplot(3, 1, 3)
+
+            # Handle wavelength exclusion case where dimensions differ
+            if wavelengths_original.shape == wavelengths_corrected.shape and \
+               mean_original.shape == mean_corrected.shape:
+                # Same dimensions - direct subtraction
+                difference = mean_original - mean_corrected
+                ax3.plot(wavelengths_original, difference, 'purple', linewidth=1.5,
+                        label='Absolute Difference (Original - Corrected)', alpha=0.8)
+                ax3.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+                ax3.fill_between(wavelengths_original, 0, difference, alpha=0.3, color='purple')
+
+                # Add statistics
+                mean_diff = np.mean(np.abs(difference))
+                max_diff = np.max(np.abs(difference))
+                ax3.text(0.02, 0.98, f'Mean |Δ|: {mean_diff:.4f}\nMax |Δ|: {max_diff:.4f}',
+                        transform=ax3.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                        fontsize=9)
+            else:
+                # Different dimensions - wavelength exclusion applied
+                ax3.text(0.5, 0.5,
+                        f'Difference plot not available:\n'
+                        f'Wavelength dimensions changed\n'
+                        f'({len(wavelengths_original)} → {len(wavelengths_corrected)} wavelengths)\n\n'
+                        f'Method "{method}" excluded wavelength regions.',
+                        transform=ax3.transAxes, ha='center', va='center',
+                        fontsize=11, bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+
+            ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax3.set_ylabel('Intensity Difference', fontsize=10)
+            ax3.set_title('Difference Plot (Mean Spectra)', fontsize=12, fontweight='bold')
+            ax3.legend(loc='best', fontsize=9)
+            ax3.grid(True, alpha=0.3, linestyle='--')
+
+            # Adjust layout
+            fig.tight_layout(pad=2.0)
+
+            # Create toolbar frame first (packed at top)
+            self.app_toolbar_frame = ttk.Frame(self.app_preview_plot_frame)
+            self.app_toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+
+            # Embed canvas in tkinter
+            self.app_canvas = FigureCanvasTkAgg(fig, self.app_preview_plot_frame)
+            self.app_canvas.draw()
+            self.app_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+            # Add toolbar to toolbar frame
+            toolbar = NavigationToolbar2Tk(self.app_canvas, self.app_toolbar_frame)
+            toolbar.update()
+
+        except Exception as e:
+            # If plotting fails, show error in label
+            if hasattr(self, 'app_preview_label'):
+                self.app_preview_label.config(
+                    text=f"⚠️ Error generating plot:\n{str(e)}",
+                    foreground='red'
+                )
+                self.app_preview_label.pack(expand=True, pady=30)
+
+    def _app_on_spectrum_selected(self, event=None):
+        """Handle individual spectrum selection change."""
+        # Simply redraw the plot with the new selection
+        if hasattr(self, 'app_spectra_corrected') and self.app_spectra_corrected is not None:
+            self._app_update_preview_plot()
+
+    # ========================================
+    # Tab 11D: Diagnostics & Visualization Helper Methods
+    # ========================================
+
+    def _on_diag_source_changed(self, event=None):
+        """Handle data source selection change."""
+        source = self.diag_data_source.get()
+
+        if source == 'Current Analysis':
+            # Check if analysis results exist
+            if hasattr(self, 'X_train') and self.X_train is not None:
+                self.diag_data_info_label.config(
+                    text=f"✓ Using current analysis data\n   {self.X_train.shape[0]} spectra loaded",
+                    foreground='green'
+                )
+            else:
+                self.diag_data_info_label.config(
+                    text="⚠️ No analysis data available (load data in Import tab first)",
+                    foreground='orange'
+                )
+
+        elif source == 'Application Tab (Tab 11C)':
+            # Check if Tab 11C has corrected spectra
+            if hasattr(self, 'app_spectra_corrected') and self.app_spectra_corrected is not None:
+                X = self.app_spectra_corrected['X']
+                self.diag_data_info_label.config(
+                    text=f"✓ Using corrected spectra from Tab 11C\n   {X.shape[0]} spectra available",
+                    foreground='green'
+                )
+            else:
+                self.diag_data_info_label.config(
+                    text="⚠️ No corrected spectra in Tab 11C (apply correction first)",
+                    foreground='orange'
+                )
+
+        elif source == 'Load from File':
+            self.diag_data_info_label.config(
+                text="Click 'Load' button to select file",
+                foreground='gray'
+            )
+
+    def _diag_get_data_source(self):
+        """
+        Get data from selected source for diagnostics.
+
+        Returns:
+            dict or None: Dictionary with keys 'X', 'wavelengths', 'method' (optional), 'X_before' (optional)
+        """
+        source = self.diag_data_source.get()
+
+        try:
+            if source == 'Current Analysis':
+                # Get data from current analysis
+                if not hasattr(self, 'X_train') or self.X_train is None:
+                    messagebox.showerror(
+                        "No Data Available",
+                        "No analysis data available.\n\n"
+                        "Please load data in the Import tab first."
+                    )
+                    return None
+
+                if not hasattr(self, 'wavelengths') or self.wavelengths is None:
+                    messagebox.showerror(
+                        "No Wavelengths",
+                        "Wavelength data is missing.\n\n"
+                        "Please ensure data was loaded correctly."
+                    )
+                    return None
+
+                return {
+                    'X': self.X_train,
+                    'wavelengths': self.wavelengths,
+                    'method': 'Current Analysis'
+                }
+
+            elif source == 'Application Tab (Tab 11C)':
+                # Get data from Tab 11C
+                if not hasattr(self, 'app_spectra_corrected') or self.app_spectra_corrected is None:
+                    messagebox.showerror(
+                        "No Data Available",
+                        "No corrected spectra available from Tab 11C.\n\n"
+                        "Please apply interference removal in Tab 11C first."
+                    )
+                    return None
+
+                result = {
+                    'X': self.app_spectra_corrected['X'],
+                    'wavelengths': self.app_spectra_corrected['wavelengths'],
+                    'method': self.app_spectra_corrected.get('method', 'Unknown')
+                }
+
+                # Also include original spectra if available
+                if hasattr(self, 'app_spectra') and self.app_spectra is not None:
+                    result['X_before'] = self.app_spectra['X']
+                    result['wavelengths_before'] = self.app_spectra['wavelengths']
+
+                return result
+
+            elif source == 'Load from File':
+                # Load from file
+                messagebox.showinfo(
+                    "Feature Not Yet Implemented",
+                    "File loading for diagnostics will be added in a future version.\n\n"
+                    "For now, please use 'Current Analysis' or 'Application Tab (Tab 11C)'."
+                )
+                return None
+
+        except Exception as e:
+            messagebox.showerror(
+                "Error Loading Data",
+                f"Failed to load data from {source}:\n\n{str(e)}"
+            )
+            return None
+
+    def _diag_cleanup_canvas(self):
+        """Cleanup existing diagnostic canvas and toolbar."""
+        if self.diag_toolbar_frame is not None:
+            self.diag_toolbar_frame.destroy()
+            self.diag_toolbar_frame = None
+
+        if self.diag_canvas is not None:
+            self.diag_canvas.get_tk_widget().destroy()
+            self.diag_canvas = None
+
+        # Hide placeholder label
+        if hasattr(self, 'diag_advanced_plot_label'):
+            self.diag_advanced_plot_label.pack_forget()
+
+    def _diag_show_pca(self):
+        """Show PCA 2D projection plot with loadings."""
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.figure import Figure
+        from sklearn.decomposition import PCA
+
+        # Get data
+        data = self._diag_get_data_source()
+        if data is None:
+            return
+
+        X = data['X']
+        wavelengths = data['wavelengths']
+        method = data.get('method', 'Unknown')
+
+        # Validate data
+        if X.size == 0:
+            messagebox.showerror("Empty Data", "No spectra available for PCA analysis.")
+            return
+
+        if X.shape[0] < 2:
+            messagebox.showerror(
+                "Insufficient Samples",
+                f"PCA requires at least 2 samples, but only {X.shape[0]} available."
+            )
+            return
+
+        # Clean NaN/Inf values
+        if not np.all(np.isfinite(X)):
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        try:
+            # Compute PCA
+            n_components = min(10, X.shape[0], X.shape[1])
+            pca = PCA(n_components=n_components)
+            X_pca = pca.fit_transform(X)
+
+            # Cleanup previous canvas
+            self._diag_cleanup_canvas()
+
+            # Create figure with 2x2 subplots
+            fig = Figure(figsize=(12, 10), dpi=100, facecolor='white')
+
+            # Subplot 1: PCA Scores (PC1 vs PC2)
+            ax1 = fig.add_subplot(2, 2, 1)
+            scatter = ax1.scatter(X_pca[:, 0], X_pca[:, 1],
+                                c=np.arange(X.shape[0]),
+                                cmap='viridis',
+                                s=50,
+                                alpha=0.7,
+                                edgecolors='black',
+                                linewidths=0.5)
+            ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)', fontsize=10)
+            ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)', fontsize=10)
+            ax1.set_title('PCA Scores Plot', fontsize=12, fontweight='bold')
+            ax1.grid(True, alpha=0.3, linestyle='--')
+            ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+            ax1.axvline(x=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+            cbar = fig.colorbar(scatter, ax=ax1)
+            cbar.set_label('Sample Index', fontsize=9)
+
+            # Subplot 2: Scree Plot (Variance Explained)
+            ax2 = fig.add_subplot(2, 2, 2)
+            components = np.arange(1, len(pca.explained_variance_ratio_) + 1)
+            variance_pct = pca.explained_variance_ratio_ * 100
+            cumulative_variance = np.cumsum(variance_pct)
+
+            ax2.bar(components, variance_pct, alpha=0.7, color='steelblue',
+                   edgecolor='black', linewidth=0.5, label='Individual')
+            ax2.plot(components, cumulative_variance, 'ro-', linewidth=2,
+                    markersize=6, label='Cumulative')
+            ax2.set_xlabel('Principal Component', fontsize=10)
+            ax2.set_ylabel('Variance Explained (%)', fontsize=10)
+            ax2.set_title('Scree Plot', fontsize=12, fontweight='bold')
+            ax2.legend(loc='best', fontsize=9)
+            ax2.grid(True, alpha=0.3, linestyle='--', axis='y')
+            ax2.set_xticks(components)
+
+            # Subplot 3: PC1 Loadings
+            ax3 = fig.add_subplot(2, 2, 3)
+            loadings_pc1 = pca.components_[0, :]
+            ax3.plot(wavelengths, loadings_pc1, 'b-', linewidth=1.5, alpha=0.8)
+            ax3.fill_between(wavelengths, 0, loadings_pc1, alpha=0.3, color='blue')
+
+            # Mark top 5% wavelengths
+            threshold = np.percentile(np.abs(loadings_pc1), 95)
+            important_idx = np.abs(loadings_pc1) > threshold
+            ax3.scatter(wavelengths[important_idx], loadings_pc1[important_idx],
+                       color='red', s=30, zorder=5, label=f'Top 5% ({important_idx.sum()} wavelengths)')
+
+            ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax3.set_ylabel('Loading', fontsize=10)
+            ax3.set_title(f'PC1 Loadings ({pca.explained_variance_ratio_[0]*100:.1f}% variance)',
+                         fontsize=12, fontweight='bold')
+            ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
+            ax3.grid(True, alpha=0.3, linestyle='--')
+            ax3.legend(loc='best', fontsize=8)
+
+            # Subplot 4: PC2 Loadings
+            ax4 = fig.add_subplot(2, 2, 4)
+            loadings_pc2 = pca.components_[1, :]
+            ax4.plot(wavelengths, loadings_pc2, 'g-', linewidth=1.5, alpha=0.8)
+            ax4.fill_between(wavelengths, 0, loadings_pc2, alpha=0.3, color='green')
+
+            # Mark top 5% wavelengths
+            threshold = np.percentile(np.abs(loadings_pc2), 95)
+            important_idx = np.abs(loadings_pc2) > threshold
+            ax4.scatter(wavelengths[important_idx], loadings_pc2[important_idx],
+                       color='red', s=30, zorder=5, label=f'Top 5% ({important_idx.sum()} wavelengths)')
+
+            ax4.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax4.set_ylabel('Loading', fontsize=10)
+            ax4.set_title(f'PC2 Loadings ({pca.explained_variance_ratio_[1]*100:.1f}% variance)',
+                         fontsize=12, fontweight='bold')
+            ax4.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
+            ax4.grid(True, alpha=0.3, linestyle='--')
+            ax4.legend(loc='best', fontsize=8)
+
+            # Overall title
+            fig.suptitle(f'PCA Analysis - {method}\n'
+                        f'{X.shape[0]} samples, {X.shape[1]} wavelengths, '
+                        f'{n_components} components computed',
+                        fontsize=13, fontweight='bold', y=0.98)
+
+            # Adjust layout
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+            # Get parent frame for embedding
+            parent_frame = self.diag_advanced_plot_label.master
+
+            # Create toolbar frame first (packed at top)
+            self.diag_toolbar_frame = ttk.Frame(parent_frame)
+            self.diag_toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+
+            # Embed canvas in tkinter
+            self.diag_canvas = FigureCanvasTkAgg(fig, parent_frame)
+            self.diag_canvas.draw()
+            self.diag_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+            # Add toolbar to toolbar frame
+            toolbar = NavigationToolbar2Tk(self.diag_canvas, self.diag_toolbar_frame)
+            toolbar.update()
+
+            # Update variance label with PCA metrics
+            self.diag_variance_label.config(
+                text=f"PCA Variance Metrics:\n\n"
+                     f"  PC1 variance: {pca.explained_variance_ratio_[0]*100:.2f}%\n"
+                     f"  PC2 variance: {pca.explained_variance_ratio_[1]*100:.2f}%\n"
+                     f"  Cumulative (PC1+PC2): {cumulative_variance[1]:.2f}%\n"
+                     f"  Total components: {n_components}\n"
+                     f"  Samples: {X.shape[0]} | Wavelengths: {X.shape[1]}"
+            )
+
+        except np.linalg.LinAlgError:
+            messagebox.showerror(
+                "Singular Matrix",
+                "PCA failed due to singular matrix.\n\n"
+                "This can happen with:\n"
+                "- Constant spectra (no variance)\n"
+                "- Identical samples\n\n"
+                "Try applying preprocessing (SNV, derivatives) first."
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "PCA Error",
+                f"Failed to compute PCA:\n\n{str(e)}"
+            )
+
+    def _diag_show_subspace(self):
+        """Show interferent subspace visualization (before/after PCA comparison)."""
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.figure import Figure
+        from sklearn.decomposition import PCA
+
+        # Get data
+        data = self._diag_get_data_source()
+        if data is None:
+            return
+
+        X_after = data['X']
+        wavelengths = data['wavelengths']
+        method = data.get('method', 'Unknown')
+
+        # Check if before/after data available
+        has_before = 'X_before' in data
+
+        if not has_before:
+            messagebox.showinfo(
+                "Limited Data",
+                "Subspace visualization requires before/after data.\n\n"
+                "This is only available when using 'Application Tab (Tab 11C)' source.\n\n"
+                "Showing single PCA analysis instead."
+            )
+
+        # Validate data
+        if X_after.size == 0:
+            messagebox.showerror("Empty Data", "No spectra available for subspace analysis.")
+            return
+
+        if X_after.shape[0] < 2:
+            messagebox.showerror(
+                "Insufficient Samples",
+                f"Subspace analysis requires at least 2 samples, but only {X_after.shape[0]} available."
+            )
+            return
+
+        # Clean NaN/Inf values
+        if not np.all(np.isfinite(X_after)):
+            X_after = np.nan_to_num(X_after, nan=0.0, posinf=0.0, neginf=0.0)
+
+        try:
+            # Cleanup previous canvas
+            self._diag_cleanup_canvas()
+
+            # Create figure
+            if has_before:
+                fig = Figure(figsize=(12, 10), dpi=100, facecolor='white')
+
+                X_before = data['X_before']
+                if not np.all(np.isfinite(X_before)):
+                    X_before = np.nan_to_num(X_before, nan=0.0, posinf=0.0, neginf=0.0)
+
+                # Compute PCA on both
+                n_comp = min(5, X_before.shape[0], X_before.shape[1])
+                pca_before = PCA(n_components=n_comp)
+                pca_after = PCA(n_components=n_comp)
+
+                X_pca_before = pca_before.fit_transform(X_before)
+                X_pca_after = pca_after.fit_transform(X_after)
+
+                # Subplot 1: PC1 vs PC2 comparison
+                ax1 = fig.add_subplot(2, 1, 1)
+                ax1.scatter(X_pca_before[:, 0], X_pca_before[:, 1],
+                           c='blue', s=80, alpha=0.5, label='Before Correction',
+                           edgecolors='black', linewidths=0.5)
+                ax1.scatter(X_pca_after[:, 0], X_pca_after[:, 1],
+                           c='red', s=80, alpha=0.5, label='After Correction',
+                           edgecolors='black', linewidths=0.5)
+
+                # Draw arrows showing transformation
+                for i in range(min(20, X_pca_before.shape[0])):  # Limit to 20 arrows for clarity
+                    ax1.arrow(X_pca_before[i, 0], X_pca_before[i, 1],
+                             X_pca_after[i, 0] - X_pca_before[i, 0],
+                             X_pca_after[i, 1] - X_pca_before[i, 1],
+                             head_width=0.3, head_length=0.3, fc='gray', ec='gray',
+                             alpha=0.3, linewidth=0.5)
+
+                ax1.set_xlabel(f'PC1 (Before: {pca_before.explained_variance_ratio_[0]*100:.1f}% | '
+                             f'After: {pca_after.explained_variance_ratio_[0]*100:.1f}%)', fontsize=10)
+                ax1.set_ylabel(f'PC2 (Before: {pca_before.explained_variance_ratio_[1]*100:.1f}% | '
+                             f'After: {pca_after.explained_variance_ratio_[1]*100:.1f}%)', fontsize=10)
+                ax1.set_title('Interferent Subspace Projection (PC1 vs PC2)',
+                            fontsize=12, fontweight='bold')
+                ax1.legend(loc='best', fontsize=9)
+                ax1.grid(True, alpha=0.3, linestyle='--')
+                ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+                ax1.axvline(x=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+
+                # Subplot 2: Variance comparison
+                ax2 = fig.add_subplot(2, 1, 2)
+                components = np.arange(1, n_comp + 1)
+                width = 0.35
+
+                ax2.bar(components - width/2, pca_before.explained_variance_ratio_ * 100,
+                       width, label='Before Correction', color='blue', alpha=0.7,
+                       edgecolor='black', linewidth=0.5)
+                ax2.bar(components + width/2, pca_after.explained_variance_ratio_ * 100,
+                       width, label='After Correction', color='red', alpha=0.7,
+                       edgecolor='black', linewidth=0.5)
+
+                # Calculate variance reduction
+                var_reduction = (pca_before.explained_variance_ratio_[0] -
+                               pca_after.explained_variance_ratio_[0]) * 100
+
+                ax2.set_xlabel('Principal Component', fontsize=10)
+                ax2.set_ylabel('Variance Explained (%)', fontsize=10)
+                ax2.set_title(f'Variance by Component - PC1 reduction: {var_reduction:.2f}%',
+                            fontsize=12, fontweight='bold')
+                ax2.legend(loc='best', fontsize=9)
+                ax2.grid(True, alpha=0.3, linestyle='--', axis='y')
+                ax2.set_xticks(components)
+
+                # Overall title
+                fig.suptitle(f'Interferent Subspace Analysis - {method}\n'
+                           f'{X_after.shape[0]} samples, {X_after.shape[1]} wavelengths',
+                           fontsize=13, fontweight='bold', y=0.98)
+
+                # Update variance label
+                self.diag_variance_label.config(
+                    text=f"Subspace Metrics:\n\n"
+                         f"  Variance reduction (PC1): {var_reduction:.2f}%\n"
+                         f"  Before PC1: {pca_before.explained_variance_ratio_[0]*100:.2f}%\n"
+                         f"  After PC1: {pca_after.explained_variance_ratio_[0]*100:.2f}%\n"
+                         f"  Method: {method}"
+                )
+
+            else:
+                # Single PCA analysis
+                fig = Figure(figsize=(12, 8), dpi=100, facecolor='white')
+
+                n_comp = min(5, X_after.shape[0], X_after.shape[1])
+                pca = PCA(n_components=n_comp)
+                X_pca = pca.fit_transform(X_after)
+
+                # Single plot: PC1 vs PC2
+                ax = fig.add_subplot(1, 1, 1)
+                scatter = ax.scatter(X_pca[:, 0], X_pca[:, 1],
+                                   c=np.arange(X_after.shape[0]),
+                                   cmap='plasma', s=80, alpha=0.7,
+                                   edgecolors='black', linewidths=0.5)
+                ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)', fontsize=10)
+                ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)', fontsize=10)
+                ax.set_title('PCA Subspace Projection', fontsize=12, fontweight='bold')
+                ax.grid(True, alpha=0.3, linestyle='--')
+                ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+                ax.axvline(x=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+                cbar = fig.colorbar(scatter, ax=ax)
+                cbar.set_label('Sample Index', fontsize=9)
+
+                fig.suptitle(f'Subspace Analysis - {method}\n'
+                           f'{X_after.shape[0]} samples, {X_after.shape[1]} wavelengths',
+                           fontsize=13, fontweight='bold', y=0.96)
+
+                self.diag_variance_label.config(
+                    text=f"Subspace Metrics (single dataset):\n\n"
+                         f"  PC1 variance: {pca.explained_variance_ratio_[0]*100:.2f}%\n"
+                         f"  PC2 variance: {pca.explained_variance_ratio_[1]*100:.2f}%\n"
+                         f"  Method: {method}"
+                )
+
+            # Adjust layout
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+            # Get parent frame for embedding
+            parent_frame = self.diag_advanced_plot_label.master
+
+            # Create toolbar frame first (packed at top)
+            self.diag_toolbar_frame = ttk.Frame(parent_frame)
+            self.diag_toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+
+            # Embed canvas in tkinter
+            self.diag_canvas = FigureCanvasTkAgg(fig, parent_frame)
+            self.diag_canvas.draw()
+            self.diag_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+            # Add toolbar to toolbar frame
+            toolbar = NavigationToolbar2Tk(self.diag_canvas, self.diag_toolbar_frame)
+            toolbar.update()
+
+        except np.linalg.LinAlgError:
+            messagebox.showerror(
+                "Singular Matrix",
+                "Subspace analysis failed due to singular matrix.\n\n"
+                "Try applying preprocessing first."
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Subspace Error",
+                f"Failed to compute subspace analysis:\n\n{str(e)}"
+            )
+
+    def _diag_show_weights(self):
+        """Show wavelength contribution weights."""
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.figure import Figure
+        from sklearn.decomposition import PCA
+
+        # Get data
+        data = self._diag_get_data_source()
+        if data is None:
+            return
+
+        X = data['X']
+        wavelengths = data['wavelengths']
+        method = data.get('method', 'Unknown')
+
+        # Validate data
+        if X.size == 0:
+            messagebox.showerror("Empty Data", "No spectra available for weights analysis.")
+            return
+
+        if X.shape[0] < 2:
+            messagebox.showerror(
+                "Insufficient Samples",
+                f"Weights analysis requires at least 2 samples, but only {X.shape[0]} available."
+            )
+            return
+
+        # Clean NaN/Inf values
+        if not np.all(np.isfinite(X)):
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        try:
+            # Cleanup previous canvas
+            self._diag_cleanup_canvas()
+
+            # Create figure with 2x1 subplots
+            fig = Figure(figsize=(12, 10), dpi=100, facecolor='white')
+
+            # Method 1: PCA-based weights
+            n_comp = min(5, X.shape[0], X.shape[1])
+            pca = PCA(n_components=n_comp)
+            pca.fit(X)
+
+            # Calculate weights: sum of squared loadings weighted by variance explained
+            weights_pca = np.sqrt(
+                np.sum(pca.components_**2 * pca.explained_variance_ratio_[:, np.newaxis], axis=0)
+            )
+            weights_pca = weights_pca / np.max(weights_pca)  # Normalize to [0, 1]
+
+            # Method 2: Variance-based weights (coefficient of variation)
+            weights_var = np.std(X, axis=0) / (np.mean(np.abs(X), axis=0) + 1e-10)
+            weights_var = weights_var / np.max(weights_var)  # Normalize to [0, 1]
+
+            # Subplot 1: Wavelength importance profile
+            ax1 = fig.add_subplot(2, 1, 1)
+            ax1.plot(wavelengths, weights_pca, 'b-', linewidth=2,
+                    label='PCA-based weights', alpha=0.8)
+            ax1.fill_between(wavelengths, 0, weights_pca, alpha=0.3, color='blue')
+            ax1.plot(wavelengths, weights_var, 'r-', linewidth=2,
+                    label='Variance-based weights', alpha=0.8)
+            ax1.fill_between(wavelengths, 0, weights_var, alpha=0.2, color='red')
+
+            # Mark top 10% wavelengths (PCA-based)
+            threshold = np.percentile(weights_pca, 90)
+            important_idx = weights_pca > threshold
+            ax1.scatter(wavelengths[important_idx], weights_pca[important_idx],
+                       color='darkblue', s=40, zorder=5,
+                       label=f'Top 10% PCA ({important_idx.sum()} wavelengths)')
+
+            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_ylabel('Normalized Weight', fontsize=10)
+            ax1.set_title('Wavelength Importance Profile', fontsize=12, fontweight='bold')
+            ax1.legend(loc='best', fontsize=9)
+            ax1.grid(True, alpha=0.3, linestyle='--')
+            ax1.set_ylim([0, 1.05])
+
+            # Subplot 2: Top 20 wavelengths (horizontal bar chart)
+            ax2 = fig.add_subplot(2, 1, 2)
+
+            # Get top 20 wavelengths by PCA weight
+            top_n = min(20, len(wavelengths))
+            top_indices = np.argsort(weights_pca)[-top_n:][::-1]
+            top_wavelengths = wavelengths[top_indices]
+            top_weights = weights_pca[top_indices]
+
+            y_pos = np.arange(top_n)
+            colors = plt.cm.viridis(top_weights / np.max(top_weights))
+
+            ax2.barh(y_pos, top_weights, color=colors, alpha=0.8,
+                    edgecolor='black', linewidth=0.5)
+            ax2.set_yticks(y_pos)
+            ax2.set_yticklabels([f'{w:.1f} nm' for w in top_wavelengths], fontsize=8)
+            ax2.set_xlabel('Normalized Weight', fontsize=10)
+            ax2.set_ylabel('Wavelength', fontsize=10)
+            ax2.set_title(f'Top {top_n} Most Important Wavelengths',
+                         fontsize=12, fontweight='bold')
+            ax2.grid(True, alpha=0.3, linestyle='--', axis='x')
+            ax2.set_xlim([0, 1.05])
+
+            # Add weight values on bars
+            for i, (weight, wl) in enumerate(zip(top_weights, top_wavelengths)):
+                ax2.text(weight + 0.02, i, f'{weight:.3f}',
+                        va='center', fontsize=7)
+
+            # Overall title
+            fig.suptitle(f'Wavelength Contribution Analysis - {method}\n'
+                        f'{X.shape[0]} samples, {X.shape[1]} wavelengths',
+                        fontsize=13, fontweight='bold', y=0.98)
+
+            # Adjust layout
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+            # Get parent frame for embedding
+            parent_frame = self.diag_advanced_plot_label.master
+
+            # Create toolbar frame first (packed at top)
+            self.diag_toolbar_frame = ttk.Frame(parent_frame)
+            self.diag_toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+
+            # Embed canvas in tkinter
+            self.diag_canvas = FigureCanvasTkAgg(fig, parent_frame)
+            self.diag_canvas.draw()
+            self.diag_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+            # Add toolbar to toolbar frame
+            toolbar = NavigationToolbar2Tk(self.diag_canvas, self.diag_toolbar_frame)
+            toolbar.update()
+
+            # Update variance label
+            top_3_wl = ', '.join([f'{w:.1f}' for w in top_wavelengths[:3]])
+            self.diag_variance_label.config(
+                text=f"Wavelength Weight Metrics:\n\n"
+                     f"  Top 3 wavelengths: {top_3_wl} nm\n"
+                     f"  Max PCA weight: {np.max(weights_pca):.3f}\n"
+                     f"  Max variance weight: {np.max(weights_var):.3f}\n"
+                     f"  Important wavelengths (top 10%): {important_idx.sum()}"
+            )
+
+        except np.linalg.LinAlgError:
+            messagebox.showerror(
+                "Singular Matrix",
+                "Weights analysis failed due to singular matrix.\n\n"
+                "Try applying preprocessing first."
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Weights Error",
+                f"Failed to compute wavelength weights:\n\n{str(e)}"
+            )
+
+    def _diag_export_plots(self):
+        """Export all diagnostic plots as PNG."""
+        from tkinter import messagebox
+
+        # Placeholder - matplotlib integration needed
+        messagebox.showinfo(
+            "Feature Not Yet Implemented",
+            "Plot export will be added in future version.\n\n"
+            "This will save all diagnostic plots as PNG files."
+        )
+
+    def _diag_export_metrics(self):
+        """Export variance metrics as CSV."""
+        from tkinter import messagebox
+
+        # Placeholder - matplotlib integration needed
+        messagebox.showinfo(
+            "Feature Not Yet Implemented",
+            "Metrics export will be added in future version.\n\n"
+            "This will export variance explained, component analysis, and other metrics as CSV."
+        )
+
+    def _diag_export_report(self):
+        """Generate HTML diagnostic report."""
+        from tkinter import messagebox
+
+        # Placeholder - matplotlib integration needed
+        messagebox.showinfo(
+            "Feature Not Yet Implemented",
+            "HTML report generation will be added in future version.\n\n"
+            "This will create a comprehensive HTML report with all plots and metrics."
+        )
 
 
 def main():
