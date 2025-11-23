@@ -200,6 +200,10 @@ def create_objective_function(
         # Build model with suggested parameters
         model = build_model(model_name, params, task_type=task_type)
 
+        # Filter kwargs to only include parameters that _run_single_config accepts
+        # Remove progress_callback and n_trials which are used by Bayesian optimization but not by _run_single_config
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ['progress_callback', 'n_trials']}
+
         # Run cross-validation using existing infrastructure
         try:
             result = run_single_config_fn(
@@ -208,7 +212,7 @@ def create_objective_function(
                 preprocess_cfg, cv_splitter, task_type,
                 is_binary_classification,
                 skip_preprocessing=True,  # Already preprocessed
-                **kwargs
+                **filtered_kwargs
             )
 
             # Extract metric to optimize
@@ -244,7 +248,14 @@ def convert_optuna_result_to_dasp_format(
     study: optuna.Study,
     model_name: str,
     preprocess_cfg: Dict,
-    task_type: str
+    task_type: str,
+    wavelengths: np.ndarray = None,
+    n_vars: int = None,
+    excluded_count: int = 0,
+    validation_count: int = 0,
+    total_samples_original: int = None,
+    folds: int = 5,
+    imbalance_method: str = None
 ) -> Dict:
     """
     Convert Optuna study result to DASP result format.
@@ -259,6 +270,20 @@ def convert_optuna_result_to_dasp_format(
         Preprocessing configuration
     task_type : str
         'regression' or 'classification'
+    wavelengths : np.ndarray, optional
+        Wavelength values
+    n_vars : int, optional
+        Number of variables (features)
+    excluded_count : int
+        Number of excluded samples
+    validation_count : int
+        Number of validation samples
+    total_samples_original : int, optional
+        Original total sample count
+    folds : int
+        Number of CV folds
+    imbalance_method : str, optional
+        Imbalance handling method
 
     Returns
     -------
@@ -269,23 +294,55 @@ def convert_optuna_result_to_dasp_format(
     best_params = best_trial.params
     best_value = best_trial.value
 
+    # Get PLS n_components if present
+    lvs = best_params.get('n_components', np.nan)
+
+    # Format imbalance display
+    if imbalance_method is None:
+        imbalance_display = "—"
+    elif imbalance_method == 'class_weight':
+        imbalance_display = "class_weight"
+    else:
+        imbalance_display = imbalance_method
+
     result = {
+        'Task': task_type,
         'Model': model_name,
         'Params': str(best_params),
         'Preprocess': preprocess_cfg.get('name', 'unknown'),
         'Deriv': preprocess_cfg.get('deriv', 0),
         'Window': preprocess_cfg.get('window', 0),
         'Poly': preprocess_cfg.get('polyorder', 0),
+        'LVs': lvs,
+        'n_vars': n_vars if n_vars is not None else len(wavelengths) if wavelengths is not None else np.nan,
+        'full_vars': n_vars if n_vars is not None else len(wavelengths) if wavelengths is not None else np.nan,
+        'SubsetTag': 'full',
+        'Imbalance': imbalance_display,
+        'all_vars': 'N/A',
         'n_trials': len(study.trials),
         'best_trial_number': best_trial.number,
         'optimization_time': sum(t.duration.total_seconds() for t in study.trials if t.duration)
     }
 
+    # Add training configuration
+    result['training_config'] = {
+        'folds': folds,
+        'n_samples_used': total_samples_original - excluded_count - validation_count if total_samples_original else np.nan,
+        'n_samples_total': total_samples_original if total_samples_original else np.nan,
+        'excluded_count': excluded_count,
+        'validation_count': validation_count,
+        'n_features_used': n_vars if n_vars is not None else np.nan,
+        'random_state': 42,
+    }
+
     if task_type == 'regression':
         result['RMSE'] = best_value
         result['R2'] = best_trial.user_attrs.get('R2', np.nan)
+        # Bayesian optimization doesn't compute regional RMSE (would need all predictions)
+        result['regional_rmse'] = None
+        result['y_quartiles'] = None
     else:
-        result['Accuracy'] = -best_value  # Un-negate
+        result['Accuracy'] = -best_value  # Un-negate (was minimizing negative accuracy)
         result['ROC_AUC'] = best_trial.user_attrs.get('ROC_AUC', np.nan)
 
     return result

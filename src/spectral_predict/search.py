@@ -1206,13 +1206,17 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     print(f"RANKING RESULTS")
     print(f"{'='*70}")
 
-    from .scoring import score_models
-    df_ranked = score_models(
+    from .scoring import compute_composite_score
+    df_ranked = compute_composite_score(
         df_results,
         task_type=task_type,
         variable_penalty=0,  # Bayesian optimization doesn't penalize variables
         complexity_penalty=0  # Bayesian optimization doesn't penalize complexity
     )
+
+    # Rename CompositeScore to Score for consistency with grid search
+    if 'CompositeScore' in df_ranked.columns:
+        df_ranked = df_ranked.rename(columns={'CompositeScore': 'Score'})
 
     print(f"\n✓ Bayesian optimization complete!")
     print(f"  Total models optimized: {len(df_ranked)}")

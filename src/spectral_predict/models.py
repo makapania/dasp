@@ -406,6 +406,10 @@ def build_model(model_name, params, task_type='regression'):
         if model_name in ["PLS-DA", "PLS"]:
             return PLSTransformer(scale=False, **params)
 
+        elif model_name == "Ridge":
+            from sklearn.linear_model import RidgeClassifier
+            return RidgeClassifier(random_state=42, **params)
+
         elif model_name == "RandomForest":
             return RandomForestClassifier(
                 random_state=42,
