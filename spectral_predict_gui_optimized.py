@@ -976,6 +976,10 @@ class SpectralPredictApp:
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
+        # Optimization method selection (Grid Search vs Bayesian Optimization)
+        self.optimization_method = tk.StringVar(value="grid")  # "grid" or "bayesian"
+        self.n_bayesian_trials = tk.IntVar(value=50)  # Number of Bayesian optimization trials (default: 50)
+
         # Model selection (original models)
         # Standard tier models (enabled by default)
         self.use_pls = tk.BooleanVar(value=True)
@@ -4187,6 +4191,33 @@ class SpectralPredictApp:
 
         # Add callback to tier selection to update checkboxes
         self.model_tier.trace_add('write', self._on_tier_changed)
+
+        # === Optimization Method Selection ===
+        opt_card_outer, opt_card = self._create_card(content_frame, title="Optimization Method 🆕",
+                                                      subtitle="Choose between Grid Search or Bayesian Optimization")
+        opt_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        opt_frame = tk.Frame(opt_card, bg=self.colors['card_bg'])
+        opt_frame.pack(fill='both', expand=True)
+
+        opt_method_frame = ttk.Frame(opt_frame)
+        opt_method_frame.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=5)
+
+        ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian Optimization", variable=self.optimization_method, value="bayesian").grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        # n_trials input for Bayesian optimization
+        trials_label = ttk.Label(opt_frame, text="Bayesian Trials:", style='Normal.TLabel')
+        trials_label.grid(row=1, column=0, sticky=tk.W, pady=(10, 5))
+        self.n_trials_entry = ttk.Entry(opt_frame, textvariable=self.n_bayesian_trials, width=10)
+        self.n_trials_entry.grid(row=1, column=1, sticky=tk.W, pady=(10, 5))
+
+        # Info label
+        info_text = ("💡 Grid Search: Tests all parameter combinations (slower, exhaustive)\n"
+                    "   Bayesian Optimization: Finds optimal parameters in 30-50 trials (~100x faster)\n"
+                    "   Recommended trials: Quick=20-30, Standard=30-50, Comprehensive=50-100")
+        ttk.Label(opt_frame, text=info_text,
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # Create card for model selection
         models_card_outer, models_card = self._create_card(content_frame, title="Select Models",
@@ -11290,7 +11321,7 @@ class SpectralPredictApp:
     def _run_analysis_thread(self, selected_models, tier):
         """Run analysis in background thread."""
         try:
-            from spectral_predict.search import run_search
+            from spectral_predict.search import run_search, run_bayesian_search
             from spectral_predict.report import write_markdown_report
 
             # Determine task type
@@ -12952,7 +12983,39 @@ class SpectralPredictApp:
             if imbalance_method:
                 self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
 
-            results_df, label_encoder = run_search(
+            # Dispatch to Grid Search or Bayesian Optimization based on user selection
+            optimization_method = self.optimization_method.get()
+
+            if optimization_method == "bayesian":
+                # === BAYESIAN OPTIMIZATION ===
+                self._log_progress("\n🎯 Running Bayesian Hyperparameter Optimization...")
+                self._log_progress(f"   Trials per model: {self.n_bayesian_trials.get()}")
+                self._log_progress(f"   Optimization method: TPE (Tree-structured Parzen Estimator)")
+                self._log_progress(f"   Expected speedup: ~100x faster than grid search\n")
+
+                results_df, label_encoder = run_bayesian_search(
+                    X=X_filtered,
+                    y=y_filtered,
+                    task_type=task_type,
+                    models_to_test=selected_models,
+                    preprocessing_methods=preprocessing_methods,
+                    n_trials=self.n_bayesian_trials.get(),
+                    folds=self.folds.get(),
+                    excluded_count=n_excluded,
+                    validation_count=n_validation,
+                    total_samples_original=n_total_original,
+                    max_n_components=adjusted_max_components,
+                    tier=tier,
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params,
+                    random_state=42,
+                    progress_callback=self._progress_callback
+                )
+            else:
+                # === GRID SEARCH (Original behavior) ===
+                self._log_progress("\n📊 Running Grid Search...")
+
+                results_df, label_encoder = run_search(
                 X_filtered,
                 y_filtered,
                 task_type=task_type,
