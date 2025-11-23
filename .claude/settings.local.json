@@ -38,7 +38,16 @@
       "Bash(rm:*)",
       "Bash(.venv/Scripts/python.exe:*)",
       "WebSearch",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(nul)",
+      "Bash(dir srcspectral_predict 2)",
+      "Bash(git ls-tree:*)",
+      "Bash(dir:*)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/reproducibility.py)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/variable_selection.py)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/models.py)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile src/spectral_predict/search.py)",
+      "Bash(\"C:/Users/sponheim/AppData/Local/Programs/Python/Python314/python.exe\" -m py_compile tests/test_reproducibility.py)"
     ],
     "deny": [],
     "ask": []
