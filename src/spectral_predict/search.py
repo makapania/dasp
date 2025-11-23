@@ -959,6 +959,275 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     return df_ranked, label_encoder
 
 
+def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_methods=None,
+                        n_trials=50, folds=5, excluded_count=0, validation_count=0,
+                        total_samples_original=None, max_n_components=8, tier='standard',
+                        imbalance_method=None, imbalance_params=None,
+                        random_state=42, progress_callback=None):
+    """
+    Run Bayesian hyperparameter optimization using Optuna.
+
+    Uses Tree-structured Parzen Estimator (TPE) to find optimal hyperparameters
+    in 30-50 trials instead of testing 5,832+ grid combinations.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Spectral data (n_samples, n_features)
+    y : pd.Series
+        Target values
+    task_type : str
+        'regression' or 'classification'
+    models_to_test : list of str, optional
+        List of model names to optimize (e.g., ['XGBoost', 'LightGBM', 'MLP'])
+        If None, optimizes all models in tier
+    preprocessing_methods : list of dict, optional
+        Preprocessing configurations to test
+        If None, uses defaults: [{'name': 'snv', 'deriv': 2}, {'name': 'none', 'deriv': 0}]
+    n_trials : int, default=50
+        Number of Optuna trials per model (30-50 recommended)
+    folds : int, default=5
+        Number of CV folds
+    excluded_count : int, default=0
+        Number of excluded samples (for tracking)
+    validation_count : int, default=0
+        Number of validation samples (for tracking)
+    total_samples_original : int, optional
+        Original total sample count (for tracking)
+    max_n_components : int, default=8
+        Maximum PLS components (constrained by min(n_samples, n_features))
+    tier : str, default='standard'
+        Model tier: 'quick', 'standard', or 'comprehensive'
+    imbalance_method : str, optional
+        Imbalance handling method ('smote', 'rare_boost', 'class_weight', etc.)
+    imbalance_params : dict, optional
+        Parameters for imbalance method
+    random_state : int, default=42
+        Random seed for reproducibility
+    progress_callback : callable, optional
+        Function to call with progress updates
+
+    Returns
+    -------
+    df_ranked : pd.DataFrame
+        Ranked results with best hyperparameters found for each model
+    label_encoder : LabelEncoder or None
+        Label encoder for classification with text labels
+
+    Examples
+    --------
+    >>> # Optimize XGBoost and LightGBM with 30 trials each
+    >>> results, _ = run_bayesian_search(
+    ...     X, y,
+    ...     task_type='regression',
+    ...     models_to_test=['XGBoost', 'LightGBM'],
+    ...     n_trials=30,
+    ...     tier='standard'
+    ... )
+
+    Notes
+    -----
+    - Bayesian optimization finds optimal parameters 100x faster than grid search
+    - Search spaces are continuous (e.g., learning_rate=0.127 instead of [0.05, 0.1, 0.2])
+    - Uses existing DASP infrastructure (_run_single_config, preprocessing, CV)
+    - Results are compatible with grid search results (same DataFrame format)
+    - Does NOT replace grid search - runs as alternative method when selected in GUI
+    """
+    from .bayesian_utils import create_optuna_study, create_objective_function, convert_optuna_result_to_dasp_format
+    from .bayesian_config import get_bayesian_search_space
+    from .models import build_model
+    import optuna
+
+    # Suppress Optuna logging (use DASP progress callback instead)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # Prepare data
+    X_np = X.values
+    y_np = y.values
+    wavelengths = X.columns.values
+    n_features = X_np.shape[1]
+    n_samples = X_np.shape[0]
+
+    # Handle categorical labels for classification
+    label_encoder = None
+    if task_type == "classification":
+        if y_np.dtype == object or not np.issubdtype(y_np.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder
+            label_encoder = LabelEncoder()
+            y_original = y_np.copy()
+            y_np = label_encoder.fit_transform(y_np)
+
+            # Log label mapping
+            label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+            print(f"\n{'='*70}")
+            print(f"BAYESIAN OPTIMIZATION - CATEGORICAL LABEL ENCODING")
+            print(f"{'='*70}")
+            print(f"Detected non-numeric classification labels.")
+            print(f"Encoding mapping:")
+            for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
+                print(f"  '{label}' -> {code}")
+            print(f"{'='*70}\n")
+
+    # Determine binary classification status
+    is_binary_classification = (task_type == "classification" and len(np.unique(y_np)) == 2)
+
+    # Create results container
+    df_results = create_results_dataframe(task_type)
+
+    # Default preprocessing methods
+    if preprocessing_methods is None:
+        preprocessing_methods = [
+            {'name': 'snv', 'deriv': 2, 'window': 15, 'polyorder': 2, 'interference': None},
+            {'name': 'snv', 'deriv': 1, 'window': 15, 'polyorder': 2, 'interference': None},
+            {'name': 'snv', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
+            {'name': 'none', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
+        ]
+
+    # Default models based on tier
+    if models_to_test is None:
+        # Use tier system to determine which models to test
+        from .model_config import get_tier_models
+        tier_config = get_tier_models(tier, task_type)
+        models_to_test = [m for m, enabled in tier_config.items() if enabled]
+
+    # Create CV splitter
+    from sklearn.model_selection import StratifiedKFold, KFold
+    if task_type == "classification":
+        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
+    else:
+        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
+
+    # Track progress
+    total_tasks = len(models_to_test) * len(preprocessing_methods)
+    current_task = 0
+
+    print(f"\n{'='*70}")
+    print(f"BAYESIAN HYPERPARAMETER OPTIMIZATION")
+    print(f"{'='*70}")
+    print(f"Task: {task_type}")
+    print(f"Models: {models_to_test}")
+    print(f"Preprocessing methods: {len(preprocessing_methods)}")
+    print(f"Trials per model: {n_trials}")
+    print(f"Total optimizations: {total_tasks} (models × preprocessing)")
+    print(f"Expected trials: {total_tasks * n_trials}")
+    print(f"CV folds: {folds}")
+    print(f"Tier: {tier}")
+    print(f"{'='*70}\n")
+
+    # Loop over models and preprocessing methods
+    for model_name in models_to_test:
+        for preprocess_cfg in preprocessing_methods:
+            current_task += 1
+
+            print(f"\n{'='*70}")
+            print(f"Optimizing {model_name} [{current_task}/{total_tasks}]")
+            print(f"Preprocessing: {preprocess_cfg['name']} (deriv={preprocess_cfg['deriv']})")
+            print(f"{'='*70}")
+
+            # Update progress callback
+            if progress_callback:
+                progress_callback({
+                    'stage': 'bayesian_optimization',
+                    'message': f'Optimizing {model_name} ({preprocess_cfg["name"]}, deriv={preprocess_cfg["deriv"]})',
+                    'current': current_task,
+                    'total': total_tasks,
+                })
+
+            # Create Optuna study
+            direction = 'minimize' if task_type == 'regression' else 'maximize'
+            study = create_optuna_study(
+                direction=direction,
+                sampler='TPE',
+                random_state=random_state,
+                study_name=f"{model_name}_{preprocess_cfg['name']}_deriv{preprocess_cfg['deriv']}"
+            )
+
+            # Create objective function
+            objective_fn = create_objective_function(
+                model_name=model_name,
+                X=X_np,
+                y=y_np,
+                wavelengths=wavelengths,
+                preprocess_cfg=preprocess_cfg,
+                cv_splitter=cv_splitter,
+                task_type=task_type,
+                is_binary_classification=is_binary_classification,
+                run_single_config_fn=_run_single_config,  # Use existing infrastructure
+                tier=tier,
+                n_features=n_features,
+                max_n_components=max_n_components,
+                excluded_count=excluded_count,
+                validation_count=validation_count,
+                total_samples_original=total_samples_original,
+                folds=folds,
+                imbalance_method=imbalance_method,
+                imbalance_params=imbalance_params,
+                progress_callback=progress_callback,
+                n_trials=n_trials
+            )
+
+            # Run optimization
+            try:
+                study.optimize(objective_fn, n_trials=n_trials, show_progress_bar=False)
+
+                # Convert Optuna result to DASP format
+                result = convert_optuna_result_to_dasp_format(
+                    study=study,
+                    model_name=model_name,
+                    preprocess_cfg=preprocess_cfg,
+                    task_type=task_type,
+                    wavelengths=wavelengths,
+                    n_vars=n_features,
+                    excluded_count=excluded_count,
+                    validation_count=validation_count,
+                    total_samples_original=total_samples_original,
+                    folds=folds,
+                    imbalance_method=imbalance_method
+                )
+
+                # Add to results
+                df_results = pd.concat([df_results, pd.DataFrame([result])], ignore_index=True)
+
+                # Print best result
+                if task_type == 'regression':
+                    print(f"✓ Best trial: RMSE={result['RMSE']:.4f}, R²={result['R2']:.4f}")
+                else:
+                    print(f"✓ Best trial: Accuracy={result['Accuracy']:.4f}, ROC_AUC={result['ROC_AUC']:.4f}")
+                print(f"  Parameters: {result['Params']}")
+
+            except Exception as e:
+                print(f"✗ Optimization failed for {model_name}: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+    # Rank results
+    print(f"\n{'='*70}")
+    print(f"RANKING RESULTS")
+    print(f"{'='*70}")
+
+    from .scoring import score_models
+    df_ranked = score_models(
+        df_results,
+        task_type=task_type,
+        variable_penalty=0,  # Bayesian optimization doesn't penalize variables
+        complexity_penalty=0  # Bayesian optimization doesn't penalize complexity
+    )
+
+    print(f"\n✓ Bayesian optimization complete!")
+    print(f"  Total models optimized: {len(df_ranked)}")
+    if len(df_ranked) > 0:
+        best_model = df_ranked.iloc[0]
+        if task_type == 'regression':
+            print(f"  Best model: {best_model['Model']} (RMSE={best_model['RMSE']:.4f}, R²={best_model['R2']:.4f})")
+        else:
+            print(f"  Best model: {best_model['Model']} (Accuracy={best_model['Accuracy']:.4f}, ROC_AUC={best_model['ROC_AUC']:.4f})")
+
+    print(f"{'='*70}\n")
+
+    return df_ranked, label_encoder
+
+
 def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes=None):
     """
     Run a single CV fold in parallel.

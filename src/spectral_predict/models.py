@@ -310,6 +310,160 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
     return model
 
 
+def build_model(model_name, params, task_type='regression'):
+    """
+    Build a model instance with specified hyperparameters.
+
+    Used by Bayesian optimization to instantiate models with Optuna-suggested parameters.
+
+    Parameters
+    ----------
+    model_name : str
+        Model type ('PLS', 'Ridge', 'XGBoost', 'LightGBM', 'MLP', etc.)
+    params : dict
+        Hyperparameters dictionary from Bayesian optimization
+    task_type : str, default='regression'
+        'regression' or 'classification'
+
+    Returns
+    -------
+    model : estimator
+        Configured model instance ready for fitting
+
+    Examples
+    --------
+    >>> params = {'n_estimators': 150, 'learning_rate': 0.08, 'max_depth': 5}
+    >>> model = build_model('XGBoost', params, task_type='regression')
+    >>> model.fit(X_train, y_train)
+    """
+    if task_type == "regression":
+        if model_name == "PLS":
+            return PLSRegression(scale=False, **params)
+
+        elif model_name == "Ridge":
+            return Ridge(random_state=42, **params)
+
+        elif model_name == "Lasso":
+            return Lasso(random_state=42, **params)
+
+        elif model_name == "ElasticNet":
+            return ElasticNet(random_state=42, **params)
+
+        elif model_name == "RandomForest":
+            return RandomForestRegressor(
+                random_state=42,
+                n_jobs=-1,
+                **params
+            )
+
+        elif model_name == "MLP":
+            return MLPRegressor(
+                random_state=42,
+                early_stopping=True,
+                **params
+            )
+
+        elif model_name == "NeuralBoosted":
+            return NeuralBoostedRegressor(
+                random_state=42,
+                verbose=0,
+                **params
+            )
+
+        elif model_name == "SVR":
+            return SVR(**params)
+
+        elif model_name == "XGBoost":
+            return XGBRegressor(
+                tree_method='hist',
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0,
+                **params
+            )
+
+        elif model_name == "LightGBM":
+            return LGBMRegressor(
+                random_state=42,
+                n_jobs=-1,
+                verbosity=-1,
+                **params
+            )
+
+        elif model_name == "CatBoost":
+            if not HAS_CATBOOST:
+                raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
+            return CatBoostRegressor(
+                random_state=42,
+                verbose=False,
+                **params
+            )
+
+        else:
+            raise ValueError(f"Unknown regression model: {model_name}")
+
+    else:  # classification
+        if model_name in ["PLS-DA", "PLS"]:
+            return PLSTransformer(scale=False, **params)
+
+        elif model_name == "RandomForest":
+            return RandomForestClassifier(
+                random_state=42,
+                n_jobs=-1,
+                **params
+            )
+
+        elif model_name == "MLP":
+            return MLPClassifier(
+                random_state=42,
+                early_stopping=True,
+                **params
+            )
+
+        elif model_name == "NeuralBoosted":
+            return NeuralBoostedClassifier(
+                random_state=42,
+                verbose=0,
+                **params
+            )
+
+        elif model_name == "SVM":
+            return SVC(
+                probability=True,
+                random_state=42,
+                **params
+            )
+
+        elif model_name == "XGBoost":
+            return XGBClassifier(
+                tree_method='hist',
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0,
+                **params
+            )
+
+        elif model_name == "LightGBM":
+            return LGBMClassifier(
+                random_state=42,
+                n_jobs=-1,
+                verbosity=-1,
+                **params
+            )
+
+        elif model_name == "CatBoost":
+            if not HAS_CATBOOST:
+                raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
+            return CatBoostClassifier(
+                random_state=42,
+                verbose=False,
+                **params
+            )
+
+        else:
+            raise ValueError(f"Unknown classification model: {model_name}")
+
+
 def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     n_estimators_list=None, learning_rates=None,
                     neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
