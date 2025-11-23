@@ -169,6 +169,9 @@ def create_objective_function(
     from .bayesian_config import get_bayesian_search_space
     from .models import build_model
 
+    # Calculate n_classes for classification tasks
+    n_classes = len(np.unique(y)) if task_type == 'classification' else 2
+
     def objective(trial: optuna.Trial) -> float:
         """
         Objective function for a single Optuna trial.
@@ -190,7 +193,8 @@ def create_objective_function(
             tier=tier,
             n_features=n_features,
             max_n_components=max_n_components,
-            task_type=task_type
+            task_type=task_type,
+            n_classes=n_classes
         )
 
         # Build model with suggested parameters
@@ -211,16 +215,27 @@ def create_objective_function(
             if task_type == 'regression':
                 # Minimize RMSE
                 metric = result['RMSE']
+                # Store R² as user attribute for reporting
+                if 'R2' in result:
+                    trial.set_user_attr('R2', result['R2'])
             else:
                 # Maximize accuracy (minimize negative accuracy)
                 metric = -result['Accuracy']
+                # Store ROC_AUC as user attribute for reporting
+                if 'ROC_AUC' in result:
+                    trial.set_user_attr('ROC_AUC', result['ROC_AUC'])
 
             return metric
 
         except Exception as e:
-            # If model training fails, return worst possible score
-            logging.warning(f"Trial {trial.number} failed: {e}")
-            raise optuna.TrialPruned()
+            # If model training fails, return large penalty value
+            # This marks the trial as completed but with worst score
+            logging.warning(f"Trial {trial.number} failed: {type(e).__name__}: {e}")
+            # Return very large penalty (for minimization) or very negative (for maximization)
+            if task_type == 'regression':
+                return 1e10  # Large RMSE penalty
+            else:
+                return 1e10  # Large penalty (negative accuracy is being minimized)
 
     return objective
 

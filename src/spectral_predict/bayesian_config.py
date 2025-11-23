@@ -105,8 +105,21 @@ def get_bayesian_search_space(
 
 def _get_pls_space(trial: optuna.Trial, max_n_components: int = 8) -> Dict:
     """PLS/PLS-DA search space."""
+    # Ensure valid range: n_components must be at least 1 and at most max_n_components
+    # Typically max_n_components is constrained by min(n_samples, n_features)
+    min_components = 1
+    max_components = max(1, max_n_components)  # Ensure at least 1
+
+    # If max_components is 1, use exactly 1 component (no range to suggest)
+    if max_components == 1:
+        n_components = 1
+    else:
+        # Suggest in range [min_components, max_components], preferring at least 2
+        lower_bound = min(2, max_components)
+        n_components = trial.suggest_int('n_components', lower_bound, max_components)
+
     return {
-        'n_components': trial.suggest_int('n_components', 2, max_n_components),
+        'n_components': n_components,
         'max_iter': trial.suggest_categorical('max_iter', [500, 1000, 2000]),
         'tol': trial.suggest_float('tol', 1e-8, 1e-4, log=True)
     }
@@ -313,16 +326,24 @@ def _get_mlp_space(trial: optuna.Trial, tier: str) -> Dict:
             trial.suggest_int('layer3_size', 32, 64)
         )
 
-    return {
+    # Suggest solver first to determine momentum conditionally
+    solver = trial.suggest_categorical('solver', ['adam', 'sgd'])
+
+    params = {
         'hidden_layer_sizes': hidden_layer_sizes,
         'alpha': trial.suggest_float('alpha', 1e-5, 1e-2, log=True),
         'learning_rate_init': trial.suggest_float('learning_rate_init', 1e-4, 1e-2, log=True),
         'activation': trial.suggest_categorical('activation', ['relu', 'tanh', 'logistic']),
-        'solver': trial.suggest_categorical('solver', ['adam', 'sgd']),
+        'solver': solver,
         'batch_size': trial.suggest_categorical('batch_size', ['auto', 32, 64, 128]),
-        'learning_rate': trial.suggest_categorical('learning_rate', ['constant', 'adaptive']),
-        'momentum': trial.suggest_float('momentum', 0.5, 0.99) if trial.params.get('solver') == 'sgd' else 0.9
+        'learning_rate': trial.suggest_categorical('learning_rate', ['constant', 'adaptive'])
     }
+
+    # Only suggest momentum if solver is 'sgd' (required parameter)
+    if solver == 'sgd':
+        params['momentum'] = trial.suggest_float('momentum', 0.5, 0.99)
+
+    return params
 
 
 def _get_neuralboosted_space(trial: optuna.Trial, tier: str) -> Dict:
