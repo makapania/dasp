@@ -1,5 +1,6 @@
 """Model search with cross-validation and subset selection."""
 
+import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -777,6 +778,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         X_transformed_varsel = X_for_models
                         wavelengths_varsel = wavelengths_for_models
                         n_features_varsel = X_for_models.shape[1]
+                        n_features_for_validation = n_features_varsel  # Define early for SPA/UVE-SPA methods
 
                         # Loop over each selected variable selection method
                         for varsel_method in selected_methods:
@@ -872,7 +874,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         # Use preprocessed+filtered data (already done globally)
                                         # Keep original preprocess_cfg for correct labeling in results
                                         subset_result = _run_single_config(
-                                            X_transformed,  # Already preprocessed + filtered
+                                            X_transformed_varsel,  # Already preprocessed + filtered
                                             y_np,
                                             wavelengths_varsel,
                                             model,
@@ -900,7 +902,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         # For raw/SNV: use filtered data since indices reference filtered array
                                         # Data is already preprocessed and filtered globally
                                         subset_result = _run_single_config(
-                                            X_transformed,  # Already preprocessed + filtered
+                                            X_transformed_varsel,  # Already preprocessed + filtered
                                             y_np,
                                             wavelengths_varsel,
                                             model,
@@ -1038,7 +1040,10 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                         n_trials=50, folds=5, excluded_count=0, validation_count=0,
                         total_samples_original=None, max_n_components=8, tier='standard',
                         imbalance_method=None, imbalance_params=None,
-                        random_state=42, progress_callback=None):
+                        random_state=42, progress_callback=None,
+                        enable_variable_subsets=True, variable_counts=None,
+                        enable_region_subsets=False, n_top_regions=5,
+                        variable_selection_methods=None):
     """
     Run Bayesian hyperparameter optimization using Optuna.
 
@@ -1287,6 +1292,11 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 tier=tier,
                 n_features=n_features,
                 max_n_components=max_n_components,
+                enable_variable_subsets=enable_variable_subsets,
+                variable_counts=variable_counts,
+                variable_selection_methods=variable_selection_methods,
+                enable_region_subsets=enable_region_subsets,
+                n_top_regions=n_top_regions,
                 excluded_count=excluded_count,
                 validation_count=validation_count,
                 total_samples_original=total_samples_original,
@@ -1301,8 +1311,9 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
             try:
                 study.optimize(objective_fn, n_trials=n_trials, show_progress_bar=False)
 
-                # Convert Optuna result to DASP format
-                result = convert_optuna_result_to_dasp_format(
+                # Convert Optuna results to DASP format
+                # CRITICAL: Now returns a LIST of ALL configurations tested (full + subsets)
+                results_list = convert_optuna_result_to_dasp_format(
                     study=study,
                     model_name=model_name,
                     preprocess_cfg=preprocess_cfg,
@@ -1316,15 +1327,22 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     imbalance_method=imbalance_method
                 )
 
-                # Add to results
-                df_results = pd.concat([df_results, pd.DataFrame([result])], ignore_index=True)
+                # Add ALL results to dataframe (not just one)
+                for result in results_list:
+                    df_results = pd.concat([df_results, pd.DataFrame([result])], ignore_index=True)
 
-                # Print best result
+                # Print summary (find best overall result)
+                print(f"✓ Collected {len(results_list)} configurations from {len(study.trials)} trials")
+
+                # Find and print best result
+                best_result = study.best_trial
                 if task_type == 'regression':
-                    print(f"✓ Best trial: RMSE={result['RMSE']:.4f}, R²={result['R2']:.4f}")
+                    best_r2 = best_result.user_attrs.get('R2', np.nan)
+                    print(f"  Best trial #{best_result.number}: RMSE={best_result.value:.4f}, R²={best_r2:.4f}")
                 else:
-                    print(f"✓ Best trial: Accuracy={result['Accuracy']:.4f}, ROC_AUC={result['ROC_AUC']:.4f}")
-                print(f"  Parameters: {result['Params']}")
+                    best_auc = best_result.user_attrs.get('ROC_AUC', np.nan)
+                    print(f"  Best trial #{best_result.number}: Accuracy={-best_result.value:.4f}, ROC_AUC={best_auc:.4f}")
+                print(f"  Parameters: {best_result.params}")
 
             except Exception as e:
                 print(f"✗ Optimization failed for {model_name}: {type(e).__name__}: {e}")
