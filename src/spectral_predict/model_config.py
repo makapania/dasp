@@ -266,7 +266,8 @@ def get_hyperparameters(model_name: str, tier: str = 'standard') -> dict:
                 'epsilon': [0.1],
                 'degree': [3],
                 'coef0': [0.0],
-                'shrinking': [True]
+                'shrinking': [True],
+                'max_iter': [5000]  # Prevent infinite training
             }
         },
         'MLP': {

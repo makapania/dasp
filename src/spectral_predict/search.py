@@ -1135,7 +1135,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     - Results are compatible with grid search results (same DataFrame format)
     - Does NOT replace grid search - runs as alternative method when selected in GUI
     """
-    from .bayesian_utils import create_optuna_study, create_objective_function, convert_optuna_result_to_dasp_format
+    from .bayesian_utils import create_optuna_study, create_objective_function, convert_optuna_result_to_dasp_format, ProgressCallback
     from .bayesian_config import get_bayesian_search_space
     from .models import build_model
     import optuna
@@ -1274,7 +1274,9 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
     # Track progress
     total_tasks = len(models_to_test) * len(preprocessing_methods)
+    total_trials = total_tasks * n_trials  # For global progress tracking
     current_task = 0
+    trials_completed = 0  # Track global trial count for elapsed time calculation
 
     print(f"\n{'='*70}")
     print(f"BAYESIAN HYPERPARAMETER OPTIMIZATION")
@@ -1284,7 +1286,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     print(f"Preprocessing methods: {len(preprocessing_methods)}")
     print(f"Trials per model: {n_trials}")
     print(f"Total optimizations: {total_tasks} (models × preprocessing)")
-    print(f"Expected trials: {total_tasks * n_trials}")
+    print(f"Expected trials: {total_trials}")
     print(f"CV folds: {folds}")
     print(f"Tier: {tier}")
     print(f"{'='*70}\n")
@@ -1348,7 +1350,32 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
             # Run optimization
             try:
-                study.optimize(objective_fn, n_trials=n_trials, show_progress_bar=False)
+                # Create progress callback for per-trial updates
+                optuna_progress_callback = None
+                if progress_callback:
+                    preprocess_name = preprocess_cfg['name']
+                    if preprocess_cfg['deriv']:
+                        preprocess_name += f"_d{preprocess_cfg['deriv']}"
+
+                    optuna_progress_callback = ProgressCallback(
+                        progress_callback=progress_callback,
+                        model_name=model_name,
+                        preprocess_name=preprocess_name,
+                        n_trials=n_trials,
+                        task_type=task_type,
+                        global_offset=trials_completed,
+                        global_total=total_trials
+                    )
+
+                study.optimize(
+                    objective_fn,
+                    n_trials=n_trials,
+                    show_progress_bar=False,
+                    callbacks=[optuna_progress_callback] if optuna_progress_callback else None
+                )
+
+                # Update global trial count for next model
+                trials_completed += len(study.trials)
 
                 # Convert Optuna results to DASP format
                 # CRITICAL: Now returns a LIST of ALL configurations tested (full + subsets)

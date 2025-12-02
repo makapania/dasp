@@ -1023,6 +1023,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             svr_kernels = svr_config.get('kernel', ['rbf', 'linear'])
             svr_Cs = svr_config.get('C', [1.0, 10.0])
             svr_gammas = svr_config.get('gamma', ['scale'])
+            svr_max_iter = svr_config.get('max_iter', [5000])[0]  # Prevent infinite training
 
             svr_configs = []
             for kernel in svr_kernels:
@@ -1045,7 +1046,8 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             gamma=gamma,
                                                             degree=degree,
                                                             coef0=coef0,
-                                                            shrinking=shrinking
+                                                            shrinking=shrinking,
+                                                            max_iter=svr_max_iter
                                                         ),
                                                         {
                                                             "kernel": kernel,
@@ -1054,7 +1056,8 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                             "gamma": gamma,
                                                             "degree": degree,
                                                             "coef0": coef0,
-                                                            "shrinking": shrinking
+                                                            "shrinking": shrinking,
+                                                            "max_iter": svr_max_iter
                                                         }
                                                     )
                                                 )
@@ -1066,14 +1069,16 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                     C=C,
                                                     epsilon=epsilon,
                                                     gamma=gamma,
-                                                    shrinking=shrinking
+                                                    shrinking=shrinking,
+                                                    max_iter=svr_max_iter
                                                 ),
                                                 {
                                                     "kernel": kernel,
                                                     "C": C,
                                                     "epsilon": epsilon,
                                                     "gamma": gamma,
-                                                    "shrinking": shrinking
+                                                    "shrinking": shrinking,
+                                                    "max_iter": svr_max_iter
                                                 }
                                             )
                                         )
@@ -1087,14 +1092,16 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                 C=C,
                                                 epsilon=epsilon,
                                                 coef0=coef0,
-                                                shrinking=shrinking
+                                                shrinking=shrinking,
+                                                max_iter=svr_max_iter
                                             ),
                                             {
                                                 "kernel": kernel,
                                                 "C": C,
                                                 "epsilon": epsilon,
                                                 "coef0": coef0,
-                                                "shrinking": shrinking
+                                                "shrinking": shrinking,
+                                                "max_iter": svr_max_iter
                                             }
                                         )
                                     )
@@ -1105,13 +1112,15 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                             kernel=kernel,
                                             C=C,
                                             epsilon=epsilon,
-                                            shrinking=shrinking
+                                            shrinking=shrinking,
+                                            max_iter=svr_max_iter
                                         ),
                                         {
                                             "kernel": kernel,
                                             "C": C,
                                             "epsilon": epsilon,
-                                            "shrinking": shrinking
+                                            "shrinking": shrinking,
+                                            "max_iter": svr_max_iter
                                         }
                                     )
                                 )
@@ -1423,6 +1432,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             svm_kernels = svm_config.get('kernel', ['rbf', 'linear'])
             svm_Cs = svm_config.get('C', [1.0, 10.0])
             svm_gammas = svm_config.get('gamma', ['scale'])
+            svm_max_iter = svm_config.get('max_iter', [5000])[0]  # Prevent infinite training
 
             svm_configs = []
             for kernel in svm_kernels:
@@ -1431,15 +1441,17 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                         for gamma in svm_gammas:
                             svm_configs.append(
                                 (
-                                    SVC(kernel=kernel, C=C, gamma=gamma, probability=True, random_state=42),
-                                    {"kernel": kernel, "C": C, "gamma": gamma}
+                                    SVC(kernel=kernel, C=C, gamma=gamma, probability=True, random_state=42,
+                                        max_iter=svm_max_iter),
+                                    {"kernel": kernel, "C": C, "gamma": gamma, "max_iter": svm_max_iter}
                                 )
                             )
                     else:
                         svm_configs.append(
                             (
-                                SVC(kernel=kernel, C=C, probability=True, random_state=42),
-                                {"kernel": kernel, "C": C}
+                                SVC(kernel=kernel, C=C, probability=True, random_state=42,
+                                    max_iter=svm_max_iter),
+                                {"kernel": kernel, "C": C, "max_iter": svm_max_iter}
                             )
                         )
             grids["SVM"] = svm_configs
