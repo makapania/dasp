@@ -108,7 +108,7 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
 
 def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None,
                                  imbalance_method=None, imbalance_params=None, task_type=None,
-                                 interference=None, wavelengths=None):
+                                 interference=None, wavelengths=None, random_state=42):
     """
     Build a preprocessing pipeline from a configuration.
 
@@ -129,6 +129,8 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         Parameters for imbalance method (e.g., {'k_neighbors': 5})
     task_type : str, optional
         'classification' or 'regression' (required if imbalance_method is specified)
+    random_state : int, optional
+        Random seed for reproducibility (default: 42)
 
     Returns
     -------
@@ -323,6 +325,7 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         imbalance_transformer = build_imbalance_transformer(
             method=imbalance_method,
             task_type=task_type,
+            random_state=random_state,  # CRITICAL for reproducibility
             **imbalance_params
         )
 

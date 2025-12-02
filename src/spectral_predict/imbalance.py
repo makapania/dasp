@@ -211,12 +211,14 @@ class ClassificationResampler(BaseEstimator):
     -----------
     method : str or object
         Resampling method name ('smote', 'adasyn', etc.) or imblearn object
+    random_state : int, optional
+        Random seed for reproducibility. CRITICAL for scientific publications.
     **params : dict
         Parameters to pass to the resampling method
 
     Example:
     --------
-    >>> resampler = ClassificationResampler('smote', k_neighbors=5)
+    >>> resampler = ClassificationResampler('smote', random_state=42, k_neighbors=5)
     >>> X_res, y_res = resampler.fit_resample(X_train, y_train)
 
     Note:
@@ -226,7 +228,7 @@ class ClassificationResampler(BaseEstimator):
     a transform() method that conflicts with fit_resample() semantics.
     """
 
-    def __init__(self, method='smote', **params):
+    def __init__(self, method='smote', random_state=None, **params):
         if not HAS_IMBLEARN:
             raise ImportError(
                 "imbalanced-learn (imblearn) is required for resampling methods. "
@@ -234,6 +236,7 @@ class ClassificationResampler(BaseEstimator):
             )
 
         self.method = method
+        self.random_state = random_state
         self.params = params
         self.resampler_ = None
         self.X_resampled_ = None
@@ -259,7 +262,11 @@ class ClassificationResampler(BaseEstimator):
                     f"Available: {list(method_map.keys())}"
                 )
             resampler_class = method_map[method_lower]
-            self.resampler_ = resampler_class(**self.params)
+            # Pass random_state for reproducibility (CRITICAL for scientific work)
+            resampler_params = dict(self.params)
+            if self.random_state is not None:
+                resampler_params['random_state'] = self.random_state
+            self.resampler_ = resampler_class(**resampler_params)
         else:
             # Allow passing custom imblearn object
             self.resampler_ = self.method
@@ -394,7 +401,8 @@ class RegressionUndersampler(BaseEstimator):
             raise ValueError(f"Invalid sampling_strategy: {self.sampling_strategy}")
 
         # Undersample over-represented bins
-        np.random.seed(self.random_state)
+        # Use RandomState for thread-safe, reproducible random sampling
+        rng = np.random.RandomState(self.random_state)
         indices_to_keep = []
 
         for bin_idx in range(self.n_bins):
@@ -404,7 +412,7 @@ class RegressionUndersampler(BaseEstimator):
 
             if n_samples_in_bin > target_count:
                 # Randomly select target_count samples
-                selected = np.random.choice(bin_sample_indices, size=target_count, replace=False)
+                selected = rng.choice(bin_sample_indices, size=target_count, replace=False)
                 indices_to_keep.extend(selected)
             else:
                 # Keep all samples in this bin
@@ -522,7 +530,7 @@ class RegressionSampleWeighter(BaseEstimator, TransformerMixin):
 # FACTORY FUNCTION
 # ============================================================================
 
-def build_imbalance_transformer(method, task_type='classification', **params):
+def build_imbalance_transformer(method, task_type='classification', random_state=None, **params):
     """
     Factory function to create imbalance handling transformers.
 
@@ -548,6 +556,10 @@ def build_imbalance_transformer(method, task_type='classification', **params):
     task_type : str, default='classification'
         'classification' or 'regression'
 
+    random_state : int, optional
+        Random seed for reproducibility. CRITICAL for scientific publications.
+        Ensures resampling produces identical results across runs.
+
     **params : dict
         Method-specific parameters
 
@@ -558,21 +570,24 @@ def build_imbalance_transformer(method, task_type='classification', **params):
 
     Example:
     --------
-    >>> # Classification with SMOTE
+    >>> # Classification with SMOTE (reproducible)
     >>> transformer = build_imbalance_transformer(
-    ...     'smote', task_type='classification', k_neighbors=5
+    ...     'smote', task_type='classification', random_state=42, k_neighbors=5
     ... )
     >>>
     >>> # Regression with binning
     >>> transformer = build_imbalance_transformer(
-    ...     'binning', task_type='regression', n_bins=5
+    ...     'binning', task_type='regression', random_state=42, n_bins=5
     ... )
     """
     if task_type == 'classification':
-        return ClassificationResampler(method=method, **params)
+        return ClassificationResampler(method=method, random_state=random_state, **params)
 
     elif task_type == 'regression':
         if method == 'undersample':
+            # RegressionUndersampler already accepts random_state in params
+            if random_state is not None and 'random_state' not in params:
+                params['random_state'] = random_state
             return RegressionUndersampler(**params)
         elif method in ['binning', 'rare_boost', 'balanced']:
             return RegressionSampleWeighter(strategy=method, **params)
@@ -767,3 +782,162 @@ def recommend_imbalance_method(y, task_type='classification'):
         'alternative': None,
         'warnings': ['Unknown task type specified']
     }
+
+
+# ============================================================================
+# UPFRONT VALIDATION
+# ============================================================================
+
+def validate_classification_config(y, imbalance_method, imbalance_params=None, n_folds=5):
+    """
+    Validate that the imbalance method is compatible with the data.
+
+    Call this BEFORE starting training to give immediate feedback to the user.
+    This prevents wasting time on long training runs that will fail partway through.
+
+    Parameters:
+    -----------
+    y : array-like
+        Target labels (classification)
+    imbalance_method : str or None
+        The imbalance handling method selected (e.g., 'smote', 'adasyn', etc.)
+    imbalance_params : dict, optional
+        Parameters for the imbalance method (e.g., {'k_neighbors': 5})
+    n_folds : int, default=5
+        Number of cross-validation folds
+
+    Returns:
+    --------
+    bool : True if configuration is valid
+
+    Raises:
+    -------
+    ValueError : If configuration is invalid, with clear message and suggestions
+
+    Example:
+    --------
+    >>> # Before starting training, validate the configuration
+    >>> validate_classification_config(y_train, 'smote', {'k_neighbors': 5}, n_folds=5)
+    True
+
+    >>> # This will raise a helpful error:
+    >>> validate_classification_config(y_with_3_samples_in_minority, 'smote', {'k_neighbors': 5})
+    ValueError: SMOTE with k_neighbors=5 requires at least 6 samples per class,
+                but class 'minority_class' has only 3.
+                Options: set k_neighbors<=2, use random_undersampler, or use class_weight.
+    """
+    if imbalance_method is None or imbalance_method == 'class_weight':
+        return True  # No resampling validation needed
+
+    if imbalance_params is None:
+        imbalance_params = {}
+
+    y = np.asarray(y)
+    class_counts = Counter(y)
+
+    if len(class_counts) < 2:
+        raise ValueError(
+            f"Classification requires at least 2 classes, but only 1 class found in data. "
+            f"Check your target variable."
+        )
+
+    min_class_count = min(class_counts.values())
+    min_class_name = min(class_counts, key=class_counts.get)
+
+    # Check 1: Enough samples for CV folds (each class needs at least n_folds samples)
+    if min_class_count < n_folds:
+        raise ValueError(
+            f"Class '{min_class_name}' has only {min_class_count} samples, "
+            f"but {n_folds}-fold stratified CV requires at least {n_folds} samples per class.\n\n"
+            f"Options:\n"
+            f"  1. Reduce CV folds to {min_class_count} or fewer\n"
+            f"  2. Use class_weight='balanced' instead of resampling\n"
+            f"  3. Collect more samples for the minority class"
+        )
+
+    # Check 2: SMOTE-based methods require k_neighbors + 1 samples per class
+    smote_methods = ('smote', 'adasyn', 'borderline_smote', 'smote_tomek', 'smote_enn')
+    if imbalance_method.lower().replace('-', '_') in smote_methods:
+        k_neighbors = imbalance_params.get('k_neighbors', 5)
+        required_samples = k_neighbors + 1
+
+        if min_class_count < required_samples:
+            max_valid_k = min_class_count - 1
+            raise ValueError(
+                f"SMOTE with k_neighbors={k_neighbors} requires at least {required_samples} samples "
+                f"per class, but class '{min_class_name}' has only {min_class_count}.\n\n"
+                f"Options:\n"
+                f"  1. Set k_neighbors<={max_valid_k} (current data supports k_neighbors up to {max_valid_k})\n"
+                f"  2. Use 'random_undersampler' instead (works with any class size)\n"
+                f"  3. Use 'class_weight' instead (no resampling, adjusts loss function)\n"
+                f"  4. Collect more samples for the minority class"
+            )
+
+    # Check 3: Warn about potential issues with very small classes in CV folds
+    # With stratified CV, samples are distributed across folds
+    # A class with exactly n_folds samples will have only 1 sample per training fold minority
+    samples_per_fold_train = (min_class_count * (n_folds - 1)) // n_folds
+    if samples_per_fold_train < 3:
+        warnings.warn(
+            f"Class '{min_class_name}' has {min_class_count} samples. "
+            f"With {n_folds}-fold CV, some training folds may have only ~{samples_per_fold_train} "
+            f"samples of this class, which may produce unstable results. "
+            f"Consider using fewer folds or class_weight method.",
+            UserWarning
+        )
+
+    return True
+
+
+def validate_imbalance_with_features(X, y, imbalance_method, imbalance_params=None, n_folds=5):
+    """
+    Extended validation that also checks feature dimensions.
+
+    This should be called when feature matrix X is available, to warn about
+    high-dimensional data issues with SMOTE.
+
+    Parameters:
+    -----------
+    X : array-like of shape (n_samples, n_features)
+        Feature matrix
+    y : array-like
+        Target labels
+    imbalance_method : str or None
+        The imbalance handling method
+    imbalance_params : dict, optional
+        Parameters for the method
+    n_folds : int, default=5
+        Number of CV folds
+
+    Returns:
+    --------
+    bool : True if configuration is valid
+
+    Raises:
+    -------
+    ValueError : If configuration is invalid
+    """
+    # First run basic validation
+    validate_classification_config(y, imbalance_method, imbalance_params, n_folds)
+
+    if imbalance_method is None or imbalance_method == 'class_weight':
+        return True
+
+    X = np.asarray(X)
+    n_samples, n_features = X.shape
+
+    # Check for high-dimensional data with SMOTE
+    smote_methods = ('smote', 'adasyn', 'borderline_smote', 'smote_tomek', 'smote_enn')
+    if imbalance_method.lower().replace('-', '_') in smote_methods:
+        if n_features > 500:
+            warnings.warn(
+                f"Using SMOTE with {n_features} features (high-dimensional data). "
+                f"SMOTE uses k-nearest neighbors, which can be unreliable in high dimensions "
+                f"due to the 'curse of dimensionality'. Consider:\n"
+                f"  1. Applying dimensionality reduction (PCA, variable selection) before SMOTE\n"
+                f"  2. Using 'class_weight' instead, which doesn't depend on distance metrics\n"
+                f"  3. Using 'random_undersampler' which randomly samples without distances",
+                UserWarning
+            )
+
+    return True

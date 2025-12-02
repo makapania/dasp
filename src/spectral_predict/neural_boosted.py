@@ -685,12 +685,37 @@ class NeuralBoostedClassifier(BaseEstimator, ClassifierMixin):
 
             # Split while preserving sample weights
             indices = np.arange(len(y_binary))
-            train_idx, val_idx = train_test_split(
-                indices,
-                test_size=self.validation_fraction,
-                stratify=y_binary,
-                random_state=self.random_state
-            )
+
+            # Check if stratification is possible (need at least 2 samples per class)
+            from collections import Counter
+            class_counts = Counter(y_binary)
+            min_class_count = min(class_counts.values())
+
+            # Calculate minimum samples needed for stratification with validation_fraction
+            min_for_stratify = int(np.ceil(1 / self.validation_fraction))  # Need at least 1 in val set
+            can_stratify = min_class_count >= max(2, min_for_stratify)
+
+            if can_stratify:
+                train_idx, val_idx = train_test_split(
+                    indices,
+                    test_size=self.validation_fraction,
+                    stratify=y_binary,
+                    random_state=self.random_state
+                )
+            else:
+                # Fall back to non-stratified split with warning
+                warnings.warn(
+                    f"Cannot perform stratified validation split: smallest class has only "
+                    f"{min_class_count} samples. Using non-stratified split instead. "
+                    f"Consider using more data or disabling early_stopping.",
+                    UserWarning
+                )
+                train_idx, val_idx = train_test_split(
+                    indices,
+                    test_size=self.validation_fraction,
+                    stratify=None,  # Non-stratified
+                    random_state=self.random_state
+                )
 
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y_binary[train_idx], y_binary[val_idx]

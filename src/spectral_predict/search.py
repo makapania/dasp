@@ -254,6 +254,24 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 print(f"  '{label}' -> {code}")
             print(f"{'='*70}\n")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # UPFRONT VALIDATION FOR CLASSIFICATION IMBALANCE METHODS
+    # Validate configuration BEFORE starting training to give immediate feedback
+    # ═══════════════════════════════════════════════════════════════════════════
+    if task_type == 'classification' and imbalance_method is not None:
+        from .imbalance import validate_classification_config
+        try:
+            validate_classification_config(
+                y=y_np,
+                imbalance_method=imbalance_method,
+                imbalance_params=imbalance_params,
+                n_folds=folds
+            )
+            print(f"✓ Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
+        except ValueError as e:
+            # Re-raise with clear indication this is an upfront validation error
+            raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
+
     # Create results container
     df_results = create_results_dataframe(task_type)
 
@@ -734,6 +752,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     folds=folds,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=n_jobs,
+                    random_state=random_state,
                 )
                 df_results = add_result(df_results, result)
 
@@ -897,6 +916,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
+                                            random_state=random_state,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -925,6 +945,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
+                                            random_state=random_state,
                                         )
                                     df_results = add_result(df_results, subset_result)
 
@@ -981,6 +1002,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
                             n_jobs_cv=n_jobs,
+                            random_state=random_state,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -1147,6 +1169,23 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
             for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
                 print(f"  '{label}' -> {code}")
             print(f"{'='*70}\n")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # UPFRONT VALIDATION FOR CLASSIFICATION IMBALANCE METHODS
+    # Validate configuration BEFORE starting Bayesian optimization
+    # ═══════════════════════════════════════════════════════════════════════════
+    if task_type == 'classification' and imbalance_method is not None:
+        from .imbalance import validate_classification_config
+        try:
+            validate_classification_config(
+                y=y_np,
+                imbalance_method=imbalance_method,
+                imbalance_params=imbalance_params,
+                n_folds=folds
+            )
+            print(f"✓ Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
+        except ValueError as e:
+            raise ValueError(f"Configuration Error (detected before optimization):\n\n{e}") from None
 
     # Determine binary classification status
     is_binary_classification = (task_type == "classification" and len(np.unique(y_np)) == 2)
@@ -1381,7 +1420,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     return df_ranked, label_encoder
 
 
-def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes=None):
+def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
+                     all_classes=None, use_sample_weight_for_classification=False):
     """
     Run a single CV fold in parallel.
 
@@ -1401,6 +1441,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         'regression' or 'classification'
     is_binary_classification : bool
         Whether this is binary classification
+    use_sample_weight_for_classification : bool
+        If True, compute and apply sample_weight for classification models
+        that don't support class_weight but do support sample_weight (e.g., Ridge)
 
     Returns
     -------
@@ -1435,6 +1478,33 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             # Refit ONLY the final model step with weights
             final_model = pipe_clone.steps[-1][1]
             final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+
+    # Handle classification sample weights (for models like Ridge that support sample_weight but not class_weight)
+    if sample_weight_train is None and use_sample_weight_for_classification and task_type == 'classification':
+        from sklearn.utils.class_weight import compute_sample_weight
+        sample_weight_train = compute_sample_weight('balanced', y_train)
+
+        # Get final model from pipeline
+        if hasattr(pipe_clone, 'steps'):
+            # Transform X through all steps except the model
+            X_train_transformed = X_train
+            for step_name, step in pipe_clone.steps[:-1]:
+                if hasattr(step, 'fit_resample'):
+                    # For imblearn resamplers, apply fit_resample
+                    X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train)
+                    # Recompute sample weights for resampled data
+                    sample_weight_train = compute_sample_weight('balanced', y_train_for_model)
+                elif hasattr(step, 'transform'):
+                    step.fit(X_train_transformed, y_train)
+                    X_train_transformed = step.transform(X_train_transformed)
+
+            # Fit the final model with sample weights
+            final_model = pipe_clone.steps[-1][1]
+            final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+        else:
+            # No pipeline, just the model
+            pipe_clone.fit(X_train, y_train, sample_weight=sample_weight_train)
+        sample_weight_train = 'applied'  # Flag that we've already fit
 
     # Standard path: fit if not already done above
     if sample_weight_train is None:
@@ -1490,6 +1560,7 @@ def _run_single_config(
     imbalance_params=None,
     full_vars_original=None,
     n_jobs_cv=1,
+    random_state=42,
 ):
     """
     Run a single model configuration with CV.
@@ -1533,6 +1604,7 @@ def _run_single_config(
             imbalance_transformer = build_imbalance_transformer(
                 method=imbalance_method,
                 task_type=task_type,
+                random_state=random_state,  # CRITICAL for reproducibility
                 **imbalance_params
             )
             pipe_steps.append(("imbalance", imbalance_transformer))
@@ -1555,12 +1627,41 @@ def _run_single_config(
 
     # Handle class_weight for imbalanced classification
     # Only apply if user selected 'class_weight' method AND model supports it
+    # Note: MLP doesn't support class_weight OR sample_weight - users should use SMOTE instead
+    use_sample_weight_for_classification = False
     if imbalance_method == 'class_weight' and task_type == 'classification':
         if hasattr(model, 'class_weight'):
             try:
                 model.set_params(class_weight='balanced')
-            except:
-                pass  # Some models may not support set_params
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"{model_name} has class_weight attribute but set_params failed: {e}. "
+                    f"Consider using SMOTE or other resampling method.",
+                    UserWarning
+                )
+        else:
+            # Check if model supports sample_weight in fit() (e.g., RidgeClassifier)
+            import inspect
+            model_fit_sig = inspect.signature(model.fit) if hasattr(model, 'fit') else None
+            if model_fit_sig and 'sample_weight' in model_fit_sig.parameters:
+                # Model supports sample_weight - we'll compute and apply during _run_single_fold
+                use_sample_weight_for_classification = True
+            else:
+                # Model doesn't support class_weight OR sample_weight
+                import warnings
+                if model_name in ['MLP', 'MLPClassifier']:
+                    warnings.warn(
+                        f"{model_name} does not support class_weight or sample_weight. "
+                        f"For imbalanced classification with MLP, use SMOTE or other resampling methods instead.",
+                        UserWarning
+                    )
+                else:
+                    warnings.warn(
+                        f"{model_name} does not support class_weight. "
+                        f"Consider using SMOTE or other resampling methods for imbalanced data.",
+                        UserWarning
+                    )
 
     # For PLS-DA, we need PLS + LogisticRegression
     if model_name == "PLS-DA":
@@ -1599,7 +1700,8 @@ def _run_single_config(
         # Serial execution for reproducibility (deterministic fold ordering)
         cv_metrics = [
             _run_single_fold(
-                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes
+                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes,
+                use_sample_weight_for_classification
             )
             for train_idx, test_idx in cv_splitter.split(X, y)
         ]
@@ -1607,7 +1709,8 @@ def _run_single_config(
         # Parallel execution for speed
         cv_metrics = Parallel(n_jobs=n_jobs_cv, backend='loky')(
             delayed(_run_single_fold)(
-                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes
+                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes,
+                use_sample_weight_for_classification
             )
             for train_idx, test_idx in cv_splitter.split(X, y)
         )

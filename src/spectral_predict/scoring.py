@@ -403,7 +403,7 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
         - 'f1_macro': F1 score macro-averaged (equal weight per class)
         - 'precision_weighted': Weighted precision
         - 'recall_weighted': Weighted recall
-        - 'roc_auc': ROC AUC score (if y_pred_proba provided)
+        - 'roc_auc': ROC AUC score with macro averaging (equal weight per class, if y_pred_proba provided)
 
     Example
     -------
@@ -448,6 +448,8 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
         metrics['recall_weighted'] = 0.0
 
     # ROC AUC (if probabilities provided)
+    # Using 'macro' average for consistency with CV folds (search.py) and
+    # because macro gives equal weight to each class, which is preferred for imbalanced data
     if y_pred_proba is not None:
         try:
             n_classes = len(np.unique(y_true))
@@ -455,9 +457,10 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
                 # Binary classification - use proba for positive class
                 metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba[:, 1])
             else:
-                # Multiclass - use one-vs-rest
+                # Multiclass - use one-vs-rest with macro averaging
+                # Macro: equal weight per class (better for imbalanced data)
                 metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba,
-                                                   multi_class='ovr', average='weighted')
+                                                   multi_class='ovr', average='macro')
         except:
             metrics['roc_auc'] = None
     else:
