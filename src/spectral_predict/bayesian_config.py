@@ -135,7 +135,8 @@ def _get_ridge_space(trial: optuna.Trial, tier: str) -> Dict:
     return {
         'alpha': trial.suggest_float('alpha', *alpha_range, log=True),
         'solver': trial.suggest_categorical('solver', ['auto', 'svd', 'cholesky', 'lsqr']),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True)
+        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True),
+        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
     }
 
 
@@ -149,7 +150,8 @@ def _get_lasso_space(trial: optuna.Trial, tier: str) -> Dict:
     return {
         'alpha': trial.suggest_float('alpha', *alpha_range, log=True),
         'selection': trial.suggest_categorical('selection', ['cyclic', 'random']),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True)
+        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True),
+        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
     }
 
 
@@ -164,7 +166,8 @@ def _get_elasticnet_space(trial: optuna.Trial, tier: str) -> Dict:
         'alpha': trial.suggest_float('alpha', *alpha_range, log=True),
         'l1_ratio': trial.suggest_float('l1_ratio', 0.1, 0.9),
         'selection': trial.suggest_categorical('selection', ['cyclic', 'random']),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True)
+        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True),
+        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
     }
 
 
@@ -180,13 +183,23 @@ def _get_randomforest_space(trial: optuna.Trial, tier: str, n_features: int = No
         n_estimators_range = (100, 300)
         max_depth_options = [None, 20, 30]
 
+    # Bootstrap decision affects other parameters
+    bootstrap = trial.suggest_categorical('bootstrap', [True, False])
+
     params = {
         'n_estimators': trial.suggest_int('n_estimators', *n_estimators_range),
         'max_depth': trial.suggest_categorical('max_depth', max_depth_options),
         'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
         'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 4),
-        'bootstrap': trial.suggest_categorical('bootstrap', [True, False])
+        'bootstrap': bootstrap,
+        'criterion': trial.suggest_categorical('criterion', ['squared_error', 'absolute_error', 'friedman_mse']),
+        'min_impurity_decrease': trial.suggest_float('min_impurity_decrease', 0.0, 0.1),
+        'ccp_alpha': trial.suggest_float('ccp_alpha', 0.0, 0.1)
     }
+
+    # max_samples: Only relevant when bootstrap=True
+    if bootstrap:
+        params['max_samples'] = trial.suggest_float('max_samples', 0.5, 1.0)
 
     # max_features: Use sqrt for high-dimensional spectral data
     if n_features and n_features > 100:
@@ -213,17 +226,23 @@ def _get_xgboost_space(trial: optuna.Trial, tier: str) -> Dict:
         n_estimators_range = (50, 300)
         max_depth_range = (3, 9)
 
-    return {
+    params = {
         'n_estimators': trial.suggest_int('n_estimators', *n_estimators_range),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'max_depth': trial.suggest_int('max_depth', *max_depth_range),
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
+        'colsample_bynode': trial.suggest_float('colsample_bynode', 0.6, 1.0),
         'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 2.0),
         'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0),
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-        'gamma': trial.suggest_float('gamma', 0.0, 1.0)
+        'min_child_weight': trial.suggest_float('min_child_weight', 0.1, 10.0),
+        'gamma': trial.suggest_float('gamma', 0.0, 1.0),
+        'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide']),
+        'max_delta_step': trial.suggest_float('max_delta_step', 0.0, 5.0)
     }
+
+    return params
 
 
 def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classes: int) -> Dict:
@@ -246,17 +265,24 @@ def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classe
         else:
             num_leaves_range = (15, 63)  # Binary/regression: simpler
 
-    return {
+    params = {
         'n_estimators': trial.suggest_int('n_estimators', *n_estimators_range),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'num_leaves': trial.suggest_int('num_leaves', *num_leaves_range),
         'max_depth': trial.suggest_int('max_depth', -1, 20),  # -1 = no limit
         'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
+        'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+        'subsample_freq': trial.suggest_int('subsample_freq', 0, 7),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
         'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 2.0),
-        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0)
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0),
+        'min_sum_hessian_in_leaf': trial.suggest_float('min_sum_hessian_in_leaf', 1e-3, 10.0, log=True),
+        'max_bin': trial.suggest_categorical('max_bin', [63, 127, 255]),
+        'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
     }
+
+    return params
 
 
 def _get_catboost_space(trial: optuna.Trial, tier: str) -> Dict:
@@ -275,15 +301,29 @@ def _get_catboost_space(trial: optuna.Trial, tier: str) -> Dict:
         iterations_range = (50, 300)
         depth_range = (4, 8)
 
-    return {
+    # Bootstrap type affects subsample parameter
+    bootstrap_type = trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli', 'MVS'])
+
+    params = {
         'iterations': trial.suggest_int('iterations', *iterations_range),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'depth': trial.suggest_int('depth', *depth_range),
         'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 0.5, 10.0),
         'border_count': trial.suggest_categorical('border_count', [32, 64, 128, 254]),
         'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 10.0),
-        'random_strength': trial.suggest_float('random_strength', 0.0, 5.0)
+        'random_strength': trial.suggest_float('random_strength', 0.0, 5.0),
+        'bootstrap_type': bootstrap_type,
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 1, 20),
+        'one_hot_max_size': trial.suggest_categorical('one_hot_max_size', [2, 10, 25]),
+        'leaf_estimation_iterations': trial.suggest_int('leaf_estimation_iterations', 1, 10),
+        'grow_policy': trial.suggest_categorical('grow_policy', ['SymmetricTree', 'Depthwise', 'Lossguide'])
     }
+
+    # subsample: Only for Bernoulli and MVS bootstrap types
+    if bootstrap_type in ['Bernoulli', 'MVS']:
+        params['subsample'] = trial.suggest_float('subsample', 0.5, 1.0)
+
+    return params
 
 
 def _get_svr_space(trial: optuna.Trial, tier: str) -> Dict:
@@ -293,7 +333,11 @@ def _get_svr_space(trial: optuna.Trial, tier: str) -> Dict:
     params = {
         'kernel': kernel,
         'C': trial.suggest_float('C', 0.01, 100.0, log=True),
-        'epsilon': trial.suggest_float('epsilon', 0.01, 0.5)
+        'epsilon': trial.suggest_float('epsilon', 0.01, 0.5),
+        'shrinking': trial.suggest_categorical('shrinking', [True, False]),
+        'tol': trial.suggest_float('tol', 1e-5, 1e-2, log=True),
+        'cache_size': trial.suggest_categorical('cache_size', [200, 500, 1000]),
+        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
     }
 
     # Kernel-specific parameters
@@ -336,12 +380,24 @@ def _get_mlp_space(trial: optuna.Trial, tier: str) -> Dict:
         'activation': trial.suggest_categorical('activation', ['relu', 'tanh', 'logistic']),
         'solver': solver,
         'batch_size': trial.suggest_categorical('batch_size', ['auto', 32, 64, 128]),
-        'learning_rate': trial.suggest_categorical('learning_rate', ['constant', 'adaptive'])
+        'learning_rate': trial.suggest_categorical('learning_rate', ['constant', 'adaptive']),
+        'max_iter': trial.suggest_int('max_iter', 200, 1000),
+        'tol': trial.suggest_float('tol', 1e-6, 1e-3, log=True),
+        'early_stopping': trial.suggest_categorical('early_stopping', [True, False]),
+        'validation_fraction': trial.suggest_float('validation_fraction', 0.05, 0.2),
+        'n_iter_no_change': trial.suggest_int('n_iter_no_change', 5, 20)
     }
 
-    # Only suggest momentum if solver is 'sgd' (required parameter)
+    # Only suggest momentum and nesterovs if solver is 'sgd'
     if solver == 'sgd':
         params['momentum'] = trial.suggest_float('momentum', 0.5, 0.99)
+        params['nesterovs_momentum'] = trial.suggest_categorical('nesterovs_momentum', [True, False])
+
+    # Adam-specific parameters
+    if solver == 'adam':
+        params['beta_1'] = trial.suggest_float('beta_1', 0.8, 0.999)
+        params['beta_2'] = trial.suggest_float('beta_2', 0.9, 0.9999)
+        params['epsilon'] = trial.suggest_float('epsilon', 1e-9, 1e-7, log=True)
 
     return params
 

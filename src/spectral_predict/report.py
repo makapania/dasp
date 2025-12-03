@@ -27,6 +27,9 @@ def write_markdown_report(target, df_ranked, out_dir):
 
     report_path = out_dir / f"{target}.md"
 
+    # Detect which score column exists (Bayesian uses 'Score', grid search uses 'CompositeScore')
+    score_col = 'Score' if 'Score' in df_ranked.columns else 'CompositeScore'
+
     # Get top 5
     top5 = df_ranked.head(5)
 
@@ -48,7 +51,8 @@ def write_markdown_report(target, df_ranked, out_dir):
     for row in top5.itertuples(index=False):
         lines.append(f"### Rank {row.Rank}: {row.Model} ({row.SubsetTag})")
         lines.append("")
-        lines.append(f"- **Composite Score:** {row.CompositeScore:.4f}")
+        score_value = getattr(row, score_col)
+        lines.append(f"- **Composite Score:** {score_value:.4f}")
         lines.append(f"- **Model:** {row.Model}")
         lines.append(f"- **Preprocess:** {row.Preprocess}")
 
@@ -88,7 +92,7 @@ def write_markdown_report(target, df_ranked, out_dir):
             "n_vars",
             "RMSE",
             "R2",
-            "CompositeScore",
+            score_col,
         ]
     else:
         cols = [
@@ -100,14 +104,14 @@ def write_markdown_report(target, df_ranked, out_dir):
             "n_vars",
             "Accuracy",
             "ROC_AUC",
-            "CompositeScore",
+            score_col,
         ]
 
     table_df = top5[cols].copy()
 
     # Format numeric columns
     for col in table_df.columns:
-        if col in ["RMSE", "R2", "Accuracy", "ROC_AUC", "CompositeScore"]:
+        if col in ["RMSE", "R2", "Accuracy", "ROC_AUC", "CompositeScore", "Score"]:
             table_df[col] = table_df[col].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
         elif col in ["LVs", "n_vars", "Rank"]:
             table_df[col] = table_df[col].apply(lambda x: f"{int(x)}" if pd.notna(x) else "N/A")

@@ -975,7 +975,7 @@ def auto_detect_y_column(df, exclude_cols):
     return candidate_cols[0]
 
 
-def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
+def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True):
     """
     Read a combined CSV/TXT file containing spectra + targets in one table.
 
@@ -1009,6 +1009,9 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         Name of specimen ID column. If None, auto-detect. If "__GENERATE__", force generation.
     y_col : str, optional
         Name of target variable column. If None, auto-detect.
+    drop_na_y : bool, optional
+        If True (default), remove rows with missing y values. If False, keep all rows with valid
+        spectral data even if y is NaN. Useful when loading data for prediction.
 
     Returns
     -------
@@ -1147,13 +1150,18 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
 
     # Check for missing values (NaN) and remove affected specimens
     has_nan_X = X.isna().any(axis=1)
-    has_nan = has_nan_X | has_nan_y
+
+    # Determine which rows to remove based on drop_na_y parameter
+    if drop_na_y:
+        has_nan = has_nan_X | has_nan_y
+    else:
+        has_nan = has_nan_X
 
     if has_nan.any():
         n_missing = has_nan.sum()
         missing_specimens = X.index[has_nan].tolist()
 
-        print(f"Warning: Found {n_missing} specimen(s) with missing values. Removing them.")
+        print(f"Warning: Found {n_missing} specimen(s) with missing spectral data. Removing them.")
         print(f"  Removed specimens: {missing_specimens[:10]}")  # Show first 10
         if n_missing > 10:
             print(f"  ... and {n_missing - 10} more")
@@ -1163,6 +1171,11 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None):
         y = y[~has_nan]
         if metadata_df is not None:
             metadata_df = metadata_df[~has_nan]
+
+    # Report on rows kept with missing y values if drop_na_y=False
+    if not drop_na_y and has_nan_y.any():
+        n_missing_y = has_nan_y.sum()
+        print(f"Info: Kept {n_missing_y} specimen(s) with missing target values (useful for prediction).")
 
     # Step 8: Validation
     # Check for duplicate specimen IDs (only if not generated)
@@ -2374,7 +2387,7 @@ def read_excel_spectra(
     return result, metadata
 
 
-def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0):
+def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0, drop_na_y=True):
     """
     Read a combined Excel file containing spectra + targets in one table.
 
@@ -2412,6 +2425,9 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         Name of target variable column. If None, auto-detect.
     sheet_name : str or int, optional
         Sheet name or index (default: 0 = first sheet)
+    drop_na_y : bool, optional
+        If True (default), remove rows with missing y values. If False, keep all rows with valid
+        spectral data even if y is NaN. Useful when loading data for prediction.
 
     Returns
     -------
@@ -2546,13 +2562,18 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
 
     # Check for missing values (NaN) and remove affected specimens
     has_nan_X = X.isna().any(axis=1)
-    has_nan = has_nan_X | has_nan_y
+
+    # Determine which rows to remove based on drop_na_y parameter
+    if drop_na_y:
+        has_nan = has_nan_X | has_nan_y
+    else:
+        has_nan = has_nan_X
 
     if has_nan.any():
         n_missing = has_nan.sum()
         missing_specimens = X.index[has_nan].tolist()
 
-        print(f"Warning: Found {n_missing} specimen(s) with missing values. Removing them.")
+        print(f"Warning: Found {n_missing} specimen(s) with missing spectral data. Removing them.")
         print(f"  Removed specimens: {missing_specimens[:10]}")  # Show first 10
         if n_missing > 10:
             print(f"  ... and {n_missing - 10} more")
@@ -2562,6 +2583,11 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         y = y[~has_nan]
         if metadata_df is not None:
             metadata_df = metadata_df[~has_nan]
+
+    # Report on rows kept with missing y values if drop_na_y=False
+    if not drop_na_y and has_nan_y.any():
+        n_missing_y = has_nan_y.sum()
+        print(f"Info: Kept {n_missing_y} specimen(s) with missing target values (useful for prediction).")
 
     # Step 8: Validation
     # Check for duplicate specimen IDs (only if not generated)

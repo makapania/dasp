@@ -20,19 +20,19 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
 
 # Check if virtual environment exists
-if [ ! -d ".venv" ]; then
+if [ ! -d ".venv312" ]; then
     echo -e "${RED}Error: Virtual environment not found!${NC}"
     echo ""
     echo "Please create the virtual environment first:"
-    echo "  python3 -m venv .venv"
-    echo "  source .venv/bin/activate"
+    echo "  python3 -m venv .venv312"
+    echo "  source .venv312/bin/activate"
     echo "  pip install -e ."
     echo ""
     exit 1
 fi
 
 # Check if Python exists in venv
-if [ ! -f ".venv/bin/python" ] && [ ! -f ".venv/bin/python3" ]; then
+if [ ! -f ".venv312/bin/python" ] && [ ! -f ".venv312/bin/python3" ]; then
     echo -e "${RED}Error: Python not found in virtual environment!${NC}"
     echo ""
     echo "Please reinstall the virtual environment."
@@ -40,10 +40,10 @@ if [ ! -f ".venv/bin/python" ] && [ ! -f ".venv/bin/python3" ]; then
 fi
 
 # Determine which Python to use
-if [ -f ".venv/bin/python3" ]; then
-    PYTHON=".venv/bin/python3"
+if [ -f ".venv312/bin/python3" ]; then
+    PYTHON=".venv312/bin/python3"
 else
-    PYTHON=".venv/bin/python"
+    PYTHON=".venv312/bin/python"
 fi
 
 # Check if the package is installed
