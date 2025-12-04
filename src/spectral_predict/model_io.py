@@ -33,6 +33,7 @@ predictions = predict_with_model(model_dict, new_X_data)
 
 import joblib
 import json
+import warnings
 import zipfile
 import tempfile
 import numpy as np
@@ -431,6 +432,12 @@ def predict_with_model(
     >>> print(predictions)
     array([15.2, 18.7, 12.3, ...])
     """
+    # Suppress sklearn warnings that are cosmetic only:
+    # - "X does not have valid feature names" (model fitted with DataFrame, predicting with array)
+    # - "Pipeline instance is not fitted yet" (FutureWarning, predictions still work)
+    warnings.filterwarnings("ignore", message="X does not have valid feature names")
+    warnings.filterwarnings("ignore", message="This Pipeline instance is not fitted yet")
+
     # Extract components
     model = model_dict['model']
     preprocessor = model_dict['preprocessor']
@@ -595,6 +602,10 @@ def predict_with_uncertainty(
     >>> print(result['applicability_domain']['distance_status'])
     array(['good', 'caution', 'extrapolation'])
     """
+    # Suppress sklearn warnings that are cosmetic only
+    warnings.filterwarnings("ignore", message="X does not have valid feature names")
+    warnings.filterwarnings("ignore", message="This Pipeline instance is not fitted yet")
+
     # Get standard predictions first
     predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
 
@@ -932,10 +943,25 @@ def _select_wavelengths_from_dataframe(
         If required wavelengths are missing
     """
     # Convert DataFrame columns to floats for comparison
-    try:
-        available_wl = df.columns.astype(float).values
-    except (ValueError, TypeError):
-        raise ValueError("DataFrame columns must be numeric wavelengths")
+    # Filter out any non-numeric columns first (metadata columns, etc.)
+    numeric_cols = []
+    non_numeric_cols = []
+    for col in df.columns:
+        try:
+            float(col)
+            numeric_cols.append(col)
+        except (ValueError, TypeError):
+            non_numeric_cols.append(col)
+
+    if non_numeric_cols:
+        print(f"Note: Ignoring {len(non_numeric_cols)} non-wavelength columns during prediction: {non_numeric_cols[:3]}{'...' if len(non_numeric_cols) > 3 else ''}")
+
+    if not numeric_cols:
+        raise ValueError("DataFrame has no numeric wavelength columns. Check that your data contains spectral data.")
+
+    # Use only numeric columns for wavelength matching
+    df_numeric = df[numeric_cols]
+    available_wl = df_numeric.columns.astype(float).values
 
     # Check for missing wavelengths
     required_set = set(required_wavelengths)
@@ -955,15 +981,16 @@ def _select_wavelengths_from_dataframe(
     selected_cols = []
     for required_wl in required_wavelengths:
         # Find matching column (allowing small floating point differences)
-        matching_cols = [
-            col for col in df.columns
-            if abs(float(col) - required_wl) < 0.01
-        ]
+        matching_cols = []
+        for col in df_numeric.columns:
+            col_float = float(col)  # Safe now - we filtered to numeric only
+            if abs(col_float - required_wl) < 0.01:
+                matching_cols.append(col)
         if not matching_cols:
             raise ValueError(f"Required wavelength {required_wl} not found")
         selected_cols.append(matching_cols[0])
 
-    return df[selected_cols].values
+    return df_numeric[selected_cols].values
 
 
 def _json_serializer(obj):

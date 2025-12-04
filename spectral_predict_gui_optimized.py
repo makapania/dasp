@@ -18916,6 +18916,8 @@ Configuration:
             self.prediction_notebook.select(1)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()  # Print full traceback to console for debugging
             messagebox.showerror("Prediction Error",
                 f"An error occurred during predictions:\n{str(e)}")
             self.pred_status.config(text="Error occurred")
@@ -18948,7 +18950,28 @@ Configuration:
         excluded_cols = {'Sample', 'Actual'} | set(metadata_cols)
         pred_cols = [col for col in results_df.columns if col not in excluded_cols]
 
-        # Additional safety: Filter out non-numeric columns
+        if len(pred_cols) < 2:
+            return results_df  # Need at least 2 models for consensus
+
+        # Check if any models are classification models FIRST - consensus only works for regression
+        # This prevents confusing warnings about non-numeric columns for classification predictions
+        has_classification = False
+        classification_count = 0
+        for col in pred_cols:
+            if col in self.predictions_model_map:
+                metadata = self.predictions_model_map[col]
+                task_type = metadata.get('task_type', 'regression')
+                if task_type == 'classification':
+                    has_classification = True
+                    classification_count += 1
+
+        # Skip consensus for classification models (can't average categorical predictions)
+        if has_classification:
+            print(f"\nSkipping consensus predictions: {classification_count} classification model(s) detected.")
+            print("Consensus predictions are only computed for regression models.")
+            return results_df
+
+        # For regression models: filter out any non-numeric columns (would indicate unexpected metadata)
         numeric_pred_cols = []
         for col in pred_cols:
             if pd.api.types.is_numeric_dtype(results_df[col]):
@@ -18959,22 +18982,6 @@ Configuration:
 
         if len(pred_cols) < 2:
             return results_df  # Need at least 2 models for consensus
-
-        # Check if any models are classification models - consensus only works for regression
-        has_classification = False
-        for col in pred_cols:
-            if col in self.predictions_model_map:
-                metadata = self.predictions_model_map[col]
-                task_type = metadata.get('task_type', 'regression')
-                if task_type == 'classification':
-                    has_classification = True
-                    break
-
-        # Skip consensus for classification models (can't average categorical predictions)
-        if has_classification:
-            print("\nSkipping consensus predictions: Classification models detected.")
-            print("Consensus predictions are only computed for regression models.")
-            return results_df
 
         # Extract model performance metadata
         model_r2 = {}
@@ -19557,6 +19564,19 @@ Configuration:
                 self.pred_plot_placeholder.pack_forget()
             return
 
+        # Check if this is a classification task - regression plots don't work for classification
+        # Classification predictions are text labels, not numeric values
+        is_classification = False
+        for col, metadata in self.predictions_model_map.items():
+            if metadata.get('task_type') == 'classification':
+                is_classification = True
+                break
+
+        if is_classification:
+            # For classification, use confusion matrix plotting instead of regression scatter
+            self._plot_classification_validation_results()
+            return
+
         # Hide placeholder
         if hasattr(self, 'pred_plot_placeholder'):
             self.pred_plot_placeholder.pack_forget()
@@ -19758,6 +19778,87 @@ Configuration:
 
         # Add export button
         self._add_plot_export_button(self.prediction_plots_frame, fig, "validation_predictions")
+
+    def _plot_classification_validation_results(self):
+        """Plot confusion matrix for classification predictions on validation set."""
+        from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+
+        # Clear existing plots
+        for widget in self.prediction_plots_frame.winfo_children():
+            widget.destroy()
+
+        # Get prediction columns (excluding metadata)
+        metadata_cols = list(self.ref.columns) if self.ref is not None else []
+        prediction_cols = [col for col in self.predictions_df.columns
+                          if col not in ['Sample', 'Actual'] + metadata_cols
+                          and not col.startswith('Consensus_')]
+
+        if not prediction_cols:
+            return
+
+        # Get actual values (text labels)
+        try:
+            y_true = self.validation_y.loc[self.predictions_df['Sample']].values
+        except Exception as e:
+            print(f"Error getting validation y values: {e}")
+            return
+
+        # Create figure with subplots for each model
+        n_models = len(prediction_cols)
+        n_cols = min(2, n_models)
+        n_rows = (n_models + n_cols - 1) // n_cols
+
+        fig = Figure(figsize=(6*n_cols, 5*n_rows))
+
+        for idx, col in enumerate(prediction_cols):
+            ax = fig.add_subplot(n_rows, n_cols, idx + 1)
+
+            y_pred = self.predictions_df[col].values
+
+            # Create confusion matrix
+            cm = confusion_matrix(y_true, y_pred)
+            class_labels = np.unique(np.concatenate([y_true, y_pred]))
+
+            # Plot confusion matrix as heatmap
+            im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+
+            # Set ticks and labels
+            tick_marks = np.arange(len(class_labels))
+            ax.set_xticks(tick_marks)
+            ax.set_yticks(tick_marks)
+            ax.set_xticklabels(class_labels, rotation=45, ha='right', fontsize=8)
+            ax.set_yticklabels(class_labels, fontsize=8)
+
+            # Add text annotations
+            thresh = cm.max() / 2.
+            for i in range(cm.shape[0]):
+                for j in range(cm.shape[1]):
+                    ax.text(j, i, format(cm[i, j], 'd'),
+                           ha="center", va="center",
+                           color="white" if cm[i, j] > thresh else "black",
+                           fontsize=10, fontweight='bold')
+
+            # Calculate metrics
+            accuracy = accuracy_score(y_true, y_pred)
+            n_classes = len(class_labels)
+            avg = 'binary' if n_classes == 2 else 'weighted'
+            precision = precision_score(y_true, y_pred, average=avg, zero_division=0)
+            recall = recall_score(y_true, y_pred, average=avg, zero_division=0)
+            f1 = f1_score(y_true, y_pred, average=avg, zero_division=0)
+
+            ax.set_xlabel('Predicted', fontsize=9)
+            ax.set_ylabel('Actual', fontsize=9)
+            ax.set_title(f'{col}\nAcc={accuracy:.3f} F1={f1:.3f}', fontsize=10, fontweight='bold')
+
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.prediction_plots_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.prediction_plots_frame, fig, "classification_validation")
 
     def _display_consensus_info(self):
         """Display detailed information about consensus predictions."""

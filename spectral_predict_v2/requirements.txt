@@ -15,6 +15,7 @@ optuna>=3.4.0
 
 # Plotting
 matplotlib>=3.7.0
+pyqtgraph>=0.13.0
 
 # File formats
 openpyxl>=3.1.0

@@ -1,21 +1,31 @@
 """
 File Drop Widget - Drag-and-drop file loading with format detection.
+
+Enhanced with theme system and modern styling.
 """
 
 from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFileDialog, QMessageBox
+    QFileDialog, QGraphicsDropShadowEffect
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QColor
+
+from ..theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY
+from ..theme.icons import Icons
 
 
 class FileDropWidget(QWidget):
     """
     A drag-and-drop widget for loading spectral data files.
 
-    Emits file_selected signal when a file is chosen via browse or drop.
+    Features:
+    - Drag and drop files
+    - Click to browse
+    - Visual feedback on drag hover
+    - Shows selected file name
+    - Theme-aware styling
     """
 
     file_selected = Signal(str)  # Emits the file path
@@ -33,54 +43,90 @@ class FileDropWidget(QWidget):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._current_file = None
+        self._is_hovering = False
 
         self._setup_ui()
+        self._apply_style()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Drop zone
+        # Drop zone container
         self.drop_zone = QWidget()
         self.drop_zone.setObjectName("dropZone")
         drop_layout = QVBoxLayout(self.drop_zone)
         drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_layout.setSpacing(SPACING["sm"])
+        drop_layout.setContentsMargins(SPACING["xl"], SPACING["lg"], SPACING["xl"], SPACING["lg"])
 
-        # Icon and text
-        self.icon_label = QLabel("📁")
-        self.icon_label.setStyleSheet("font-size: 32px;")
+        # Upload icon
+        self.icon_label = QLabel()
+        self.icon_label.setPixmap(Icons.upload(48).pixmap(48, 48))
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop_layout.addWidget(self.icon_label)
 
-        self.text_label = QLabel("Drop spectral file here\nor click to browse")
+        # Main text
+        self.text_label = QLabel("Drop spectral file here")
         self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.text_label.setStyleSheet("color: #aaa; font-size: 14px;")
+        self.text_label.setStyleSheet(f"""
+            color: {COLORS["text_primary"]};
+            font-size: {TYPOGRAPHY["size_lg"]}pt;
+            font-weight: {TYPOGRAPHY["weight_medium"]};
+        """)
         drop_layout.addWidget(self.text_label)
 
-        # Supported formats hint
-        self.formats_label = QLabel("CSV, Excel, ASD, SPC, JCAMP...")
+        # Secondary text
+        self.secondary_label = QLabel("or click to browse")
+        self.secondary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.secondary_label.setStyleSheet(f"""
+            color: {COLORS["text_secondary"]};
+            font-size: {TYPOGRAPHY["size_md"]}pt;
+        """)
+        drop_layout.addWidget(self.secondary_label)
+
+        # Supported formats
+        self.formats_label = QLabel("CSV, Excel, ASD, SPC, JCAMP-DX, TXT")
         self.formats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.formats_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.formats_label.setStyleSheet(f"""
+            color: {COLORS["text_tertiary"]};
+            font-size: {TYPOGRAPHY["size_sm"]}pt;
+            margin-top: {SPACING["sm"]}px;
+        """)
         drop_layout.addWidget(self.formats_label)
 
         layout.addWidget(self.drop_zone)
 
-        # Styling
-        self.drop_zone.setMinimumHeight(100)
-        self.drop_zone.setStyleSheet("""
-            #dropZone {
-                background-color: #2d2d2d;
-                border: 2px dashed #555;
-                border-radius: 8px;
-            }
-            #dropZone:hover {
-                border-color: #0078d4;
-                background-color: #333;
-            }
-        """)
-
-        # Make the whole widget clickable
+        # Make clickable
         self.drop_zone.mousePressEvent = self._on_click
+        self.drop_zone.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _apply_style(self):
+        self._update_style(False)
+
+    def _update_style(self, is_drag_over: bool = False, is_success: bool = False):
+        """Update styling based on state."""
+        if is_success:
+            bg = COLORS["accent_primary_muted"]
+            border_color = COLORS["accent_primary"]
+        elif is_drag_over:
+            bg = COLORS["accent_secondary_muted"]
+            border_color = COLORS["accent_secondary"]
+        else:
+            bg = COLORS["bg_elevated"]
+            border_color = COLORS["border_default"]
+
+        self.drop_zone.setStyleSheet(f"""
+            #dropZone {{
+                background-color: {bg};
+                border: 2px dashed {border_color};
+                border-radius: {RADIUS["lg"]}px;
+            }}
+            #dropZone:hover {{
+                border-color: {COLORS["accent_secondary"]};
+                background-color: {COLORS["bg_overlay"]};
+            }}
+        """)
 
     def _on_click(self, event):
         """Handle click to browse."""
@@ -104,23 +150,17 @@ class FileDropWidget(QWidget):
             urls = event.mimeData().urls()
             if urls and self._is_valid_file(urls[0].toLocalFile()):
                 event.acceptProposedAction()
-                self.drop_zone.setStyleSheet("""
-                    #dropZone {
-                        background-color: #1a3a1a;
-                        border: 2px dashed #4caf50;
-                        border-radius: 8px;
-                    }
-                """)
+                self._update_style(is_drag_over=True)
                 return
         event.ignore()
 
     def dragLeaveEvent(self, event):
         """Handle drag leave."""
-        self._reset_style()
+        self._update_style(False)
 
     def dropEvent(self, event: QDropEvent):
         """Handle file drop."""
-        self._reset_style()
+        self._update_style(False)
 
         if event.mimeData().hasUrls():
             url = event.mimeData().urls()[0]
@@ -146,39 +186,155 @@ class FileDropWidget(QWidget):
         self._current_file = file_path
         file_name = Path(file_path).name
 
-        # Update display
-        self.icon_label.setText("✓")
-        self.icon_label.setStyleSheet("font-size: 32px; color: #4caf50;")
+        # Update to success state
+        self._update_style(is_success=True)
+
+        # Update icon to checkmark
+        self.icon_label.setPixmap(Icons.success(48, COLORS["accent_primary"]).pixmap(48, 48))
+
+        # Update text
         self.text_label.setText(file_name)
-        self.text_label.setStyleSheet("color: #e0e0e0; font-size: 14px; font-weight: bold;")
-        self.formats_label.setText("Click to change file")
+        self.text_label.setStyleSheet(f"""
+            color: {COLORS["text_primary"]};
+            font-size: {TYPOGRAPHY["size_lg"]}pt;
+            font-weight: {TYPOGRAPHY["weight_semibold"]};
+        """)
+
+        self.secondary_label.setText("Click to change file")
+        self.formats_label.setVisible(False)
 
         # Emit signal
         self.file_selected.emit(file_path)
 
-    def _reset_style(self):
-        """Reset to default style."""
-        self.drop_zone.setStyleSheet("""
-            #dropZone {
-                background-color: #2d2d2d;
-                border: 2px dashed #555;
-                border-radius: 8px;
-            }
-            #dropZone:hover {
-                border-color: #0078d4;
-                background-color: #333;
-            }
+    def clear(self):
+        """Clear the current selection."""
+        self._current_file = None
+
+        # Reset icon
+        self.icon_label.setPixmap(Icons.upload(48).pixmap(48, 48))
+
+        # Reset text
+        self.text_label.setText("Drop spectral file here")
+        self.text_label.setStyleSheet(f"""
+            color: {COLORS["text_primary"]};
+            font-size: {TYPOGRAPHY["size_lg"]}pt;
+            font-weight: {TYPOGRAPHY["weight_medium"]};
         """)
+
+        self.secondary_label.setText("or click to browse")
+        self.formats_label.setVisible(True)
+
+        self._update_style(False)
+
+    @property
+    def current_file(self) -> str:
+        return self._current_file
+
+    def set_file(self, file_path: str):
+        """Programmatically set the file."""
+        if file_path and Path(file_path).exists():
+            self._handle_file(file_path)
+
+
+class CompactFileDropWidget(QWidget):
+    """
+    A compact version of the file drop widget for use in cards.
+
+    Shows a single row with icon, filename, and browse button.
+    """
+
+    file_selected = Signal(str)
+
+    SUPPORTED_EXTENSIONS = FileDropWidget.SUPPORTED_EXTENSIONS
+
+    def __init__(self, label: str = "Data file:", parent=None):
+        super().__init__(parent)
+        self._current_file = None
+        self._label = label
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACING["sm"])
+
+        # Label
+        label = QLabel(self._label)
+        label.setStyleSheet(f"""
+            color: {COLORS["text_secondary"]};
+            font-weight: {TYPOGRAPHY["weight_medium"]};
+        """)
+        layout.addWidget(label)
+
+        # File name display
+        self.file_label = QLabel("No file selected")
+        self.file_label.setStyleSheet(f"""
+            color: {COLORS["text_tertiary"]};
+            padding: 4px 8px;
+            background-color: {COLORS["bg_elevated"]};
+            border: 1px solid {COLORS["border_default"]};
+            border-radius: {RADIUS["sm"]}px;
+        """)
+        layout.addWidget(self.file_label, 1)
+
+        # Browse button
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.setIcon(Icons.folder_open(14))
+        self.browse_btn.clicked.connect(self.browse)
+        self.browse_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS["bg_elevated"]};
+                color: {COLORS["text_primary"]};
+                border: 1px solid {COLORS["border_default"]};
+                border-radius: {RADIUS["md"]}px;
+                padding: 4px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS["bg_overlay"]};
+            }}
+        """)
+        layout.addWidget(self.browse_btn)
+
+    def browse(self):
+        """Open file browser dialog."""
+        extensions = " ".join(f"*{ext}" for ext in self.SUPPORTED_EXTENSIONS)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Spectral Data",
+            "",
+            f"Spectral Files ({extensions});;All Files (*)"
+        )
+        if file_path:
+            self._handle_file(file_path)
+
+    def _handle_file(self, file_path: str):
+        """Process the selected file."""
+        self._current_file = file_path
+        file_name = Path(file_path).name
+
+        self.file_label.setText(file_name)
+        self.file_label.setStyleSheet(f"""
+            color: {COLORS["text_primary"]};
+            padding: 4px 8px;
+            background-color: {COLORS["bg_elevated"]};
+            border: 1px solid {COLORS["accent_primary"]};
+            border-radius: {RADIUS["sm"]}px;
+        """)
+
+        self.file_selected.emit(file_path)
 
     def clear(self):
         """Clear the current selection."""
         self._current_file = None
-        self.icon_label.setText("📁")
-        self.icon_label.setStyleSheet("font-size: 32px;")
-        self.text_label.setText("Drop spectral file here\nor click to browse")
-        self.text_label.setStyleSheet("color: #aaa; font-size: 14px;")
-        self.formats_label.setText("CSV, Excel, ASD, SPC, JCAMP...")
-        self._reset_style()
+        self.file_label.setText("No file selected")
+        self.file_label.setStyleSheet(f"""
+            color: {COLORS["text_tertiary"]};
+            padding: 4px 8px;
+            background-color: {COLORS["bg_elevated"]};
+            border: 1px solid {COLORS["border_default"]};
+            border-radius: {RADIUS["sm"]}px;
+        """)
 
     @property
     def current_file(self) -> str:

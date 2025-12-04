@@ -1,28 +1,33 @@
 """
 Predict Mode - Apply saved models to new data.
 
-For loading trained models and making predictions on new samples.
+Modern card-based layout for loading models and making predictions.
 """
 
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QPushButton, QFrame, QScrollArea, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QMessageBox, QProgressBar
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QFrame, QScrollArea, QSplitter, QFileDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
 from orchestration.state_store import StateStore
 from orchestration.job_runner import JobRunner
-from ui.widgets.file_drop import FileDropWidget
+
+from ..theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY
+from ..theme.icons import Icons
+from ..components.cards import Card, StatusCard
+from ..components.buttons import PrimaryButton, SecondaryButton, OutlineButton
+from ..widgets.file_drop import FileDropWidget, CompactFileDropWidget
+from ..widgets.data_grid import SpectralDataGrid
 
 
 class PredictionWorker(QThread):
     """Background worker for predictions."""
 
-    finished = Signal(object)  # (predictions, uncertainty, ad_flags, sample_ids) or Exception
+    finished = Signal(object)
     progress = Signal(str)
 
     def __init__(self, engine, model, X, sample_ids):
@@ -36,7 +41,6 @@ class PredictionWorker(QThread):
         try:
             self.progress.emit("Applying preprocessing...")
 
-            # Make predictions
             predictions, uncertainty, ad_flags = self.engine.predict(
                 self.X,
                 self.model,
@@ -45,14 +49,11 @@ class PredictionWorker(QThread):
 
             self.progress.emit("Checking applicability domain...")
 
-            # Enhanced AD check using training stats
             training_stats = self.model.config.get('training_stats', {})
             if training_stats:
                 y_min = training_stats.get('y_min', -np.inf)
                 y_max = training_stats.get('y_max', np.inf)
                 y_range = y_max - y_min if y_max > y_min else 1
-
-                # Flag predictions outside training range (with 10% margin)
                 margin = y_range * 0.1
                 ad_flags = (predictions >= y_min - margin) & (predictions <= y_max + margin)
 
@@ -66,10 +67,9 @@ class PredictMode(QWidget):
     """
     Predict mode view for applying models to new data.
 
-    Layout:
-    - MODEL: Load saved model, show model info
-    - NEW DATA: Load new spectral data for prediction
-    - PREDICTIONS: Table with predictions, uncertainty, applicability domain flags
+    Modern card-based layout:
+    - Left panel: Model loading, data loading, predict controls
+    - Right panel: Predictions table with summary stats
     """
 
     def __init__(self, state: StateStore, job_runner: JobRunner, parent=None):
@@ -78,7 +78,7 @@ class PredictMode(QWidget):
         self.job_runner = job_runner
         self._engine = None
         self._loaded_model = None
-        self._prediction_data = None  # (X, sample_ids, wavelengths)
+        self._prediction_data = None
         self._prediction_worker = None
         self._predictions_df = None
 
@@ -94,155 +94,232 @@ class PredictMode(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 10, 20, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["lg"])
+        layout.setSpacing(SPACING["md"])
 
+        # Main splitter: config left, results right
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setHandleWidth(SPACING["sm"])
+
+        # Left panel: configuration
+        left_panel = self._create_config_panel()
+        left_panel.setMaximumWidth(450)
+        main_splitter.addWidget(left_panel)
+
+        # Right panel: results
+        right_panel = self._create_results_panel()
+        main_splitter.addWidget(right_panel)
+
+        main_splitter.setSizes([400, 800])
+        layout.addWidget(main_splitter)
+
+    def _create_config_panel(self) -> QWidget:
+        """Create the left configuration panel."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setSpacing(16)
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, SPACING["sm"], 0)
+        layout.setSpacing(SPACING["md"])
 
-        # MODEL Section
-        model_group = self._create_model_section()
-        content_layout.addWidget(model_group)
+        # MODEL Card
+        model_card = Card("Model", parent=self)
+        model_layout = model_card.content_layout
 
-        # NEW DATA Section
-        data_group = self._create_data_section()
-        content_layout.addWidget(data_group)
-
-        # PREDICTIONS Section
-        pred_group = self._create_predictions_section()
-        content_layout.addWidget(pred_group, 1)
-
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
-
-    def _create_model_section(self) -> QGroupBox:
-        """Create the MODEL section."""
-        group = QGroupBox("MODEL")
-        layout = QVBoxLayout(group)
-
-        # Top row
-        row1 = QHBoxLayout()
-
-        self.load_model_btn = QPushButton("Load Model (.dasp)")
+        # Load model button
+        self.load_model_btn = OutlineButton("Load Model (.dasp)", Icons.folder_open(14, COLORS["text_primary"]))
         self.load_model_btn.clicked.connect(self._load_model)
-        row1.addWidget(self.load_model_btn)
+        model_layout.addWidget(self.load_model_btn)
 
-        self.model_path_label = QLabel("No model loaded")
-        self.model_path_label.setStyleSheet("color: #888;")
-        row1.addWidget(self.model_path_label)
+        # Model info display
+        self.model_status = StatusCard("No model loaded", "neutral", parent=self)
+        model_layout.addWidget(self.model_status)
 
-        row1.addStretch()
-        layout.addLayout(row1)
+        # Model details
+        self.model_details = QLabel("")
+        self.model_details.setWordWrap(True)
+        self.model_details.setStyleSheet(f"""
+            color: {COLORS['text_secondary']};
+            font-size: {TYPOGRAPHY['size_sm']}pt;
+            padding: {SPACING['xs']}px;
+            background-color: {COLORS['bg_elevated']};
+            border-radius: {RADIUS['sm']}px;
+        """)
+        self.model_details.setVisible(False)
+        model_layout.addWidget(self.model_details)
 
-        # Model info row
-        self.model_info_label = QLabel("")
-        self.model_info_label.setStyleSheet("color: #4fc3f7; font-size: 12px;")
-        layout.addWidget(self.model_info_label)
+        layout.addWidget(model_card)
 
-        return group
+        # DATA Card
+        data_card = Card("Prediction Data", parent=self)
+        data_layout = data_card.content_layout
 
-    def _create_data_section(self) -> QGroupBox:
-        """Create the NEW DATA section."""
-        group = QGroupBox("NEW DATA")
-        layout = QVBoxLayout(group)
-
-        # File drop widget
+        # File drop
         self.file_drop = FileDropWidget()
         self.file_drop.file_selected.connect(self._on_file_selected)
-        layout.addWidget(self.file_drop)
+        data_layout.addWidget(self.file_drop)
 
         # Data info
-        self.data_info_label = QLabel("")
-        self.data_info_label.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addWidget(self.data_info_label)
+        self.data_info = QLabel("")
+        self.data_info.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        data_layout.addWidget(self.data_info)
 
-        # Warnings
+        # Warning label
         self.warning_label = QLabel("")
-        self.warning_label.setStyleSheet("color: #ffa500;")
+        self.warning_label.setStyleSheet(f"""
+            color: {COLORS['accent_warning']};
+            font-size: {TYPOGRAPHY['size_sm']}pt;
+            padding: {SPACING['xs']}px;
+            background-color: {COLORS['accent_warning']}20;
+            border-radius: {RADIUS['sm']}px;
+        """)
+        self.warning_label.setWordWrap(True)
         self.warning_label.setVisible(False)
-        layout.addWidget(self.warning_label)
+        data_layout.addWidget(self.warning_label)
 
-        # Status and predict button
-        btn_row = QHBoxLayout()
+        layout.addWidget(data_card)
 
+        # PREDICT Card
+        predict_card = Card(parent=self)
+        predict_layout = predict_card.content_layout
+
+        # Status
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #888;")
-        btn_row.addWidget(self.status_label)
+        self.status_label.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        predict_layout.addWidget(self.status_label)
 
-        btn_row.addStretch()
-
-        self.predict_btn = QPushButton("▶ PREDICT")
-        self.predict_btn.setMinimumHeight(40)
-        self.predict_btn.setMinimumWidth(150)
+        # Predict button
+        self.predict_btn = PrimaryButton("Run Predictions", Icons.play(16, "#ffffff"))
+        self.predict_btn.setMinimumHeight(48)
         self.predict_btn.setEnabled(False)
         self.predict_btn.clicked.connect(self._run_prediction)
-        btn_row.addWidget(self.predict_btn)
+        predict_layout.addWidget(self.predict_btn)
 
-        layout.addLayout(btn_row)
+        layout.addWidget(predict_card)
 
-        return group
+        # BATCH Card
+        batch_card = Card("Batch Processing", parent=self)
+        batch_layout = batch_card.content_layout
 
-    def _create_predictions_section(self) -> QGroupBox:
-        """Create the PREDICTIONS section."""
-        group = QGroupBox("PREDICTIONS")
-        layout = QVBoxLayout(group)
+        batch_info = QLabel("Process multiple files at once")
+        batch_info.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        batch_layout.addWidget(batch_info)
 
-        # Summary row
-        self.summary_label = QLabel("")
-        self.summary_label.setStyleSheet("font-size: 12px; color: #888;")
-        layout.addWidget(self.summary_label)
+        self.batch_btn = OutlineButton("Select Folder...", Icons.folder_open(14, COLORS["text_primary"]))
+        self.batch_btn.setEnabled(False)
+        self.batch_btn.clicked.connect(self._batch_process)
+        batch_layout.addWidget(self.batch_btn)
 
-        # Results table
-        self.pred_table = QTableWidget()
-        self.pred_table.setColumnCount(4)
-        self.pred_table.setHorizontalHeaderLabels([
-            "Sample ID", "Prediction", "Uncertainty (±)", "AD Flag"
-        ])
-        self.pred_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.pred_table.setAlternatingRowColors(True)
-        self.pred_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #2d2d2d;
-                alternate-background-color: #353535;
-                gridline-color: #444;
-            }
-            QHeaderView::section {
-                background-color: #3d3d3d;
-                color: #e0e0e0;
-                padding: 4px;
-                border: 1px solid #444;
-            }
-        """)
-        layout.addWidget(self.pred_table)
+        layout.addWidget(batch_card)
 
-        # Action buttons
+        layout.addStretch()
+        scroll.setWidget(panel)
+        return scroll
+
+    def _create_results_panel(self) -> QWidget:
+        """Create the right results panel."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACING["md"])
+
+        # Summary Card
+        summary_card = Card("Summary", parent=self)
+        summary_layout = summary_card.content_layout
+
+        # Stats grid
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(SPACING["md"])
+
+        self.stat_count = self._create_stat_widget("Samples", "--")
+        stats_row.addWidget(self.stat_count, 1)
+
+        self.stat_mean = self._create_stat_widget("Mean", "--")
+        stats_row.addWidget(self.stat_mean, 1)
+
+        self.stat_std = self._create_stat_widget("Std Dev", "--")
+        stats_row.addWidget(self.stat_std, 1)
+
+        self.stat_range = self._create_stat_widget("Range", "--")
+        stats_row.addWidget(self.stat_range, 1)
+
+        self.stat_ad = self._create_stat_widget("Outside AD", "--")
+        stats_row.addWidget(self.stat_ad, 1)
+
+        summary_layout.addLayout(stats_row)
+        layout.addWidget(summary_card)
+
+        # Results Card
+        results_card = Card("Predictions", parent=self)
+        results_layout = results_card.content_layout
+
+        # Results grid
+        self.results_grid = SpectralDataGrid()
+        self.results_grid.setMinimumHeight(300)
+        results_layout.addWidget(self.results_grid)
+
+        layout.addWidget(results_card, 1)
+
+        # Export Card
+        export_card = Card(parent=self)
+        export_layout = export_card.content_layout
+
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING["sm"])
 
-        self.export_csv_btn = QPushButton("Export CSV")
+        self.export_csv_btn = PrimaryButton("Export CSV", Icons.download(14, "#ffffff"))
         self.export_csv_btn.setEnabled(False)
         self.export_csv_btn.clicked.connect(self._export_csv)
         btn_row.addWidget(self.export_csv_btn)
 
-        self.export_report_btn = QPushButton("Export Report")
+        self.export_report_btn = OutlineButton("Export Report", Icons.download(14, COLORS["text_primary"]))
         self.export_report_btn.setEnabled(False)
         self.export_report_btn.clicked.connect(self._export_report)
         btn_row.addWidget(self.export_report_btn)
 
-        self.batch_btn = QPushButton("Batch Process Folder")
-        self.batch_btn.setEnabled(False)
-        self.batch_btn.clicked.connect(self._batch_process)
-        btn_row.addWidget(self.batch_btn)
-
         btn_row.addStretch()
 
-        layout.addLayout(btn_row)
+        export_layout.addLayout(btn_row)
+        layout.addWidget(export_card)
 
-        return group
+        return panel
+
+    def _create_stat_widget(self, label: str, value: str) -> QWidget:
+        """Create a statistics display widget."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(SPACING["sm"], SPACING["xs"], SPACING["sm"], SPACING["xs"])
+        layout.setSpacing(2)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        label_widget = QLabel(label)
+        label_widget.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY['size_xs']}pt;")
+        label_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label_widget)
+
+        value_widget = QLabel(value)
+        value_widget.setObjectName("value")
+        value_widget.setStyleSheet(f"""
+            color: {COLORS['text_primary']};
+            font-size: {TYPOGRAPHY['size_lg']}pt;
+            font-weight: {TYPOGRAPHY['weight_semibold']};
+        """)
+        value_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(value_widget)
+
+        container.setStyleSheet(f"""
+            QWidget {{
+                background-color: {COLORS['bg_elevated']};
+                border: 1px solid {COLORS['border_subtle']};
+                border-radius: {RADIUS['sm']}px;
+            }}
+        """)
+
+        return container
 
     def _connect_signals(self):
         """Connect signals."""
@@ -251,7 +328,6 @@ class PredictMode(QWidget):
     def _on_model_changed(self):
         """Handle model change from Build mode."""
         if self.state.model.selected_model:
-            # Use model from state (passed from Build mode)
             from engine.api import TrainedModel
             self._loaded_model = TrainedModel(
                 model=self.state.model.selected_model,
@@ -271,10 +347,9 @@ class PredictMode(QWidget):
             if isinstance(rmsecv, float):
                 rmsecv = f"{rmsecv:.4f}"
 
-            self.model_path_label.setText(f"Loaded: {self._loaded_model.name}")
-            self.model_path_label.setStyleSheet("color: #4caf50;")
+            self.model_status.set_status(f"Loaded: {self._loaded_model.name}", "success")
 
-            info_parts = [
+            details = [
                 f"Preprocessing: {self._loaded_model.preprocessing}",
                 f"RMSECV: {rmsecv}",
             ]
@@ -282,24 +357,21 @@ class PredictMode(QWidget):
             training_stats = self._loaded_model.config.get('training_stats', {})
             if training_stats:
                 n_samples = training_stats.get('n_samples', '?')
-                y_range = f"{training_stats.get('y_min', '?'):.2f} - {training_stats.get('y_max', '?'):.2f}"
-                info_parts.append(f"Trained on: {n_samples} samples")
-                info_parts.append(f"Target range: {y_range}")
+                y_min = training_stats.get('y_min', 0)
+                y_max = training_stats.get('y_max', 0)
+                details.append(f"Trained on {n_samples} samples")
+                details.append(f"Target range: {y_min:.2f} - {y_max:.2f}")
 
-            created = self._loaded_model.config.get('created', '')
-            if created:
-                info_parts.append(f"Created: {created[:10]}")
+            self.model_details.setText("\n".join(details))
+            self.model_details.setVisible(True)
 
-            self.model_info_label.setText(" | ".join(info_parts))
             self.batch_btn.setEnabled(True)
             self._check_ready()
 
     def _load_model(self):
         """Load a saved model from .dasp file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Model",
-            "",
+            self, "Load Model", "",
             "DASP Model Files (*.dasp);;All Files (*)"
         )
 
@@ -308,12 +380,8 @@ class PredictMode(QWidget):
                 engine = self._get_engine()
                 self._loaded_model = engine.load_model(file_path)
                 self._update_model_display()
-
             except Exception as e:
-                QMessageBox.critical(
-                    self, "Load Failed",
-                    f"Failed to load model:\n{str(e)}"
-                )
+                QMessageBox.critical(self, "Load Failed", f"Failed to load model:\n{str(e)}")
 
     def _on_file_selected(self, file_path: str):
         """Handle file selection for prediction."""
@@ -323,13 +391,12 @@ class PredictMode(QWidget):
 
             self._prediction_data = (loaded.X, loaded.sample_ids, loaded.wavelengths)
 
-            self.data_info_label.setText(
+            self.data_info.setText(
                 f"{loaded.metadata['n_samples']} samples | "
                 f"{loaded.metadata['n_wavelengths']} wavelengths | "
                 f"Range: {loaded.metadata['wavelength_range'][0]:.0f}-{loaded.metadata['wavelength_range'][1]:.0f} nm"
             )
 
-            # Check wavelength compatibility
             self._check_wavelength_compatibility()
             self._check_ready()
 
@@ -346,22 +413,20 @@ class PredictMode(QWidget):
 
         model_wavelengths = self._loaded_model.config.get('wavelengths')
         if model_wavelengths is None:
-            # Can't check, proceed anyway
             self.warning_label.setVisible(False)
             return
 
         pred_wavelengths = self._prediction_data[2]
 
-        # Check if wavelength ranges match reasonably
         if len(model_wavelengths) != len(pred_wavelengths):
             self.warning_label.setText(
-                f"⚠️ Wavelength count mismatch: Model has {len(model_wavelengths)}, "
+                f"Wavelength count mismatch: Model has {len(model_wavelengths)}, "
                 f"data has {len(pred_wavelengths)}. Predictions may be unreliable."
             )
             self.warning_label.setVisible(True)
         elif not np.allclose(model_wavelengths, pred_wavelengths, rtol=0.01):
             self.warning_label.setText(
-                "⚠️ Wavelength values differ from training data. Predictions may be unreliable."
+                "Wavelength values differ from training data. Predictions may be unreliable."
             )
             self.warning_label.setVisible(True)
         else:
@@ -391,6 +456,7 @@ class PredictMode(QWidget):
 
         self.predict_btn.setEnabled(False)
         self.status_label.setText("Running predictions...")
+        self.status_label.setStyleSheet(f"color: {COLORS['accent_secondary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
 
         self._prediction_worker = PredictionWorker(
             engine=self._get_engine(),
@@ -412,11 +478,13 @@ class PredictMode(QWidget):
 
         if isinstance(result, Exception):
             self.status_label.setText(f"Error: {str(result)}")
+            self.status_label.setStyleSheet(f"color: {COLORS['accent_danger']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
             QMessageBox.critical(self, "Prediction Failed", str(result))
             return
 
         predictions, uncertainty, ad_flags, sample_ids = result
         self.status_label.setText("Predictions complete!")
+        self.status_label.setStyleSheet(f"color: {COLORS['accent_primary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
 
         # Store as DataFrame for export
         self._predictions_df = pd.DataFrame({
@@ -426,54 +494,62 @@ class PredictMode(QWidget):
             'in_ad': ad_flags if ad_flags is not None else True,
         })
 
-        # Update table
-        self._update_predictions_table(predictions, uncertainty, ad_flags, sample_ids)
+        # Update summary stats
+        self._update_summary(predictions, ad_flags)
 
-        # Update summary
-        n_outside_ad = np.sum(~ad_flags) if ad_flags is not None else 0
-        self.summary_label.setText(
-            f"{len(predictions)} predictions | "
-            f"Mean: {np.mean(predictions):.4f} | "
-            f"Std: {np.std(predictions):.4f} | "
-            f"Range: {np.min(predictions):.4f} - {np.max(predictions):.4f}"
-            + (f" | ⚠️ {n_outside_ad} outside AD" if n_outside_ad > 0 else "")
-        )
+        # Update results grid
+        self._update_results_display()
 
         self.export_csv_btn.setEnabled(True)
         self.export_report_btn.setEnabled(True)
 
-    def _update_predictions_table(self, predictions, uncertainty, ad_flags, sample_ids):
-        """Update the predictions table."""
-        self.pred_table.setRowCount(len(predictions))
+    def _update_summary(self, predictions, ad_flags):
+        """Update summary statistics."""
+        n_outside_ad = np.sum(~ad_flags) if ad_flags is not None else 0
 
-        for i, (sid, pred, unc, ad) in enumerate(zip(
-            sample_ids, predictions,
-            uncertainty if uncertainty is not None else [None] * len(predictions),
-            ad_flags if ad_flags is not None else [True] * len(predictions)
-        )):
-            # Sample ID
-            self.pred_table.setItem(i, 0, QTableWidgetItem(str(sid)))
+        self.stat_count.findChild(QLabel, "value").setText(str(len(predictions)))
+        self.stat_mean.findChild(QLabel, "value").setText(f"{np.mean(predictions):.4f}")
+        self.stat_std.findChild(QLabel, "value").setText(f"{np.std(predictions):.4f}")
+        self.stat_range.findChild(QLabel, "value").setText(
+            f"{np.min(predictions):.2f} - {np.max(predictions):.2f}"
+        )
 
-            # Prediction
-            pred_item = QTableWidgetItem(f"{pred:.4f}")
-            pred_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.pred_table.setItem(i, 1, pred_item)
+        ad_widget = self.stat_ad.findChild(QLabel, "value")
+        ad_widget.setText(str(n_outside_ad))
+        if n_outside_ad > 0:
+            ad_widget.setStyleSheet(f"""
+                color: {COLORS['accent_warning']};
+                font-size: {TYPOGRAPHY['size_lg']}pt;
+                font-weight: {TYPOGRAPHY['weight_semibold']};
+            """)
+        else:
+            ad_widget.setStyleSheet(f"""
+                color: {COLORS['accent_primary']};
+                font-size: {TYPOGRAPHY['size_lg']}pt;
+                font-weight: {TYPOGRAPHY['weight_semibold']};
+            """)
 
-            # Uncertainty
-            unc_text = f"{unc:.4f}" if unc is not None else "N/A"
-            unc_item = QTableWidgetItem(unc_text)
-            unc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.pred_table.setItem(i, 2, unc_item)
+    def _update_results_display(self):
+        """Update the results grid with predictions."""
+        if self._predictions_df is None:
+            return
 
-            # AD flag
-            ad_text = "✓" if ad else "⚠️ Outside"
-            ad_item = QTableWidgetItem(ad_text)
-            if not ad:
-                ad_item.setForeground(Qt.GlobalColor.yellow)
-            else:
-                ad_item.setForeground(Qt.GlobalColor.green)
-            ad_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.pred_table.setItem(i, 3, ad_item)
+        df = self._predictions_df
+        n_rows = len(df)
+        n_cols = 4
+
+        # Convert to numpy array for grid display
+        data = np.zeros((n_rows, n_cols))
+        data[:, 0] = np.arange(n_rows)  # Sample index
+        data[:, 1] = df['prediction'].values
+        data[:, 2] = df['uncertainty'].values if 'uncertainty' in df else np.nan
+        data[:, 3] = df['in_ad'].astype(float).values if 'in_ad' in df else 1.0
+
+        wavelengths = np.arange(n_cols)
+        sample_ids = df['sample_id'].tolist()
+
+        self.results_grid.set_data(data, wavelengths, sample_ids)
+        self.results_grid.model().set_column_names(["Index", "Prediction", "Uncertainty", "In AD"])
 
     def _export_csv(self):
         """Export predictions to CSV."""
@@ -488,10 +564,7 @@ class PredictMode(QWidget):
         if file_path:
             try:
                 self._predictions_df.to_csv(file_path, index=False)
-                QMessageBox.information(
-                    self, "Export Complete",
-                    f"Predictions exported to:\n{file_path}"
-                )
+                QMessageBox.information(self, "Export Complete", f"Predictions exported to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Export Failed", str(e))
 
@@ -538,10 +611,7 @@ class PredictMode(QWidget):
                 report += "\n---\n*Generated by Spectral Predict 2.0*\n"
 
                 Path(file_path).write_text(report)
-                QMessageBox.information(
-                    self, "Report Exported",
-                    f"Report exported to:\n{file_path}"
-                )
+                QMessageBox.information(self, "Report Exported", f"Report exported to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Export Failed", str(e))
 
@@ -567,7 +637,6 @@ class PredictMode(QWidget):
                     )
                     return
 
-                # Confirm
                 reply = QMessageBox.question(
                     self, "Batch Process",
                     f"Found {len(files)} files to process.\nContinue?",
@@ -577,7 +646,6 @@ class PredictMode(QWidget):
                 if reply != QMessageBox.StandardButton.Yes:
                     return
 
-                # Process all files
                 all_results = []
                 engine = self._get_engine()
 
@@ -610,14 +678,12 @@ class PredictMode(QWidget):
                             'error': str(e),
                         })
 
-                # Save results
                 output_path = folder_path / "batch_predictions.csv"
                 pd.DataFrame(all_results).to_csv(output_path, index=False)
 
                 QMessageBox.information(
                     self, "Batch Complete",
-                    f"Processed {len(files)} files.\n"
-                    f"Results saved to:\n{output_path}"
+                    f"Processed {len(files)} files.\nResults saved to:\n{output_path}"
                 )
 
             except Exception as e:

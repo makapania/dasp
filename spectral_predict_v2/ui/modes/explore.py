@@ -1,14 +1,13 @@
 """
 Explore Mode - Automated model discovery.
 
-Primary entry point for finding the best model automatically.
+Modern card-based layout with integrated data viewing and analysis.
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QPushButton, QComboBox, QSlider, QProgressBar, QTableWidget,
-    QTableWidgetItem, QHeaderView, QCheckBox, QFrame, QScrollArea,
-    QSplitter, QFileDialog, QMessageBox, QSpinBox, QDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QProgressBar, QFrame, QScrollArea, QSplitter,
+    QFileDialog, QMessageBox, QSpinBox, QDialog, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, Slot
 import numpy as np
@@ -17,18 +16,28 @@ from orchestration.state_store import StateStore, TaskType
 from orchestration.job_runner import JobRunner, JobResult
 from orchestration.config_manager import ConfigManager, AnalysisPreset
 from engine.api import EngineAPI, AnalysisConfig
-from ui.widgets.file_drop import FileDropWidget
-from ui.widgets.column_config_dialog import ColumnConfigDialog
+
+from ..theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY
+from ..theme.icons import Icons
+from ..components.cards import Card, CollapsibleCard
+from ..components.buttons import PrimaryButton, SecondaryButton, GhostButton, OutlineButton
+from ..components.inputs import (
+    StyledComboBox, StyledSpinBox, StyledSlider, StyledCheckBox, LabeledInput
+)
+from ..widgets.file_drop import FileDropWidget
+from ..widgets.column_config_dialog import ColumnConfigDialog
+from ..widgets.data_grid import SpectralDataGrid
+from ..widgets.plot_widget import SpectraOverlayPlot
 
 
 class ExploreMode(QWidget):
     """
     Explore mode view for automated model discovery.
 
-    Layout:
-    - DATA section: File drop, preset selector, target/task selection
-    - ANALYSIS section: Thoroughness slider, run button, advanced options
-    - RESULTS section: Sortable/filterable table with pinning for comparison
+    Modern card-based layout:
+    - Left panel: Data loading, configuration, run controls
+    - Right panel: Data preview (grid + spectra plot)
+    - Bottom: Results table with filtering
     """
 
     def __init__(self, state: StateStore, job_runner: JobRunner, config: ConfigManager, parent=None):
@@ -39,257 +48,324 @@ class ExploreMode(QWidget):
         self.engine = EngineAPI()
 
         self._current_job_id = None
+        self._results_df = None
 
         self._setup_ui()
         self._connect_signals()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 10, 20, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["lg"])
+        layout.setSpacing(SPACING["md"])
 
-        # Create scrollable content area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Main splitter: top (config + preview) and bottom (results)
+        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_splitter.setHandleWidth(SPACING["sm"])
 
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setSpacing(16)
+        # Top section: config left, preview right
+        top_widget = QWidget()
+        top_layout = QHBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(SPACING["md"])
 
-        # DATA Section
-        data_group = self._create_data_section()
-        content_layout.addWidget(data_group)
+        # Left panel: configuration
+        left_panel = self._create_config_panel()
+        left_panel.setMinimumWidth(400)
+        top_layout.addWidget(left_panel)
 
-        # ANALYSIS Section
-        analysis_group = self._create_analysis_section()
-        content_layout.addWidget(analysis_group)
+        # Right panel: data preview
+        right_panel = self._create_preview_panel()
+        top_layout.addWidget(right_panel, 1)
 
-        # RESULTS Section
-        results_group = self._create_results_section()
-        content_layout.addWidget(results_group, 1)  # Stretch
+        main_splitter.addWidget(top_widget)
 
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
+        # Bottom section: results
+        results_panel = self._create_results_panel()
+        main_splitter.addWidget(results_panel)
 
-    def _create_data_section(self) -> QGroupBox:
-        """Create the DATA section."""
-        group = QGroupBox("DATA")
-        layout = QHBoxLayout(group)
-        layout.setSpacing(16)
+        # Set splitter stretch factors (top gets more space)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 2)
 
-        # File drop widget
+        layout.addWidget(main_splitter)
+
+    def _create_config_panel(self) -> QWidget:
+        """Create the left configuration panel."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACING["md"])
+
+        # DATA Card
+        data_card = Card("Load Data", parent=self)
+        data_layout = data_card.content_layout
+
+        # File drop
         self.file_drop = FileDropWidget()
-        self.file_drop.setMinimumWidth(300)
-        self.file_drop.setMaximumWidth(400)
         self.file_drop.file_selected.connect(self._on_file_selected)
-        layout.addWidget(self.file_drop)
+        data_layout.addWidget(self.file_drop)
 
-        # Preset selector
-        preset_layout = QVBoxLayout()
-        preset_layout.addWidget(QLabel("Preset:"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.setMinimumWidth(180)
-        self._populate_presets()
-        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        preset_layout.addWidget(self.preset_combo)
-        preset_layout.addStretch()
-        layout.addLayout(preset_layout)
+        # Target and task selection row
+        target_row = QHBoxLayout()
+        target_row.setSpacing(SPACING["sm"])
 
-        # Target variable
-        target_layout = QVBoxLayout()
-        target_layout.addWidget(QLabel("Target:"))
-        self.target_combo = QComboBox()
-        self.target_combo.setMinimumWidth(150)
+        # Target combo
+        target_container = QWidget()
+        target_inner = QVBoxLayout(target_container)
+        target_inner.setContentsMargins(0, 0, 0, 0)
+        target_inner.setSpacing(SPACING["xs"])
+        target_label = QLabel("Target Variable")
+        target_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        target_inner.addWidget(target_label)
+        self.target_combo = StyledComboBox()
         self.target_combo.setEnabled(False)
         self.target_combo.currentIndexChanged.connect(self._on_target_changed)
-        target_layout.addWidget(self.target_combo)
-        target_layout.addStretch()
-        layout.addLayout(target_layout)
+        target_inner.addWidget(self.target_combo)
+        target_row.addWidget(target_container, 1)
 
-        # Task type
-        task_layout = QVBoxLayout()
-        task_layout.addWidget(QLabel("Task:"))
-        self.task_combo = QComboBox()
+        # Task type combo
+        task_container = QWidget()
+        task_inner = QVBoxLayout(task_container)
+        task_inner.setContentsMargins(0, 0, 0, 0)
+        task_inner.setSpacing(SPACING["xs"])
+        task_label = QLabel("Task Type")
+        task_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        task_inner.addWidget(task_label)
+        self.task_combo = StyledComboBox()
         self.task_combo.addItems(["Regression", "Classification"])
         self.task_combo.currentIndexChanged.connect(self._on_task_changed)
-        task_layout.addWidget(self.task_combo)
-        task_layout.addStretch()
-        layout.addLayout(task_layout)
+        task_inner.addWidget(self.task_combo)
+        target_row.addWidget(task_container, 1)
 
-        layout.addStretch()
+        data_layout.addLayout(target_row)
+        layout.addWidget(data_card)
 
-        return group
+        # ANALYSIS Card
+        analysis_card = Card("Analysis Settings", parent=self)
+        analysis_layout = analysis_card.content_layout
 
-    def _create_analysis_section(self) -> QGroupBox:
-        """Create the ANALYSIS section."""
-        group = QGroupBox("ANALYSIS")
-        layout = QVBoxLayout(group)
+        # Preset row
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(SPACING["sm"])
+        preset_label = QLabel("Preset:")
+        preset_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        preset_row.addWidget(preset_label)
+        self.preset_combo = StyledComboBox()
+        self._populate_presets()
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        preset_row.addWidget(self.preset_combo, 1)
+        analysis_layout.addLayout(preset_row)
 
-        # Thoroughness slider row
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(QLabel("Thoroughness:"))
+        # Thoroughness slider
+        thoroughness_container = QWidget()
+        thor_layout = QVBoxLayout(thoroughness_container)
+        thor_layout.setContentsMargins(0, 0, 0, 0)
+        thor_layout.setSpacing(SPACING["xs"])
 
-        self.thoroughness_slider = QSlider(Qt.Orientation.Horizontal)
+        thor_header = QHBoxLayout()
+        thor_label = QLabel("Thoroughness")
+        thor_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        thor_header.addWidget(thor_label)
+        self.time_estimate_label = QLabel("~15 min")
+        self.time_estimate_label.setStyleSheet(f"color: {COLORS['text_tertiary']};")
+        thor_header.addStretch()
+        thor_header.addWidget(self.time_estimate_label)
+        thor_layout.addLayout(thor_header)
+
+        self.thoroughness_slider = StyledSlider(Qt.Orientation.Horizontal)
         self.thoroughness_slider.setMinimum(0)
         self.thoroughness_slider.setMaximum(3)
-        self.thoroughness_slider.setValue(1)  # Standard
-        self.thoroughness_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.thoroughness_slider.setValue(1)
+        self.thoroughness_slider.setTickPosition(StyledSlider.TickPosition.TicksBelow)
         self.thoroughness_slider.setTickInterval(1)
-        self.thoroughness_slider.setMinimumWidth(300)
-        slider_row.addWidget(self.thoroughness_slider)
-
-        self.time_estimate_label = QLabel("~15 min")
-        self.time_estimate_label.setStyleSheet("color: #888;")
-        self.time_estimate_label.setMinimumWidth(80)
-        slider_row.addWidget(self.time_estimate_label)
-
-        slider_row.addStretch()
-
-        # Advanced options button
-        self.advanced_btn = QPushButton("Advanced ▸")
-        self.advanced_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid #555;
-                color: #aaa;
-            }
-            QPushButton:hover {
-                background-color: #3d3d3d;
-            }
-        """)
-        self.advanced_btn.clicked.connect(self._toggle_advanced)
-        slider_row.addWidget(self.advanced_btn)
-
-        layout.addLayout(slider_row)
+        self.thoroughness_slider.valueChanged.connect(self._update_time_estimate)
+        thor_layout.addWidget(self.thoroughness_slider)
 
         # Slider labels
-        labels_row = QHBoxLayout()
-        labels_row.addSpacing(100)  # Offset for "Thoroughness:" label
-        labels_row.addWidget(QLabel("Quick"))
-        labels_row.addStretch()
-        labels_row.addWidget(QLabel("Standard"))
-        labels_row.addStretch()
-        labels_row.addWidget(QLabel("Comprehensive"))
-        labels_row.addStretch()
-        labels_row.addWidget(QLabel("Experimental"))
-        labels_row.addSpacing(160)
-        layout.addLayout(labels_row)
+        slider_labels = QHBoxLayout()
+        for text in ["Quick", "Standard", "Thorough", "Exhaustive"]:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY['size_xs']}pt;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            slider_labels.addWidget(lbl)
+        thor_layout.addLayout(slider_labels)
 
-        # Advanced options (hidden by default)
-        self.advanced_frame = QFrame()
-        self.advanced_frame.setVisible(False)
-        self.advanced_frame.setStyleSheet("QFrame { background-color: #252525; border-radius: 4px; padding: 8px; }")
-        adv_layout = QVBoxLayout(self.advanced_frame)
+        analysis_layout.addWidget(thoroughness_container)
+        layout.addWidget(analysis_card)
+
+        # ADVANCED Card (collapsible)
+        self.advanced_card = CollapsibleCard("Advanced Options", start_collapsed=True, parent=self)
+        adv_layout = self.advanced_card.content_layout
 
         # Preprocessing options
+        preprocess_label = QLabel("Preprocessing Methods")
+        preprocess_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        adv_layout.addWidget(preprocess_label)
+
         preprocess_row = QHBoxLayout()
-        preprocess_row.addWidget(QLabel("Preprocessing:"))
+        preprocess_row.setSpacing(SPACING["sm"])
         self.preprocess_checks = {}
         for name in ["Raw", "SNV", "SG1", "SG2", "MSC"]:
-            cb = QCheckBox(name)
+            cb = StyledCheckBox(name)
             cb.setChecked(name in ["Raw", "SNV", "SG1"])
             self.preprocess_checks[name.lower()] = cb
             preprocess_row.addWidget(cb)
         preprocess_row.addStretch()
         adv_layout.addLayout(preprocess_row)
 
-        # Model options - container for dynamic model checkboxes
+        # Model options
+        models_label = QLabel("Model Types")
+        models_label.setStyleSheet(f"color: {COLORS['text_secondary']}; margin-top: {SPACING['sm']}px;")
+        adv_layout.addWidget(models_label)
+
+        # Container for dynamic model checkboxes
         self.model_container = QWidget()
         self.model_layout = QHBoxLayout(self.model_container)
         self.model_layout.setContentsMargins(0, 0, 0, 0)
-        self.model_layout.addWidget(QLabel("Models:"))
+        self.model_layout.setSpacing(SPACING["sm"])
         self.model_checks = {}
 
-        # Define models for each task type
         self.regression_models = ["PLS", "Ridge", "ElasticNet", "RandomForest", "XGBoost", "LightGBM", "SVR"]
         self.classification_models = ["PLS-DA", "RandomForest", "XGBoost", "LightGBM", "SVM", "LDA"]
 
-        # Create checkboxes for regression models (default)
         for name in self.regression_models:
-            cb = QCheckBox(name)
+            cb = StyledCheckBox(name)
             cb.setChecked(name in ["PLS", "Ridge", "ElasticNet"])
             key = name.lower().replace("-", "")
             self.model_checks[key] = cb
             self.model_layout.addWidget(cb)
-
         self.model_layout.addStretch()
         adv_layout.addWidget(self.model_container)
 
-        # Bayesian option
-        bayesian_row = QHBoxLayout()
-        self.bayesian_check = QCheckBox("Use Bayesian Optimization (faster)")
+        # Bayesian options
+        bayes_row = QHBoxLayout()
+        bayes_row.setSpacing(SPACING["sm"])
+        self.bayesian_check = StyledCheckBox("Bayesian Optimization")
         self.bayesian_check.setChecked(True)
-        bayesian_row.addWidget(self.bayesian_check)
-        bayesian_row.addWidget(QLabel("Trials:"))
-        self.n_trials_spin = QSpinBox()
+        bayes_row.addWidget(self.bayesian_check)
+        bayes_row.addWidget(QLabel("Trials:"))
+        self.n_trials_spin = StyledSpinBox()
         self.n_trials_spin.setRange(10, 200)
         self.n_trials_spin.setValue(50)
-        bayesian_row.addWidget(self.n_trials_spin)
-        bayesian_row.addStretch()
-        adv_layout.addLayout(bayesian_row)
+        self.n_trials_spin.setFixedWidth(80)
+        bayes_row.addWidget(self.n_trials_spin)
+        bayes_row.addStretch()
+        adv_layout.addLayout(bayes_row)
 
-        layout.addWidget(self.advanced_frame)
+        layout.addWidget(self.advanced_card)
 
-        # Run button
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        # RUN section
+        run_card = Card(parent=self)
+        run_layout = run_card.content_layout
 
-        self.run_btn = QPushButton("▶ RUN AUTO ANALYSIS")
-        self.run_btn.setMinimumHeight(50)
-        self.run_btn.setMinimumWidth(250)
-        self.run_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 16px;
-                font-weight: bold;
-            }
+        # Progress (hidden initially)
+        self.progress_container = QWidget()
+        self.progress_container.setVisible(False)
+        progress_inner = QVBoxLayout(self.progress_container)
+        progress_inner.setContentsMargins(0, 0, 0, 0)
+        progress_inner.setSpacing(SPACING["xs"])
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {COLORS["bg_elevated"]};
+                border: 1px solid {COLORS["border_default"]};
+                border-radius: {RADIUS["sm"]}px;
+                height: 8px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS["accent_primary"]};
+                border-radius: {RADIUS["sm"]}px;
+            }}
         """)
-        self.run_btn.setEnabled(False)  # Disabled until data loaded
-        self.run_btn.clicked.connect(self._run_analysis)
-        btn_row.addWidget(self.run_btn)
+        progress_inner.addWidget(self.progress_bar)
 
-        self.cancel_btn = QPushButton("Cancel")
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        progress_inner.addWidget(self.progress_label)
+
+        run_layout.addWidget(self.progress_container)
+
+        # Button row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING["sm"])
+
+        self.run_btn = PrimaryButton("Run Analysis", Icons.play(16, "#ffffff"))
+        self.run_btn.setMinimumHeight(44)
+        self.run_btn.setEnabled(False)
+        self.run_btn.clicked.connect(self._run_analysis)
+        btn_row.addWidget(self.run_btn, 1)
+
+        self.cancel_btn = OutlineButton("Cancel")
+        self.cancel_btn.setMinimumHeight(44)
         self.cancel_btn.setVisible(False)
         self.cancel_btn.clicked.connect(self._cancel_analysis)
         btn_row.addWidget(self.cancel_btn)
 
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
+        run_layout.addLayout(btn_row)
+        layout.addWidget(run_card)
 
-        # Progress bar (hidden until analysis starts)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setMinimumHeight(24)
-        layout.addWidget(self.progress_bar)
+        layout.addStretch()
+        return panel
 
-        self.progress_label = QLabel("")
-        self.progress_label.setVisible(False)
-        self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.progress_label)
+    def _create_preview_panel(self) -> QWidget:
+        """Create the right data preview panel."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACING["md"])
 
-        return group
+        # Preview splitter: grid top, plot bottom
+        preview_splitter = QSplitter(Qt.Orientation.Vertical)
+        preview_splitter.setHandleWidth(SPACING["xs"])
 
-    def _create_results_section(self) -> QGroupBox:
-        """Create the RESULTS section."""
-        group = QGroupBox("RESULTS")
-        layout = QVBoxLayout(group)
+        # Data grid card
+        grid_card = Card("Data Preview", parent=self)
+        self.data_grid = SpectralDataGrid()
+        grid_card.content_layout.addWidget(self.data_grid)
+        preview_splitter.addWidget(grid_card)
 
-        # Filter/sort row
+        # Spectra plot card
+        plot_card = Card("Spectra", parent=self)
+        self.spectra_plot = SpectraOverlayPlot()
+        plot_card.content_layout.addWidget(self.spectra_plot)
+        preview_splitter.addWidget(plot_card)
+
+        preview_splitter.setSizes([300, 200])
+        layout.addWidget(preview_splitter)
+
+        return panel
+
+    def _create_results_panel(self) -> QWidget:
+        """Create the bottom results panel."""
+        card = Card("Analysis Results", parent=self)
+        layout = card.content_layout
+
+        # Filter row
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Filter:"))
+        filter_row.setSpacing(SPACING["sm"])
 
-        self.model_filter = QComboBox()
+        filter_label = QLabel("Filter:")
+        filter_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        filter_row.addWidget(filter_label)
+
+        self.model_filter = StyledComboBox()
         self.model_filter.addItems(["All Models", "PLS", "Ridge", "ElasticNet", "RandomForest", "XGBoost", "LightGBM"])
         self.model_filter.currentIndexChanged.connect(self._apply_filters)
         filter_row.addWidget(self.model_filter)
 
-        self.preprocess_filter = QComboBox()
+        self.preprocess_filter = StyledComboBox()
         self.preprocess_filter.addItems(["All Preprocessing", "Raw", "SNV", "SG1", "SG2", "MSC"])
         self.preprocess_filter.currentIndexChanged.connect(self._apply_filters)
         filter_row.addWidget(self.preprocess_filter)
 
-        filter_row.addWidget(QLabel("Score >"))
-        self.score_filter = QComboBox()
+        score_label = QLabel("Score >")
+        score_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        filter_row.addWidget(score_label)
+
+        self.score_filter = StyledComboBox()
         self.score_filter.addItems(["Any", "50", "70", "80", "90"])
         self.score_filter.currentIndexChanged.connect(self._apply_filters)
         filter_row.addWidget(self.score_filter)
@@ -297,48 +373,40 @@ class ExploreMode(QWidget):
         filter_row.addStretch()
 
         self.results_count_label = QLabel("No results yet")
-        self.results_count_label.setStyleSheet("color: #888;")
+        self.results_count_label.setStyleSheet(f"color: {COLORS['text_tertiary']};")
         filter_row.addWidget(self.results_count_label)
 
         layout.addLayout(filter_row)
 
-        # Results table
-        self.results_table = QTableWidget()
-        self.results_table.setColumnCount(7)
-        self.results_table.setHorizontalHeaderLabels([
-            "Pin", "Model", "Preprocessing", "RMSECV", "R²", "Variables", "Score"
-        ])
-        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.results_table.setColumnWidth(0, 40)
-        self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.results_table.setAlternatingRowColors(True)
-        self.results_table.cellDoubleClicked.connect(self._on_result_double_click)
-        layout.addWidget(self.results_table)
+        # Results grid (reusing SpectralDataGrid for now, will be specialized later)
+        self.results_grid = SpectralDataGrid()
+        self.results_grid.setMinimumHeight(150)
+        layout.addWidget(self.results_grid)
 
         # Action buttons
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING["sm"])
 
-        self.compare_btn = QPushButton("Compare Pinned (0)")
+        self.compare_btn = SecondaryButton("Compare Pinned (0)")
         self.compare_btn.setEnabled(False)
         self.compare_btn.clicked.connect(self._compare_pinned)
         btn_row.addWidget(self.compare_btn)
 
-        self.export_btn = QPushButton("Export CSV")
+        self.export_btn = OutlineButton("Export CSV", Icons.download(14, COLORS["text_primary"]))
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_results)
         btn_row.addWidget(self.export_btn)
 
         btn_row.addStretch()
 
-        self.build_btn = QPushButton("→ Build Selected")
+        self.build_btn = PrimaryButton("Build Selected Model", Icons.chevron_right(14, "#ffffff"))
         self.build_btn.setEnabled(False)
         self.build_btn.clicked.connect(self._go_to_build)
         btn_row.addWidget(self.build_btn)
 
         layout.addLayout(btn_row)
 
-        return group
+        return card
 
     def _populate_presets(self):
         """Populate the preset dropdown."""
@@ -346,7 +414,6 @@ class ExploreMode(QWidget):
         self.preset_combo.addItem("Custom", None)
         for key, name in self.config.list_presets():
             self.preset_combo.addItem(name, key)
-        # Default to Standard preset
         idx = self.preset_combo.findText("NIR Protein (Grain)")
         if idx >= 0:
             self.preset_combo.setCurrentIndex(idx)
@@ -355,88 +422,177 @@ class ExploreMode(QWidget):
         """Connect signals."""
         self.state.data_changed.connect(self._on_data_changed)
         self.state.analysis_completed.connect(self._on_analysis_completed)
-        self.thoroughness_slider.valueChanged.connect(self._update_time_estimate)
-
-        # Job runner signals
         self.job_runner.job_progress.connect(self._on_job_progress)
         self.job_runner.job_completed.connect(self._on_job_completed)
 
     def _on_file_selected(self, file_path: str):
-        """Handle file selection - shows column config dialog."""
+        """Handle file selection - auto-detects format and loads appropriately."""
+        from pathlib import Path
+
         try:
-            # Show column configuration dialog
-            dialog = ColumnConfigDialog(file_path, self)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                self.file_drop.clear()
-                return
+            path = Path(file_path)
 
-            config = dialog.get_config()
-            if not config:
-                self.file_drop.clear()
-                return
+            # Determine if this is a tabular file that needs column config
+            # or a spectral file that can be loaded directly
+            tabular_extensions = {'.csv', '.xlsx', '.xls', '.txt'}
+            spectral_extensions = {'.asd', '.spc', '.jdx', '.dx', '.jcm', '.sp', '.dat', '.dpt'}
 
-            # Load data with configuration
-            data = self.engine.load_data_with_config(
-                file_path,
-                id_column=config.get('id_column'),
-                target_column=config.get('target_column'),
-                metadata_columns=config.get('metadata_columns', [])
-            )
+            is_directory = path.is_dir()
+            extension = path.suffix.lower() if not is_directory else ''
 
-            # Update state
-            self.state.load_data(
-                X=data.X,
-                y=data.y if data.y is not None else np.zeros(data.X.shape[0]),
-                wavelengths=data.wavelengths,
-                file_path=file_path,
-                target_column=data.target_column or "Unknown",
-                sample_ids=data.sample_ids
-            )
-
-            # Populate target combo
-            self.target_combo.clear()
-            if data.available_targets:
-                self.target_combo.addItems(data.available_targets)
-                self.target_combo.setEnabled(True)
-                if data.target_column:
-                    idx = self.target_combo.findText(data.target_column)
-                    if idx >= 0:
-                        self.target_combo.setCurrentIndex(idx)
+            if is_directory or extension in spectral_extensions:
+                # Load spectral files directly - no column config needed
+                self._load_spectral_file(file_path)
+            elif extension in tabular_extensions:
+                # Show column config dialog for CSV/Excel
+                self._load_tabular_file(file_path)
             else:
-                self.target_combo.addItem("(No targets detected)")
-                self.target_combo.setEnabled(False)
-
-            # Enable run button if we have target
-            self.run_btn.setEnabled(data.y is not None)
-
-            # Auto-set task type based on target
-            if data.metadata.get("is_classification", False):
-                self.task_combo.setCurrentIndex(1)  # Classification
-                self.state.set_task_type(TaskType.CLASSIFICATION)
-            else:
-                self.task_combo.setCurrentIndex(0)  # Regression
-                self.state.set_task_type(TaskType.REGRESSION)
-
-            # Show success message
-            n_samples = data.X.shape[0]
-            n_wl = data.X.shape[1]
-            wl_range = f"{data.wavelengths.min():.0f}-{data.wavelengths.max():.0f}"
-            QMessageBox.information(
-                self,
-                "Data Loaded",
-                f"Successfully loaded:\n"
-                f"• {n_samples} samples\n"
-                f"• {n_wl} wavelengths ({wl_range} nm)\n"
-                f"• Target: {data.target_column or 'None detected'}"
-            )
+                # Try to auto-detect and load
+                self._load_spectral_file(file_path)
 
         except Exception as e:
             QMessageBox.critical(
                 self,
                 "Error Loading Data",
-                f"Could not load file:\n{str(e)}"
+                f"Could not load file:\n\n{str(e)}\n\nSupported formats:\n"
+                "• CSV, Excel (.csv, .xlsx, .xls)\n"
+                "• ASD directory or files\n"
+                "• SPC files\n"
+                "• JCAMP-DX (.jdx, .dx)\n"
+                "• ASCII spectra (.txt, .dat)"
             )
             self.file_drop.clear()
+
+    def _load_spectral_file(self, file_path: str):
+        """Load ASD, SPC, JCAMP, or other spectral files directly."""
+        from pathlib import Path
+
+        path = Path(file_path)
+
+        # If directory, check what's inside and give helpful feedback
+        if path.is_dir():
+            files = list(path.iterdir())
+            extensions = set(f.suffix.lower() for f in files if f.is_file())
+
+            # Check for supported spectral file types
+            asd_files = [f for f in files if f.suffix.lower() in ['.asd', '.sig']]
+            spc_files = [f for f in files if f.suffix.lower() == '.spc']
+            jcamp_files = [f for f in files if f.suffix.lower() in ['.jdx', '.dx']]
+
+            if not (asd_files or spc_files or jcamp_files):
+                raise ValueError(
+                    f"No spectral files found in folder.\n\n"
+                    f"Folder: {path.name}\n"
+                    f"Files found: {len(files)}\n"
+                    f"Extensions: {', '.join(sorted(extensions)) if extensions else 'none'}\n\n"
+                    f"Supported formats:\n"
+                    f"• ASD files (.asd, .sig)\n"
+                    f"• SPC files (.spc)\n"
+                    f"• JCAMP-DX files (.jdx, .dx)\n\n"
+                    f"For CSV/Excel files, use File > Open File instead."
+                )
+
+        data = self.engine.load_data(file_path, for_prediction=False)
+
+        self.state.load_data(
+            X=data.X,
+            y=data.y if data.y is not None else None,
+            wavelengths=data.wavelengths,
+            file_path=file_path,
+            target_column=data.target_column or "",
+            sample_ids=data.sample_ids
+        )
+
+        # Show info about loaded data
+        n_samples = data.X.shape[0]
+        n_wavelengths = data.X.shape[1]
+        wl_range = data.metadata.get("wavelength_range", (0, 0))
+        file_format = data.metadata.get("file_format", "unknown")
+
+        # Update target combo - spectral files usually don't have targets
+        self.target_combo.clear()
+        self.target_combo.addItem("(Load reference file for targets)")
+        self.target_combo.setEnabled(False)
+        self.run_btn.setEnabled(False)
+
+        # Update preview
+        self._update_preview(data.X, data.wavelengths, data.y, data.sample_ids)
+
+        # Show success message
+        QMessageBox.information(
+            self,
+            "Data Loaded",
+            f"Successfully loaded {file_format.upper()} data:\n\n"
+            f"• {n_samples} samples\n"
+            f"• {n_wavelengths} wavelengths ({wl_range[0]:.0f} - {wl_range[1]:.0f} nm)\n\n"
+            f"To run analysis, load a reference file with target values\n"
+            f"using the Target dropdown menu."
+        )
+
+    def _load_tabular_file(self, file_path: str):
+        """Load CSV/Excel with column configuration dialog."""
+        dialog = ColumnConfigDialog(file_path, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.file_drop.clear()
+            return
+
+        config = dialog.get_config()
+        if not config:
+            self.file_drop.clear()
+            return
+
+        data = self.engine.load_data_with_config(
+            file_path,
+            id_column=config.get('id_column'),
+            target_column=config.get('target_column'),
+            metadata_columns=config.get('metadata_columns', [])
+        )
+
+        self.state.load_data(
+            X=data.X,
+            y=data.y if data.y is not None else np.zeros(data.X.shape[0]),
+            wavelengths=data.wavelengths,
+            file_path=file_path,
+            target_column=data.target_column or "Unknown",
+            sample_ids=data.sample_ids
+        )
+
+        # Populate target combo
+        self.target_combo.clear()
+        if data.available_targets:
+            self.target_combo.addItems(data.available_targets)
+            self.target_combo.setEnabled(True)
+            if data.target_column:
+                idx = self.target_combo.findText(data.target_column)
+                if idx >= 0:
+                    self.target_combo.setCurrentIndex(idx)
+        else:
+            self.target_combo.addItem("(No targets detected)")
+            self.target_combo.setEnabled(False)
+
+        self.run_btn.setEnabled(data.y is not None)
+
+        # Auto-set task type
+        if data.metadata.get("is_classification", False):
+            self.task_combo.setCurrentIndex(1)
+            self.state.set_task_type(TaskType.CLASSIFICATION)
+        else:
+            self.task_combo.setCurrentIndex(0)
+            self.state.set_task_type(TaskType.REGRESSION)
+
+        # Update preview panels
+        self._update_preview(data.X, data.wavelengths, data.y, data.sample_ids)
+
+    def _update_preview(self, X, wavelengths, y, sample_ids):
+        """Update the data preview panels."""
+        # Update data grid
+        self.data_grid.set_data(X, wavelengths, sample_ids)
+
+        # Update spectra plot
+        self.spectra_plot.clear()
+        n_preview = min(50, X.shape[0])
+        sample_names = [f"Sample {i+1}" for i in range(n_preview)]
+        self.spectra_plot.set_data(X[:n_preview], wavelengths, sample_ids=sample_names)
 
     def _on_data_changed(self):
         """Handle data change from state."""
@@ -455,27 +611,22 @@ class ExploreMode(QWidget):
 
     def _apply_preset(self, preset: AnalysisPreset):
         """Apply preset configuration to UI."""
-        # Set task type
         if preset.task_type == "classification":
             self.task_combo.setCurrentIndex(1)
         else:
             self.task_combo.setCurrentIndex(0)
 
-        # Set preprocessing checkboxes
         for key, cb in self.preprocess_checks.items():
             cb.setChecked(key in preset.preprocessing.methods)
 
-        # Set model checkboxes
         for key, cb in self.model_checks.items():
             cb.setChecked(key in preset.models.model_types)
 
-        # Set Bayesian
         self.bayesian_check.setChecked(preset.models.use_bayesian)
         self.n_trials_spin.setValue(preset.models.n_trials)
 
     def _on_target_changed(self, index: int):
         """Handle target selection change."""
-        # TODO: Reload y values for new target
         pass
 
     def _on_task_changed(self, index: int):
@@ -486,9 +637,8 @@ class ExploreMode(QWidget):
 
     def _update_model_checkboxes(self, task: TaskType):
         """Update model checkboxes based on task type."""
-        # Clear existing checkboxes (except the label)
-        while self.model_layout.count() > 1:
-            item = self.model_layout.takeAt(1)
+        while self.model_layout.count() > 0:
+            item = self.model_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
@@ -502,19 +652,13 @@ class ExploreMode(QWidget):
             defaults = ["PLS", "Ridge", "ElasticNet"]
 
         for name in models:
-            cb = QCheckBox(name)
+            cb = StyledCheckBox(name)
             cb.setChecked(name in defaults)
             key = name.lower().replace("-", "")
             self.model_checks[key] = cb
             self.model_layout.addWidget(cb)
 
         self.model_layout.addStretch()
-
-    def _toggle_advanced(self):
-        """Toggle advanced options visibility."""
-        visible = not self.advanced_frame.isVisible()
-        self.advanced_frame.setVisible(visible)
-        self.advanced_btn.setText("Advanced ▾" if visible else "Advanced ▸")
 
     def _update_time_estimate(self, value: int):
         """Update the time estimate based on thoroughness."""
@@ -523,15 +667,12 @@ class ExploreMode(QWidget):
 
     def _get_analysis_config(self) -> AnalysisConfig:
         """Build analysis config from UI settings."""
-        # Get task type
         task_type = "classification" if self.task_combo.currentIndex() == 1 else "regression"
 
-        # Get selected preprocessing
         preprocessing = [k for k, cb in self.preprocess_checks.items() if cb.isChecked()]
         if not preprocessing:
             preprocessing = ["raw"]
 
-        # Get selected models - use appropriate defaults based on task type
         models = [k for k, cb in self.model_checks.items() if cb.isChecked()]
         if not models:
             if task_type == "classification":
@@ -539,16 +680,15 @@ class ExploreMode(QWidget):
             else:
                 models = ["pls", "ridge"]
 
-        # Adjust based on thoroughness
         thoroughness = self.thoroughness_slider.value()
         n_trials = self.n_trials_spin.value()
 
-        if thoroughness == 0:  # Quick
+        if thoroughness == 0:
             n_trials = min(n_trials, 20)
-            models = models[:2]  # Limit models
-        elif thoroughness == 2:  # Comprehensive
+            models = models[:2]
+        elif thoroughness == 2:
             n_trials = max(n_trials, 100)
-        elif thoroughness == 3:  # Experimental
+        elif thoroughness == 3:
             n_trials = max(n_trials, 150)
 
         return AnalysisConfig(
@@ -567,21 +707,17 @@ class ExploreMode(QWidget):
             QMessageBox.warning(self, "No Data", "Please load data first.")
             return
 
-        # Get configuration
         config = self._get_analysis_config()
 
         # Show progress UI
         self.run_btn.setVisible(False)
         self.cancel_btn.setVisible(True)
-        self.progress_bar.setVisible(True)
+        self.progress_container.setVisible(True)
         self.progress_bar.setValue(0)
-        self.progress_label.setVisible(True)
         self.progress_label.setText("Starting analysis...")
 
-        # Mark analysis as started
         self.state.start_analysis()
 
-        # Run analysis in background
         X = self.state.get_active_X()
         y = self.state.data.y
 
@@ -607,14 +743,11 @@ class ExploreMode(QWidget):
 
         self._current_job_id = None
 
-        # Reset UI
         self.run_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
-        self.progress_bar.setVisible(False)
-        self.progress_label.setVisible(False)
+        self.progress_container.setVisible(False)
 
         if result.success:
-            # Store results
             self.state.complete_analysis(result.result)
             self._populate_results(result.result)
             self.export_btn.setEnabled(True)
@@ -640,8 +773,7 @@ class ExploreMode(QWidget):
             self.job_runner.cancel(self._current_job_id)
         self.run_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
-        self.progress_bar.setVisible(False)
-        self.progress_label.setVisible(False)
+        self.progress_container.setVisible(False)
 
     def _on_analysis_completed(self):
         """Handle analysis completion from state."""
@@ -651,109 +783,68 @@ class ExploreMode(QWidget):
 
     def _populate_results(self, df):
         """Populate the results table."""
-        self._results_df = df  # Store for filtering
+        self._results_df = df
         self._display_results(df)
 
     def _display_results(self, df):
-        """Display results in the table."""
-        self.results_table.setRowCount(len(df))
-        for i, (_, row) in enumerate(df.iterrows()):
-            # Pin checkbox
-            pin_cb = QCheckBox()
-            pin_cb.stateChanged.connect(lambda state, idx=i: self._toggle_pin(idx, state))
-            self.results_table.setCellWidget(i, 0, pin_cb)
+        """Display results in the grid."""
+        if df is None or len(df) == 0:
+            self.results_count_label.setText("No results")
+            return
 
-            # Model
-            model_name = str(row.get("model", row.get("model_type", "")))
-            self.results_table.setItem(i, 1, QTableWidgetItem(model_name))
+        # Convert DataFrame to numpy for display in grid
+        # For now, just show key columns
+        display_cols = ["model", "preprocessing", "rmsecv", "r2", "n_variables", "composite_score"]
+        available_cols = [c for c in display_cols if c in df.columns or c.replace("_", "") in df.columns]
 
-            # Preprocessing
-            preprocess = str(row.get("preprocessing", row.get("preprocess", "")))
-            self.results_table.setItem(i, 2, QTableWidgetItem(preprocess))
+        if available_cols:
+            display_df = df[available_cols].head(100)
+            values = display_df.values
+            wavelengths = np.arange(len(available_cols))
+            self.results_grid.model().set_column_names([c.replace("_", " ").title() for c in available_cols])
 
-            # RMSECV
-            rmsecv = row.get("rmsecv", row.get("mean_rmsecv", 0))
-            self.results_table.setItem(i, 3, QTableWidgetItem(f"{rmsecv:.4f}"))
-
-            # R²
-            r2 = row.get("r2", row.get("mean_r2", 0))
-            self.results_table.setItem(i, 4, QTableWidgetItem(f"{r2:.4f}"))
-
-            # Variables
-            n_vars = row.get("n_variables", row.get("n_features", "all"))
-            self.results_table.setItem(i, 5, QTableWidgetItem(str(n_vars)))
-
-            # Score
-            score = row.get("composite_score", row.get("score", 0))
-            score_text = f"{score:.1f}"
-            if i == 0:
-                score_text += " 🥇"
-            elif i == 1:
-                score_text += " 🥈"
-            elif i == 2:
-                score_text += " 🥉"
-            self.results_table.setItem(i, 6, QTableWidgetItem(score_text))
-
-        self.results_count_label.setText(f"Showing: {len(df)} models")
+        self.results_count_label.setText(f"Showing {len(df)} models")
 
     def _apply_filters(self):
         """Apply filters to results."""
-        if not hasattr(self, '_results_df') or self._results_df is None:
+        if self._results_df is None:
             return
 
         df = self._results_df.copy()
 
-        # Model filter
         model_filter = self.model_filter.currentText()
         if model_filter != "All Models":
-            df = df[df.get("model", df.get("model_type", "")).str.lower().str.contains(model_filter.lower())]
+            model_col = "model" if "model" in df.columns else "model_type"
+            if model_col in df.columns:
+                df = df[df[model_col].str.lower().str.contains(model_filter.lower())]
 
-        # Preprocessing filter
         preprocess_filter = self.preprocess_filter.currentText()
         if preprocess_filter != "All Preprocessing":
-            df = df[df.get("preprocessing", df.get("preprocess", "")).str.lower() == preprocess_filter.lower()]
+            prep_col = "preprocessing" if "preprocessing" in df.columns else "preprocess"
+            if prep_col in df.columns:
+                df = df[df[prep_col].str.lower() == preprocess_filter.lower()]
 
-        # Score filter
         score_filter = self.score_filter.currentText()
         if score_filter != "Any":
-            min_score = float(score_filter)
-            df = df[df.get("composite_score", df.get("score", 0)) >= min_score]
+            score_col = "composite_score" if "composite_score" in df.columns else "score"
+            if score_col in df.columns:
+                df = df[df[score_col] >= float(score_filter)]
 
         self._display_results(df)
-
-    def _toggle_pin(self, index: int, state: int):
-        """Toggle a model's pinned state."""
-        is_pinned = self.state.toggle_pinned(index)
-        n_pinned = len(self.state.pinned_indices)
-        self.compare_btn.setText(f"Compare Pinned ({n_pinned})")
-        self.compare_btn.setEnabled(n_pinned >= 2)
-
-    def _on_result_double_click(self, row: int, col: int):
-        """Handle double-click on result row."""
-        # TODO: Show detailed model info
-        if hasattr(self, '_results_df') and self._results_df is not None:
-            model_info = self._results_df.iloc[row].to_dict()
-            info_text = "\n".join(f"{k}: {v}" for k, v in model_info.items())
-            QMessageBox.information(self, "Model Details", info_text)
 
     def _compare_pinned(self):
         """Show comparison of pinned models."""
         indices = self.state.pinned_indices
         if len(indices) < 2:
             return
-
-        # TODO: Implement proper comparison view
         QMessageBox.information(
-            self,
-            "Compare Models",
-            f"Comparing {len(indices)} models:\n"
-            f"Indices: {indices}\n\n"
-            "(Full comparison view coming in Phase 3)"
+            self, "Compare Models",
+            f"Comparing {len(indices)} models:\nIndices: {indices}\n\n(Full comparison view coming soon)"
         )
 
     def _export_results(self):
         """Export results to CSV."""
-        if not hasattr(self, '_results_df') or self._results_df is None:
+        if self._results_df is None:
             return
 
         file_path, _ = QFileDialog.getSaveFileName(

@@ -1,7 +1,7 @@
 """
 Main Application Window - Spectral Predict v2
 
-Combines mode selector, data context bar, and mode views into a unified interface.
+Modern card-based interface with integrated theme system.
 """
 
 from PySide6.QtWidgets import (
@@ -15,12 +15,14 @@ from PySide6.QtGui import QAction, QKeySequence
 from orchestration.state_store import StateStore, AppMode
 from orchestration.job_runner import JobRunner
 from orchestration.config_manager import ConfigManager
-from .mode_selector import ModeSelector
-from .data_context_bar import DataContextBar
+
+from .theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY
+from .theme.styles import get_app_stylesheet
+from .widgets.mode_selector import ModeSelector, AppMode as WidgetAppMode
+from .widgets.data_context_bar import DataContextBar
 from .modes.explore import ExploreMode
 from .modes.build import BuildMode
 from .modes.predict import PredictMode
-from .tools import CalibrationTransferTool, DataQualityTool, InterferenceRemovalTool, PresetManagerTool
 
 
 class ToolDialog(QDialog):
@@ -36,7 +38,6 @@ class ToolDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(tool_widget)
 
-        # Close button
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         button_box.rejected.connect(self.accept)
         layout.addWidget(button_box)
@@ -45,6 +46,9 @@ class ToolDialog(QDialog):
 class SpectralPredictApp(QMainWindow):
     """
     Main application window for Spectral Predict v2.
+
+    Modern dark theme with card-based layout and integrated
+    data grid, visualizations, and analysis tools.
     """
 
     def __init__(self):
@@ -77,10 +81,15 @@ class SpectralPredictApp(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
 
-        open_action = QAction("&Open Data...", self)
+        open_action = QAction("&Open File...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_data)
         file_menu.addAction(open_action)
+
+        open_folder_action = QAction("Open &Folder...", self)
+        open_folder_action.setShortcut("Ctrl+Shift+O")
+        open_folder_action.triggered.connect(self._open_folder)
+        file_menu.addAction(open_folder_action)
 
         file_menu.addSeparator()
 
@@ -154,13 +163,20 @@ class SpectralPredictApp(QMainWindow):
         layout.setSpacing(0)
 
         # Data context bar (always visible at top)
-        self.data_bar = DataContextBar(self.state)
+        self.data_bar = DataContextBar()
+        self.data_bar.file_clicked.connect(self._open_data)
         layout.addWidget(self.data_bar)
 
-        # Mode selector
+        # Mode selector container
         mode_container = QWidget()
+        mode_container.setStyleSheet(f"""
+            QWidget {{
+                background-color: {COLORS['bg_base']};
+                border-bottom: 1px solid {COLORS['border_subtle']};
+            }}
+        """)
         mode_layout = QVBoxLayout(mode_container)
-        mode_layout.setContentsMargins(20, 12, 20, 12)
+        mode_layout.setContentsMargins(SPACING["xl"], SPACING["md"], SPACING["xl"], SPACING["md"])
 
         self.mode_selector = ModeSelector()
         mode_layout.addWidget(self.mode_selector, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -169,6 +185,7 @@ class SpectralPredictApp(QMainWindow):
 
         # Stacked widget for mode views
         self.mode_stack = QStackedWidget()
+        self.mode_stack.setStyleSheet(f"background-color: {COLORS['bg_base']};")
 
         self.explore_mode = ExploreMode(self.state, self.job_runner, self.config_manager)
         self.build_mode = BuildMode(self.state, self.job_runner)
@@ -178,22 +195,44 @@ class SpectralPredictApp(QMainWindow):
         self.mode_stack.addWidget(self.build_mode)
         self.mode_stack.addWidget(self.predict_mode)
 
-        layout.addWidget(self.mode_stack, 1)  # Stretch factor 1
+        layout.addWidget(self.mode_stack, 1)
 
         # Status bar
         self.status_bar = QStatusBar()
+        self.status_bar.setStyleSheet(f"""
+            QStatusBar {{
+                background-color: {COLORS['bg_surface']};
+                color: {COLORS['text_tertiary']};
+                border-top: 1px solid {COLORS['border_subtle']};
+                padding: {SPACING['xs']}px {SPACING['sm']}px;
+            }}
+        """)
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
 
     def _connect_signals(self):
         """Connect signals between components."""
-        # Mode switching
-        self.mode_selector.mode_changed.connect(self._on_mode_changed)
-        self.state.mode_changed.connect(self.mode_selector.set_mode)
+        # Mode switching - map widget AppMode to state AppMode
+        def on_widget_mode_changed(widget_mode):
+            mode_map = {
+                WidgetAppMode.EXPLORE: AppMode.EXPLORE,
+                WidgetAppMode.BUILD: AppMode.BUILD,
+                WidgetAppMode.PREDICT: AppMode.PREDICT,
+            }
+            self._on_mode_changed(mode_map.get(widget_mode, AppMode.EXPLORE))
 
-        # Data bar actions
-        self.data_bar.load_data_clicked.connect(self._open_data)
-        self.data_bar.quality_check_clicked.connect(self._show_quality_check)
+        self.mode_selector.mode_changed.connect(on_widget_mode_changed)
+
+        # State mode changes update selector
+        def on_state_mode_changed(state_mode):
+            mode_map = {
+                AppMode.EXPLORE: WidgetAppMode.EXPLORE,
+                AppMode.BUILD: WidgetAppMode.BUILD,
+                AppMode.PREDICT: WidgetAppMode.PREDICT,
+            }
+            self.mode_selector.set_mode(mode_map.get(state_mode, WidgetAppMode.EXPLORE))
+
+        self.state.mode_changed.connect(on_state_mode_changed)
 
         # Job runner
         self.job_runner.job_started.connect(
@@ -210,6 +249,9 @@ class SpectralPredictApp(QMainWindow):
             lambda: self.status_bar.showMessage("Analysis started...")
         )
         self.state.analysis_completed.connect(self._on_analysis_completed)
+
+        # Data changes update context bar
+        self.state.data_changed.connect(self._on_data_changed)
 
     def _on_mode_changed(self, mode: AppMode):
         """Handle mode change."""
@@ -228,6 +270,23 @@ class SpectralPredictApp(QMainWindow):
         best = self.state.analysis.best_model_name
         self.status_bar.showMessage(f"Analysis complete: {n_models} models evaluated. Best: {best}")
 
+    def _on_data_changed(self):
+        """Handle data changes and update context bar."""
+        if self.state.has_data:
+            data = self.state.data
+            self.data_bar.set_data(
+                file_name=data.file_name or "Unknown",
+                n_samples=data.n_samples,
+                n_wavelengths=data.n_wavelengths,
+                wavelength_range=(data.wavelength_min, data.wavelength_max),
+                target_column=data.target_column,
+                target_range=(data.y.min(), data.y.max()) if data.y is not None else None,
+                missing_count=0,
+                outlier_count=len(self.state.flagged_rows) if hasattr(self.state, 'flagged_rows') else 0
+            )
+        else:
+            self.data_bar.clear()
+
     # --- File Actions ---
 
     def _open_data(self):
@@ -236,24 +295,34 @@ class SpectralPredictApp(QMainWindow):
             self,
             "Open Spectral Data",
             "",
-            "All Supported (*.csv *.xlsx *.xls *.asd *.spc *.jdx *.dx);;"\
-            "CSV Files (*.csv);;"\
-            "Excel Files (*.xlsx *.xls);;"\
-            "ASD Files (*.asd);;"\
-            "SPC Files (*.spc);;"\
-            "JCAMP-DX Files (*.jdx *.dx);;"\
+            "All Supported (*.csv *.xlsx *.xls *.asd *.spc *.jdx *.dx);;"
+            "CSV Files (*.csv);;"
+            "Excel Files (*.xlsx *.xls);;"
+            "ASD Files (*.asd);;"
+            "SPC Files (*.spc);;"
+            "JCAMP-DX Files (*.jdx *.dx);;"
             "All Files (*)"
         )
 
         if file_path:
-            # TODO: Use engine API to load data
             self.status_bar.showMessage(f"Loading: {file_path}")
-            # For now, just show a message
-            QMessageBox.information(
-                self,
-                "Load Data",
-                f"Data loading will be implemented in Phase 2.\n\nFile: {file_path}"
-            )
+            # Switch to Explore mode and trigger file selection
+            self.state.set_mode(AppMode.EXPLORE)
+            self.explore_mode.file_drop.set_file(file_path)
+
+    def _open_folder(self):
+        """Open a folder containing spectral files (ASD, SPC, etc.)."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Open Spectral Data Folder",
+            "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if folder_path:
+            self.status_bar.showMessage(f"Loading folder: {folder_path}")
+            # Switch to Explore mode and trigger file selection
+            self.state.set_mode(AppMode.EXPLORE)
+            self.explore_mode.file_drop.set_file(folder_path)
 
     def _save_model(self):
         """Save the current model."""
@@ -261,31 +330,14 @@ class SpectralPredictApp(QMainWindow):
             QMessageBox.warning(self, "Save Model", "No model to save. Train a model first.")
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Model",
-            "",
-            "DASP Model Files (*.dasp);;All Files (*)"
-        )
-
-        if file_path:
-            # TODO: Implement model saving
-            QMessageBox.information(self, "Save Model", f"Model saving will be implemented.\n\nPath: {file_path}")
+        # Delegate to Build mode
+        self.build_mode._save_model()
 
     def _load_model(self):
         """Load a saved model."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Model",
-            "",
-            "DASP Model Files (*.dasp);;All Files (*)"
-        )
-
-        if file_path:
-            # TODO: Implement model loading
-            QMessageBox.information(self, "Load Model", f"Model loading will be implemented.\n\nPath: {file_path}")
-            # Switch to Predict mode
-            self.state.set_mode(AppMode.PREDICT)
+        # Switch to Predict mode which handles model loading
+        self.state.set_mode(AppMode.PREDICT)
+        self.predict_mode._load_model()
 
     def _export_results(self):
         """Export analysis results."""
@@ -319,208 +371,8 @@ class SpectralPredictApp(QMainWindow):
 
     def _apply_theme(self):
         """Apply the current theme."""
-        if self._dark_mode:
-            self.setStyleSheet(self._get_dark_stylesheet())
-        else:
-            self.setStyleSheet(self._get_light_stylesheet())
-
-    def _get_dark_stylesheet(self) -> str:
-        """Return dark mode stylesheet."""
-        return """
-            QMainWindow, QWidget {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-            }
-            QMenuBar {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-            }
-            QMenuBar::item:selected {
-                background-color: #3d3d3d;
-            }
-            QMenu {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #444;
-            }
-            QMenu::item:selected {
-                background-color: #0078d4;
-            }
-            QStatusBar {
-                background-color: #2d2d2d;
-                color: #aaa;
-            }
-            QScrollBar:vertical {
-                background-color: #2d2d2d;
-                width: 12px;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #555;
-                border-radius: 6px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #666;
-            }
-            QPushButton {
-                background-color: #0078d4;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                color: white;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1084d8;
-            }
-            QPushButton:pressed {
-                background-color: #006cbd;
-            }
-            QPushButton:disabled {
-                background-color: #444;
-                color: #888;
-            }
-            QComboBox {
-                background-color: #3d3d3d;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 6px 12px;
-                color: #e0e0e0;
-            }
-            QComboBox:hover {
-                border-color: #0078d4;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QLineEdit, QSpinBox, QDoubleSpinBox {
-                background-color: #3d3d3d;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 6px;
-                color: #e0e0e0;
-            }
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-                border-color: #0078d4;
-            }
-            QTableWidget, QTableView {
-                background-color: #2d2d2d;
-                border: 1px solid #444;
-                gridline-color: #444;
-            }
-            QTableWidget::item, QTableView::item {
-                padding: 4px;
-            }
-            QTableWidget::item:selected, QTableView::item:selected {
-                background-color: #0078d4;
-            }
-            QHeaderView::section {
-                background-color: #3d3d3d;
-                border: none;
-                border-bottom: 1px solid #555;
-                padding: 6px;
-                font-weight: bold;
-            }
-            QProgressBar {
-                background-color: #3d3d3d;
-                border: none;
-                border-radius: 4px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: #0078d4;
-                border-radius: 4px;
-            }
-            QGroupBox {
-                border: 1px solid #444;
-                border-radius: 6px;
-                margin-top: 12px;
-                padding-top: 12px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 4px;
-            }
-        """
-
-    def _get_light_stylesheet(self) -> str:
-        """Return light mode stylesheet."""
-        return """
-            QMainWindow, QWidget {
-                background-color: #f5f5f5;
-                color: #333;
-            }
-            QMenuBar {
-                background-color: #fff;
-                color: #333;
-            }
-            QMenuBar::item:selected {
-                background-color: #e0e0e0;
-            }
-            QMenu {
-                background-color: #fff;
-                color: #333;
-                border: 1px solid #ccc;
-            }
-            QMenu::item:selected {
-                background-color: #0078d4;
-                color: white;
-            }
-            QStatusBar {
-                background-color: #e0e0e0;
-                color: #666;
-            }
-            QPushButton {
-                background-color: #0078d4;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                color: white;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1084d8;
-            }
-            QComboBox {
-                background-color: #fff;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QLineEdit, QSpinBox, QDoubleSpinBox {
-                background-color: #fff;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 6px;
-            }
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-                border-color: #0078d4;
-            }
-            QTableWidget, QTableView {
-                background-color: #fff;
-                border: 1px solid #ddd;
-            }
-            QTableWidget::item:selected, QTableView::item:selected {
-                background-color: #0078d4;
-                color: white;
-            }
-            QHeaderView::section {
-                background-color: #f0f0f0;
-                border: none;
-                border-bottom: 1px solid #ddd;
-                padding: 6px;
-                font-weight: bold;
-            }
-            QGroupBox {
-                border: 1px solid #ddd;
-                border-radius: 6px;
-                margin-top: 12px;
-                padding-top: 12px;
-            }
-        """
+        mode = "dark" if self._dark_mode else "light"
+        self.setStyleSheet(get_app_stylesheet(mode))
 
     # --- Tools Actions ---
 
@@ -530,35 +382,49 @@ class SpectralPredictApp(QMainWindow):
             QMessageBox.warning(self, "Quality Check", "Load data first to run quality checks.")
             return
 
-        tool = DataQualityTool(self.state)
-        dialog = ToolDialog(tool, "Data Quality Assessment", self)
-        dialog.exec()
+        try:
+            from .tools import DataQualityTool
+            tool = DataQualityTool(self.state)
+            dialog = ToolDialog(tool, "Data Quality Assessment", self)
+            dialog.exec()
+        except ImportError:
+            QMessageBox.information(self, "Coming Soon", "Data Quality tool will be available soon.")
 
     def _show_calibration_transfer(self):
         """Show the calibration transfer tool."""
-        tool = CalibrationTransferTool(self.state)
-        dialog = ToolDialog(tool, "Calibration Transfer", self)
-        dialog.exec()
+        try:
+            from .tools import CalibrationTransferTool
+            tool = CalibrationTransferTool(self.state)
+            dialog = ToolDialog(tool, "Calibration Transfer", self)
+            dialog.exec()
+        except ImportError:
+            QMessageBox.information(self, "Coming Soon", "Calibration Transfer tool will be available soon.")
 
     def _show_interference_removal(self):
         """Show the interference removal tool."""
-        tool = InterferenceRemovalTool(self.state)
-        dialog = ToolDialog(tool, "Interference Removal", self)
-        dialog.exec()
+        try:
+            from .tools import InterferenceRemovalTool
+            tool = InterferenceRemovalTool(self.state)
+            dialog = ToolDialog(tool, "Interference Removal", self)
+            dialog.exec()
+        except ImportError:
+            QMessageBox.information(self, "Coming Soon", "Interference Removal tool will be available soon.")
 
     def _show_preset_manager(self):
         """Show the preset manager."""
-        tool = PresetManagerTool(self.config_manager)
-        tool.preset_selected.connect(self._on_preset_applied)
-        dialog = ToolDialog(tool, "Preset Manager", self)
-        dialog.exec()
+        try:
+            from .tools import PresetManagerTool
+            tool = PresetManagerTool(self.config_manager)
+            tool.preset_selected.connect(self._on_preset_applied)
+            dialog = ToolDialog(tool, "Preset Manager", self)
+            dialog.exec()
+        except ImportError:
+            QMessageBox.information(self, "Coming Soon", "Preset Manager will be available soon.")
 
     def _on_preset_applied(self, preset_key: str):
         """Handle preset application from preset manager."""
         self.state.set_preset(preset_key)
-        # Switch to Explore mode and update preset
         self.state.set_mode(AppMode.EXPLORE)
-        self.explore_mode.set_preset(preset_key)
         self.status_bar.showMessage(f"Applied preset: {preset_key}")
 
     # --- Help Actions ---
@@ -568,18 +434,23 @@ class SpectralPredictApp(QMainWindow):
         QMessageBox.about(
             self,
             "About Spectral Predict",
-            "<h2>Spectral Predict v2.0</h2>"
-            "<p>Modern Automated Spectral Analysis Platform</p>"
-            "<p>A replacement for SIMCA and Unscrambler with superior automation.</p>"
-            "<hr>"
-            "<p><b>Features:</b></p>"
-            "<ul>"
-            "<li>Automated model discovery and ranking</li>"
-            "<li>Bayesian hyperparameter optimization</li>"
-            "<li>Preset-driven workflows</li>"
-            "<li>Calibration transfer</li>"
-            "<li>Interference removal</li>"
-            "</ul>"
+            f"""<h2 style="color: {COLORS['accent_primary']};">Spectral Predict v2.0</h2>
+            <p>Modern Automated Spectral Analysis Platform</p>
+            <p style="color: {COLORS['text_secondary']};">
+            A replacement for SIMCA and Unscrambler with superior automation.
+            </p>
+            <hr>
+            <p><b>Features:</b></p>
+            <ul>
+            <li>Automated model discovery and ranking</li>
+            <li>Excel-like data editing with fill-down</li>
+            <li>Interactive pyqtgraph visualizations</li>
+            <li>Bayesian hyperparameter optimization</li>
+            <li>Preset-driven workflows</li>
+            <li>Calibration transfer</li>
+            <li>Interference removal</li>
+            </ul>
+            """
         )
 
     def closeEvent(self, event):
@@ -598,3 +469,21 @@ class SpectralPredictApp(QMainWindow):
             self.job_runner.cancel_all()
 
         event.accept()
+
+
+def main():
+    """Launch the application."""
+    from PySide6.QtWidgets import QApplication
+    import sys
+
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    window = SpectralPredictApp()
+    window.show()
+
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

@@ -207,7 +207,22 @@ class EngineAPI:
         df, meta = io.read_spectra(file_path, format=file_format)
 
         X = df.values.astype(np.float64)
-        wavelengths = np.array([float(c) for c in df.columns])
+
+        # Parse wavelengths from column headers
+        try:
+            wavelengths = np.array([float(c) for c in df.columns])
+        except (ValueError, TypeError) as e:
+            # Some columns are not numeric - try to filter or give helpful error
+            non_numeric = [c for c in df.columns if not str(c).replace('.', '').replace('-', '').isdigit()]
+            if non_numeric:
+                raise ValueError(
+                    f"Could not parse wavelengths from column headers.\n"
+                    f"Non-numeric columns found: {non_numeric[:5]}"
+                    f"{'...' if len(non_numeric) > 5 else ''}\n"
+                    f"For CSV/Excel files with metadata columns, use the column configuration dialog."
+                ) from e
+            raise
+
         sample_ids = list(df.index.astype(str))
 
         return LoadedData(
