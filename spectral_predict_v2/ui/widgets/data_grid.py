@@ -173,6 +173,34 @@ class SpectralDataModel(QAbstractTableModel):
             self._column_types.append(self.COL_TYPE_METADATA)
             self._column_names.append(col_name)
 
+    def set_column_names(self, names: List[str]):
+        """
+        Set custom column names for display.
+
+        Args:
+            names: List of column names (excluding the ID column)
+
+        Note: This only works if the number of names matches the data columns
+        """
+        if not names:
+            return
+
+        # Keep ID column, replace the rest
+        if len(names) + 1 != len(self._column_names):
+            # Names don't match - try to update just the wavelength/data columns
+            id_cols = 1 + (1 if self._target_values is not None else 0)
+            if len(names) == len(self._column_names) - id_cols:
+                # Update wavelength columns
+                for i, name in enumerate(names):
+                    if id_cols + i < len(self._column_names):
+                        self._column_names[id_cols + i] = name
+                self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self._column_names) - 1)
+        else:
+            # Replace all except ID
+            for i, name in enumerate(names):
+                self._column_names[i + 1] = name
+            self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self._column_names) - 1)
+
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid() or self._spectral_data is None:
             return 0
@@ -810,7 +838,8 @@ class SpectralDataGrid(QWidget):
         self._filter_input = QLineEdit()
         self._filter_input.setPlaceholderText("Type to filter...")
         self._filter_input.textChanged.connect(self._on_filter_changed)
-        self._filter_input.setMaximumWidth(200)
+        self._filter_input.setMinimumWidth(150)
+        self._filter_input.setMaximumWidth(300)  # Responsive width range
         layout.addWidget(self._filter_input)
 
         # Column selector
@@ -831,7 +860,7 @@ class SpectralDataGrid(QWidget):
 
     def _create_status_bar(self) -> QWidget:
         bar = QWidget()
-        bar.setFixedHeight(24)
+        bar.setMinimumHeight(24)  # Allow expansion for text
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(SPACING["sm"], 0, SPACING["sm"], 0)
         layout.setSpacing(SPACING["md"])
@@ -925,6 +954,10 @@ class SpectralDataGrid(QWidget):
 
     def get_model(self) -> SpectralDataModel:
         """Get the underlying data model."""
+        return self._model
+
+    def model(self) -> SpectralDataModel:
+        """Get the underlying data model (alias for Qt compatibility)."""
         return self._model
 
     def get_selected_rows(self) -> List[int]:

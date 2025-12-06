@@ -16,6 +16,9 @@ def main():
     app.setApplicationVersion("2.0.0")
     app.setOrganizationName("DASP")
 
+    # Set Fusion style for consistent cross-platform appearance
+    app.setStyle("Fusion")
+
     window = SpectralPredictApp()
     window.show()
 

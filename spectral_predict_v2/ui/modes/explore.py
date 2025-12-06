@@ -4,6 +4,9 @@ Explore Mode - Automated model discovery.
 Modern card-based layout with integrated data viewing and analysis.
 """
 
+from pathlib import Path
+from typing import Optional
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QProgressBar, QFrame, QScrollArea, QSplitter,
@@ -68,13 +71,15 @@ class ExploreMode(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(SPACING["md"])
 
-        # Left panel: configuration
+        # Left panel: configuration - needs enough space for card titles
         left_panel = self._create_config_panel()
-        left_panel.setMinimumWidth(400)
+        left_panel.setMinimumWidth(450)
+        left_panel.setMaximumWidth(550)
         top_layout.addWidget(left_panel)
 
-        # Right panel: data preview
+        # Right panel: data preview - gets remaining space
         right_panel = self._create_preview_panel()
+        right_panel.setMinimumWidth(500)
         top_layout.addWidget(right_panel, 1)
 
         main_splitter.addWidget(top_widget)
@@ -104,6 +109,61 @@ class ExploreMode(QWidget):
         self.file_drop = FileDropWidget()
         self.file_drop.file_selected.connect(self._on_file_selected)
         data_layout.addWidget(self.file_drop)
+
+        # Reference file row (hidden until ASD folder loaded)
+        self.ref_container = QWidget()
+        ref_layout = QVBoxLayout(self.ref_container)
+        ref_layout.setContentsMargins(0, 0, 0, 0)
+        ref_layout.setSpacing(SPACING["xs"])
+
+        # Reference file path row
+        ref_path_row = QHBoxLayout()
+        ref_path_row.setSpacing(SPACING["sm"])
+
+        ref_label = QLabel("Reference CSV:")
+        ref_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        ref_path_row.addWidget(ref_label)
+
+        self.ref_path_label = QLabel("(No reference loaded)")
+        self.ref_path_label.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-style: italic;")
+        ref_path_row.addWidget(self.ref_path_label, 1)
+
+        self.load_ref_btn = SecondaryButton("Browse...")
+        self.load_ref_btn.clicked.connect(self._browse_reference_file)
+        ref_path_row.addWidget(self.load_ref_btn)
+
+        ref_layout.addLayout(ref_path_row)
+
+        # File column selection row (shown after reference loaded)
+        self.ref_config_container = QWidget()
+        ref_config_layout = QHBoxLayout(self.ref_config_container)
+        ref_config_layout.setContentsMargins(0, 0, 0, 0)
+        ref_config_layout.setSpacing(SPACING["sm"])
+
+        file_col_label = QLabel("Filename Column:")
+        file_col_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
+        ref_config_layout.addWidget(file_col_label)
+
+        self.file_column_combo = StyledComboBox()
+        self.file_column_combo.setEnabled(False)
+        self.file_column_combo.currentIndexChanged.connect(self._on_file_column_changed)
+        ref_config_layout.addWidget(self.file_column_combo, 1)
+
+        self.apply_ref_btn = PrimaryButton("Apply Reference")
+        self.apply_ref_btn.setEnabled(False)
+        self.apply_ref_btn.clicked.connect(self._apply_reference_merge)
+        ref_config_layout.addWidget(self.apply_ref_btn)
+
+        ref_layout.addWidget(self.ref_config_container)
+        self.ref_config_container.setVisible(False)
+
+        self.ref_container.setVisible(False)  # Hidden until spectral files loaded
+        data_layout.addWidget(self.ref_container)
+
+        # Store loaded reference info
+        self._loaded_reference_file = None
+        self._reference_columns = []
+        self._current_spectral_data = None
 
         # Target and task selection row
         target_row = QHBoxLayout()
@@ -199,15 +259,16 @@ class ExploreMode(QWidget):
 
         # Preprocessing options
         preprocess_label = QLabel("Preprocessing Methods")
-        preprocess_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        preprocess_label.setStyleSheet(f"color: {COLORS['text_secondary']}; margin-bottom: {SPACING['xs']}px;")
         adv_layout.addWidget(preprocess_label)
 
         preprocess_row = QHBoxLayout()
-        preprocess_row.setSpacing(SPACING["sm"])
+        preprocess_row.setSpacing(SPACING["md"])  # More spacing between checkboxes
         self.preprocess_checks = {}
         for name in ["Raw", "SNV", "SG1", "SG2", "MSC"]:
             cb = StyledCheckBox(name)
             cb.setChecked(name in ["Raw", "SNV", "SG1"])
+            cb.setMinimumWidth(60)  # Ensure minimum clickable width
             self.preprocess_checks[name.lower()] = cb
             preprocess_row.addWidget(cb)
         preprocess_row.addStretch()
@@ -215,14 +276,14 @@ class ExploreMode(QWidget):
 
         # Model options
         models_label = QLabel("Model Types")
-        models_label.setStyleSheet(f"color: {COLORS['text_secondary']}; margin-top: {SPACING['sm']}px;")
+        models_label.setStyleSheet(f"color: {COLORS['text_secondary']}; margin-top: {SPACING['md']}px; margin-bottom: {SPACING['xs']}px;")
         adv_layout.addWidget(models_label)
 
         # Container for dynamic model checkboxes
         self.model_container = QWidget()
         self.model_layout = QHBoxLayout(self.model_container)
         self.model_layout.setContentsMargins(0, 0, 0, 0)
-        self.model_layout.setSpacing(SPACING["sm"])
+        self.model_layout.setSpacing(SPACING["md"])  # More spacing between checkboxes
         self.model_checks = {}
 
         self.regression_models = ["PLS", "Ridge", "ElasticNet", "RandomForest", "XGBoost", "LightGBM", "SVR"]
@@ -231,23 +292,30 @@ class ExploreMode(QWidget):
         for name in self.regression_models:
             cb = StyledCheckBox(name)
             cb.setChecked(name in ["PLS", "Ridge", "ElasticNet"])
+            cb.setMinimumWidth(80)  # Ensure minimum clickable width
             key = name.lower().replace("-", "")
             self.model_checks[key] = cb
             self.model_layout.addWidget(cb)
         self.model_layout.addStretch()
         adv_layout.addWidget(self.model_container)
 
-        # Bayesian options
+        # Bayesian options - add vertical spacer first
+        adv_layout.addSpacing(SPACING["sm"])
+
         bayes_row = QHBoxLayout()
-        bayes_row.setSpacing(SPACING["sm"])
+        bayes_row.setSpacing(SPACING["md"])
         self.bayesian_check = StyledCheckBox("Bayesian Optimization")
         self.bayesian_check.setChecked(True)
         bayes_row.addWidget(self.bayesian_check)
-        bayes_row.addWidget(QLabel("Trials:"))
+
+        trials_label = QLabel("Trials:")
+        trials_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        bayes_row.addWidget(trials_label)
+
         self.n_trials_spin = StyledSpinBox()
         self.n_trials_spin.setRange(10, 200)
         self.n_trials_spin.setValue(50)
-        self.n_trials_spin.setFixedWidth(80)
+        self.n_trials_spin.setFixedWidth(90)
         bayes_row.addWidget(self.n_trials_spin)
         bayes_row.addStretch()
         adv_layout.addLayout(bayes_row)
@@ -494,6 +562,9 @@ class ExploreMode(QWidget):
 
         data = self.engine.load_data(file_path, for_prediction=False)
 
+        # Store spectral data for later merging with reference
+        self._current_spectral_data = data
+
         self.state.load_data(
             X=data.X,
             y=data.y if data.y is not None else None,
@@ -515,19 +586,29 @@ class ExploreMode(QWidget):
         self.target_combo.setEnabled(False)
         self.run_btn.setEnabled(False)
 
+        # Show reference file controls
+        self.ref_container.setVisible(True)
+
+        # Auto-detect reference files in the same folder
+        auto_detected = self._auto_detect_reference_files(file_path)
+
         # Update preview
         self._update_preview(data.X, data.wavelengths, data.y, data.sample_ids)
 
         # Show success message
-        QMessageBox.information(
-            self,
-            "Data Loaded",
+        msg = (
             f"Successfully loaded {file_format.upper()} data:\n\n"
             f"• {n_samples} samples\n"
             f"• {n_wavelengths} wavelengths ({wl_range[0]:.0f} - {wl_range[1]:.0f} nm)\n\n"
-            f"To run analysis, load a reference file with target values\n"
-            f"using the Target dropdown menu."
         )
+
+        if auto_detected:
+            msg += f"• Auto-detected reference file:\n  {Path(auto_detected).name}\n\n"
+            msg += "Configure column mapping and click 'Apply Reference' to merge."
+        else:
+            msg += "Click 'Browse...' to load a reference file with target values."
+
+        QMessageBox.information(self, "Data Loaded", msg)
 
     def _load_tabular_file(self, file_path: str):
         """Load CSV/Excel with column configuration dialog."""
@@ -654,6 +735,7 @@ class ExploreMode(QWidget):
         for name in models:
             cb = StyledCheckBox(name)
             cb.setChecked(name in defaults)
+            cb.setMinimumWidth(80)  # Ensure minimum clickable width
             key = name.lower().replace("-", "")
             self.model_checks[key] = cb
             self.model_layout.addWidget(cb)
@@ -800,7 +882,21 @@ class ExploreMode(QWidget):
         if available_cols:
             display_df = df[available_cols].head(100)
             values = display_df.values
+
+            # Create dummy wavelengths for column indices
             wavelengths = np.arange(len(available_cols))
+
+            # Create sample IDs from row index
+            sample_ids = [f"Model {i+1}" for i in range(len(values))]
+
+            # Set data to grid
+            self.results_grid.set_data(
+                spectral_data=values,
+                wavelengths=wavelengths,
+                sample_ids=sample_ids
+            )
+
+            # Update column names
             self.results_grid.model().set_column_names([c.replace("_", " ").title() for c in available_cols])
 
         self.results_count_label.setText(f"Showing {len(df)} models")
@@ -858,3 +954,255 @@ class ExploreMode(QWidget):
         """Switch to Build mode with selected model."""
         from orchestration.state_store import AppMode
         self.state.set_mode(AppMode.BUILD)
+
+    def _auto_detect_reference_files(self, spectral_file_path: str) -> Optional[str]:
+        """
+        Auto-detect reference CSV/Excel files in the same folder as spectral files.
+
+        Mimics V1 behavior: scan for .csv, .xlsx, .xls in the same directory.
+        If exactly 1 file found, auto-load it and populate column dropdowns.
+
+        Args:
+            spectral_file_path: Path to spectral data file or folder
+
+        Returns:
+            Path to auto-detected reference file, or None if not found/ambiguous
+        """
+        from pathlib import Path
+
+        path = Path(spectral_file_path)
+
+        # Get parent directory
+        if path.is_dir():
+            search_dir = path
+        else:
+            search_dir = path.parent
+
+        # Search for reference files
+        ref_files = []
+        for ext in ['*.csv', '*.xlsx', '*.xls']:
+            ref_files.extend(list(search_dir.glob(ext)))
+
+        # Remove duplicates and sort
+        ref_files = sorted(set(ref_files))
+
+        if len(ref_files) == 1:
+            # Auto-load the single reference file
+            ref_path = str(ref_files[0])
+            self._load_reference_columns(ref_path)
+            return ref_path
+        elif len(ref_files) > 1:
+            # Multiple files found - user must select manually
+            file_names = ', '.join(f.name for f in ref_files[:3])
+            if len(ref_files) > 3:
+                file_names += f" (+{len(ref_files) - 3} more)"
+            self.ref_path_label.setText(f"({len(ref_files)} files found: {file_names})")
+            return None
+        else:
+            # No reference files found
+            return None
+
+    def _browse_reference_file(self):
+        """Browse for reference CSV/Excel file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Reference File",
+            "",
+            "Supported Files (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*.*)"
+        )
+
+        if file_path:
+            self._load_reference_columns(file_path)
+
+    def _load_reference_columns(self, file_path: str):
+        """
+        Load reference file and populate column selection dropdowns.
+
+        Args:
+            file_path: Path to reference CSV/Excel file
+        """
+        from pathlib import Path
+        import pandas as pd
+
+        try:
+            # Read first few rows to detect columns
+            path = Path(file_path)
+            if path.suffix.lower() in ['.xlsx', '.xls']:
+                df = pd.read_excel(file_path, nrows=5)
+            else:
+                df = pd.read_csv(file_path, nrows=5)
+
+            columns = list(df.columns)
+
+            # Store reference info
+            self._loaded_reference_file = file_path
+            self._reference_columns = columns
+
+            # Update UI
+            self.ref_path_label.setText(path.name)
+            self.ref_path_label.setStyleSheet(f"color: {COLORS['text_primary']}; font-weight: 500;")
+
+            # Populate file column dropdown
+            self.file_column_combo.clear()
+            self.file_column_combo.addItems(columns)
+            self.file_column_combo.setEnabled(True)
+
+            # Show config controls
+            self.ref_config_container.setVisible(True)
+
+            # Auto-select first column as filename column (common pattern)
+            if columns:
+                self.file_column_combo.setCurrentIndex(0)
+                self.apply_ref_btn.setEnabled(True)
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Reference",
+                f"Could not read reference file:\n\n{str(e)}"
+            )
+            self._loaded_reference_file = None
+            self._reference_columns = []
+
+    def _on_file_column_changed(self, index: int):
+        """Handle file column selection change."""
+        # Enable apply button if we have both spectral data and file column selected
+        has_spectral = self._current_spectral_data is not None
+        has_file_col = self.file_column_combo.currentText() != ""
+        self.apply_ref_btn.setEnabled(has_spectral and has_file_col)
+
+    def _apply_reference_merge(self):
+        """
+        Merge spectral data with reference file using selected file column.
+
+        This implements the V1 workflow:
+        1. User selects which column in reference file contains filenames
+        2. Match reference filenames to spectral sample IDs
+        3. Show target column selection dialog
+        4. Merge and validate
+        """
+        if not self._current_spectral_data or not self._loaded_reference_file:
+            QMessageBox.warning(
+                self,
+                "Missing Data",
+                "Please load both spectral data and a reference file first."
+            )
+            return
+
+        file_column = self.file_column_combo.currentText()
+        if not file_column:
+            QMessageBox.warning(
+                self,
+                "Column Not Selected",
+                "Please select which column contains the filenames for matching."
+            )
+            return
+
+        # Show target column selection dialog
+        from PySide6.QtWidgets import QInputDialog
+
+        target_column, ok = QInputDialog.getItem(
+            self,
+            "Select Target Column",
+            f"Available columns in {Path(self._loaded_reference_file).name}:\n\n"
+            f"Select the column containing target values (e.g., protein, moisture, etc.):",
+            self._reference_columns,
+            0,
+            False
+        )
+
+        if not ok or not target_column:
+            return
+
+        try:
+            # Perform merge using engine API
+            merged_data, validation_info = self.engine.merge_with_reference(
+                spectral_data=self._current_spectral_data,
+                reference_file=self._loaded_reference_file,
+                file_column=file_column,
+                target_column=target_column
+            )
+
+            # Update state with merged data
+            self.state.load_data(
+                X=merged_data.X,
+                y=merged_data.y,
+                wavelengths=merged_data.wavelengths,
+                file_path=self._current_spectral_data.metadata.get('file_path', ''),
+                target_column=target_column,
+                sample_ids=merged_data.sample_ids
+            )
+
+            # Update target combo with all available targets
+            self.target_combo.clear()
+            if merged_data.available_targets:
+                self.target_combo.addItems(merged_data.available_targets)
+                self.target_combo.setEnabled(True)
+
+                # Select the current target
+                idx = self.target_combo.findText(target_column)
+                if idx >= 0:
+                    self.target_combo.setCurrentIndex(idx)
+
+            # Enable run button
+            self.run_btn.setEnabled(True)
+
+            # Auto-set task type
+            if merged_data.metadata.get("is_classification", False):
+                self.task_combo.setCurrentIndex(1)
+            else:
+                self.task_combo.setCurrentIndex(0)
+
+            # Update preview with merged data
+            self._update_preview(merged_data.X, merged_data.wavelengths, merged_data.y, merged_data.sample_ids)
+
+            # Show validation results
+            self._show_merge_validation(validation_info, target_column)
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Merge Failed",
+                f"Could not merge spectral data with reference file:\n\n{str(e)}"
+            )
+
+    def _show_merge_validation(self, validation_info: dict, target_column: str):
+        """
+        Show validation results after merging spectral and reference data.
+
+        Args:
+            validation_info: Dictionary with matching statistics
+            target_column: Name of selected target column
+        """
+        matched = validation_info['matched']
+        total_spectral = validation_info['total_spectral']
+        total_reference = validation_info['total_reference']
+        unmatched_spectral = validation_info['unmatched_spectral']
+        unmatched_reference = validation_info['unmatched_reference']
+
+        # Build message
+        msg = f"Successfully merged data with target column '{target_column}':\n\n"
+        msg += f"• Matched samples: {matched}\n"
+        msg += f"• Total spectral samples: {total_spectral}\n"
+        msg += f"• Total reference samples: {total_reference}\n"
+
+        if unmatched_spectral or unmatched_reference:
+            msg += "\n⚠ Warning: Some samples could not be matched:\n"
+
+            if unmatched_spectral:
+                msg += f"\n• {len(unmatched_spectral)} spectral samples without reference data"
+                if len(unmatched_spectral) <= 5:
+                    msg += f":\n  " + "\n  ".join(unmatched_spectral[:5])
+                else:
+                    msg += f":\n  " + "\n  ".join(unmatched_spectral[:5]) + f"\n  ... and {len(unmatched_spectral) - 5} more"
+
+            if unmatched_reference:
+                msg += f"\n• {len(unmatched_reference)} reference samples without spectral data"
+                if len(unmatched_reference) <= 5:
+                    msg += f":\n  " + "\n  ".join(unmatched_reference[:5])
+                else:
+                    msg += f":\n  " + "\n  ".join(unmatched_reference[:5]) + f"\n  ... and {len(unmatched_reference) - 5} more"
+
+            msg += "\n\nOnly matched samples will be used for analysis."
+
+        QMessageBox.information(self, "Data Merged", msg)

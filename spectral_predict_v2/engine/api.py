@@ -369,6 +369,112 @@ class EngineAPI:
         io = self._lazy_import_io()
         return io.read_reference_csv(file_path, id_column)
 
+    def merge_with_reference(
+        self,
+        spectral_data: LoadedData,
+        reference_file: str,
+        file_column: str,
+        target_column: str,
+    ) -> tuple[LoadedData, dict]:
+        """
+        Merge spectral data with a reference file containing target values.
+
+        This implements the V1 workflow:
+        1. Load reference CSV/Excel with target values
+        2. Match samples by filename (file_column in reference -> sample_ids in spectral_data)
+        3. Align X and y so they correspond
+        4. Validate and report any unmatched samples
+
+        Args:
+            spectral_data: LoadedData from ASD/SPC/other spectral files
+            reference_file: Path to reference CSV/Excel
+            file_column: Column in reference file containing filenames for matching
+            target_column: Column in reference file containing target values
+
+        Returns:
+            Tuple of (merged_LoadedData, validation_info)
+            validation_info contains:
+                - 'matched': Number of matched samples
+                - 'unmatched_spectral': List of spectral samples without reference data
+                - 'unmatched_reference': List of reference samples without spectral data
+                - 'available_targets': List of all columns in reference file
+        """
+        io = self._lazy_import_io()
+
+        # Load reference file
+        ref_df = io.read_reference_csv(reference_file, file_column)
+
+        # Get available target columns (all non-index columns)
+        available_targets = list(ref_df.columns)
+
+        # Validate target column exists
+        if target_column not in ref_df.columns:
+            raise ValueError(
+                f"Target column '{target_column}' not found in reference file.\n"
+                f"Available columns: {', '.join(available_targets)}"
+            )
+
+        # Extract target values
+        target_series = ref_df[target_column]
+
+        # Align spectral data with reference data using align_xy
+        X_df = pd.DataFrame(
+            spectral_data.X,
+            index=spectral_data.sample_ids,
+            columns=spectral_data.wavelengths
+        )
+
+        # Use align_xy to match and align
+        X_aligned, y_aligned, alignment_info_from_align = io.align_xy(
+            X_df, ref_df, file_column, target_column, return_alignment_info=True
+        )
+
+        # Use alignment info from align_xy - it already handles fuzzy matching properly
+        validation_info = {
+            'matched': len(alignment_info_from_align['matched_ids']),
+            'total_spectral': len(spectral_data.sample_ids),
+            'total_reference': len(ref_df),
+            'unmatched_spectral': alignment_info_from_align['unmatched_spectra'],
+            'unmatched_reference': alignment_info_from_align['unmatched_reference'],
+            'available_targets': available_targets,
+            'n_nan_dropped': alignment_info_from_align.get('n_nan_dropped', 0),
+            'used_fuzzy_matching': alignment_info_from_align.get('used_fuzzy_matching', False),
+        }
+
+        # Check if target is classification (categorical) or regression (numeric)
+        is_classification = False
+        if pd.api.types.is_numeric_dtype(y_aligned):
+            y_values = y_aligned.values.astype(np.float64)
+        else:
+            # Categorical - encode for classification
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_values = le.fit_transform(y_aligned.values.astype(str))
+            is_classification = True
+
+        # Create merged LoadedData
+        merged_data = LoadedData(
+            X=X_aligned.values.astype(np.float64),
+            y=y_values,
+            wavelengths=spectral_data.wavelengths,
+            sample_ids=list(X_aligned.index),
+            target_column=target_column,
+            metadata={
+                **spectral_data.metadata,
+                'reference_file': reference_file,
+                'file_column': file_column,
+                'is_classification': is_classification,
+                'n_matched': validation_info['matched'],
+                'n_unmatched_spectral': len(validation_info['unmatched_spectral']),
+                'n_unmatched_reference': len(validation_info['unmatched_reference']),
+                'n_nan_dropped': validation_info['n_nan_dropped'],
+                'used_fuzzy_matching': validation_info['used_fuzzy_matching'],
+            },
+            available_targets=available_targets
+        )
+
+        return merged_data, validation_info
+
     def detect_file_format(self, file_path: str) -> str:
         """Detect the format of a spectral data file."""
         io = self._lazy_import_io()

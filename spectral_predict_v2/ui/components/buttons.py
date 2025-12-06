@@ -80,8 +80,8 @@ class PrimaryButton(BaseButton):
                 color: #ffffff;
                 border: 1px solid {COLORS["accent_primary"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {BUTTON["padding_x_md"]}px;
-                min-height: {BUTTON["height_md"] - 12}px;
+                padding: 8px {BUTTON["padding_x_md"]}px;
+                min-height: {BUTTON["height_md"] - 6}px;
                 font-weight: {TYPOGRAPHY["weight_medium"]};
             }}
             PrimaryButton:hover {{
@@ -136,8 +136,8 @@ class SecondaryButton(BaseButton):
                 color: #ffffff;
                 border: 1px solid {COLORS["accent_secondary"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {BUTTON["padding_x_md"]}px;
-                min-height: {BUTTON["height_md"] - 12}px;
+                padding: 8px {BUTTON["padding_x_md"]}px;
+                min-height: {BUTTON["height_md"] - 6}px;
                 font-weight: {TYPOGRAPHY["weight_medium"]};
             }}
             SecondaryButton:hover {{
@@ -188,8 +188,8 @@ class DangerButton(BaseButton):
                 color: #ffffff;
                 border: 1px solid {COLORS["accent_danger"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {BUTTON["padding_x_md"]}px;
-                min-height: {BUTTON["height_md"] - 12}px;
+                padding: 8px {BUTTON["padding_x_md"]}px;
+                min-height: {BUTTON["height_md"] - 6}px;
                 font-weight: {TYPOGRAPHY["weight_medium"]};
             }}
             DangerButton:hover {{
@@ -240,8 +240,8 @@ class GhostButton(BaseButton):
                 color: {COLORS["text_primary"]};
                 border: none;
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {BUTTON["padding_x_md"]}px;
-                min-height: {BUTTON["height_md"] - 12}px;
+                padding: 8px {BUTTON["padding_x_md"]}px;
+                min-height: {BUTTON["height_md"] - 6}px;
                 font-weight: {TYPOGRAPHY["weight_medium"]};
             }}
             GhostButton:hover {{
@@ -289,8 +289,8 @@ class OutlineButton(BaseButton):
                 color: {COLORS["text_primary"]};
                 border: 1px solid {COLORS["border_default"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {BUTTON["padding_x_md"]}px;
-                min-height: {BUTTON["height_md"] - 12}px;
+                padding: 8px {BUTTON["padding_x_md"]}px;
+                min-height: {BUTTON["height_md"] - 6}px;
                 font-weight: {TYPOGRAPHY["weight_medium"]};
             }}
             OutlineButton:hover {{
@@ -447,8 +447,8 @@ class ToggleButton(BaseButton):
                 color: {COLORS["text_primary"]};
                 border: 1px solid {COLORS["border_default"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {BUTTON["padding_x_md"]}px;
-                min-height: {BUTTON["height_md"] - 12}px;
+                padding: 8px {BUTTON["padding_x_md"]}px;
+                min-height: {BUTTON["height_md"] - 6}px;
                 font-weight: {TYPOGRAPHY["weight_medium"]};
             }}
             ToggleButton:hover {{

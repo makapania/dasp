@@ -1,13 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3:*)",
-      "Bash(find:*)",
-      "Bash(python:*)",
-      "Bash(grep:*)",
-      "Bash(ls:*)",
-      "Bash(del test_imports.py)",
-      "Bash(dir:*)",
+      "Bash(timeout 120 python:*)",
+      "Bash(dir /s /b C:Userssponheimgitdaspspectral_predict*.py)",
+      "Bash(dir C:Userssponheimgitdasp /b)",
+      "Bash(timeout 90 python:*)",
+      "Bash(timeout 30 python:*)",
+      "Bash(timeout 60 python:*)",
+      "Bash(dir /s /b C:Userssponheimgitdaspspectral_predict_v3*.py)",
+      "Bash(python -c:*)",
+      "Bash(pip install:*)",
+      "Bash(cd:*)",
       "Bash(git add:*)"
     ],
     "deny": [],

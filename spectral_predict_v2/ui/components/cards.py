@@ -59,12 +59,21 @@ class CardHeader(QWidget):
         title_layout.setSpacing(2)
 
         self._title_label = QLabel(title)
-        self._title_label.setProperty("class", "heading")
+        self._title_label.setStyleSheet(f"""
+            font-size: {TYPOGRAPHY['size_lg']}pt;
+            font-weight: {TYPOGRAPHY['weight_semibold']};
+            color: {COLORS['text_primary']};
+            background: transparent;
+        """)
         title_layout.addWidget(self._title_label)
 
         if subtitle:
             self._subtitle_label = QLabel(subtitle)
-            self._subtitle_label.setProperty("class", "secondary")
+            self._subtitle_label.setStyleSheet(f"""
+                font-size: {TYPOGRAPHY['size_sm']}pt;
+                color: {COLORS['text_secondary']};
+                background: transparent;
+            """)
             title_layout.addWidget(self._subtitle_label)
         else:
             self._subtitle_label = None
@@ -81,30 +90,31 @@ class CardHeader(QWidget):
         # Collapse button
         if collapsible:
             self._collapse_btn = QPushButton()
-            self._collapse_btn.setFixedSize(24, 24)
-            self._collapse_btn.setProperty("class", "ghost")
-            self._collapse_btn.setIcon(Icons.chevron_up(16))
+            self._collapse_btn.setFixedSize(28, 28)
+            self._collapse_btn.setIcon(Icons.chevron_up(16, COLORS["text_secondary"]))
             self._collapse_btn.clicked.connect(self._toggle_collapse)
             self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._collapse_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    border: 1px solid {COLORS["border_subtle"]};
+                    border-radius: {RADIUS["sm"]}px;
+                }}
+                QPushButton:hover {{
+                    background-color: {COLORS["bg_elevated"]};
+                    border-color: {COLORS["border_default"]};
+                }}
+                QPushButton:pressed {{
+                    background-color: {COLORS["bg_overlay"]};
+                }}
+            """)
             layout.addWidget(self._collapse_btn)
         else:
             self._collapse_btn = None
 
     def _apply_style(self):
-        self.setStyleSheet(f"""
-            CardHeader {{
-                background-color: transparent;
-            }}
-            QLabel[class="heading"] {{
-                font-size: {TYPOGRAPHY["size_lg"]}pt;
-                font-weight: {TYPOGRAPHY["weight_semibold"]};
-                color: {COLORS["text_primary"]};
-            }}
-            QLabel[class="secondary"] {{
-                font-size: {TYPOGRAPHY["size_sm"]}pt;
-                color: {COLORS["text_secondary"]};
-            }}
-        """)
+        # Styles are now applied directly to labels in _setup_ui
+        self.setStyleSheet("CardHeader { background-color: transparent; }")
 
     def _toggle_collapse(self):
         self._expanded = not self._expanded
@@ -114,9 +124,9 @@ class CardHeader(QWidget):
     def _update_collapse_icon(self):
         if self._collapse_btn:
             if self._expanded:
-                self._collapse_btn.setIcon(Icons.chevron_up(16))
+                self._collapse_btn.setIcon(Icons.chevron_up(16, COLORS["text_secondary"]))
             else:
-                self._collapse_btn.setIcon(Icons.chevron_down(16))
+                self._collapse_btn.setIcon(Icons.chevron_down(16, COLORS["text_secondary"]))
 
     def set_title(self, title: str):
         self._title_label.setText(title)
@@ -165,6 +175,10 @@ class Card(QFrame):
         super().__init__(parent)
         self._padding = padding
 
+        # Prevent cards from being squished
+        self.setMinimumHeight(80)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+
         self._setup_ui(title, subtitle)
         self._apply_style(elevated)
 
@@ -199,21 +213,32 @@ class Card(QFrame):
         self._layout.addWidget(separator)
 
     def _apply_style(self, elevated: bool):
-        bg_color = COLORS["bg_elevated"] if elevated else COLORS["bg_surface"]
+        # Frosted glass effect with semi-transparent backgrounds
+        if elevated:
+            bg_color = "rgba(33, 38, 45, 0.88)"
+            border = "rgba(255, 255, 255, 0.08)"
+            border_top = "rgba(255, 255, 255, 0.12)"
+        else:
+            bg_color = "rgba(22, 27, 34, 0.75)"
+            border = "rgba(255, 255, 255, 0.05)"
+            border_top = "rgba(255, 255, 255, 0.08)"
+
         self.setStyleSheet(f"""
             Card {{
                 background-color: {bg_color};
-                border: 1px solid {COLORS["border_default"]};
+                border: 1px solid {border};
+                border-top: 1px solid {border_top};
                 border-radius: {CARD["border_radius"]}px;
             }}
         """)
 
     def _apply_shadow(self):
+        # Enhanced shadow for floating glass panel effect
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(12)
+        shadow.setBlurRadius(24)
         shadow.setXOffset(0)
-        shadow.setYOffset(2)
-        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 80))
         self.setGraphicsEffect(shadow)
 
     def add_widget(self, widget: QWidget):
@@ -358,10 +383,11 @@ class StatusCard(Card):
         }
         color = status_colors.get(self._status, COLORS["border_default"])
 
+        # Frosted glass with colored left accent
         self.setStyleSheet(f"""
             StatusCard {{
-                background-color: {COLORS["bg_surface"]};
-                border: 1px solid {COLORS["border_default"]};
+                background-color: rgba(22, 27, 34, 0.8);
+                border: 1px solid rgba(255, 255, 255, 0.06);
                 border-left: 3px solid {color};
                 border-radius: {CARD["border_radius"]}px;
             }}

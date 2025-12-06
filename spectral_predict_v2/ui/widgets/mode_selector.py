@@ -97,13 +97,15 @@ class ModeButton(QPushButton):
     def _apply_style(self):
         """Apply styling based on state."""
         if self._is_active:
-            bg = COLORS["bg_elevated"]
+            # Active: Frosted glass with accent glow
+            bg = "rgba(33, 38, 45, 0.9)"
             border = COLORS["accent_primary"]
             text_color = COLORS["text_primary"]
             desc_color = COLORS["text_secondary"]
         else:
-            bg = "transparent"
-            border = "transparent"
+            # Inactive: Subtle transparent
+            bg = "rgba(45, 50, 60, 0.3)"
+            border = "rgba(255, 255, 255, 0.06)"
             text_color = COLORS["text_secondary"]
             desc_color = COLORS["text_tertiary"]
 
@@ -115,8 +117,8 @@ class ModeButton(QPushButton):
                 min-height: 80px;
             }}
             ModeButton:hover {{
-                background-color: {COLORS["bg_overlay"]};
-                border-color: {COLORS["border_emphasis"] if not self._is_active else COLORS["accent_primary"]};
+                background-color: rgba(48, 54, 61, 0.85);
+                border-color: {COLORS["accent_primary"] if self._is_active else "rgba(255, 255, 255, 0.15)"};
             }}
         """)
 
@@ -204,19 +206,21 @@ class ModeSelector(QWidget):
         # Set initial mode
         self._update_active_state()
 
-        # Apply container style
+        # Apply frosted glass container style
         self.setStyleSheet(f"""
             ModeSelector {{
-                background-color: {COLORS["bg_surface"]};
-                border-radius: {RADIUS["lg"]}px;
+                background-color: rgba(22, 27, 34, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-top: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: {RADIUS["xl"]}px;
             }}
         """)
 
-        # Add shadow
+        # Add stronger shadow for floating glass effect
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(SHADOW_PARAMS["md"]["blur"])
-        shadow.setOffset(0, SHADOW_PARAMS["md"]["y"])
-        shadow.setColor(QColor(0, 0, 0, int(SHADOW_PARAMS["md"]["alpha"] * 255)))
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 80))
         self.setGraphicsEffect(shadow)
 
     def _on_mode_clicked(self, mode: AppMode):
@@ -328,7 +332,7 @@ class CompactModeSelector(QWidget):
                 AppMode.BUILD: Icons.settings,
                 AppMode.PREDICT: Icons.play,
             }
-            color = "#ffffff" if mode == self._current_mode else COLORS["text_secondary"]
+            color = COLORS["text_primary"] if mode == self._current_mode else COLORS["text_secondary"]
             btn.setIcon(icon_methods[mode](18, color))
 
     @property

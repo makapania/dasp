@@ -16,8 +16,8 @@ from orchestration.state_store import StateStore, AppMode
 from orchestration.job_runner import JobRunner
 from orchestration.config_manager import ConfigManager
 
-from .theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY
-from .theme.styles import get_app_stylesheet
+from .theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY, set_theme_mode
+from .theme.styles import get_app_stylesheet, ThemeMode
 from .widgets.mode_selector import ModeSelector, AppMode as WidgetAppMode
 from .widgets.data_context_bar import DataContextBar
 from .modes.explore import ExploreMode
@@ -71,8 +71,11 @@ class SpectralPredictApp(QMainWindow):
     def _setup_window(self):
         """Configure the main window."""
         self.setWindowTitle("Spectral Predict v2")
-        self.setMinimumSize(1200, 800)
-        self.resize(1400, 900)
+        self.setMinimumSize(1400, 900)
+        self.resize(1600, 1000)
+
+        # Try to maximize on start for best experience
+        # self.showMaximized()  # Uncomment to start maximized
 
     def _setup_menu(self):
         """Create the menu bar."""
@@ -202,7 +205,7 @@ class SpectralPredictApp(QMainWindow):
         self.status_bar.setStyleSheet(f"""
             QStatusBar {{
                 background-color: {COLORS['bg_surface']};
-                color: {COLORS['text_tertiary']};
+                color: {COLORS['text_secondary']};
                 border-top: 1px solid {COLORS['border_subtle']};
                 padding: {SPACING['xs']}px {SPACING['sm']}px;
             }}
@@ -371,7 +374,8 @@ class SpectralPredictApp(QMainWindow):
 
     def _apply_theme(self):
         """Apply the current theme."""
-        mode = "dark" if self._dark_mode else "light"
+        mode = ThemeMode.DARK if self._dark_mode else ThemeMode.LIGHT
+        set_theme_mode(mode)  # Update global COLORS dict
         self.setStyleSheet(get_app_stylesheet(mode))
 
     # --- Tools Actions ---

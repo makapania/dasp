@@ -152,20 +152,32 @@ class StateStore(QObject):
         """Load a new dataset into the store."""
         import os
 
+        # Handle case when y is None (spectral files without targets)
+        if y is not None:
+            target_min = float(np.nanmin(y))
+            target_max = float(np.nanmax(y))
+        else:
+            target_min = 0.0
+            target_max = 0.0
+
+        # Generate sample_ids if not provided
+        if sample_ids is None:
+            sample_ids = [f"Sample_{i+1}" for i in range(X.shape[0])]
+
         self._data = DataState(
             file_path=file_path,
             file_name=os.path.basename(file_path),
             X=X,
             y=y,
             wavelengths=wavelengths,
-            sample_ids=sample_ids or list(range(len(y))),
+            sample_ids=sample_ids,
             target_column=target_column,
             n_samples=X.shape[0],
             n_wavelengths=X.shape[1],
             wavelength_min=float(wavelengths.min()),
             wavelength_max=float(wavelengths.max()),
-            target_min=float(np.nanmin(y)),
-            target_max=float(np.nanmax(y)),
+            target_min=target_min,
+            target_max=target_max,
         )
 
         # Clear previous analysis results

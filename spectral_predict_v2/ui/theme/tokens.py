@@ -29,28 +29,28 @@ COLORS_DARK: Dict[str, str] = {
     "bg_highlight": "#388bfd26",    # Selection highlight (semi-transparent)
 
     # Border colors
-    "border_subtle": "#21262d",     # Subtle separators
-    "border_default": "#30363d",    # Standard borders
-    "border_emphasis": "#8b949e",   # Emphasized borders (focus states)
+    "border_subtle": "#30363d",     # Subtle separators (was #21262d - invisible)
+    "border_default": "#444c56",    # Standard borders (was #30363d - too subtle)
+    "border_emphasis": "#6e7681",   # Emphasized borders (focus states)
 
     # Text colors
-    "text_primary": "#e6edf3",      # Primary text
-    "text_secondary": "#8b949e",    # Secondary/muted text
-    "text_tertiary": "#6e7681",     # Tertiary/disabled text
+    "text_primary": "#ffffff",      # Primary text - pure white for maximum visibility
+    "text_secondary": "#b0b8c1",    # Secondary/muted text - brighter
+    "text_tertiary": "#9ca3af",     # Tertiary/disabled text - much brighter
     "text_link": "#58a6ff",         # Links
     "text_inverse": "#0d1117",      # Text on light backgrounds
 
-    # Accent colors - Success/Primary (green)
-    "accent_primary": "#238636",    # Primary action (buttons)
-    "accent_primary_hover": "#2ea043",
-    "accent_primary_active": "#238636",
-    "accent_primary_subtle": "#238636",
-    "accent_primary_muted": "#23863633",  # Background tint
+    # Accent colors - Success/Primary (green) - Vibrant for modern look
+    "accent_primary": "#3fb950",    # Brighter green for visibility
+    "accent_primary_hover": "#46c254",
+    "accent_primary_active": "#3fb950",
+    "accent_primary_subtle": "#2ea043",
+    "accent_primary_muted": "#3fb95033",  # Background tint
 
-    # Accent colors - Secondary (blue)
-    "accent_secondary": "#1f6feb",
-    "accent_secondary_hover": "#388bfd",
-    "accent_secondary_muted": "#1f6feb33",
+    # Accent colors - Secondary (blue) - Vibrant
+    "accent_secondary": "#58a6ff",  # Brighter blue
+    "accent_secondary_hover": "#79b8ff",
+    "accent_secondary_muted": "#58a6ff33",
 
     # Accent colors - Warning (yellow/orange)
     "accent_warning": "#d29922",
@@ -78,7 +78,7 @@ COLORS_DARK: Dict[str, str] = {
 
     # Special purpose
     "scrollbar_bg": "#21262d",
-    "scrollbar_thumb": "#484f58",
+    "scrollbar_thumb": "#525a65",       # Was #484f58 - slightly brighter
     "scrollbar_thumb_hover": "#6e7681",
 
     # Status colors
@@ -294,6 +294,24 @@ SHADOW_PARAMS: Dict[str, Dict[str, float]] = {
     "md": {"blur": 6, "y": 3, "alpha": 0.16},
     "lg": {"blur": 20, "y": 10, "alpha": 0.19},
     "xl": {"blur": 28, "y": 14, "alpha": 0.25},
+    "glass": {"blur": 24, "y": 8, "alpha": 0.31},  # Frosted glass floating effect
+}
+
+# =============================================================================
+# FROSTED GLASS TOKENS (for modern glass morphism effect)
+# =============================================================================
+
+GLASS: Dict[str, str] = {
+    # Semi-transparent backgrounds
+    "bg_panel": "rgba(22, 27, 34, 0.85)",      # Main panels
+    "bg_card": "rgba(33, 38, 45, 0.88)",       # Cards
+    "bg_elevated": "rgba(45, 50, 60, 0.9)",    # Elevated elements
+    "bg_subtle": "rgba(45, 50, 60, 0.3)",      # Subtle backgrounds
+
+    # Light edge borders (simulates glass reflection)
+    "border_light": "rgba(255, 255, 255, 0.08)",
+    "border_top": "rgba(255, 255, 255, 0.12)",
+    "border_hover": "rgba(255, 255, 255, 0.15)",
 }
 
 

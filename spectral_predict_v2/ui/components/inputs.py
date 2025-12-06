@@ -52,8 +52,8 @@ class StyledLineEdit(QLineEdit):
                 color: {COLORS["text_primary"]};
                 border: 1px solid {COLORS["border_default"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {INPUT["padding_x"]}px;
-                min-height: {INPUT["height_md"] - 14}px;
+                padding: 8px {INPUT["padding_x"]}px;
+                min-height: {INPUT["height_md"] - 6}px;
                 selection-background-color: {COLORS["accent_secondary"]};
                 selection-color: #ffffff;
             }}
@@ -102,9 +102,9 @@ class StyledComboBox(QComboBox):
                 color: {COLORS["text_primary"]};
                 border: 1px solid {COLORS["border_default"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {INPUT["padding_x"]}px;
+                padding: 8px {INPUT["padding_x"]}px;
                 padding-right: 30px;
-                min-height: {INPUT["height_md"] - 14}px;
+                min-height: {INPUT["height_md"] - 6}px;
             }}
             StyledComboBox:hover {{
                 border-color: {COLORS["border_emphasis"]};
@@ -188,9 +188,9 @@ class StyledSpinBox(QSpinBox):
                 color: {COLORS["text_primary"]};
                 border: 1px solid {COLORS["border_default"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {INPUT["padding_x"]}px;
+                padding: 8px {INPUT["padding_x"]}px;
                 padding-right: 20px;
-                min-height: {INPUT["height_md"] - 14}px;
+                min-height: {INPUT["height_md"] - 6}px;
             }}
             StyledSpinBox:hover {{
                 border-color: {COLORS["border_emphasis"]};
@@ -256,9 +256,9 @@ class StyledDoubleSpinBox(QDoubleSpinBox):
                 color: {COLORS["text_primary"]};
                 border: 1px solid {COLORS["border_default"]};
                 border-radius: {RADIUS["md"]}px;
-                padding: 6px {INPUT["padding_x"]}px;
+                padding: 8px {INPUT["padding_x"]}px;
                 padding-right: 20px;
-                min-height: {INPUT["height_md"] - 14}px;
+                min-height: {INPUT["height_md"] - 6}px;
             }}
             StyledDoubleSpinBox:hover {{
                 border-color: {COLORS["border_emphasis"]};
@@ -422,7 +422,7 @@ class LabeledInput(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACING["xs"])
+        layout.setSpacing(SPACING["sm"])  # 8px spacing for better readability
 
         # Label row
         label_layout = QHBoxLayout()

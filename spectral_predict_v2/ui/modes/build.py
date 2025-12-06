@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 import numpy as np
 
-from orchestration.state_store import StateStore, AppMode
+from orchestration.state_store import StateStore, AppMode, TaskType
 from orchestration.job_runner import JobRunner
 
 from ..theme.tokens import COLORS, SPACING, RADIUS, TYPOGRAPHY
@@ -31,13 +31,14 @@ class TrainingWorker(QThread):
     finished = Signal(object)
     progress = Signal(str)
 
-    def __init__(self, engine, X, y, config, wavelengths=None):
+    def __init__(self, engine, X, y, config, wavelengths=None, task_type='regression'):
         super().__init__()
         self.engine = engine
         self.X = X
         self.y = y
         self.config = config
         self.wavelengths = wavelengths
+        self.task_type = task_type
 
     def run(self):
         try:
@@ -65,24 +66,43 @@ class TrainingWorker(QThread):
             from src.spectral_predict.models import get_model
             model = get_model(
                 self.config['model_type'],
+                task_type=self.task_type,
                 n_components=self.config.get('n_components', 5)
             )
 
             y_pred_cv = cross_val_predict(model, X_proc, self.y, cv=5)
 
-            from sklearn.metrics import mean_squared_error, r2_score
-            rmse_cv = np.sqrt(mean_squared_error(self.y, y_pred_cv))
-            r2_cv = r2_score(self.y, y_pred_cv)
-            bias = np.mean(y_pred_cv - self.y)
-            rpd = np.std(self.y) / rmse_cv if rmse_cv > 0 else 0
+            # Compute metrics based on task type
+            if self.task_type == 'classification':
+                from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-            trained.metrics['rmsecv'] = rmse_cv
-            trained.metrics['r2_cv'] = r2_cv
-            trained.metrics['bias'] = bias
-            trained.metrics['rpd'] = rpd
+                accuracy = accuracy_score(self.y, y_pred_cv)
+                # Use weighted average for multiclass
+                f1 = f1_score(self.y, y_pred_cv, average='weighted', zero_division=0)
+                precision = precision_score(self.y, y_pred_cv, average='weighted', zero_division=0)
+                recall = recall_score(self.y, y_pred_cv, average='weighted', zero_division=0)
+
+                trained.metrics['accuracy'] = accuracy
+                trained.metrics['f1'] = f1
+                trained.metrics['precision'] = precision
+                trained.metrics['recall'] = recall
+                trained.metrics['task_type'] = 'classification'
+            else:
+                from sklearn.metrics import mean_squared_error, r2_score
+                rmse_cv = np.sqrt(mean_squared_error(self.y, y_pred_cv))
+                r2_cv = r2_score(self.y, y_pred_cv)
+                bias = np.mean(y_pred_cv - self.y)
+                rpd = np.std(self.y) / rmse_cv if rmse_cv > 0 else 0
+
+                trained.metrics['rmsecv'] = rmse_cv
+                trained.metrics['r2_cv'] = r2_cv
+                trained.metrics['bias'] = bias
+                trained.metrics['rpd'] = rpd
+                trained.metrics['task_type'] = 'regression'
 
             trained.config['y_pred_cv'] = y_pred_cv
             trained.config['y_true'] = self.y
+            trained.config['task_type'] = self.task_type
 
             if hasattr(trained.model, 'coef_'):
                 trained.config['coefficients'] = trained.model.coef_.flatten()
@@ -366,25 +386,29 @@ class BuildMode(QWidget):
         metrics_grid = QHBoxLayout()
         metrics_grid.setSpacing(SPACING["lg"])
 
-        # RMSECV
-        rmsecv_container = self._create_metric_display("RMSECV", "--")
-        self.rmsecv_value = rmsecv_container.findChild(QLabel, "value")
-        metrics_grid.addWidget(rmsecv_container, 1)
+        # Metric 1: RMSECV (regression) / Accuracy (classification)
+        self.metric1_container = self._create_metric_display("RMSECV", "--")
+        self.metric1_label = self.metric1_container.findChild(QLabel, "label")
+        self.rmsecv_value = self.metric1_container.findChild(QLabel, "value")
+        metrics_grid.addWidget(self.metric1_container, 1)
 
-        # R2
-        r2_container = self._create_metric_display("R\u00b2 (CV)", "--")
-        self.r2_value = r2_container.findChild(QLabel, "value")
-        metrics_grid.addWidget(r2_container, 1)
+        # Metric 2: R2 (regression) / F1 (classification)
+        self.metric2_container = self._create_metric_display("R\u00b2 (CV)", "--")
+        self.metric2_label = self.metric2_container.findChild(QLabel, "label")
+        self.r2_value = self.metric2_container.findChild(QLabel, "value")
+        metrics_grid.addWidget(self.metric2_container, 1)
 
-        # RPD
-        rpd_container = self._create_metric_display("RPD", "--")
-        self.rpd_value = rpd_container.findChild(QLabel, "value")
-        metrics_grid.addWidget(rpd_container, 1)
+        # Metric 3: RPD (regression) / Precision (classification)
+        self.metric3_container = self._create_metric_display("RPD", "--")
+        self.metric3_label = self.metric3_container.findChild(QLabel, "label")
+        self.rpd_value = self.metric3_container.findChild(QLabel, "value")
+        metrics_grid.addWidget(self.metric3_container, 1)
 
-        # Bias
-        bias_container = self._create_metric_display("Bias", "--")
-        self.bias_value = bias_container.findChild(QLabel, "value")
-        metrics_grid.addWidget(bias_container, 1)
+        # Metric 4: Bias (regression) / Recall (classification)
+        self.metric4_container = self._create_metric_display("Bias", "--")
+        self.metric4_label = self.metric4_container.findChild(QLabel, "label")
+        self.bias_value = self.metric4_container.findChild(QLabel, "value")
+        metrics_grid.addWidget(self.metric4_container, 1)
 
         metrics_layout.addLayout(metrics_grid)
         layout.addWidget(metrics_card)
@@ -426,6 +450,7 @@ class BuildMode(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         label_widget = QLabel(label)
+        label_widget.setObjectName("label")
         label_widget.setStyleSheet(f"""
             color: {COLORS['text_tertiary']};
             font-size: {TYPOGRAPHY['size_sm']}pt;
@@ -546,12 +571,14 @@ class BuildMode(QWidget):
             self.export_btn.setEnabled(True)
 
     def _update_metrics(self, metrics):
-        """Update the metrics display."""
+        """Update the metrics display based on task type."""
         if metrics is None:
             self.rmsecv_value.setText("--")
             self.r2_value.setText("--")
             self.rpd_value.setText("--")
             self.bias_value.setText("--")
+            # Reset labels to regression defaults
+            self._update_metric_labels(is_classification=False)
             for widget in [self.rmsecv_value, self.r2_value, self.rpd_value, self.bias_value]:
                 widget.setStyleSheet(f"""
                     color: {COLORS['text_tertiary']};
@@ -559,10 +586,23 @@ class BuildMode(QWidget):
                     font-weight: {TYPOGRAPHY['weight_semibold']};
                 """)
         else:
-            self.rmsecv_value.setText(f"{metrics.get('rmsecv', 0):.4f}")
-            self.r2_value.setText(f"{metrics.get('r2_cv', 0):.4f}")
-            self.rpd_value.setText(f"{metrics.get('rpd', 0):.2f}")
-            self.bias_value.setText(f"{metrics.get('bias', 0):.4f}")
+            # Check if classification or regression
+            is_classification = metrics.get('task_type') == 'classification'
+
+            if is_classification:
+                # Update labels for classification metrics
+                self._update_metric_labels(is_classification=True)
+                self.rmsecv_value.setText(f"{metrics.get('accuracy', 0)*100:.1f}%")
+                self.r2_value.setText(f"{metrics.get('f1', 0):.4f}")
+                self.rpd_value.setText(f"{metrics.get('precision', 0):.4f}")
+                self.bias_value.setText(f"{metrics.get('recall', 0):.4f}")
+            else:
+                # Regression metrics
+                self._update_metric_labels(is_classification=False)
+                self.rmsecv_value.setText(f"{metrics.get('rmsecv', 0):.4f}")
+                self.r2_value.setText(f"{metrics.get('r2_cv', 0):.4f}")
+                self.rpd_value.setText(f"{metrics.get('rpd', 0):.2f}")
+                self.bias_value.setText(f"{metrics.get('bias', 0):.4f}")
 
             for widget in [self.rmsecv_value, self.r2_value, self.rpd_value, self.bias_value]:
                 widget.setStyleSheet(f"""
@@ -570,6 +610,19 @@ class BuildMode(QWidget):
                     font-size: {TYPOGRAPHY['size_xl']}pt;
                     font-weight: {TYPOGRAPHY['weight_semibold']};
                 """)
+
+    def _update_metric_labels(self, is_classification: bool):
+        """Update the metric labels based on task type."""
+        if is_classification:
+            self.metric1_label.setText("Accuracy")
+            self.metric2_label.setText("F1 Score")
+            self.metric3_label.setText("Precision")
+            self.metric4_label.setText("Recall")
+        else:
+            self.metric1_label.setText("RMSECV")
+            self.metric2_label.setText("R\u00b2 (CV)")
+            self.metric3_label.setText("RPD")
+            self.metric4_label.setText("Bias")
 
     def _start_fresh(self):
         """Start with a fresh model configuration."""
@@ -618,12 +671,16 @@ class BuildMode(QWidget):
         self.status_label.setText("Training...")
         self.status_label.setStyleSheet(f"color: {COLORS['accent_secondary']}; font-size: {TYPOGRAPHY['size_sm']}pt;")
 
+        # Determine task type from state
+        task_type = 'classification' if self.state.task_type == TaskType.CLASSIFICATION else 'regression'
+
         self._training_worker = TrainingWorker(
             engine=self._get_engine(),
             X=self.state.data.X,
             y=self.state.data.y,
             config=config,
-            wavelengths=self.state.data.wavelengths
+            wavelengths=self.state.data.wavelengths,
+            task_type=task_type
         )
         self._training_worker.progress.connect(self._on_training_progress)
         self._training_worker.finished.connect(self._on_training_complete)
@@ -662,14 +719,23 @@ class BuildMode(QWidget):
         loadings = result.config.get('loadings')
         coefficients = result.config.get('coefficients')
 
+        # Update diagnostic plots
         if y_true is not None and y_pred is not None:
-            self.diagnostics_panel.update_plots(
-                y_true=y_true,
-                y_pred=y_pred,
-                wavelengths=wavelengths,
-                loadings=loadings,
-                coefficients=coefficients
-            )
+            sample_ids = self.state.data.sample_ids or [f"Sample {i+1}" for i in range(len(y_true))]
+            self.diagnostics_panel.set_cv_results(y_true, y_pred, sample_ids)
+
+        # Set loadings or coefficients
+        if loadings is not None and wavelengths is not None:
+            self.diagnostics_panel.set_loadings(loadings, wavelengths)
+        elif coefficients is not None and wavelengths is not None:
+            self.diagnostics_panel.get_loadings_plot().set_coefficients(coefficients, wavelengths)
+
+        # Set spectra
+        if wavelengths is not None and self.state.has_data:
+            # Show first 10 spectra
+            n_show = min(10, self.state.data.X.shape[0])
+            sample_ids = self.state.data.sample_ids[:n_show] if self.state.data.sample_ids else [f"Sample {i+1}" for i in range(n_show)]
+            self.diagnostics_panel.set_spectra(self.state.data.X[:n_show], wavelengths, sample_ids)
 
         self._update_metrics(result.metrics)
         self.save_btn.setEnabled(True)

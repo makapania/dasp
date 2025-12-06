@@ -35,6 +35,7 @@ dependencies = [
     "openpyxl>=3.1.0",
     "jcamp>=1.3.0",
     "spc-io>=0.2.0",
+    "joblib>=1.3.0",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +44,7 @@ opus = ["brukeropus"]
 perkinelmer = ["specio"]
 agilent = ["agilent-ir-formats"]
 all-formats = ["specdal", "brukeropus", "specio", "agilent-ir-formats"]
+v3 = ["dearpygui>=1.10"]
 dev = [
     "pytest>=7.0.0",
     "black>=22.0.0",
@@ -53,9 +55,11 @@ dev = [
 
 [project.scripts]
 spectral-predict = "spectral_predict.cli:main"
+spectral-predict-v3 = "spectral_predict_v3.main:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["spectral_predict*"]
 
 [tool.black]
 line-length = 100
