@@ -923,6 +923,10 @@ class SpectralPredictApp:
         self.wavelength_min = tk.StringVar(value="")  # Import filter
         self.wavelength_max = tk.StringVar(value="")  # Import filter
 
+        # Append mode for loading multiple data sources
+        self.append_mode = tk.BooleanVar(value=False)
+        self.data_sources = []  # Track loaded data sources: [(path, n_samples), ...]
+
         # Analysis wavelength restriction (further filters for model training only)
         self.enable_analysis_wl_restriction = tk.BooleanVar(value=False)
         self.analysis_wl_min = tk.StringVar(value="")
@@ -2792,6 +2796,7 @@ class SpectralPredictApp:
         # Create tabs
         self._create_tab0_data_management()  # NEW: Data Management tab (Tab 0)
         self._create_tab1_import_preview()
+        self._create_explore_tab()  # NEW: Explore tab with plots & screening
         self._create_tab2_data_viewer()
         self._create_tab3_data_quality_check()
         self._create_tab4_analysis_config()
@@ -3319,15 +3324,33 @@ class SpectralPredictApp:
         ttk.Button(input_frame, text="Browse...", command=self._browse_reference_file, style='Modern.TButton').grid(row=input_row, column=2)
         input_row += 1
 
-        # === Load Data Button (moved up for easier access) ===
-        self.load_button = self._create_button_with_gradient(content_frame, text="📊 Load Data & Generate Plots",
-                                                              command=self._load_and_plot_data, style='accent')
-        self.load_button.grid(row=row, column=0, columnspan=3, pady=(20, 10))
+        # === Load Data Button and Append Mode ===
+        load_frame = ttk.Frame(content_frame)
+        load_frame.grid(row=row, column=0, columnspan=3, pady=(20, 10))
         row += 1
+
+        self.load_button = self._create_button_with_gradient(load_frame, text="📊 Load Data & Generate Plots",
+                                                              command=self._load_and_plot_data, style='accent')
+        self.load_button.pack(side=tk.LEFT, padx=(0, 20))
+
+        # Append mode checkbox
+        ttk.Checkbutton(load_frame, text="Append to existing data",
+                       variable=self.append_mode).pack(side=tk.LEFT, padx=5)
+
+        # Clear data sources button (only visible when data is loaded)
+        self.clear_sources_btn = ttk.Button(load_frame, text="Clear All",
+                                            command=self._clear_data_sources, style='Modern.TButton')
+        self.clear_sources_btn.pack(side=tk.LEFT, padx=5)
+        self.clear_sources_btn.pack_forget()  # Hidden until data is loaded
 
         # Status
         self.tab1_status = ttk.Label(content_frame, text="Ready to load data", style='Caption.TLabel')
-        self.tab1_status.grid(row=row, column=0, columnspan=3, pady=(0, 20))
+        self.tab1_status.grid(row=row, column=0, columnspan=3, pady=(0, 5))
+        row += 1
+
+        # Data sources info (shows when multiple sources loaded)
+        self.data_sources_label = ttk.Label(content_frame, text="", style='Caption.TLabel')
+        self.data_sources_label.grid(row=row, column=0, columnspan=3, pady=(0, 20))
         row += 1
 
         # === SECTION 2: Advanced Configuration (Collapsible) ===
@@ -3468,6 +3491,479 @@ class SpectralPredictApp:
         ttk.Label(placeholder, text="Load data in the Data subtab to generate spectral plots",
                  style='Caption.TLabel').pack(expand=True)
 
+    def _create_explore_tab(self):
+        """Explore Tab: Unified visualization hub for spectral analysis.
+
+        Contains:
+        - Raw Spectra plot
+        - 1st/2nd Derivative plots
+        - Target Distribution
+        - Predictor Screening (wavelength-target correlations)
+        """
+        self.explore_tab = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.explore_tab, text='  🔍 Explore  ')
+
+        # Main container with padding
+        content_frame = ttk.Frame(self.explore_tab, style='TFrame', padding="20")
+        content_frame.pack(fill='both', expand=True)
+
+        # Header with refresh button
+        header_frame = ttk.Frame(content_frame)
+        header_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(header_frame, text="Spectral Data Exploration",
+                 style='Heading.TLabel').pack(side='left')
+
+        ttk.Button(header_frame, text="🔄 Refresh Plots",
+                  command=self._refresh_explore_plots,
+                  style='Modern.TButton').pack(side='right')
+
+        # Create notebook for sub-tabs
+        self.explore_notebook = ttk.Notebook(content_frame)
+        self.explore_notebook.pack(fill='both', expand=True, pady=10)
+
+        # Create placeholder sub-tabs (will be populated when data is loaded)
+        # Spectral Plots sub-tab
+        self.explore_spectra_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_spectra_frame, text="  Raw Spectra  ")
+        ttk.Label(self.explore_spectra_frame,
+                 text="Load data in the Import & Preview tab to see spectral plots",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # 1st Derivative sub-tab
+        self.explore_deriv1_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_deriv1_frame, text="  1st Derivative  ")
+        ttk.Label(self.explore_deriv1_frame,
+                 text="Load data to see 1st derivative plots",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # 2nd Derivative sub-tab
+        self.explore_deriv2_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_deriv2_frame, text="  2nd Derivative  ")
+        ttk.Label(self.explore_deriv2_frame,
+                 text="Load data to see 2nd derivative plots",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # Target Distribution sub-tab
+        self.explore_target_dist_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_target_dist_frame, text="  Target Distribution  ")
+        ttk.Label(self.explore_target_dist_frame,
+                 text="Load data with a target variable to see distribution",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # Predictor Screening sub-tab
+        self.explore_predictor_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_predictor_frame, text="  Predictor Screening  ")
+        self._setup_explore_predictor_screening()
+
+    def _setup_explore_predictor_screening(self):
+        """Set up the Predictor Screening UI within the Explore tab."""
+        frame = self.explore_predictor_frame
+
+        # Control panel at top
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(fill='x', padx=20, pady=10)
+
+        ttk.Label(control_frame, text="Screening Method:").pack(side='left', padx=(0, 10))
+
+        self.explore_screening_method = tk.StringVar(value="Correlation")
+        method_combo = ttk.Combobox(control_frame, textvariable=self.explore_screening_method,
+                                   values=["Correlation", "Random Forest"],
+                                   state='readonly', width=15)
+        method_combo.pack(side='left', padx=(0, 20))
+
+        ttk.Label(control_frame, text="Top N:").pack(side='left', padx=(0, 5))
+        self.explore_top_n = tk.IntVar(value=10)
+        ttk.Spinbox(control_frame, from_=5, to=50, textvariable=self.explore_top_n,
+                   width=5).pack(side='left', padx=(0, 20))
+
+        ttk.Button(control_frame, text="▶ Run Screening",
+                  command=self._run_explore_predictor_screening,
+                  style='Modern.TButton').pack(side='left')
+
+        # Separator
+        ttk.Separator(frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
+
+        # Results area (will be populated after running)
+        self.explore_screening_results_frame = ttk.Frame(frame)
+        self.explore_screening_results_frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+        # Initial placeholder
+        ttk.Label(self.explore_screening_results_frame,
+                 text="Load data and click 'Run Screening' to identify important wavelengths",
+                 style='Caption.TLabel').pack(expand=True)
+
+    def _refresh_explore_plots(self):
+        """Refresh all plots in the Explore tab."""
+        if self.X is None:
+            messagebox.showinfo("No Data", "Please load spectral data first in the Import & Preview tab.")
+            return
+
+        self._generate_explore_plots()
+        messagebox.showinfo("Plots Refreshed", "All exploration plots have been updated.")
+
+    def _generate_explore_plots(self):
+        """Generate all plots for the Explore tab."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        if self.X is None:
+            return
+
+        # Clear and regenerate each plot frame
+        self._generate_explore_spectra_plot()
+        self._generate_explore_derivative_plots()
+        self._generate_explore_target_distribution()
+
+    def _generate_explore_spectra_plot(self):
+        """Generate the raw spectra plot in the Explore tab."""
+        # Clear existing content
+        for widget in self.explore_spectra_frame.winfo_children():
+            widget.destroy()
+
+        # Get data
+        ylabel = self._get_spectral_ylabel()
+        data_transformed = self._apply_transformation(self.X.values)
+
+        # Create plot
+        self._create_explore_plot_in_frame(
+            self.explore_spectra_frame,
+            "Raw Spectra",
+            data_transformed,
+            ylabel,
+            "blue"
+        )
+
+    def _generate_explore_derivative_plots(self):
+        """Generate derivative plots in the Explore tab."""
+        if not HAS_DERIVATIVES:
+            # Show message in both frames
+            for frame in [self.explore_deriv1_frame, self.explore_deriv2_frame]:
+                for widget in frame.winfo_children():
+                    widget.destroy()
+                ttk.Label(frame, text="Derivative module not available",
+                         style='Caption.TLabel').pack(expand=True)
+            return
+
+        # 1st Derivative
+        for widget in self.explore_deriv1_frame.winfo_children():
+            widget.destroy()
+        deriv1 = SavgolDerivative(deriv=1, window=7)
+        X_deriv1 = deriv1.transform(self.X.values)
+        self._create_explore_plot_in_frame(
+            self.explore_deriv1_frame,
+            "1st Derivative",
+            X_deriv1,
+            "First Derivative",
+            "green"
+        )
+
+        # 2nd Derivative
+        for widget in self.explore_deriv2_frame.winfo_children():
+            widget.destroy()
+        deriv2 = SavgolDerivative(deriv=2, window=7)
+        X_deriv2 = deriv2.transform(self.X.values)
+        self._create_explore_plot_in_frame(
+            self.explore_deriv2_frame,
+            "2nd Derivative",
+            X_deriv2,
+            "Second Derivative",
+            "red"
+        )
+
+    def _generate_explore_target_distribution(self):
+        """Generate target distribution plot in the Explore tab."""
+        # Clear existing content
+        for widget in self.explore_target_dist_frame.winfo_children():
+            widget.destroy()
+
+        if self.y is None:
+            ttk.Label(self.explore_target_dist_frame,
+                     text="No target variable loaded. Select a target in the Import tab.",
+                     style='Caption.TLabel').pack(expand=True)
+            return
+
+        # Create figure
+        fig = Figure(figsize=(10, 5))
+        ax = fig.add_subplot(111)
+
+        # Determine if classification or regression
+        n_unique = len(np.unique(self.y))
+        is_classification = n_unique < 15
+
+        if is_classification:
+            # Bar chart for categorical/classification
+            unique_vals, counts = np.unique(self.y, return_counts=True)
+            colors = plt.cm.viridis(np.linspace(0, 1, len(unique_vals)))
+            bars = ax.bar(range(len(unique_vals)), counts, color=colors, edgecolor='white')
+            ax.set_xticks(range(len(unique_vals)))
+            ax.set_xticklabels([str(v) for v in unique_vals], rotation=45, ha='right')
+            ax.set_xlabel('Class', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title(f'Target Distribution (n={len(self.y)}, {n_unique} classes)',
+                        fontsize=14, fontweight='bold')
+
+            # Add count labels on bars
+            for bar, count in zip(bars, counts):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                       str(count), ha='center', va='bottom', fontsize=10)
+        else:
+            # Histogram for continuous/regression
+            ax.hist(self.y, bins=30, color='steelblue', edgecolor='white', alpha=0.8)
+            ax.axvline(np.mean(self.y), color='red', linestyle='--', linewidth=2,
+                      label=f'Mean: {np.mean(self.y):.2f}')
+            ax.axvline(np.median(self.y), color='orange', linestyle='--', linewidth=2,
+                      label=f'Median: {np.median(self.y):.2f}')
+            ax.set_xlabel('Target Value', fontsize=12)
+            ax.set_ylabel('Frequency', fontsize=12)
+            ax.set_title(f'Target Distribution (n={len(self.y)}, range: {np.min(self.y):.2f} - {np.max(self.y):.2f})',
+                        fontsize=14, fontweight='bold')
+            ax.legend()
+
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, master=self.explore_target_dist_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # Add toolbar
+        toolbar_frame = ttk.Frame(self.explore_target_dist_frame)
+        toolbar_frame.pack(fill='x')
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+    def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color):
+        """Create an interactive spectral plot in a given frame.
+
+        Args:
+            frame: Parent frame for the plot
+            title: Plot title
+            data: Spectral data (samples x wavelengths)
+            ylabel: Y-axis label
+            color: Line color
+        """
+        fig = Figure(figsize=(12, 6))
+        ax = fig.add_subplot(111)
+
+        wavelengths = self.X.columns.values
+        n_samples = len(data)
+
+        # Determine plotting strategy
+        if n_samples <= 50:
+            alpha = 0.3
+            indices = range(n_samples)
+        else:
+            alpha = 0.5
+            indices = np.random.choice(n_samples, size=50, replace=False)
+
+        # Plot spectra
+        for i in indices:
+            if i in self.excluded_spectra:
+                current_alpha = 0.05
+                current_linewidth = 0.5
+            else:
+                current_alpha = alpha
+                current_linewidth = 1.0
+
+            line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
+                          color=color, linewidth=current_linewidth)
+            line.set_gid(str(i))
+            line.set_picker(5)
+
+        ax.set_xlabel('Wavelength (nm)', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(f'{title} (n={n_samples})', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+
+        if "Derivative" in title:
+            ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
+
+        # Add click handler for toggling exclusion
+        def on_pick(event):
+            if event.artist.get_gid():
+                sample_idx = int(event.artist.get_gid())
+                if sample_idx in self.excluded_spectra:
+                    self.excluded_spectra.discard(sample_idx)
+                    event.artist.set_alpha(alpha)
+                    event.artist.set_linewidth(1.0)
+                    print(f"✓ Sample {sample_idx} included")
+                else:
+                    self.excluded_spectra.add(sample_idx)
+                    event.artist.set_alpha(0.05)
+                    event.artist.set_linewidth(0.5)
+                    print(f"✗ Sample {sample_idx} excluded")
+                fig.canvas.draw_idle()
+
+        fig.canvas.mpl_connect('pick_event', on_pick)
+        fig.tight_layout()
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # Add toolbar
+        toolbar_frame = ttk.Frame(frame)
+        toolbar_frame.pack(fill='x')
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+    def _run_explore_predictor_screening(self):
+        """Run predictor screening from the Explore tab."""
+        if self.X is None or self.y is None:
+            messagebox.showwarning("No Data",
+                                  "Please load spectral data with a target variable first.")
+            return
+
+        # Clear previous results
+        for widget in self.explore_screening_results_frame.winfo_children():
+            widget.destroy()
+
+        method = self.explore_screening_method.get()
+        top_n = self.explore_top_n.get()
+
+        try:
+            if method == "Correlation":
+                results = self._compute_correlation_screening()
+            else:
+                # Show progress for RF (it's slower)
+                progress_label = ttk.Label(self.explore_screening_results_frame,
+                                          text="Computing Random Forest importances... (this may take 10-30 seconds)",
+                                          style='Caption.TLabel')
+                progress_label.pack(expand=True)
+                self.root.update()
+                results = self._compute_rf_screening()
+                progress_label.destroy()
+
+            if results is None:
+                messagebox.showerror("Error", "Failed to compute predictor screening.")
+                return
+
+            # Create screening plot
+            self._create_explore_screening_plot(results, top_n)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Predictor screening failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_explore_screening_plot(self, results, top_n):
+        """Create the predictor screening visualization in the Explore tab."""
+        # Clear the results frame
+        for widget in self.explore_screening_results_frame.winfo_children():
+            widget.destroy()
+
+        # Create main container with plot and info panel side by side
+        main_container = ttk.Frame(self.explore_screening_results_frame)
+        main_container.pack(fill='both', expand=True)
+
+        # Left: Plot area (70% width)
+        plot_frame = ttk.Frame(main_container)
+        plot_frame.pack(side='left', fill='both', expand=True)
+
+        # Right: Info panel (30% width)
+        info_frame = ttk.LabelFrame(main_container, text="Top Wavelengths", padding="10")
+        info_frame.pack(side='right', fill='y', padx=(10, 0))
+
+        # Create the figure with 2 subplots
+        fig = Figure(figsize=(10, 6))
+
+        # Plot 1: Raw values (signed for correlation, positive for RF)
+        ax1 = fig.add_subplot(211)
+        wavelengths = results['wavelengths']
+        importances = results['importances']
+
+        ax1.plot(wavelengths, importances, color='#2ecc71', linewidth=1.5)
+        ax1.fill_between(wavelengths, 0, importances,
+                        where=importances >= 0, alpha=0.3, color='#2ecc71')
+        ax1.fill_between(wavelengths, 0, importances,
+                        where=importances < 0, alpha=0.3, color='#e74c3c')
+        ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+        ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+        ax1.set_ylabel(results['metric_name'], fontsize=10)
+        ax1.set_title(f"Predictor Screening: {results['method'].upper()}",
+                     fontsize=12, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+
+        # Mark top wavelengths
+        top_wls = results['top_wavelengths'][:top_n]
+        for wl in top_wls:
+            ax1.axvline(x=wl, color='red', linestyle='--', alpha=0.5, linewidth=0.8)
+
+        # Plot 2: Absolute values
+        ax2 = fig.add_subplot(212)
+        abs_importances = results['abs_importances']
+
+        ax2.plot(wavelengths, abs_importances, color='#9b59b6', linewidth=1.5)
+        ax2.fill_between(wavelengths, 0, abs_importances, alpha=0.3, color='#9b59b6')
+        ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+        ax2.set_ylabel(f"|{results['metric_name']}|", fontsize=10)
+        ax2.set_title("Absolute Importance", fontsize=11)
+        ax2.grid(True, alpha=0.3)
+
+        # Mark top wavelengths
+        for wl in top_wls:
+            ax2.axvline(x=wl, color='red', linestyle='--', alpha=0.5, linewidth=0.8)
+
+        fig.tight_layout()
+
+        # Embed plot
+        canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # Add toolbar
+        toolbar_frame = ttk.Frame(plot_frame)
+        toolbar_frame.pack(fill='x')
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+        # Populate info panel with top wavelengths
+        ttk.Label(info_frame, text=f"Top {top_n} Wavelengths:",
+                 font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 10))
+
+        # Create scrollable list
+        list_frame = ttk.Frame(info_frame)
+        list_frame.pack(fill='both', expand=True)
+
+        for i, wl in enumerate(top_wls, 1):
+            importance_val = results['importances'][wl] if isinstance(results['importances'], pd.Series) else 0
+            sign = "+" if importance_val >= 0 else ""
+            text = f"{i:2d}. {wl:.1f} nm → {sign}{importance_val:.4f}"
+            ttk.Label(list_frame, text=text, font=('Consolas', 9)).pack(anchor='w')
+
+        # Add interpretation
+        ttk.Separator(info_frame, orient='horizontal').pack(fill='x', pady=10)
+
+        max_abs = abs_importances.max()
+        if results['method'] == 'correlation':
+            if max_abs > 0.7:
+                interpretation = "Strong correlations detected.\nTarget is likely predictable."
+                color = '#27ae60'
+            elif max_abs > 0.4:
+                interpretation = "Moderate correlations.\nReasonable predictability expected."
+                color = '#f39c12'
+            else:
+                interpretation = "Weak correlations.\nPrediction may be challenging."
+                color = '#e74c3c'
+        else:  # RF
+            if max_abs > 0.05:
+                interpretation = "Clear important wavelengths.\nGood feature discrimination."
+                color = '#27ae60'
+            elif max_abs > 0.02:
+                interpretation = "Some important wavelengths.\nModerate discrimination."
+                color = '#f39c12'
+            else:
+                interpretation = "Importance spread widely.\nNo dominant features."
+                color = '#e74c3c'
+
+        interp_label = ttk.Label(info_frame, text=interpretation,
+                                wraplength=180, foreground=color,
+                                font=('Segoe UI', 9))
+        interp_label.pack(anchor='w')
+
     def _create_tab2_data_viewer(self):
         """Tab 2: Data Viewer - Excel-like spreadsheet view with smooth scrolling."""
         from tksheet import Sheet
@@ -3478,9 +3974,9 @@ class SpectralPredictApp:
         content_frame = ttk.Frame(self.tab2, style='TFrame', padding="30")
         content_frame.pack(fill='both', expand=True)
 
-        # Control panel
+        # Control panel - Top row
         control_frame = ttk.Frame(content_frame)
-        control_frame.pack(fill='x', pady=(0, 10))
+        control_frame.pack(fill='x', pady=(0, 5))
 
         # Left side controls
         self.show_excluded_data_viewer = tk.BooleanVar(value=True)
@@ -3489,9 +3985,55 @@ class SpectralPredictApp:
                        command=self._populate_data_viewer).pack(side='left', padx=(0, 10))
 
         # Right side controls
-        ttk.Button(control_frame, text="📥 Export All Data to CSV",
+        ttk.Button(control_frame, text="📥 Export CSV",
                   command=self._export_data_viewer_to_csv,
                   style='Modern.TButton').pack(side='right', padx=(5, 0))
+
+        # Editing toolbar - Second row
+        edit_toolbar = ttk.Frame(content_frame)
+        edit_toolbar.pack(fill='x', pady=(0, 10))
+
+        # Save button with modified indicator
+        self.data_viewer_modified = tk.BooleanVar(value=False)
+        self.save_data_btn = ttk.Button(edit_toolbar, text="💾 Save Changes",
+                                        command=self._save_data_viewer_changes,
+                                        style='Modern.TButton')
+        self.save_data_btn.pack(side='left', padx=(0, 5))
+
+        # Undo button
+        ttk.Button(edit_toolbar, text="↩️ Undo",
+                  command=self._undo_data_viewer,
+                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+
+        ttk.Separator(edit_toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
+
+        # Column operations
+        ttk.Button(edit_toolbar, text="➕ Add Column",
+                  command=self._add_data_viewer_column,
+                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+
+        ttk.Button(edit_toolbar, text="🗑️ Delete Column",
+                  command=self._delete_data_viewer_column,
+                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+
+        ttk.Separator(edit_toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
+
+        # Row operations
+        ttk.Button(edit_toolbar, text="❌ Delete Rows",
+                  command=self._delete_data_viewer_rows,
+                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+
+        ttk.Button(edit_toolbar, text="🚫 Exclude Selected",
+                  command=self._exclude_selected_rows,
+                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+
+        ttk.Button(edit_toolbar, text="✅ Include Selected",
+                  command=self._include_selected_rows,
+                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+
+        # Modified indicator
+        self.modified_label = ttk.Label(edit_toolbar, text="", foreground='#ff6b6b')
+        self.modified_label.pack(side='right', padx=10)
 
         # Status bar
         self.data_viewer_status = ttk.Label(content_frame, text="", style='Caption.TLabel')
@@ -3515,17 +4057,34 @@ class SpectralPredictApp:
             width=1200,
         )
 
-        # Enable Excel-like interactions
+        # Enable Excel-like interactions with EDITING
         self.data_viewer_sheet.enable_bindings(
             "single_select",
             "row_select",
+            "column_select",
             "column_width_resize",
             "double_click_column_resize",
             "arrowkeys",
             "right_click_popup_menu",
             "rc_select",
             "copy",
+            # Editing bindings
+            "edit_cell",
+            "paste",
+            "cut",
+            "delete",
+            "undo",
         )
+
+        # Bind edit events to track modifications
+        self.data_viewer_sheet.extra_bindings([
+            ("end_edit_cell", self._on_data_viewer_edit),
+            ("end_paste", self._on_data_viewer_edit),
+            ("end_delete", self._on_data_viewer_edit),
+        ])
+
+        # Initialize undo stack
+        self.data_viewer_undo_stack = []
 
         self.data_viewer_sheet.grid(row=0, column=0, sticky='nsew')
         sheet_frame.grid_rowconfigure(0, weight=1)
@@ -3616,6 +4175,11 @@ class SpectralPredictApp:
 
         self.y_dist_plot_frame = ttk.Frame(self.outlier_plot_notebook)
         self.outlier_plot_notebook.add(self.y_dist_plot_frame, text="Y Distribution")
+
+        # Predictor Screening sub-tab
+        self.predictor_screening_frame = ttk.Frame(self.outlier_plot_notebook)
+        self.outlier_plot_notebook.add(self.predictor_screening_frame, text="Predictor Screening")
+        self._setup_predictor_screening_tab()
 
         # === SECTION 2.5: Class/Target Distribution Analysis ===
         ttk.Label(content_frame, text="2.5 Class/Target Distribution Analysis", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
@@ -8231,6 +8795,18 @@ class SpectralPredictApp:
             self.tab1_status.config(text="Loading data...")
             self.root.update()
 
+            # Save existing data if append mode is enabled
+            if self.append_mode.get() and self.X_original is not None:
+                self._existing_X = self.X_original.copy()
+                self._existing_y = self.y.copy() if self.y is not None else None
+                self._existing_ref = self.ref.copy() if self.ref is not None else None
+                self._existing_metadata_df = self.combined_metadata_df.copy() if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None else None
+            else:
+                self._existing_X = None
+                self._existing_y = None
+                self._existing_ref = None
+                self._existing_metadata_df = None
+
             # Check if spectral data has been selected and detected
             if not self.spectral_data_path.get():
                 messagebox.showwarning("Missing Input", "Please select spectral data directory")
@@ -8593,6 +9169,49 @@ class SpectralPredictApp:
                 messagebox.showerror("Error", f"Unknown data type: {self.detected_type}")
                 return
 
+            # Handle append mode - merge new data with existing
+            new_n_samples = len(self.X_original)
+            source_path = self.spectral_data_path.get() or self.combined_file_path or "Unknown"
+
+            if self.append_mode.get() and hasattr(self, '_existing_X') and self._existing_X is not None:
+                try:
+                    # Merge with existing data (including ref and metadata)
+                    self.X_original, self.y, self.ref, merged_metadata = self._merge_spectral_data(
+                        self._existing_X, self._existing_y,
+                        self.X_original, self.y,
+                        self._existing_ref, self.ref,
+                        self._existing_metadata_df, getattr(self, 'combined_metadata_df', None)
+                    )
+                    # Update combined_metadata_df if it exists
+                    if merged_metadata is not None:
+                        self.combined_metadata_df = merged_metadata
+
+                    # Update data sources tracking
+                    self.data_sources.append((source_path, new_n_samples))
+                    self._update_data_sources_display()
+                    print(f"✓ Appended {new_n_samples} samples from: {source_path}")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    messagebox.showerror("Append Error", f"Failed to merge data:\n{str(e)}")
+                    # Restore previous data
+                    self.X_original = self._existing_X
+                    self.y = self._existing_y
+                    self.ref = self._existing_ref
+                    if self._existing_metadata_df is not None:
+                        self.combined_metadata_df = self._existing_metadata_df
+                    return
+            else:
+                # First load or replace mode - reset data sources
+                self.data_sources = [(source_path, new_n_samples)]
+                self._update_data_sources_display()
+
+            # Clean up temporary storage
+            self._existing_X = None
+            self._existing_y = None
+            self._existing_ref = None
+            self._existing_metadata_df = None
+
             # CRITICAL: Verify index alignment to prevent data corruption
             if self.X_original is not None and self.y is not None:
                 if not (self.X_original.index.equals(self.y.index)):
@@ -8646,6 +9265,7 @@ class SpectralPredictApp:
 
             # Generate plots
             self._generate_plots()
+            self._generate_explore_plots()  # Also update Explore tab plots
 
             # Update data type detection UI
             self._update_data_type_status_ui()
@@ -8841,6 +9461,7 @@ class SpectralPredictApp:
 
             # Regenerate plots
             self._generate_plots()
+            self._generate_explore_plots()  # Also update Explore tab plots
 
             # Update status
             self.tab1_status.config(text=f"✓ Updated to {len(self.X)} samples × {self.X.shape[1]} wavelengths")
@@ -8871,6 +9492,7 @@ class SpectralPredictApp:
 
         # Regenerate plots with current transformation state
         self._generate_plots()
+        self._generate_explore_plots()  # Also update Explore tab plots
 
     def _on_data_type_override(self):
         """
@@ -8962,6 +9584,7 @@ class SpectralPredictApp:
 
             # Regenerate plots with new data and labels
             self._generate_plots()
+            self._generate_explore_plots()  # Also update Explore tab plots
 
             print(f"✓ Successfully converted data to {target_type}")
 
@@ -9019,6 +9642,7 @@ class SpectralPredictApp:
         self._update_exclusion_status()
         # Regenerate plots to restore all spectra
         self._generate_plots()
+        self._generate_explore_plots()  # Also update Explore tab plots
 
     def _update_exclusion_status(self):
         """Update the exclusion status label."""
@@ -10476,6 +11100,7 @@ class SpectralPredictApp:
         # Update plots in Tab 1 if data is loaded
         if self.X is not None:
             self._generate_plots()
+            self._generate_explore_plots()  # Also update Explore tab plots
         # Samples excluded - plots updated
 
     def _export_outlier_report(self):
@@ -10500,6 +11125,530 @@ class SpectralPredictApp:
             messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
 
     # ========== END OUTLIER DETECTION METHODS ==========
+
+    # ========== PREDICTOR SCREENING METHODS ==========
+
+    def _setup_predictor_screening_tab(self):
+        """Set up the Predictor Screening sub-tab UI."""
+        frame = self.predictor_screening_frame
+
+        # Control frame at top
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        # Method selection
+        ttk.Label(control_frame, text="Screening Method:").pack(side=tk.LEFT, padx=(0, 5))
+
+        self.screening_method = tk.StringVar(value="correlation")
+        method_combo = ttk.Combobox(control_frame, textvariable=self.screening_method,
+                                    state='readonly', width=20)
+        method_combo['values'] = ['correlation', 'random_forest']
+        method_combo.pack(side=tk.LEFT, padx=(0, 15))
+
+        # Top N wavelengths
+        ttk.Label(control_frame, text="Top N:").pack(side=tk.LEFT, padx=(0, 5))
+        self.screening_top_n = tk.IntVar(value=20)
+        top_n_spinbox = ttk.Spinbox(control_frame, from_=5, to=50, width=5,
+                                    textvariable=self.screening_top_n)
+        top_n_spinbox.pack(side=tk.LEFT, padx=(0, 15))
+
+        # Run button
+        self.run_screening_btn = ttk.Button(control_frame, text="Run Screening",
+                                            command=self._run_predictor_screening)
+        self.run_screening_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Status label
+        self.screening_status = ttk.Label(control_frame, text="Load data and click Run Screening",
+                                          style='Caption.TLabel')
+        self.screening_status.pack(side=tk.LEFT, padx=10)
+
+        # Main content area with plot and info panel
+        content_frame = ttk.Frame(frame)
+        content_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Left side: Plot area
+        self.screening_plot_frame = ttk.Frame(content_frame)
+        self.screening_plot_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Right side: Info panel
+        info_frame = ttk.LabelFrame(content_frame, text="Top Wavelengths", padding="10")
+        info_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+
+        # Interpretation label
+        self.screening_interpretation = ttk.Label(info_frame, text="",
+                                                   wraplength=250, justify='left')
+        self.screening_interpretation.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
+
+        # Top wavelengths listbox with scrollbar
+        list_frame = ttk.Frame(info_frame)
+        list_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.screening_listbox = tk.Listbox(list_frame, width=30, height=20,
+                                             yscrollcommand=scrollbar.set,
+                                             font=('Consolas', 9))
+        self.screening_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.screening_listbox.yview)
+
+    def _compute_correlation_screening(self):
+        """Compute wavelength-target correlations (fast, linear)."""
+        if self.X is None or self.y is None:
+            return None
+
+        try:
+            # Handle categorical/string targets by encoding them
+            y_numeric = self.y.copy()
+            if y_numeric.dtype == 'object' or isinstance(y_numeric.iloc[0], str):
+                # Label encode string targets
+                from sklearn.preprocessing import LabelEncoder
+                le = LabelEncoder()
+                y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=self.X.index)
+                print(f"ℹ️ Encoded categorical target for correlation: {dict(zip(le.classes_, range(len(le.classes_))))}")
+
+            # Vectorized correlation - computes all correlations in one operation
+            correlations = self.X.corrwith(pd.Series(y_numeric, index=self.X.index))
+
+            abs_corr = correlations.abs()
+            top_n = self.screening_top_n.get()
+            top_indices = abs_corr.nlargest(top_n).index
+
+            return {
+                'importances': correlations,
+                'abs_importances': abs_corr,
+                'top_wavelengths': list(top_indices),
+                'top_values': correlations[top_indices].values,
+                'wavelengths': correlations.index.values,
+                'method': 'correlation',
+                'metric_name': 'Correlation (r)'
+            }
+        except Exception as e:
+            messagebox.showerror("Error", f"Correlation screening failed: {str(e)}")
+            return None
+
+    def _compute_rf_screening(self):
+        """Compute RF-based feature importances (slower, non-linear)."""
+        if self.X is None or self.y is None:
+            return None
+
+        try:
+            from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+
+            # Determine task type
+            n_unique = len(np.unique(self.y))
+            is_classification = n_unique < 10 and isinstance(self.y.iloc[0], (str, np.str_)) or n_unique <= 10
+
+            # Check if target is categorical
+            if self.y.dtype == 'object' or n_unique <= 10:
+                is_classification = True
+
+            self.screening_status.config(text="Training Random Forest (may take a moment)...")
+            self.root.update()
+
+            # Quick RF fit (limited trees for speed)
+            if is_classification:
+                rf = RandomForestClassifier(n_estimators=100, max_depth=10,
+                                            n_jobs=-1, random_state=42)
+            else:
+                rf = RandomForestRegressor(n_estimators=100, max_depth=10,
+                                           n_jobs=-1, random_state=42)
+
+            rf.fit(self.X.values, self.y.values)
+            importances = pd.Series(rf.feature_importances_, index=self.X.columns)
+
+            top_n = self.screening_top_n.get()
+            top_indices = importances.nlargest(top_n).index
+
+            return {
+                'importances': importances,
+                'abs_importances': importances,  # RF importances are always positive
+                'top_wavelengths': list(top_indices),
+                'top_values': importances[top_indices].values,
+                'wavelengths': importances.index.values,
+                'method': 'rf',
+                'metric_name': 'RF Importance'
+            }
+        except Exception as e:
+            messagebox.showerror("Error", f"RF screening failed: {str(e)}")
+            return None
+
+    def _run_predictor_screening(self):
+        """Run predictor screening and update plots."""
+        if self.X is None or self.y is None:
+            messagebox.showerror("Error", "Please load data first in the 'Import & Preview' tab")
+            return
+
+        self.screening_status.config(text="Computing...")
+        self.root.update()
+
+        # Run selected screening method
+        method = self.screening_method.get()
+        if method == 'correlation':
+            results = self._compute_correlation_screening()
+        else:  # random_forest
+            results = self._compute_rf_screening()
+
+        if results is None:
+            self.screening_status.config(text="Screening failed")
+            return
+
+        # Store results for potential export
+        self.screening_results = results
+
+        # Update plot
+        self._create_predictor_screening_plot(results)
+
+        # Update info panel
+        self._update_screening_info_panel(results)
+
+        n_top = len(results['top_wavelengths'])
+        self.screening_status.config(text=f"Screening complete - showing top {n_top} wavelengths")
+
+    def _create_predictor_screening_plot(self, results):
+        """Create the predictor screening visualization."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Clear existing plot
+        for widget in self.screening_plot_frame.winfo_children():
+            widget.destroy()
+
+        # Create figure with 2 subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+        fig.patch.set_facecolor('#f5f5f5')
+
+        wavelengths = results['wavelengths'].astype(float)
+        importances = results['importances'].values
+        abs_importances = results['abs_importances'].values
+        top_wls = [float(w) for w in results['top_wavelengths']]
+        method = results['method']
+        metric_name = results['metric_name']
+
+        # Plot 1: Raw importance (can be +/- for correlation)
+        if method == 'correlation':
+            ax1.plot(wavelengths, importances, 'b-', linewidth=0.8, alpha=0.8)
+            ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+            ax1.set_ylabel('Correlation (r)', fontsize=10)
+            ax1.set_title('Wavelength-Target Correlation', fontsize=11, fontweight='bold')
+            # Color positive/negative regions
+            ax1.fill_between(wavelengths, 0, importances, where=(importances > 0),
+                            alpha=0.3, color='blue', label='Positive')
+            ax1.fill_between(wavelengths, 0, importances, where=(importances < 0),
+                            alpha=0.3, color='red', label='Negative')
+        else:  # RF
+            ax1.plot(wavelengths, importances, 'g-', linewidth=0.8, alpha=0.8)
+            ax1.fill_between(wavelengths, 0, importances, alpha=0.3, color='green')
+            ax1.set_ylabel('RF Importance', fontsize=10)
+            ax1.set_title('Random Forest Feature Importance', fontsize=11, fontweight='bold')
+
+        # Mark top wavelengths on plot 1
+        for wl in top_wls[:10]:  # Show top 10 markers
+            ax1.axvline(x=wl, color='red', linestyle=':', alpha=0.5, linewidth=0.8)
+
+        ax1.grid(True, alpha=0.3)
+        ax1.set_facecolor('white')
+
+        # Plot 2: Absolute importance
+        ax2.plot(wavelengths, abs_importances, 'purple', linewidth=0.8, alpha=0.8)
+        ax2.fill_between(wavelengths, 0, abs_importances, alpha=0.3, color='purple')
+        ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+        ax2.set_ylabel(f'|{metric_name}|', fontsize=10)
+        ax2.set_title(f'Absolute {metric_name}', fontsize=11, fontweight='bold')
+
+        # Mark top wavelengths on plot 2
+        for wl in top_wls[:10]:
+            ax2.axvline(x=wl, color='red', linestyle=':', alpha=0.5, linewidth=0.8)
+
+        ax2.grid(True, alpha=0.3)
+        ax2.set_facecolor('white')
+
+        plt.tight_layout()
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, master=self.screening_plot_frame)
+        canvas.draw()
+
+        # Add navigation toolbar
+        toolbar_frame = ttk.Frame(self.screening_plot_frame)
+        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Add export button
+        self._add_plot_export_button(self.screening_plot_frame, fig, 'predictor_screening')
+
+    def _update_screening_info_panel(self, results):
+        """Update the screening info panel with results."""
+        # Clear listbox
+        self.screening_listbox.delete(0, tk.END)
+
+        # Add top wavelengths to listbox
+        metric_name = results['metric_name']
+        for i, (wl, val) in enumerate(zip(results['top_wavelengths'], results['top_values']), 1):
+            if results['method'] == 'correlation':
+                sign = '+' if val > 0 else ''
+                self.screening_listbox.insert(tk.END, f"{i:2}. {float(wl):.1f} nm -> r = {sign}{val:.4f}")
+            else:
+                self.screening_listbox.insert(tk.END, f"{i:2}. {float(wl):.1f} nm -> imp = {val:.5f}")
+
+        # Generate interpretation
+        max_abs = results['abs_importances'].max()
+
+        if results['method'] == 'correlation':
+            if max_abs > 0.7:
+                interp = "✓ STRONG correlations detected\n\nStrong linear relationships found. Target should be predictable with linear models (PLS, PCR)."
+                color = '#2e7d32'  # Green
+            elif max_abs > 0.4:
+                interp = "○ MODERATE correlations detected\n\nModerate relationships found. May benefit from non-linear models or feature engineering."
+                color = '#f57c00'  # Orange
+            else:
+                interp = "⚠ WEAK correlations detected\n\nNo strong linear relationships. Consider:\n• Non-linear models (RF, SVM)\n• Different preprocessing\n• Additional data"
+                color = '#c62828'  # Red
+        else:  # RF
+            if max_abs > 0.05:
+                interp = "✓ Clear important wavelengths identified\n\nRandom Forest found discriminative wavelengths. Variable selection may help."
+                color = '#2e7d32'
+            elif max_abs > 0.02:
+                interp = "○ Some important wavelengths identified\n\nModerate importance spread. Some wavelengths are more predictive than others."
+                color = '#f57c00'
+            else:
+                interp = "⚠ Importance spread across wavelengths\n\nNo single wavelengths dominate. May indicate:\n• Complex interactions\n• Noise in data\n• Difficult prediction task"
+                color = '#c62828'
+
+        self.screening_interpretation.config(text=interp, foreground=color)
+
+    # ========== END PREDICTOR SCREENING METHODS ==========
+
+    # ========== DATA SOURCE MANAGEMENT METHODS ==========
+
+    def _merge_spectral_data(self, X_existing, y_existing, X_new, y_new,
+                             ref_existing=None, ref_new=None,
+                             metadata_existing=None, metadata_new=None):
+        """
+        Merge new spectral data with existing data.
+
+        Handles wavelength alignment via interpolation if needed.
+        Also intelligently merges reference data and metadata with different columns.
+
+        Parameters
+        ----------
+        X_existing : pd.DataFrame
+            Existing spectral data
+        y_existing : pd.Series
+            Existing target values
+        X_new : pd.DataFrame
+            New spectral data to append
+        y_new : pd.Series
+            New target values to append
+        ref_existing : pd.DataFrame, optional
+            Existing reference/metadata
+        ref_new : pd.DataFrame, optional
+            New reference/metadata
+        metadata_existing : pd.DataFrame, optional
+            Existing combined format metadata
+        metadata_new : pd.DataFrame, optional
+            New combined format metadata
+
+        Returns
+        -------
+        X_merged : pd.DataFrame
+            Combined spectral data
+        y_merged : pd.Series
+            Combined target values
+        ref_merged : pd.DataFrame or None
+            Combined reference data
+        metadata_merged : pd.DataFrame or None
+            Combined metadata
+        """
+        from scipy import interpolate
+
+        existing_wls = X_existing.columns.astype(float)
+        new_wls = X_new.columns.astype(float)
+
+        # Track original indices for metadata alignment
+        original_new_index = X_new.index.copy()
+
+        # Check if wavelengths match exactly
+        if len(existing_wls) == len(new_wls) and np.allclose(existing_wls, new_wls, atol=0.1):
+            # Wavelengths match - simple concatenation
+            X_new.columns = X_existing.columns  # Ensure exact column match
+        else:
+            # Wavelengths differ - interpolate new data to existing wavelengths
+            print(f"Wavelength alignment needed: existing={len(existing_wls)}, new={len(new_wls)}")
+
+            # Find common wavelength range
+            wl_min = max(existing_wls.min(), new_wls.min())
+            wl_max = min(existing_wls.max(), new_wls.max())
+
+            # Filter existing wavelengths to common range
+            common_wls = existing_wls[(existing_wls >= wl_min) & (existing_wls <= wl_max)]
+
+            if len(common_wls) < 10:
+                raise ValueError(f"Insufficient wavelength overlap: only {len(common_wls)} common wavelengths")
+
+            # Interpolate new data to common wavelengths
+            interpolated_rows = []
+            for idx, row in X_new.iterrows():
+                f = interpolate.interp1d(new_wls, row.values, kind='linear', fill_value='extrapolate')
+                interpolated_rows.append(f(common_wls))
+
+            X_new_interp = pd.DataFrame(
+                interpolated_rows,
+                index=X_new.index,
+                columns=common_wls
+            )
+
+            # Also filter existing data to common wavelengths
+            X_existing = X_existing[common_wls]
+            X_new = X_new_interp
+
+            print(f"✓ Interpolated to {len(common_wls)} common wavelengths ({wl_min:.0f}-{wl_max:.0f} nm)")
+
+        # Make indices unique to avoid collisions
+        new_index_mapping = {}  # Track index changes for metadata
+        if X_new.index.intersection(X_existing.index).size > 0:
+            # Prefix new indices to avoid collision
+            new_indices = [f"src{len(self.data_sources)+1}_{idx}" for idx in X_new.index]
+            new_index_mapping = dict(zip(X_new.index, new_indices))
+            X_new.index = new_indices
+            y_new.index = X_new.index
+
+        # Concatenate spectral data
+        X_merged = pd.concat([X_existing, X_new], axis=0)
+        y_merged = pd.concat([y_existing, y_new], axis=0)
+
+        # Merge reference data intelligently
+        ref_merged = self._merge_metadata_frames(
+            ref_existing, ref_new,
+            X_existing.index, X_new.index,
+            new_index_mapping
+        )
+
+        # Merge combined metadata similarly
+        metadata_merged = self._merge_metadata_frames(
+            metadata_existing, metadata_new,
+            X_existing.index, X_new.index,
+            new_index_mapping
+        )
+
+        return X_merged, y_merged, ref_merged, metadata_merged
+
+    def _merge_metadata_frames(self, df1, df2, idx1, idx2, index_mapping=None):
+        """
+        Merge two metadata DataFrames with different columns intelligently.
+
+        Parameters
+        ----------
+        df1 : pd.DataFrame or None
+            First metadata frame (existing)
+        df2 : pd.DataFrame or None
+            Second metadata frame (new)
+        idx1 : pd.Index
+            Index for first frame
+        idx2 : pd.Index
+            Index for second frame (after any renaming)
+        index_mapping : dict, optional
+            Mapping from original to new indices for df2
+
+        Returns
+        -------
+        pd.DataFrame or None
+            Merged metadata with union of columns
+        """
+        if df1 is None and df2 is None:
+            return None
+
+        if df1 is None:
+            # Only new data has metadata - align to new indices
+            if df2 is None:
+                return None
+            df2_copy = df2.copy()
+            if index_mapping:
+                df2_copy.index = [index_mapping.get(idx, idx) for idx in df2_copy.index]
+            return df2_copy
+
+        if df2 is None:
+            # Only existing has metadata - add NaN rows for new data
+            empty_rows = pd.DataFrame(index=idx2, columns=df1.columns)
+            return pd.concat([df1, empty_rows])
+
+        # Both have metadata - find union of columns
+        all_columns = list(df1.columns)
+        for col in df2.columns:
+            if col not in all_columns:
+                all_columns.append(col)
+
+        # Reindex df1 to have all columns (fills missing with NaN)
+        df1_aligned = df1.reindex(columns=all_columns)
+
+        # Copy and align df2
+        df2_aligned = df2.reindex(columns=all_columns).copy()
+
+        # Update indices if mapping provided
+        if index_mapping:
+            df2_aligned.index = [index_mapping.get(idx, idx) for idx in df2_aligned.index]
+
+        return pd.concat([df1_aligned, df2_aligned])
+
+    def _update_data_sources_display(self):
+        """Update the data sources label in the Import tab."""
+        if not hasattr(self, 'data_sources_label'):
+            return
+
+        if not self.data_sources:
+            self.data_sources_label.config(text="")
+            if hasattr(self, 'clear_sources_btn'):
+                self.clear_sources_btn.pack_forget()
+            return
+
+        # Build display text
+        total = sum(n for _, n in self.data_sources)
+
+        if len(self.data_sources) == 1:
+            path, n = self.data_sources[0]
+            short_path = os.path.basename(path) if path else "Unknown"
+            self.data_sources_label.config(text=f"📁 {n} samples from: {short_path}")
+            if hasattr(self, 'clear_sources_btn'):
+                self.clear_sources_btn.pack_forget()
+        else:
+            # Multiple sources
+            source_strs = []
+            for i, (path, n) in enumerate(self.data_sources, 1):
+                short_path = os.path.basename(path) if path else f"Source {i}"
+                source_strs.append(f"{n} from {short_path}")
+
+            sources_text = ", ".join(source_strs)
+            self.data_sources_label.config(
+                text=f"📁 {total} total samples ({len(self.data_sources)} sources: {sources_text})"
+            )
+            # Show clear button when multiple sources
+            if hasattr(self, 'clear_sources_btn'):
+                self.clear_sources_btn.pack(side=tk.LEFT, padx=5)
+
+    def _clear_data_sources(self):
+        """Clear all loaded data and reset to initial state."""
+        if messagebox.askyesno("Clear Data", "Clear all loaded data?\n\nThis will remove all spectral data from all sources."):
+            self.X_original = None
+            self.X = None
+            self.y = None
+            self.ref = None
+            self.combined_metadata_df = None
+            self.data_sources = []
+            self._update_data_sources_display()
+            self.tab1_status.config(text="Data cleared. Ready to load new data.")
+
+            # Clear plots
+            if hasattr(self, 'spectra_plot_frame'):
+                for widget in self.spectra_plot_frame.winfo_children():
+                    widget.destroy()
+
+            # Reset append mode
+            self.append_mode.set(False)
+
+    # ========== END DATA SOURCE MANAGEMENT METHODS ==========
 
     # ========== IMBALANCE HANDLING METHODS ==========
 
@@ -14378,6 +15527,330 @@ class SpectralPredictApp:
                 "Export Error",
                 f"Failed to export data:\n\n{str(e)}"
             )
+
+    # ========== DATA VIEWER EDITING METHODS ==========
+
+    def _on_data_viewer_edit(self, event=None):
+        """Called when user edits a cell in the data viewer."""
+        self.data_viewer_modified.set(True)
+        self.modified_label.config(text="⚠ Unsaved changes")
+
+    def _save_data_viewer_changes(self):
+        """Save changes from the data viewer back to X, y, and ref."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No data loaded to save.")
+            return
+
+        try:
+            # Save current state to undo stack
+            self._push_data_viewer_undo()
+
+            # Get sheet data
+            data = self.data_viewer_sheet.get_sheet_data()
+            headers = self.data_viewer_sheet.headers()
+
+            if not data or not headers:
+                return
+
+            # Parse header structure: Sample ID, [metadata cols], Target, [wavelength cols]
+            # Find target column position
+            target_col_name = self.target_column.get() if self.target_column.get() else "Target"
+            wavelength_cols = list(self.X.columns)
+
+            # Identify column types
+            sample_id_idx = 0
+            target_idx = None
+            metadata_indices = []
+            wavelength_start_idx = None
+
+            for i, h in enumerate(headers):
+                if h == "Sample ID":
+                    sample_id_idx = i
+                elif h == target_col_name or h == "Target":
+                    target_idx = i
+                elif h in [str(w) for w in wavelength_cols]:
+                    if wavelength_start_idx is None:
+                        wavelength_start_idx = i
+                else:
+                    metadata_indices.append(i)
+
+            if target_idx is None or wavelength_start_idx is None:
+                messagebox.showerror("Error", "Could not parse data structure. Save cancelled.")
+                return
+
+            # Rebuild data from sheet
+            new_indices = []
+            new_y_values = []
+            new_X_data = []
+            new_metadata = {h: [] for i, h in enumerate(headers) if i in metadata_indices}
+
+            for row in data:
+                sample_id = row[sample_id_idx]
+                new_indices.append(sample_id)
+
+                # Target value
+                target_val = row[target_idx]
+                try:
+                    target_val = float(target_val)
+                except (ValueError, TypeError):
+                    pass  # Keep as string
+                new_y_values.append(target_val)
+
+                # Spectral values
+                spectral_vals = []
+                for i in range(wavelength_start_idx, len(row)):
+                    try:
+                        spectral_vals.append(float(row[i]))
+                    except (ValueError, TypeError):
+                        spectral_vals.append(np.nan)
+                new_X_data.append(spectral_vals)
+
+                # Metadata values
+                for i in metadata_indices:
+                    col_name = headers[i]
+                    new_metadata[col_name].append(row[i])
+
+            # Update self.X
+            self.X = pd.DataFrame(new_X_data, index=new_indices, columns=wavelength_cols)
+            self.X_original = self.X.copy()
+
+            # Update self.y
+            self.y = pd.Series(new_y_values, index=new_indices)
+
+            # Update metadata (ref or combined_metadata_df)
+            if new_metadata:
+                metadata_df = pd.DataFrame(new_metadata, index=new_indices)
+                if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                    self.combined_metadata_df = metadata_df
+                else:
+                    self.ref = metadata_df
+
+            # Clear modified flag
+            self.data_viewer_modified.set(False)
+            self.modified_label.config(text="✓ Saved")
+
+            # Update status
+            self.data_viewer_status.config(text=f"✓ Saved {len(self.X)} samples")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Save Error", f"Failed to save changes:\n{str(e)}")
+
+    def _push_data_viewer_undo(self):
+        """Push current data state to undo stack."""
+        if self.X is None:
+            return
+
+        state = {
+            'X': self.X.copy(),
+            'X_original': self.X_original.copy() if self.X_original is not None else None,
+            'y': self.y.copy() if self.y is not None else None,
+            'ref': self.ref.copy() if self.ref is not None else None,
+            'combined_metadata_df': self.combined_metadata_df.copy() if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None else None,
+            'excluded_spectra': self.excluded_spectra.copy(),
+        }
+        self.data_viewer_undo_stack.append(state)
+        # Limit stack size
+        if len(self.data_viewer_undo_stack) > 20:
+            self.data_viewer_undo_stack.pop(0)
+
+    def _undo_data_viewer(self):
+        """Undo last data viewer change."""
+        if not self.data_viewer_undo_stack:
+            messagebox.showinfo("Undo", "Nothing to undo.")
+            return
+
+        state = self.data_viewer_undo_stack.pop()
+
+        self.X = state['X']
+        self.X_original = state['X_original']
+        self.y = state['y']
+        self.ref = state['ref']
+        if state['combined_metadata_df'] is not None:
+            self.combined_metadata_df = state['combined_metadata_df']
+        self.excluded_spectra = state['excluded_spectra']
+
+        # Refresh display
+        self._populate_data_viewer()
+
+        # Update status
+        self.data_viewer_status.config(text="↩️ Undo successful")
+        self.modified_label.config(text="")
+        self.data_viewer_modified.set(False)
+
+    def _add_data_viewer_column(self):
+        """Add a new metadata column to the data viewer."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No data loaded.")
+            return
+
+        # Ask for column name
+        col_name = simpledialog.askstring("Add Column", "Enter new column name:")
+        if not col_name:
+            return
+
+        # Ask for default value
+        default_val = simpledialog.askstring("Add Column", f"Enter default value for '{col_name}':", initialvalue="")
+        if default_val is None:
+            return
+
+        try:
+            # Push undo state
+            self._push_data_viewer_undo()
+
+            # Add column to metadata
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                self.combined_metadata_df[col_name] = default_val
+            elif self.ref is not None:
+                self.ref[col_name] = default_val
+            else:
+                # Create new ref dataframe
+                self.ref = pd.DataFrame({col_name: [default_val] * len(self.X)}, index=self.X.index)
+
+            # Refresh display
+            self._populate_data_viewer()
+            self.data_viewer_status.config(text=f"✓ Added column '{col_name}'")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add column:\n{str(e)}")
+
+    def _delete_data_viewer_column(self):
+        """Delete a selected metadata column."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No data loaded.")
+            return
+
+        # Get selected column
+        selected = self.data_viewer_sheet.get_selected_columns()
+        if not selected:
+            messagebox.showinfo("Delete Column", "Please select a column first by clicking its header.")
+            return
+
+        col_idx = selected[0]
+        headers = self.data_viewer_sheet.headers()
+
+        if col_idx >= len(headers):
+            return
+
+        col_name = headers[col_idx]
+
+        # Prevent deletion of essential columns
+        wavelength_cols = [str(w) for w in self.X.columns]
+        if col_name == "Sample ID" or col_name in wavelength_cols:
+            messagebox.showwarning("Cannot Delete", f"Cannot delete '{col_name}' - it's part of the spectral data.")
+            return
+
+        target_col = self.target_column.get() if self.target_column.get() else "Target"
+        if col_name == target_col or col_name == "Target":
+            messagebox.showwarning("Cannot Delete", "Cannot delete the Target column.")
+            return
+
+        if not messagebox.askyesno("Delete Column", f"Delete column '{col_name}'?"):
+            return
+
+        try:
+            # Push undo state
+            self._push_data_viewer_undo()
+
+            # Remove from metadata
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and col_name in self.combined_metadata_df.columns:
+                self.combined_metadata_df = self.combined_metadata_df.drop(columns=[col_name])
+            elif self.ref is not None and col_name in self.ref.columns:
+                self.ref = self.ref.drop(columns=[col_name])
+
+            # Refresh display
+            self._populate_data_viewer()
+            self.data_viewer_status.config(text=f"✓ Deleted column '{col_name}'")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete column:\n{str(e)}")
+
+    def _delete_data_viewer_rows(self):
+        """Delete selected rows from the data."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No data loaded.")
+            return
+
+        # Get selected rows
+        selected = self.data_viewer_sheet.get_selected_rows()
+        if not selected:
+            messagebox.showinfo("Delete Rows", "Please select rows first.")
+            return
+
+        # Get sample IDs for selected rows
+        data = self.data_viewer_sheet.get_sheet_data()
+        indices_to_delete = [data[row][0] for row in selected]
+
+        if not messagebox.askyesno("Delete Rows", f"Permanently delete {len(indices_to_delete)} sample(s)?\n\nThis cannot be undone (except via Undo button)."):
+            return
+
+        try:
+            # Push undo state
+            self._push_data_viewer_undo()
+
+            # Remove from X
+            self.X = self.X.drop(index=indices_to_delete, errors='ignore')
+            self.X_original = self.X_original.drop(index=indices_to_delete, errors='ignore') if self.X_original is not None else None
+
+            # Remove from y
+            self.y = self.y.drop(index=indices_to_delete, errors='ignore')
+
+            # Remove from metadata
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                self.combined_metadata_df = self.combined_metadata_df.drop(index=indices_to_delete, errors='ignore')
+            if self.ref is not None:
+                self.ref = self.ref.drop(index=indices_to_delete, errors='ignore')
+
+            # Remove from excluded set
+            self.excluded_spectra = self.excluded_spectra - set(indices_to_delete)
+
+            # Refresh display
+            self._populate_data_viewer()
+            self.data_viewer_status.config(text=f"✓ Deleted {len(indices_to_delete)} sample(s)")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete rows:\n{str(e)}")
+
+    def _exclude_selected_rows(self):
+        """Mark selected rows as excluded."""
+        if self.X is None:
+            return
+
+        selected = self.data_viewer_sheet.get_selected_rows()
+        if not selected:
+            messagebox.showinfo("Exclude", "Please select rows first.")
+            return
+
+        data = self.data_viewer_sheet.get_sheet_data()
+        indices = [data[row][0] for row in selected]
+
+        for idx in indices:
+            self.excluded_spectra.add(idx)
+
+        self._populate_data_viewer()
+        self.data_viewer_status.config(text=f"✓ Excluded {len(indices)} sample(s)")
+
+    def _include_selected_rows(self):
+        """Remove selected rows from exclusion list."""
+        if self.X is None:
+            return
+
+        selected = self.data_viewer_sheet.get_selected_rows()
+        if not selected:
+            messagebox.showinfo("Include", "Please select rows first.")
+            return
+
+        data = self.data_viewer_sheet.get_sheet_data()
+        indices = [data[row][0] for row in selected]
+
+        for idx in indices:
+            self.excluded_spectra.discard(idx)
+
+        self._populate_data_viewer()
+        self.data_viewer_status.config(text=f"✓ Included {len(indices)} sample(s)")
+
+    # ========== END DATA VIEWER EDITING METHODS ==========
 
     def _validate_data_for_refinement(self):
         """Validate that required data is available for refinement."""
