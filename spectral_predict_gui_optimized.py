@@ -1450,6 +1450,18 @@ class SpectralPredictApp:
         self.window_19 = tk.BooleanVar(value=False)
         self.window_custom = tk.StringVar(value="")  # Custom window size
 
+        # Pre-processing steps (optional, applied before transforms)
+        # Baseline correction
+        self.enable_baseline = tk.BooleanVar(value=False)
+        self.baseline_method = tk.StringVar(value="polynomial")
+        self.baseline_poly_degree = tk.IntVar(value=2)
+        self.baseline_asls_lambda = tk.StringVar(value="1e5")
+        self.baseline_asls_p = tk.StringVar(value="0.01")
+        # Smoothing
+        self.enable_smoothing = tk.BooleanVar(value=False)
+        self.smoothing_window = tk.IntVar(value=17)
+        self.smoothing_polyorder = tk.IntVar(value=2)
+
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
         self.n_estimators_100 = tk.BooleanVar(value=True)  # Default
@@ -5239,6 +5251,89 @@ class SpectralPredictApp:
         ttk.Label(window_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5), pady=2)
         ttk.Entry(window_frame, textvariable=self.window_custom, width=10).grid(row=0, column=5, padx=5, pady=2)
         ttk.Label(window_frame, text="(comma-separated, e.g., 13,15,21)", style='Caption.TLabel').grid(row=0, column=6, padx=5, pady=2)
+
+        # === Pre-Processing Steps (Optional) ===
+        prestep_card_outer, prestep_card = self._create_card(content_frame, title="Pre-Processing Steps (Optional)",
+                                                              subtitle="Applied before transforms: Baseline -> Smoothing -> SNV/Derivatives")
+        prestep_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        prestep_frame = tk.Frame(prestep_card, bg=self.colors['card_bg'])
+        prestep_frame.pack(fill='both', expand=True)
+
+        # Baseline Correction Section
+        self.baseline_checkbox = ttk.Checkbutton(prestep_frame, text="Apply Baseline Correction",
+                                                  variable=self.enable_baseline,
+                                                  command=self._toggle_baseline_options)
+        self.baseline_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+
+        # Baseline method frame (hidden when disabled)
+        self.baseline_options_frame = ttk.Frame(prestep_frame)
+        self.baseline_options_frame.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
+
+        ttk.Label(self.baseline_options_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        baseline_method_combo = ttk.Combobox(self.baseline_options_frame, textvariable=self.baseline_method,
+                                              width=12, state='readonly')
+        baseline_method_combo['values'] = ['polynomial', 'asls']
+        baseline_method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        baseline_method_combo.bind('<<ComboboxSelected>>', self._on_baseline_method_changed)
+
+        # Polynomial options
+        self.baseline_poly_frame = ttk.Frame(self.baseline_options_frame)
+        self.baseline_poly_frame.grid(row=0, column=2, sticky=tk.W, padx=(15, 0))
+        ttk.Label(self.baseline_poly_frame, text="Degree:").pack(side='left', padx=(0, 5))
+        poly_degree_combo = ttk.Combobox(self.baseline_poly_frame, textvariable=self.baseline_poly_degree,
+                                          width=5, state='readonly')
+        poly_degree_combo['values'] = [1, 2, 3, 4, 5]
+        poly_degree_combo.pack(side='left')
+
+        # AsLS options (initially hidden)
+        self.baseline_asls_frame = ttk.Frame(self.baseline_options_frame)
+        self.baseline_asls_frame.grid(row=0, column=3, sticky=tk.W, padx=(15, 0))
+        ttk.Label(self.baseline_asls_frame, text="Lambda:").pack(side='left', padx=(0, 5))
+        asls_lambda_combo = ttk.Combobox(self.baseline_asls_frame, textvariable=self.baseline_asls_lambda,
+                                          width=8, state='readonly')
+        asls_lambda_combo['values'] = ['1e3', '1e4', '1e5', '1e6', '1e7']
+        asls_lambda_combo.pack(side='left', padx=(0, 10))
+        ttk.Label(self.baseline_asls_frame, text="p:").pack(side='left', padx=(0, 5))
+        asls_p_combo = ttk.Combobox(self.baseline_asls_frame, textvariable=self.baseline_asls_p,
+                                     width=6, state='readonly')
+        asls_p_combo['values'] = ['0.001', '0.005', '0.01', '0.05', '0.1']
+        asls_p_combo.pack(side='left')
+
+        # Initially hide AsLS frame if polynomial is selected
+        self.baseline_asls_frame.grid_remove()
+
+        # Smoothing Section
+        ttk.Separator(prestep_frame, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=10)
+
+        self.smoothing_checkbox = ttk.Checkbutton(prestep_frame, text="Apply Smoothing (Savitzky-Golay)",
+                                                   variable=self.enable_smoothing,
+                                                   command=self._toggle_smoothing_options)
+        self.smoothing_checkbox.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+
+        # Smoothing options frame (hidden when disabled)
+        self.smoothing_options_frame = ttk.Frame(prestep_frame)
+        self.smoothing_options_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
+
+        ttk.Label(self.smoothing_options_frame, text="Window:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        smooth_window_combo = ttk.Combobox(self.smoothing_options_frame, textvariable=self.smoothing_window,
+                                            width=5, state='readonly')
+        smooth_window_combo['values'] = [7, 11, 17, 21, 25]
+        smooth_window_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(self.smoothing_options_frame, text="Polyorder:").grid(row=0, column=2, sticky=tk.W, padx=(15, 5))
+        smooth_poly_combo = ttk.Combobox(self.smoothing_options_frame, textvariable=self.smoothing_polyorder,
+                                          width=5, state='readonly')
+        smooth_poly_combo['values'] = [2, 3, 4]
+        smooth_poly_combo.grid(row=0, column=3, sticky=tk.W)
+
+        # Info label
+        ttk.Label(prestep_frame, text="Order: Baseline -> Smoothing -> Transform (SNV/Derivatives)",
+                  style='Caption.TLabel').grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+
+        # Initially hide options if checkboxes unchecked
+        self.baseline_options_frame.grid_remove()
+        self.smoothing_options_frame.grid_remove()
 
         # === Advanced Settings: Reproducibility ===
         self._create_section_header(content_frame, "Advanced Settings", row=row, columnspan=2)
@@ -12681,6 +12776,64 @@ class SpectralPredictApp:
 
     # ========== END IMBALANCE HANDLING METHODS ==========
 
+    # ========== BASELINE/SMOOTHING PRE-PROCESSING METHODS ==========
+
+    def _toggle_baseline_options(self):
+        """Show/hide baseline correction options based on checkbox state."""
+        if self.enable_baseline.get():
+            self.baseline_options_frame.grid()
+            self._on_baseline_method_changed(None)  # Update method-specific options
+        else:
+            self.baseline_options_frame.grid_remove()
+
+    def _toggle_smoothing_options(self):
+        """Show/hide smoothing options based on checkbox state."""
+        if self.enable_smoothing.get():
+            self.smoothing_options_frame.grid()
+        else:
+            self.smoothing_options_frame.grid_remove()
+
+    def _on_baseline_method_changed(self, event):
+        """Show/hide method-specific baseline options."""
+        method = self.baseline_method.get()
+        if method == 'polynomial':
+            self.baseline_poly_frame.grid()
+            self.baseline_asls_frame.grid_remove()
+        elif method == 'asls':
+            self.baseline_poly_frame.grid_remove()
+            self.baseline_asls_frame.grid()
+
+    def _get_baseline_params(self):
+        """Get current baseline correction parameters."""
+        if not self.enable_baseline.get():
+            return None, None
+
+        method = self.baseline_method.get()
+        params = {}
+
+        if method == 'polynomial':
+            params['degree'] = self.baseline_poly_degree.get()
+        elif method == 'asls':
+            try:
+                params['lam'] = float(self.baseline_asls_lambda.get())
+            except ValueError:
+                params['lam'] = 1e5
+            try:
+                params['p'] = float(self.baseline_asls_p.get())
+            except ValueError:
+                params['p'] = 0.01
+
+        return method, params
+
+    def _get_smoothing_params(self):
+        """Get current smoothing parameters."""
+        if not self.enable_smoothing.get():
+            return False, 17, 2
+
+        return True, self.smoothing_window.get(), self.smoothing_polyorder.get()
+
+    # ========== END BASELINE/SMOOTHING METHODS ==========
+
     def _export_preprocessed_csv(self, window_size=None):
         """
         Export preprocessed spectral data (2nd derivative) to CSV.
@@ -19419,6 +19572,10 @@ F1 Score:  {f1:.4f}
             else:
                 cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
+            # Get baseline and smoothing parameters
+            baseline_method, baseline_params = self._get_baseline_params()
+            smoothing_enabled, smoothing_window_size, smoothing_poly = self._get_smoothing_params()
+
             if use_full_spectrum_preprocessing:
                 # === PATH A: Derivative + Subset (matches search.py lines 434-449) ===
                 # 1. Build preprocessing pipeline WITHOUT model
@@ -19426,7 +19583,12 @@ F1 Score:  {f1:.4f}
                     preprocess_name,
                     deriv,
                     window,
-                    polyorder
+                    polyorder,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    smoothing=smoothing_enabled,
+                    smoothing_window=smoothing_window_size,
+                    smoothing_polyorder=smoothing_poly
                 )
                 prep_pipeline = Pipeline(prep_steps)
 
@@ -19488,7 +19650,12 @@ F1 Score:  {f1:.4f}
                     preprocess_name,
                     deriv,
                     window,
-                    polyorder
+                    polyorder,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    smoothing=smoothing_enabled,
+                    smoothing_window=smoothing_window_size,
+                    smoothing_polyorder=smoothing_poly
                 )
 
                 # For PLS-DA, we need PLS + LogisticRegression

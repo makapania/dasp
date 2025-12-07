@@ -84,10 +84,11 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
         if window % 2 == 0:
             window = window + 1
 
-        # Default polyorder
+        # Default polyorder: deriv + 1 for higher derivatives
         polyorder = self.polyorder
         if polyorder is None:
-            polyorder = 2 if self.deriv == 1 else 3
+            polyorder_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
+            polyorder = polyorder_map.get(self.deriv, self.deriv + 1)
 
         # Validate
         if window < polyorder + 2:
@@ -106,9 +107,74 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
         return X_deriv
 
 
+class SavgolSmooth(BaseEstimator, TransformerMixin):
+    """
+    Savitzky-Golay smoothing without derivatives.
+
+    Applies smoothing to reduce noise while preserving spectral shape.
+    Unlike SavgolDerivative, this uses deriv=0 for pure smoothing.
+
+    Parameters
+    ----------
+    window_length : int, default=17
+        Window length (must be odd; if even, will be incremented by 1)
+    polyorder : int, default=2
+        Polynomial order for fitting
+    """
+
+    def __init__(self, window_length=17, polyorder=2):
+        self.window_length = window_length
+        self.polyorder = polyorder
+
+    def fit(self, X, y=None):
+        """Fit transformer (no-op for smoothing)."""
+        return self
+
+    def transform(self, X):
+        """
+        Apply Savitzky-Golay smoothing.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Spectral data
+
+        Returns
+        -------
+        X_smooth : ndarray, shape (n_samples, n_features)
+            Smoothed spectra
+        """
+        X = np.asarray(X)
+
+        # Ensure odd window
+        window = self.window_length
+        if window % 2 == 0:
+            window = window + 1
+
+        # Validate
+        if window < self.polyorder + 2:
+            raise ValueError(
+                f"Window length ({window}) must be >= polyorder ({self.polyorder}) + 2"
+            )
+
+        if window > X.shape[1]:
+            raise ValueError(
+                f"Window length ({window}) must be <= number of features ({X.shape[1]})"
+            )
+
+        # Apply smoothing (deriv=0) along axis=1 (features)
+        X_smooth = savgol_filter(
+            X, window_length=window, polyorder=self.polyorder, deriv=0, axis=1
+        )
+
+        return X_smooth
+
+
 def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None,
                                  imbalance_method=None, imbalance_params=None, task_type=None,
-                                 interference=None, wavelengths=None, random_state=42):
+                                 interference=None, wavelengths=None, random_state=42,
+                                 baseline_method=None, baseline_params=None,
+                                 smoothing=False, smoothing_window=17, smoothing_polyorder=2):
     """
     Build a preprocessing pipeline from a configuration.
 
@@ -131,6 +197,17 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         'classification' or 'regression' (required if imbalance_method is specified)
     random_state : int, optional
         Random seed for reproducibility (default: 42)
+    baseline_method : str, optional
+        Baseline correction method: 'polynomial', 'asls', or None (default)
+    baseline_params : dict, optional
+        Parameters for baseline correction (e.g., {'degree': 2} for polynomial,
+        {'lam': 1e5, 'p': 0.01} for asls)
+    smoothing : bool, default=False
+        Whether to apply Savitzky-Golay smoothing before other transformations
+    smoothing_window : int, default=17
+        Window size for smoothing
+    smoothing_polyorder : int, default=2
+        Polynomial order for smoothing
 
     Returns
     -------
@@ -139,6 +216,7 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 
     Notes
     -----
+    Processing order: Baseline → Smoothing → SNV/Derivatives → Imbalance handling
     Imbalance handling is applied AFTER spectral preprocessing (SNV/derivatives)
     but BEFORE the model. This ensures resampling operates on preprocessed spectra.
     """
@@ -279,6 +357,36 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 
         except ImportError as e:
             print(f"WARNING: Interference removal module not available ({e}), skipping interference removal")
+
+    # Step 0.5: Baseline correction (applied before smoothing and transforms)
+    if baseline_method is not None:
+        try:
+            from spectral_predict.baseline import BaselineALS, BaselinePolynomial
+
+            params = baseline_params or {}
+
+            if baseline_method == 'polynomial':
+                degree = params.get('degree', 2)
+                steps.append(("baseline", BaselinePolynomial(degree=degree)))
+
+            elif baseline_method == 'asls':
+                lam = params.get('lam', 1e5)
+                p = params.get('p', 0.01)
+                niter = params.get('niter', 10)
+                steps.append(("baseline", BaselineALS(lambda_=lam, p=p, niter=niter)))
+
+            else:
+                print(f"WARNING: Unknown baseline method '{baseline_method}', skipping baseline correction")
+
+        except ImportError as e:
+            print(f"WARNING: Baseline module not available ({e}), skipping baseline correction")
+
+    # Step 0.6: Savitzky-Golay smoothing (applied after baseline, before transforms)
+    if smoothing:
+        steps.append(("smooth", SavgolSmooth(
+            window_length=smoothing_window,
+            polyorder=smoothing_polyorder
+        )))
 
     # Step 1: Spectral preprocessing
     if preprocess_name == "raw":
