@@ -736,12 +736,402 @@ TOOLTIP_CONTENT = {
 }
 
 
+# ===== SPACING CONSTANTS =====
+# Standardized spacing scale for consistent UI
+SPACING = {
+    'xs': 4,
+    'sm': 8,
+    'md': 12,
+    'lg': 16,
+    'xl': 24,
+    'xxl': 32
+}
+
+# Sidebar configuration
+SIDEBAR_CONFIG = {
+    'expanded_width': 220,
+    'collapsed_width': 56,
+    'item_height': 40,
+    'section_header_height': 32,
+    'icon_size': 20,
+}
+
+
+class SidebarNavigation:
+    """
+    Collapsible sidebar navigation component for the application.
+    Replaces the tab-based navigation with a modern sidebar pattern.
+    """
+
+    def __init__(self, parent, colors, on_select_callback):
+        """
+        Initialize the sidebar navigation.
+
+        Args:
+            parent: Parent widget (usually a PanedWindow)
+            colors: Color palette dict from the theme
+            on_select_callback: Function to call when an item is selected (item_id)
+        """
+        self.parent = parent
+        self.colors = colors
+        self.on_select_callback = on_select_callback
+        self.collapsed = False
+        self.sections = []
+        self.items = {}  # item_id -> (button, icon, label)
+        self.current_item = None
+        self.section_states = {}  # section_id -> expanded (bool)
+
+        # Create main frame
+        self.frame = tk.Frame(parent, bg=colors.get('sidebar', '#2D3748'),
+                             width=SIDEBAR_CONFIG['expanded_width'])
+        self.frame.pack_propagate(False)
+
+        # Create collapse toggle at bottom FIRST (so it reserves space)
+        self._create_collapse_toggle()
+
+        # Create header with logo/title and collapse button
+        self._create_header()
+
+        # Create scrollable content area (fills remaining space)
+        self._create_content_area()
+
+    def _get_font(self):
+        """Get platform-appropriate font."""
+        import platform
+        system = platform.system()
+        if system == 'Darwin':
+            return ('SF Pro Text', 11)
+        elif system == 'Windows':
+            return ('Segoe UI', 10)
+        else:
+            return ('Ubuntu', 10)
+
+    def _get_sidebar_text_color(self):
+        """Get the sidebar text color, with fallback."""
+        return self.colors.get('sidebar_text', self.colors.get('text_inverse', '#FFFFFF'))
+
+    def _create_header(self):
+        """Create minimal header spacing."""
+        # Just add some top padding - no title needed
+        spacer = tk.Frame(self.frame, bg=self.colors.get('sidebar', '#2D3748'),
+                         height=SPACING['md'])
+        spacer.pack(fill='x')
+        self.title_label = spacer  # Keep reference for update_colors compatibility
+
+    def _create_content_area(self):
+        """Create the scrollable content area for navigation items."""
+        # Canvas for scrolling
+        self.canvas = tk.Canvas(self.frame,
+                               bg=self.colors.get('sidebar', '#2D3748'),
+                               highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self.frame, orient='vertical',
+                                       command=self.canvas.yview)
+
+        self.content_frame = tk.Frame(self.canvas,
+                                     bg=self.colors.get('sidebar', '#2D3748'))
+
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.content_frame,
+                                                        anchor='nw')
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        # Pack canvas (scrollbar hidden initially, shown if needed)
+        self.canvas.pack(side='left', fill='both', expand=True)
+
+        # Bind events for scrolling
+        self.content_frame.bind('<Configure>', self._on_content_configure)
+        self.canvas.bind('<Configure>', self._on_canvas_configure)
+
+        # Mouse wheel scrolling
+        self.canvas.bind('<Enter>', lambda e: self._bind_mousewheel())
+        self.canvas.bind('<Leave>', lambda e: self._unbind_mousewheel())
+
+    def _on_content_configure(self, event):
+        """Update scroll region when content changes."""
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+
+    def _on_canvas_configure(self, event):
+        """Update content width when canvas is resized."""
+        self.canvas.itemconfig(self.canvas_window, width=event.width)
+
+    def _bind_mousewheel(self):
+        """Bind mouse wheel to canvas scrolling."""
+        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+
+    def _unbind_mousewheel(self):
+        """Unbind mouse wheel scrolling."""
+        self.canvas.unbind_all('<MouseWheel>')
+
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel scrolling."""
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+    def _create_collapse_toggle(self):
+        """Create the collapse/expand toggle button at the bottom."""
+        toggle_frame = tk.Frame(self.frame, bg=self.colors.get('sidebar', '#2D3748'),
+                               height=50)
+        toggle_frame.pack(side='bottom', fill='x')
+        toggle_frame.pack_propagate(False)
+
+        # Separator above toggle
+        separator = tk.Frame(toggle_frame, bg=self.colors.get('border', '#4A5568'), height=1)
+        separator.pack(fill='x', pady=(0, SPACING['xs']))
+
+        self.collapse_btn = tk.Button(toggle_frame,
+                                     text="« Collapse",
+                                     font=self._get_font(),
+                                     bg=self.colors.get('sidebar', '#2D3748'),
+                                     fg=self._get_sidebar_text_color(),
+                                     activebackground=self.colors.get('sidebar_hover', '#3D4858'),
+                                     activeforeground=self._get_sidebar_text_color(),
+                                     relief='flat',
+                                     bd=0,
+                                     cursor='hand2',
+                                     command=self.toggle_collapse)
+        self.collapse_btn.pack(fill='x', padx=SPACING['sm'], pady=SPACING['xs'])
+
+    def add_section(self, section_id, title, items, expanded=True):
+        """
+        Add a collapsible section with navigation items.
+
+        Args:
+            section_id: Unique identifier for the section
+            title: Section header text
+            items: List of tuples (item_id, icon, label)
+            expanded: Whether section starts expanded
+        """
+        self.section_states[section_id] = expanded
+
+        section_data = {
+            'id': section_id,
+            'title': title,
+            'items': items,
+            'header': None,
+            'title_label': None,
+            'content': None,
+            'indicator': None
+        }
+
+        # Create section header
+        header_frame = tk.Frame(self.content_frame,
+                               bg=self.colors.get('sidebar', '#2D3748'),
+                               cursor='hand2')
+        header_frame.pack(fill='x', pady=(SPACING['sm'], 0))
+
+        # Indicator (arrow)
+        indicator = tk.Label(header_frame,
+                            text='v' if expanded else '>',
+                            font=(self._get_font()[0], 10),
+                            bg=self.colors.get('sidebar', '#2D3748'),
+                            fg=self._get_sidebar_text_color())
+        indicator.pack(side='left', padx=(SPACING['md'], SPACING['xs']))
+        section_data['indicator'] = indicator
+
+        # Section title
+        title_label = tk.Label(header_frame,
+                              text=title.upper(),
+                              font=(self._get_font()[0], 9, 'bold'),
+                              bg=self.colors.get('sidebar', '#2D3748'),
+                              fg=self._get_sidebar_text_color())
+        title_label.pack(side='left', padx=SPACING['xs'])
+        section_data['header'] = header_frame
+        section_data['title_label'] = title_label
+
+        # Content frame for items
+        content_frame = tk.Frame(self.content_frame,
+                                bg=self.colors.get('sidebar', '#2D3748'))
+        if expanded:
+            content_frame.pack(fill='x')
+        section_data['content'] = content_frame
+
+        # Bind click events to toggle
+        def toggle_section(e=None):
+            self._toggle_section(section_id)
+
+        header_frame.bind('<Button-1>', toggle_section)
+        indicator.bind('<Button-1>', toggle_section)
+        title_label.bind('<Button-1>', toggle_section)
+
+        # Add items
+        for item_id, icon, label in items:
+            self._add_nav_item(content_frame, item_id, icon, label)
+
+        self.sections.append(section_data)
+
+    def _toggle_section(self, section_id):
+        """Toggle a section's expanded/collapsed state."""
+        for section in self.sections:
+            if section['id'] == section_id:
+                expanded = self.section_states[section_id]
+                self.section_states[section_id] = not expanded
+
+                if expanded:
+                    # Collapse - hide content but keep in hierarchy
+                    section['content'].pack_forget()
+                    section['indicator'].config(text='>')
+                else:
+                    # Expand - pack after the header to maintain position
+                    section['content'].pack(fill='x', after=section['header'])
+                    section['indicator'].config(text='v')
+                break
+
+    def _add_nav_item(self, parent, item_id, icon, label):
+        """Add a navigation item to a section."""
+        item_frame = tk.Frame(parent,
+                             bg=self.colors.get('sidebar', '#2D3748'),
+                             cursor='hand2',
+                             height=SIDEBAR_CONFIG['item_height'])
+        item_frame.pack(fill='x')
+        item_frame.pack_propagate(False)
+
+        # Icon label with fixed width for consistent alignment
+        icon_label = tk.Label(item_frame,
+                             text=icon,
+                             font=(self._get_font()[0], 12),
+                             bg=self.colors.get('sidebar', '#2D3748'),
+                             fg=self._get_sidebar_text_color(),
+                             width=4,
+                             anchor='center')
+        icon_label.pack(side='left', padx=(SPACING['xs'], 0))
+
+        # Text label
+        text_label = tk.Label(item_frame,
+                             text=label,
+                             font=self._get_font(),
+                             bg=self.colors.get('sidebar', '#2D3748'),
+                             fg=self._get_sidebar_text_color(),
+                             anchor='w')
+        text_label.pack(side='left', fill='x', expand=True, padx=SPACING['xs'])
+
+        # Store references
+        self.items[item_id] = {
+            'frame': item_frame,
+            'icon': icon_label,
+            'label': text_label
+        }
+
+        # Bind events
+        def on_enter(e):
+            if self.current_item != item_id:
+                hover_bg = self.colors.get('sidebar_hover', '#3D4858')
+                item_frame.config(bg=hover_bg)
+                icon_label.config(bg=hover_bg)
+                text_label.config(bg=hover_bg)
+
+        def on_leave(e):
+            if self.current_item != item_id:
+                sidebar_bg = self.colors.get('sidebar', '#2D3748')
+                item_frame.config(bg=sidebar_bg)
+                icon_label.config(bg=sidebar_bg)
+                text_label.config(bg=sidebar_bg)
+
+        def on_click(e):
+            self.select_item(item_id)
+
+        for widget in [item_frame, icon_label, text_label]:
+            widget.bind('<Enter>', on_enter)
+            widget.bind('<Leave>', on_leave)
+            widget.bind('<Button-1>', on_click)
+
+    def select_item(self, item_id):
+        """Select and highlight a navigation item."""
+        # Deselect previous item
+        if self.current_item and self.current_item in self.items:
+            prev = self.items[self.current_item]
+            sidebar_bg = self.colors.get('sidebar', '#2D3748')
+            prev['frame'].config(bg=sidebar_bg)
+            prev['icon'].config(bg=sidebar_bg)
+            prev['label'].config(bg=sidebar_bg)
+
+        # Select new item
+        if item_id in self.items:
+            self.current_item = item_id
+            item = self.items[item_id]
+            accent = self.colors.get('accent', '#0078D4')
+            item['frame'].config(bg=accent)
+            item['icon'].config(bg=accent)
+            item['label'].config(bg=accent)
+
+            # Call the callback
+            if self.on_select_callback:
+                self.on_select_callback(item_id)
+
+    def toggle_collapse(self):
+        """Toggle between expanded and collapsed sidebar."""
+        self.collapsed = not self.collapsed
+
+        if self.collapsed:
+            # Collapse to icon-only mode
+            self.frame.config(width=SIDEBAR_CONFIG['collapsed_width'])
+            self.collapse_btn.config(text='>>')
+
+            # Hide section headers
+            for section in self.sections:
+                section['header'].pack_forget()
+
+            # Hide text labels (icons remain visible)
+            for item_id, item in self.items.items():
+                item['label'].pack_forget()
+        else:
+            # Expand to full width
+            self.frame.config(width=SIDEBAR_CONFIG['expanded_width'])
+            self.collapse_btn.config(text='<< Collapse')
+
+            # REBUILD entire content in correct order
+            # First, remove all children from content_frame
+            for widget in self.content_frame.winfo_children():
+                widget.pack_forget()
+
+            # Re-pack sections in order: header, then content (if section is expanded)
+            for section in self.sections:
+                section['header'].pack(fill='x', pady=(SPACING['sm'], 0))
+                if self.section_states[section['id']]:
+                    section['content'].pack(fill='x')
+
+            # Re-pack text labels in each item frame (after their icons)
+            for item_id, item in self.items.items():
+                item['label'].pack(side='left', fill='x', expand=True, padx=SPACING['xs'])
+
+    def update_colors(self, colors):
+        """Update colors when theme changes."""
+        self.colors = colors
+        sidebar_bg = colors.get('sidebar', '#2D3748')
+        text_color = colors.get('sidebar_text', colors.get('text_inverse', '#FFFFFF'))
+
+        self.frame.config(bg=sidebar_bg)
+        self.title_label.config(bg=sidebar_bg)  # title_label is now just a spacer frame
+        self.canvas.config(bg=sidebar_bg)
+        self.content_frame.config(bg=sidebar_bg)
+        self.collapse_btn.config(bg=sidebar_bg, fg=text_color,
+                                activebackground=colors.get('sidebar_hover', '#3D4858'),
+                                activeforeground=text_color)
+
+        # Update all items
+        for item_id, item in self.items.items():
+            bg = colors.get('accent', '#0078D4') if item_id == self.current_item else sidebar_bg
+            item['frame'].config(bg=bg)
+            item['icon'].config(bg=bg, fg=text_color)
+            item['label'].config(bg=bg, fg=text_color)
+
+        # Update section headers
+        for section in self.sections:
+            if section['header']:
+                section['header'].config(bg=sidebar_bg)
+                for child in section['header'].winfo_children():
+                    child.config(bg=sidebar_bg, fg=text_color)
+            if section['content']:
+                section['content'].config(bg=sidebar_bg)
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
     def __init__(self, root):
         self.root = root
         self.root.title("ASP - Advanced Spectral Prediction (OPTIMIZED)")
+
+        # Set minimum window size for usability
+        self.root.minsize(1200, 700)
 
         # Set window size - use zoomed/maximized for better visibility
         try:
@@ -1455,12 +1845,14 @@ class SpectralPredictApp:
         self.refine_ridge_alpha = tk.StringVar(value="1.0")  # Regularization strength
         self.refine_ridge_solver = tk.StringVar(value="auto")  # Solver algorithm
         self.refine_ridge_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
+        self.refine_ridge_fit_intercept = tk.BooleanVar(value=True)  # Fit intercept term
 
         # Lasso Regression Hyperparameters
         self.refine_lasso_alpha = tk.StringVar(value="1.0")  # Regularization strength
         self.refine_lasso_selection = tk.StringVar(value="cyclic")  # Feature selection method
         self.refine_lasso_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
         self.refine_lasso_max_iter = tk.IntVar(value=1000)  # Max iterations for convergence
+        self.refine_lasso_fit_intercept = tk.BooleanVar(value=True)  # Fit intercept term
 
         # ElasticNet Hyperparameters
         self.refine_elasticnet_alpha = tk.StringVar(value="1.0")  # Regularization strength
@@ -1468,6 +1860,7 @@ class SpectralPredictApp:
         self.refine_elasticnet_selection = tk.StringVar(value="cyclic")  # Feature selection method
         self.refine_elasticnet_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
         self.refine_elasticnet_max_iter = tk.IntVar(value=1000)  # Max iterations for convergence
+        self.refine_elasticnet_fit_intercept = tk.BooleanVar(value=True)  # Fit intercept term
 
         # RandomForest Hyperparameters
         self.refine_rf_n_estimators = tk.IntVar(value=200)  # Number of trees
@@ -1536,6 +1929,8 @@ class SpectralPredictApp:
         self.refine_neuralboosted_hidden_layer_size = tk.IntVar(value=3)  # Hidden layer size
         self.refine_neuralboosted_activation = tk.StringVar(value="tanh")  # Activation function
         self.refine_neuralboosted_early_stopping = tk.BooleanVar(value=False)  # Early stopping
+        self.refine_neuralboosted_max_iter = tk.IntVar(value=100)  # Max iterations per weak learner
+        self.refine_neuralboosted_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -1799,9 +2194,10 @@ class SpectralPredictApp:
                 'name': '📊 Classic',
                 'bg': '#F0F0F0',
                 'bg_secondary': '#E0E0E0',
-                'panel': '#F8F8F8',  # Changed from harsh #FFFFFF to softer #F8F8F8
-                'sidebar': '#D4D4D4',
-                'sidebar_hover': '#C0C0C0',
+                'panel': '#F8F8F8',
+                'sidebar': '#2D3748',  # Slate blue-gray (VS Code style)
+                'sidebar_hover': '#4A5568',
+                'sidebar_text': '#FFFFFF',
                 'text': '#000000',
                 'text_light': '#666666',
                 'text_inverse': '#FFFFFF',
@@ -1810,31 +2206,32 @@ class SpectralPredictApp:
                 'accent_gradient': ['#0078D7', '#5EB8FF'],
                 'success': '#107C10',
                 'warning': '#FF8C00',
-                'border': '#999999',  # Darker, stronger border
-                'border_light': '#CCCCCC',  # Secondary lighter border
-                'shadow': '#BEBEBE',  # Much darker shadow for depth
-                'tab_bg': '#F8F8F8',  # Changed from harsh #FFFFFF to softer #F8F8F8
+                'border': '#999999',
+                'border_light': '#CCCCCC',
+                'shadow': '#BEBEBE',
+                'tab_bg': '#F8F8F8',
                 'tab_active': '#0078D7',
-                'card_bg': '#F8F8F8',  # Changed from harsh #FFFFFF to softer #F8F8F8
+                'card_bg': '#F8F8F8',
             },
             'sakura': {  # Cherry Blossom - Soft, elegant, feminine
                 'name': '🌸 Sakura',
                 'bg': '#FFF8F8',
                 'bg_secondary': '#FFE8E8',
                 'panel': '#FFFFFF',
-                'sidebar': '#FFD1D1',
-                'sidebar_hover': '#FFC1C1',
+                'sidebar': '#9B4D6C',  # Dusty rose (elegant cherry tone)
+                'sidebar_hover': '#7A3D5C',
+                'sidebar_text': '#FFFFFF',
                 'text': '#5D4157',
                 'text_light': '#9B8A96',
                 'text_inverse': '#FFFFFF',
-                'accent': '#E85A8A',  # Improved contrast for better readability
+                'accent': '#E85A8A',
                 'accent_dark': '#D04A7A',
                 'accent_gradient': ['#E85A8A', '#FFB6D9'],
                 'success': '#82C785',
                 'warning': '#F4A261',
-                'border': '#FFB0B0',  # Darker, stronger border
-                'border_light': '#FFD1D1',  # Secondary lighter border
-                'shadow': '#FFC8C8',  # Much darker shadow for depth
+                'border': '#FFB0B0',
+                'border_light': '#FFD1D1',
+                'shadow': '#FFC8C8',
                 'tab_bg': '#FFFFFF',
                 'tab_active': '#E85A8A',
                 'card_bg': '#FFFFFF',
@@ -1844,19 +2241,20 @@ class SpectralPredictApp:
                 'bg': '#F8FBF6',
                 'bg_secondary': '#E8F5E0',
                 'panel': '#FFFFFF',
-                'sidebar': '#B8D4A8',
-                'sidebar_hover': '#A8C498',
+                'sidebar': '#3D6B4F',  # Forest green (rich tea depth)
+                'sidebar_hover': '#4D7B5F',
+                'sidebar_text': '#FFFFFF',
                 'text': '#2D4A2B',
                 'text_light': '#6B8268',
                 'text_inverse': '#FFFFFF',
-                'accent': '#6BB85C',  # Improved contrast for better readability
+                'accent': '#6BB85C',
                 'accent_dark': '#5AA84D',
                 'accent_gradient': ['#6BB85C', '#B8E6A8'],
                 'success': '#6BBD6C',
                 'warning': '#E8A547',
-                'border': '#A0C890',  # Darker, stronger border
-                'border_light': '#D0E5C8',  # Secondary lighter border
-                'shadow': '#C8DDB8',  # Much darker shadow for depth
+                'border': '#A0C890',
+                'border_light': '#D0E5C8',
+                'shadow': '#C8DDB8',
                 'tab_bg': '#FFFFFF',
                 'tab_active': '#6BB85C',
                 'card_bg': '#FFFFFF',
@@ -1866,8 +2264,9 @@ class SpectralPredictApp:
                 'bg': '#F5F5F5',
                 'bg_secondary': '#E8E8E8',
                 'panel': '#FFFFFF',
-                'sidebar': '#4A4A4A',
-                'sidebar_hover': '#5A5A5A',
+                'sidebar': '#1A1A2E',  # Near black with blue undertone (ink-like)
+                'sidebar_hover': '#2A2A3E',
+                'sidebar_text': '#E8E8E8',
                 'text': '#2C2C2C',
                 'text_light': '#7A7A7A',
                 'text_inverse': '#FFFFFF',
@@ -1876,9 +2275,9 @@ class SpectralPredictApp:
                 'accent_gradient': ['#5A5A5A', '#8A8A8A'],
                 'success': '#6B9B6C',
                 'warning': '#D89A5A',
-                'border': '#A0A0A0',  # Darker, stronger border
-                'border_light': '#D8D8D8',  # Secondary lighter border
-                'shadow': '#B0B0B0',  # Much darker shadow for depth
+                'border': '#A0A0A0',
+                'border_light': '#D8D8D8',
+                'shadow': '#B0B0B0',
                 'tab_bg': '#FFFFFF',
                 'tab_active': '#5A5A5A',
                 'card_bg': '#FFFFFF',
@@ -1888,19 +2287,20 @@ class SpectralPredictApp:
                 'bg': '#FFF9F5',
                 'bg_secondary': '#FFE8D8',
                 'panel': '#FFFFFF',
-                'sidebar': '#FF9A6C',
-                'sidebar_hover': '#FF8A5C',
+                'sidebar': '#8B4513',  # Saddle brown (sunset earth tone)
+                'sidebar_hover': '#9B5523',
+                'sidebar_text': '#FFFFFF',
                 'text': '#4A3A2F',
                 'text_light': '#8A7A6F',
                 'text_inverse': '#FFFFFF',
-                'accent': '#E85A3A',  # Improved contrast for better readability
+                'accent': '#E85A3A',
                 'accent_dark': '#D04A2A',
                 'accent_gradient': ['#E85A3A', '#FFB494'],
                 'success': '#7FC77F',
                 'warning': '#FFA726',
-                'border': '#FFB090',  # Darker, stronger border
-                'border_light': '#FFD1B8',  # Secondary lighter border
-                'shadow': '#FFC8B0',  # Much darker shadow for depth
+                'border': '#FFB090',
+                'border_light': '#FFD1B8',
+                'shadow': '#FFC8B0',
                 'tab_bg': '#FFFFFF',
                 'tab_active': '#E85A3A',
                 'card_bg': '#FFFFFF',
@@ -1910,19 +2310,20 @@ class SpectralPredictApp:
                 'bg': '#F5F9FB',
                 'bg_secondary': '#E0EEF5',
                 'panel': '#FFFFFF',
-                'sidebar': '#5BA3C4',
-                'sidebar_hover': '#4B93B4',
+                'sidebar': '#1E3A5F',  # Deep navy (ocean depth)
+                'sidebar_hover': '#2E4A6F',
+                'sidebar_text': '#FFFFFF',
                 'text': '#1E3A52',
                 'text_light': '#5E7A92',
                 'text_inverse': '#FFFFFF',
-                'accent': '#2D7AA8',  # Improved contrast for better readability
+                'accent': '#2D7AA8',
                 'accent_dark': '#246A98',
                 'accent_gradient': ['#2D7AA8', '#7DC4E8'],
                 'success': '#5CB85C',
                 'warning': '#F0AD4E',
-                'border': '#7AB8D8',  # Darker, stronger border
-                'border_light': '#A8D4E8',  # Secondary lighter border
-                'shadow': '#B0D0E8',  # Much darker shadow for depth
+                'border': '#7AB8D8',
+                'border_light': '#A8D4E8',
+                'shadow': '#B0D0E8',
                 'tab_bg': '#FFFFFF',
                 'tab_active': '#2D7AA8',
                 'card_bg': '#FFFFFF',
@@ -2052,21 +2453,28 @@ class SpectralPredictApp:
                        foreground=self.colors['text'],
                        font=(body_font, 10))
 
-        # Notebook styling - Modern tab design with improved visibility
-        # Selected tabs now use accent color for text (not background) for better contrast
+        # Notebook styling - Default style for subtabs (keep tabs visible)
         style.configure('TNotebook',
                        background=self.colors['bg'],
                        borderwidth=0,
                        tabmargins=[0, 0, 0, 0])
         style.configure('TNotebook.Tab',
-                       font=(body_font, 11, 'bold'),  # Bold for selected emphasis
-                       padding=(24, 12),  # More generous padding
+                       font=(body_font, 10),
+                       padding=(12, 6),
                        borderwidth=0)
         style.map('TNotebook.Tab',
-                 background=[('selected', self.colors['bg']),           # Selected tabs match background
-                           ('!selected', self.colors['bg_secondary'])], # Unselected tabs slightly different
-                 foreground=[('selected', self.colors['accent']),       # Accent color when selected (high contrast)
-                           ('!selected', self.colors['text_light'])])   # Muted when not selected
+                 background=[('selected', self.colors['bg']),
+                           ('!selected', self.colors['bg_secondary'])],
+                 foreground=[('selected', self.colors['accent']),
+                           ('!selected', self.colors['text_light'])])
+
+        # Hidden notebook style - for main navigation (sidebar handles it)
+        style.configure('Hidden.TNotebook',
+                       background=self.colors['bg'],
+                       borderwidth=0,
+                       tabmargins=[0, 0, 0, 0],
+                       padding=0)
+        style.layout('Hidden.TNotebook.Tab', [])  # Remove tab layout for hidden style
 
         # Entry and input styling - stronger borders for better definition
         style.configure('TEntry',
@@ -2214,6 +2622,16 @@ class SpectralPredictApp:
 
         # Update accent buttons to use new theme colors
         self._update_accent_buttons()
+
+        # Update sidebar colors
+        if hasattr(self, 'sidebar'):
+            self.sidebar.update_colors(self.colors)
+
+        # Update main container background
+        if hasattr(self, 'main_container'):
+            self.main_container.config(bg=self.colors['bg'])
+        if hasattr(self, 'content_container'):
+            self.content_container.config(bg=self.colors['bg'])
 
         # Restore tab selection
         self.notebook.select(current_tab)
@@ -2786,32 +3204,207 @@ class SpectralPredictApp:
 
     # ========== End of Modern Layout Helpers ==========
 
+    # ========== Responsive Figure Helpers ==========
+
+    def _get_figure_size(self, container, aspect_ratio=1.5, min_width=6, min_height=4):
+        """
+        Calculate appropriate figure size based on container dimensions.
+
+        Args:
+            container: The tkinter widget containing the figure
+            aspect_ratio: Width/height ratio (default 1.5)
+            min_width: Minimum figure width in inches
+            min_height: Minimum figure height in inches
+
+        Returns:
+            Tuple of (width, height) in inches
+        """
+        # Get container dimensions in pixels
+        container.update_idletasks()
+        container_width = container.winfo_width()
+        container_height = container.winfo_height()
+
+        # Convert to inches (assuming 100 DPI for estimation)
+        dpi = 100
+        width_inches = max(min_width, (container_width - 40) / dpi)
+        height_inches = max(min_height, (container_height - 60) / dpi)
+
+        # Adjust for aspect ratio
+        if width_inches / height_inches > aspect_ratio:
+            width_inches = height_inches * aspect_ratio
+        else:
+            height_inches = width_inches / aspect_ratio
+
+        return (width_inches, height_inches)
+
+    def _bind_figure_resize(self, container, fig, canvas, debounce_ms=150):
+        """
+        Bind container resize events to update figure size.
+
+        Args:
+            container: The tkinter widget containing the figure
+            fig: The matplotlib Figure object
+            canvas: The FigureCanvasTkAgg object
+            debounce_ms: Debounce delay in milliseconds
+        """
+        resize_timer = [None]
+
+        def on_resize(event):
+            # Cancel previous timer if exists
+            if resize_timer[0]:
+                container.after_cancel(resize_timer[0])
+
+            def do_resize():
+                try:
+                    new_size = self._get_figure_size(container)
+                    fig.set_size_inches(new_size, forward=True)
+                    fig.tight_layout()
+                    canvas.draw_idle()
+                except Exception:
+                    pass  # Ignore errors during resize
+
+            resize_timer[0] = container.after(debounce_ms, do_resize)
+
+        container.bind('<Configure>', on_resize)
+
+    def _configure_treeview_columns(self, tree, columns_config, container=None):
+        """
+        Configure treeview columns with proportional widths.
+
+        Args:
+            tree: The ttk.Treeview widget
+            columns_config: List of tuples (column_id, weight, min_width)
+            container: Optional container to base width calculations on
+        """
+        if container:
+            container.update_idletasks()
+            total_width = container.winfo_width() - 30  # Account for scrollbar
+        else:
+            total_width = 800  # Default fallback
+
+        total_weight = sum(c[1] for c in columns_config)
+
+        for col_id, weight, min_width in columns_config:
+            calculated_width = int((weight / total_weight) * total_width)
+            actual_width = max(calculated_width, min_width)
+            tree.column(col_id, width=actual_width, minwidth=min_width)
+
+        # Bind resize to update columns
+        if container:
+            def on_resize(event):
+                try:
+                    new_total = event.width - 30
+                    for col_id, weight, min_width in columns_config:
+                        calculated = int((weight / total_weight) * new_total)
+                        tree.column(col_id, width=max(calculated, min_width))
+                except Exception:
+                    pass
+
+            container.bind('<Configure>', on_resize)
+
+    # ========== End of Responsive Figure Helpers ==========
+
     def _create_ui(self):
-        """Create 10-tab user interface with theme switching."""
+        """Create sidebar-based user interface with theme switching."""
         # Create top bar with theme switcher and title
         self._create_top_bar()
 
-        # Create main content area with notebook
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+        # Create main content area with sidebar + content
+        self.main_container = tk.Frame(self.root, bg=self.colors['bg'])
+        self.main_container.pack(fill='both', expand=True, padx=SPACING['xl'], pady=(0, SPACING['xl']))
 
-        # Create tabs
-        self._create_tab0_data_management()  # NEW: Data Management tab (Tab 0)
-        self._create_tab1_import_preview()
-        self._create_explore_tab()  # NEW: Explore tab with plots & screening
-        self._create_tab2_data_viewer()
-        self._create_tab3_data_quality_check()
-        self._create_tab4_analysis_config()
-        self._create_tab5_progress()
-        self._create_tab6_results()
-        self._create_tab7_refine_model()
-        self._create_tab8_model_prediction()
-        self._create_tab9_multi_model_comparison()
-        self._create_tab10_calibration_transfer()
-        self._create_tab11_interference_removal()
+        # Create sidebar navigation
+        self.sidebar = SidebarNavigation(
+            self.main_container,
+            self.colors,
+            self._on_nav_select
+        )
+        self.sidebar.frame.pack(side='left', fill='y')
 
-        # Bind tab change event
+        # Add navigation sections
+        self.sidebar.add_section('data', 'Data', [
+            ('data_management', '🗃️', 'Data Management'),
+            ('import_preview', '📁', 'Import & Preview'),
+            ('explore', '🔍', 'Explore'),
+            ('data_viewer', '📋', 'Data Viewer'),
+            ('quality_check', '✅', 'Quality Check'),
+        ], expanded=True)
+
+        self.sidebar.add_section('analysis', 'Analysis', [
+            ('config', '⚙️', 'Configuration'),
+            ('progress', '⏳', 'Progress'),
+            ('results', '📊', 'Results'),
+        ], expanded=True)
+
+        self.sidebar.add_section('models', 'Models', [
+            ('development', '🔧', 'Development'),
+            ('prediction', '🔮', 'Prediction'),
+            ('multi_model', '🔬', 'Multi-Model'),
+        ], expanded=True)
+
+        self.sidebar.add_section('advanced', 'Advanced', [
+            ('calibration', '🔄', 'Cal Transfer'),
+            ('interference', '🧬', 'Interference'),
+        ], expanded=False)
+
+        # Create content container (holds all content frames)
+        self.content_container = tk.Frame(self.main_container, bg=self.colors['bg'])
+        self.content_container.pack(side='left', fill='both', expand=True, padx=(SPACING['md'], 0))
+
+        # Dictionary to store content frames
+        self.content_frames = {}
+        self.current_content = None
+
+        # Create a notebook that will be hidden but used for content organization
+        # This allows us to reuse existing tab creation methods
+        self.notebook = ttk.Notebook(self.content_container, style='Hidden.TNotebook')
+
+        # Create tabs (they get added to the notebook)
+        self._create_tab0_data_management()  # Data Management
+        self._create_tab1_import_preview()   # Import & Preview
+        self._create_explore_tab()           # Explore
+        self._create_tab2_data_viewer()      # Data Viewer
+        self._create_tab3_data_quality_check()  # Quality Check
+        self._create_tab4_analysis_config()  # Configuration
+        self._create_tab5_progress()         # Progress
+        self._create_tab6_results()          # Results
+        self._create_tab7_refine_model()     # Development
+        self._create_tab8_model_prediction() # Prediction
+        self._create_tab9_multi_model_comparison()  # Multi-Model
+        self._create_tab10_calibration_transfer()   # Cal Transfer
+        self._create_tab11_interference_removal()   # Interference
+
+        # Map nav IDs to notebook tab indices
+        self.nav_to_tab = {
+            'data_management': 0,
+            'import_preview': 1,
+            'explore': 2,
+            'data_viewer': 3,
+            'quality_check': 4,
+            'config': 5,
+            'progress': 6,
+            'results': 7,
+            'development': 8,
+            'prediction': 9,
+            'multi_model': 10,
+            'calibration': 11,
+            'interference': 12,
+        }
+
+        # Now pack the notebook and show it
+        self.notebook.pack(fill='both', expand=True)
+
+        # Select the first item
+        self.sidebar.select_item('data_management')
+
+        # Bind tab change event (still works when notebook tabs are clicked internally)
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+
+    def _on_nav_select(self, item_id):
+        """Handle sidebar navigation selection."""
+        if item_id in self.nav_to_tab:
+            tab_index = self.nav_to_tab[item_id]
+            self.notebook.select(tab_index)
 
     def _create_tab0_data_management(self):
         """Tab 0: Data Management - Import, merge, and manipulate multiple data sources."""
@@ -2944,7 +3537,7 @@ class SpectralPredictApp:
         load_frame.pack(fill='x', pady=5)
 
         # Info label
-        info_text = "Supports: Directories (ASD/CSV/SPC) • Combined Files (CSV/Excel)"
+        info_text = "Supports: Directories (ASD/CSV/SPC) - Combined Files (CSV/Excel)"
         ttk.Label(load_frame, text=info_text, font=('TkDefaultFont', 8), foreground='gray').grid(
             row=0, column=0, columnspan=3, sticky='w', padx=5, pady=(0, 5))
 
@@ -3003,7 +3596,7 @@ class SpectralPredictApp:
                  bg='#0078D4', fg='white', font=('TkDefaultFont', 11, 'bold'),
                  relief='raised', bd=2, padx=20, pady=10).pack(side='left', padx=5)
 
-        ttk.Label(action_frame, text="← Sends selected data to analysis pipeline").pack(side='left', padx=5)
+        ttk.Label(action_frame, text="<- Sends selected data to analysis pipeline").pack(side='left', padx=5)
 
     def _create_tab0b_merge_combine(self):
         """Subtab 0B: Merge & Combine - Merge multiple data sources."""
@@ -3828,12 +4421,12 @@ class SpectralPredictApp:
                     self.excluded_spectra.discard(sample_idx)
                     event.artist.set_alpha(alpha)
                     event.artist.set_linewidth(1.0)
-                    print(f"✓ Sample {sample_idx} included")
+                    print(f"> Sample {sample_idx} included")
                 else:
                     self.excluded_spectra.add(sample_idx)
                     event.artist.set_alpha(0.05)
                     event.artist.set_linewidth(0.5)
-                    print(f"✗ Sample {sample_idx} excluded")
+                    print(f"[X] Sample {sample_idx} excluded")
                 fig.canvas.draw_idle()
 
         fig.canvas.mpl_connect('pick_event', on_pick)
@@ -4002,7 +4595,7 @@ class SpectralPredictApp:
         for i, wl in enumerate(top_wls, 1):
             importance_val = results['importances'][wl] if isinstance(results['importances'], pd.Series) else 0
             sign = "+" if importance_val >= 0 else ""
-            text = f"{i:3d}. {wl:.1f} nm → {sign}{importance_val:.4f}"
+            text = f"{i:3d}. {wl:.1f} nm -> {sign}{importance_val:.4f}"
             wl_listbox.insert(tk.END, text)
 
         # Add interpretation
@@ -4090,7 +4683,7 @@ class SpectralPredictApp:
         ttk.Separator(edit_toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
 
         # Row operations
-        ttk.Button(edit_toolbar, text="❌ Delete Rows",
+        ttk.Button(edit_toolbar, text="[X] Delete Rows",
                   command=self._delete_data_viewer_rows,
                   style='Modern.TButton').pack(side='left', padx=(0, 5))
 
@@ -4512,7 +5105,7 @@ class SpectralPredictApp:
 
         # Enable/disable checkbox
         self.wl_restrict_checkbox = ttk.Checkbutton(options_frame,
-                                                     text="✓ Restrict wavelengths for model training",
+                                                     text="Restrict wavelengths for model training",
                                                      variable=self.enable_analysis_wl_restriction)
         self.wl_restrict_checkbox.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
@@ -4596,22 +5189,22 @@ class SpectralPredictApp:
         preprocess_frame = tk.Frame(preprocess_card, bg=self.colors['card_bg'])
         preprocess_frame.pack(fill='both', expand=True)
 
-        self.raw_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ Raw (no preprocessing)", variable=self.use_raw)
+        self.raw_checkbox = ttk.Checkbutton(preprocess_frame, text="Raw (no preprocessing)", variable=self.use_raw)
         self.raw_checkbox.grid(row=0, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Baseline, unprocessed spectra", style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.raw_checkbox, text=TOOLTIP_CONTENT['preprocessing']['Raw'], delay=500)
 
-        self.snv_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ SNV (Standard Normal Variate)", variable=self.use_snv)
+        self.snv_checkbox = ttk.Checkbutton(preprocess_frame, text="SNV (Standard Normal Variate)", variable=self.use_snv)
         self.snv_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Scatter correction", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SNV'], delay=500)
 
-        self.sg1_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ SG1 (1st derivative)", variable=self.use_sg1)
+        self.sg1_checkbox = ttk.Checkbutton(preprocess_frame, text="SG1 (1st derivative)", variable=self.use_sg1)
         self.sg1_checkbox.grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Removes baseline drift", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.sg1_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG1'], delay=500)
 
-        self.sg2_checkbox = ttk.Checkbutton(preprocess_frame, text="✓ SG2 (2nd derivative)", variable=self.use_sg2)
+        self.sg2_checkbox = ttk.Checkbutton(preprocess_frame, text="SG2 (2nd derivative)", variable=self.use_sg2)
         self.sg2_checkbox.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.sg2_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG2'], delay=500)
@@ -4667,10 +5260,10 @@ class SpectralPredictApp:
         self.repro_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
         CreateToolTip(self.repro_checkbox,
                      text=("Reproducibility mode ensures identical results across multiple runs by:\n"
-                           "• Using fixed random seed for cross-validation splits\n"
-                           "• Setting BLAS threads to 1 (prevents floating-point variation)\n"
-                           "• Only available for Grid Search (not Bayesian Optimization)\n\n"
-                           "⚠️ WARNING: Slower performance (~2-3x) due to single-threaded linear algebra.\n"
+                           "- Using fixed random seed for cross-validation splits\n"
+                           "- Setting BLAS threads to 1 (prevents floating-point variation)\n"
+                           "- Only available for Grid Search (not Bayesian Optimization)\n\n"
+                           "[!] WARNING: Slower performance (~2-3x) due to single-threaded linear algebra.\n"
                            "Recommended for: final results, publications, validation.\n"
                            "Default: OFF for faster exploratory analysis."),
                      delay=500)
@@ -4690,7 +5283,7 @@ class SpectralPredictApp:
 
         # Info label explaining impact
         ttk.Label(repro_frame,
-                 text="⚠️ Performance Impact: ~2-3x slower due to single-threaded linear algebra (BLAS threads=1)",
+                 text="[!] Performance Impact: ~2-3x slower due to single-threaded linear algebra (BLAS threads=1)",
                  style='Caption.TLabel',
                  foreground=self.colors['warning']).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 5))
 
@@ -4738,10 +5331,10 @@ class SpectralPredictApp:
         subset_frame.pack(fill='both', expand=True)
 
         # Enable/disable toggles
-        ttk.Checkbutton(subset_frame, text="✓ Enable Top-N Variable Analysis", variable=self.enable_variable_subsets).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=5)
+        ttk.Checkbutton(subset_frame, text="Enable Top-N Variable Analysis", variable=self.enable_variable_subsets).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=5)
         ttk.Label(subset_frame, text="Test models using only the N most important wavelengths", style='Caption.TLabel').grid(row=1, column=0, columnspan=4, sticky=tk.W, padx=(20, 0))
 
-        ttk.Checkbutton(subset_frame, text="✓ Enable Spectral Region Analysis", variable=self.enable_region_subsets).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 5))
+        ttk.Checkbutton(subset_frame, text="Enable Spectral Region Analysis", variable=self.enable_region_subsets).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 5))
         ttk.Label(subset_frame, text="Test models using auto-detected spectral regions (e.g., 2000-2050nm)", style='Caption.TLabel').grid(row=3, column=0, columnspan=4, sticky=tk.W, padx=(20, 0))
 
         # Region analysis depth (radio buttons)
@@ -4792,22 +5385,22 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Uses model-specific importance scores",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="✓ SPA (Successive Projections)",
+        ttk.Checkbutton(varsel_frame, text="SPA (Successive Projections)",
                        variable=self.varsel_spa).grid(row=2, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Collinearity-aware selection",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="✓ UVE (Uninformative Variable Elimination)",
+        ttk.Checkbutton(varsel_frame, text="UVE (Uninformative Variable Elimination)",
                        variable=self.varsel_uve).grid(row=3, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="✓ UVE-SPA Hybrid",
+        ttk.Checkbutton(varsel_frame, text="UVE-SPA Hybrid",
                        variable=self.varsel_uve_spa).grid(row=4, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Combines noise filtering + collinearity reduction",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="✓ iPLS (Interval PLS)",
+        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
                        variable=self.varsel_ipls).grid(row=5, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
@@ -4934,32 +5527,32 @@ class SpectralPredictApp:
         # Core Models (Column 1)
         ttk.Label(models_frame, text="Core Models", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
 
-        self.pls_checkbox = ttk.Checkbutton(models_frame, text="✓ PLS (Partial Least Squares)", variable=self.use_pls)
+        self.pls_checkbox = ttk.Checkbutton(models_frame, text="PLS (Partial Least Squares)", variable=self.use_pls)
         self.pls_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Linear, fast, interpretable", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.pls_checkbox, text=TOOLTIP_CONTENT['models']['PLS'], delay=500)
 
-        self.plsda_checkbox = ttk.Checkbutton(models_frame, text="✓ PLS-DA (Discriminant Analysis)", variable=self.use_plsda)
+        self.plsda_checkbox = ttk.Checkbutton(models_frame, text="PLS-DA (Discriminant Analysis)", variable=self.use_plsda)
         self.plsda_checkbox.grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="PLS for classification tasks", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.plsda_checkbox, text=TOOLTIP_CONTENT['models']['PLS-DA'], delay=500)
 
-        self.ridge_checkbox = ttk.Checkbutton(models_frame, text="✓ Ridge Regression", variable=self.use_ridge)
+        self.ridge_checkbox = ttk.Checkbutton(models_frame, text="Ridge Regression", variable=self.use_ridge)
         self.ridge_checkbox.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L2 regularized linear", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.ridge_checkbox, text=TOOLTIP_CONTENT['models']['Ridge'], delay=500)
 
-        self.lasso_checkbox = ttk.Checkbutton(models_frame, text="✓ Lasso Regression", variable=self.use_lasso)
+        self.lasso_checkbox = ttk.Checkbutton(models_frame, text="Lasso Regression", variable=self.use_lasso)
         self.lasso_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L1 regularized, sparse", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.lasso_checkbox, text=TOOLTIP_CONTENT['models']['Lasso'], delay=500)
 
-        self.elasticnet_checkbox = ttk.Checkbutton(models_frame, text="✓ ElasticNet 🆕", variable=self.use_elasticnet)
+        self.elasticnet_checkbox = ttk.Checkbutton(models_frame, text="ElasticNet 🆕", variable=self.use_elasticnet)
         self.elasticnet_checkbox.grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L1+L2 combined regularization", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.elasticnet_checkbox, text=TOOLTIP_CONTENT['models']['ElasticNet'], delay=500)
 
-        self.randomforest_checkbox = ttk.Checkbutton(models_frame, text="✓ Random Forest", variable=self.use_randomforest)
+        self.randomforest_checkbox = ttk.Checkbutton(models_frame, text="Random Forest", variable=self.use_randomforest)
         self.randomforest_checkbox.grid(row=6, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.randomforest_checkbox, text=TOOLTIP_CONTENT['models']['RandomForest'], delay=500)
@@ -4967,34 +5560,34 @@ class SpectralPredictApp:
         # Advanced Models (Column 2)
         ttk.Label(models_frame, text="Advanced Models", style='Subheading.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5), padx=(40, 0))
 
-        self.mlp_checkbox = ttk.Checkbutton(models_frame, text="✓ MLP (Multi-Layer Perceptron)", variable=self.use_mlp)
+        self.mlp_checkbox = ttk.Checkbutton(models_frame, text="MLP (Multi-Layer Perceptron)", variable=self.use_mlp)
         self.mlp_checkbox.grid(row=1, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=1, column=3, sticky=tk.W, padx=15)
         CreateToolTip(self.mlp_checkbox, text=TOOLTIP_CONTENT['models']['MLP'], delay=500)
 
-        self.svr_checkbox = ttk.Checkbutton(models_frame, text="✓ SVR 🆕", variable=self.use_svr)
+        self.svr_checkbox = ttk.Checkbutton(models_frame, text="SVR 🆕", variable=self.use_svr)
         self.svr_checkbox.grid(row=2, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
         CreateToolTip(self.svr_checkbox, text=TOOLTIP_CONTENT['models']['SVR'], delay=500)
 
-        self.svm_checkbox = ttk.Checkbutton(models_frame, text="✓ SVM 🆕", variable=self.use_svm)
+        self.svm_checkbox = ttk.Checkbutton(models_frame, text="SVM 🆕", variable=self.use_svm)
         self.svm_checkbox.grid(row=3, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Support Vector Machine (classification)", style='Caption.TLabel').grid(row=3, column=3, sticky=tk.W, padx=15)
 
         # Gradient Boosting Models (Column 3, spanning bottom)
         ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
 
-        self.xgboost_checkbox = ttk.Checkbutton(models_frame, text="✓ XGBoost", variable=self.use_xgboost)
+        self.xgboost_checkbox = ttk.Checkbutton(models_frame, text="XGBoost", variable=self.use_xgboost)
         self.xgboost_checkbox.grid(row=8, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Industry-leading gradient boosting", style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.xgboost_checkbox, text=TOOLTIP_CONTENT['models']['XGBoost'], delay=500)
 
-        self.lightgbm_checkbox = ttk.Checkbutton(models_frame, text="✓ LightGBM", variable=self.use_lightgbm)
+        self.lightgbm_checkbox = ttk.Checkbutton(models_frame, text="LightGBM", variable=self.use_lightgbm)
         self.lightgbm_checkbox.grid(row=9, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Microsoft's fast gradient boosting", style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.lightgbm_checkbox, text=TOOLTIP_CONTENT['models']['LightGBM'], delay=500)
 
-        self.catboost_checkbox = ttk.Checkbutton(models_frame, text="✓ CatBoost", variable=self.use_catboost)
+        self.catboost_checkbox = ttk.Checkbutton(models_frame, text="CatBoost", variable=self.use_catboost)
         self.catboost_checkbox.grid(row=10, column=0, sticky=tk.W, pady=5)
         if not HAS_CATBOOST:
             self.catboost_checkbox.state(['disabled'])
@@ -5003,7 +5596,7 @@ class SpectralPredictApp:
             ttk.Label(models_frame, text="Yandex's gradient boosting", style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.catboost_checkbox, text=TOOLTIP_CONTENT['models']['CatBoost'], delay=500)
 
-        self.neuralboosted_checkbox = ttk.Checkbutton(models_frame, text="✓ Neural Boosted", variable=self.use_neuralboosted)
+        self.neuralboosted_checkbox = ttk.Checkbutton(models_frame, text="Neural Boosted", variable=self.use_neuralboosted)
         self.neuralboosted_checkbox.grid(row=11, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="Gradient boosting with neural networks", style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.neuralboosted_checkbox, text=TOOLTIP_CONTENT['models']['NeuralBoosted'], delay=500)
@@ -6279,7 +6872,7 @@ class SpectralPredictApp:
     def _create_tab4e_validation(self):
         """Subtab 4E: Validation - Holdout validation set configuration."""
         tab4e = ttk.Frame(self.config_notebook, style='TFrame')
-        self.config_notebook.add(tab4e, text='  ✓ Validation  ')
+        self.config_notebook.add(tab4e, text='  > Validation  ')
 
         # Create scrollable content
         canvas = tk.Canvas(tab4e, bg=self.colors['bg'], highlightthickness=0)
@@ -6914,6 +7507,9 @@ class SpectralPredictApp:
         tol_combo['values'] = ['1e-5', '1e-4', '1e-3']
         tol_combo.grid(row=5, column=0, sticky=tk.W, pady=5)
 
+        ttk.Label(ridge_frame, text="Fit Intercept:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Checkbutton(ridge_frame, text="Include intercept term", variable=self.refine_ridge_fit_intercept).grid(row=7, column=0, sticky=tk.W, pady=5)
+
         # === Lasso Hyperparameters ===
         self.refine_hyperparam_frames['Lasso'] = ttk.Frame(hyperparams_outer_frame)
         lasso_frame = self.refine_hyperparam_frames['Lasso']
@@ -6935,6 +7531,9 @@ class SpectralPredictApp:
 
         ttk.Label(lasso_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(15, 5))
         ttk.Spinbox(lasso_frame, from_=100, to=5000, increment=100, textvariable=self.refine_lasso_max_iter, width=12).grid(row=7, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(lasso_frame, text="Fit Intercept:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Checkbutton(lasso_frame, text="Include intercept term", variable=self.refine_lasso_fit_intercept).grid(row=9, column=0, sticky=tk.W, pady=5)
 
         # === ElasticNet Hyperparameters ===
         self.refine_hyperparam_frames['ElasticNet'] = ttk.Frame(hyperparams_outer_frame)
@@ -6962,6 +7561,9 @@ class SpectralPredictApp:
 
         ttk.Label(elasticnet_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
         ttk.Spinbox(elasticnet_frame, from_=100, to=5000, increment=100, textvariable=self.refine_elasticnet_max_iter, width=12).grid(row=9, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(elasticnet_frame, text="Fit Intercept:", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Checkbutton(elasticnet_frame, text="Include intercept term", variable=self.refine_elasticnet_fit_intercept).grid(row=11, column=0, sticky=tk.W, pady=5)
 
         # === RandomForest Hyperparameters ===
         self.refine_hyperparam_frames['RandomForest'] = ttk.Frame(hyperparams_outer_frame)
@@ -7179,6 +7781,14 @@ class SpectralPredictApp:
         ttk.Label(neuralboosted_frame, text="Early Stopping:", style='Subheading.TLabel').grid(row=8, column=0, sticky=tk.W, pady=(15, 5))
         ttk.Checkbutton(neuralboosted_frame, text="Enable Early Stopping", variable=self.refine_neuralboosted_early_stopping).grid(row=9, column=0, sticky=tk.W, pady=5)
 
+        ttk.Label(neuralboosted_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=10, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(neuralboosted_frame, from_=50, to=1000, increment=50, textvariable=self.refine_neuralboosted_max_iter, width=12).grid(row=11, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(neuralboosted_frame, text="Tolerance:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
+        tol_combo = ttk.Combobox(neuralboosted_frame, textvariable=self.refine_neuralboosted_tol, width=12, state='readonly')
+        tol_combo['values'] = ['1e-5', '1e-4', '1e-3', '1e-2']
+        tol_combo.grid(row=13, column=0, sticky=tk.W, pady=5)
+
         # Initially hide all hyperparameter frames - will show the one matching selected model
         for frame in self.refine_hyperparam_frames.values():
             frame.grid_forget()
@@ -7307,10 +7917,10 @@ class SpectralPredictApp:
 
         residual_help_text = (
             "Residuals Analysis: Good models show randomly scattered residuals around zero with no patterns.\n\n"
-            "• Residuals vs Fitted: Look for random scatter. Patterns (curves, funnels) indicate model issues.\n"
-            "• Residuals vs Index: Check for systematic trends across samples.\n"
-            "• Q-Q Plot: Points should follow the red diagonal line. Deviations suggest non-normal residuals.\n\n"
-            "✓ Good: Random scatter, points on diagonal | ⚠ Warning: Patterns, curved Q-Q plot"
+            "- Residuals vs Fitted: Look for random scatter. Patterns (curves, funnels) indicate model issues.\n"
+            "- Residuals vs Index: Check for systematic trends across samples.\n"
+            "- Q-Q Plot: Points should follow the red diagonal line. Deviations suggest non-normal residuals.\n\n"
+            "> Good: Random scatter, points on diagonal | [!] Warning: Patterns, curved Q-Q plot"
         )
 
         residual_help_label = ttk.Label(residual_help_frame, text=residual_help_text,
@@ -7335,10 +7945,10 @@ class SpectralPredictApp:
 
         leverage_help_text = (
             "Leverage Analysis: Identifies influential samples that strongly affect the model.\n\n"
-            "• Interpretation: High-leverage points (red, above threshold) have unusual feature values.\n"
-            "• Orange line (2p/n): Moderate influence | Red line (3p/n): High influence\n"
+            "- Interpretation: High-leverage points (red, above threshold) have unusual feature values.\n"
+            "- Orange line (2p/n): Moderate influence | Red line (3p/n): High influence\n"
             "  where p = number of model parameters, n = number of samples\n\n"
-            "✓ Good: Most points below orange line | ⚠ Warning: Many red points may indicate data quality issues"
+            "> Good: Most points below orange line | [!] Warning: Many red points may indicate data quality issues"
         )
 
         leverage_help_label = ttk.Label(leverage_help_frame, text=leverage_help_text,
@@ -7374,7 +7984,7 @@ class SpectralPredictApp:
         if asd_files:
             self.detected_type = "asd"
             self.detection_status.config(
-                text=f"✓ Detected {len(asd_files)} ASD files",
+                text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
 
@@ -7387,7 +7997,7 @@ class SpectralPredictApp:
             elif len(ref_files) > 1:
                 # Update status to guide user - no popup needed
                 self.detection_status.config(
-                    text=f"✓ Detected {len(asd_files)} ASD files - {len(ref_files)} reference files found, select manually",
+                    text=f"> Detected {len(asd_files)} ASD files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7400,7 +8010,7 @@ class SpectralPredictApp:
                 self.spectral_data_path.set(str(csv_files[0]))
                 self.detected_type = "csv"
                 self.detection_status.config(
-                    text="✓ Detected CSV spectra file - select reference CSV below",
+                    text="Detected CSV spectra file - select reference CSV below",
                     foreground=self.colors['success']
                 )
                 # No popup needed - status label guides user
@@ -7408,7 +8018,7 @@ class SpectralPredictApp:
                 # Multiple CSVs - need user to clarify
                 self.detected_type = "csv"
                 self.detection_status.config(
-                    text=f"⚠ Found {len(csv_files)} CSV files - select files manually",
+                    text=f"[!] Found {len(csv_files)} CSV files - select files manually",
                     foreground=self.colors['accent']
                 )
                 # No popup needed - status label guides user
@@ -7419,7 +8029,7 @@ class SpectralPredictApp:
         if spc_files:
             self.detected_type = "spc"
             self.detection_status.config(
-                text=f"✓ Detected {len(spc_files)} SPC files",
+                text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
 
@@ -7432,7 +8042,7 @@ class SpectralPredictApp:
             elif len(ref_files) > 1:
                 # Update status to guide user - no popup needed
                 self.detection_status.config(
-                    text=f"✓ Detected {len(spc_files)} SPC files - {len(ref_files)} reference files found, select manually",
+                    text=f"> Detected {len(spc_files)} SPC files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7442,7 +8052,7 @@ class SpectralPredictApp:
         if jcamp_files:
             self.detected_type = "jcamp"
             self.detection_status.config(
-                text=f"✓ Detected {len(jcamp_files)} JCAMP-DX files",
+                text=f"> Detected {len(jcamp_files)} JCAMP-DX files",
                 foreground=self.colors['success']
             )
 
@@ -7453,7 +8063,7 @@ class SpectralPredictApp:
                 self._auto_detect_columns()
             elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(jcamp_files)} JCAMP-DX files - {len(ref_files)} reference files found, select manually",
+                    text=f"> Detected {len(jcamp_files)} JCAMP-DX files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7464,7 +8074,7 @@ class SpectralPredictApp:
         if ascii_files:
             self.detected_type = "ascii"
             self.detection_status.config(
-                text=f"✓ Detected {len(ascii_files)} ASCII files (.dpt/.dat/.asc)",
+                text=f"> Detected {len(ascii_files)} ASCII files (.dpt/.dat/.asc)",
                 foreground=self.colors['success']
             )
 
@@ -7475,7 +8085,7 @@ class SpectralPredictApp:
                 self._auto_detect_columns()
             elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(ascii_files)} ASCII files - {len(ref_files)} reference files found, select manually",
+                    text=f"> Detected {len(ascii_files)} ASCII files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7487,7 +8097,7 @@ class SpectralPredictApp:
         if opus_files:
             self.detected_type = "opus"
             self.detection_status.config(
-                text=f"✓ Detected {len(opus_files)} Bruker OPUS files",
+                text=f"> Detected {len(opus_files)} Bruker OPUS files",
                 foreground=self.colors['success']
             )
 
@@ -7498,7 +8108,7 @@ class SpectralPredictApp:
                 self._auto_detect_columns()
             elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(opus_files)} OPUS files - {len(ref_files)} reference files found, select manually",
+                    text=f"> Detected {len(opus_files)} OPUS files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7508,7 +8118,7 @@ class SpectralPredictApp:
         if sp_files:
             self.detected_type = "perkinelmer"
             self.detection_status.config(
-                text=f"✓ Detected {len(sp_files)} PerkinElmer files",
+                text=f"> Detected {len(sp_files)} PerkinElmer files",
                 foreground=self.colors['success']
             )
 
@@ -7519,7 +8129,7 @@ class SpectralPredictApp:
                 self._auto_detect_columns()
             elif len(ref_files) > 1:
                 self.detection_status.config(
-                    text=f"✓ Detected {len(sp_files)} PerkinElmer files - {len(ref_files)} reference files found, select manually",
+                    text=f"> Detected {len(sp_files)} PerkinElmer files - {len(ref_files)} reference files found, select manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7602,7 +8212,7 @@ class SpectralPredictApp:
 
                 format_type = "Excel" if is_excel else "CSV/TXT"
                 self.detection_status.config(
-                    text=f"✓ Combined {format_type}: {metadata['n_spectra']} spectra, "
+                    text=f"> Combined {format_type}: {metadata['n_spectra']} spectra, "
                          f"{len(metadata['wavelength_cols'])} wavelengths ({metadata['wavelength_range'][0]:.0f}-{metadata['wavelength_range'][1]:.0f} nm)",
                     foreground=self.colors['success']
                 )
@@ -7611,10 +8221,10 @@ class SpectralPredictApp:
                 info_msg = (
                     f"Detected combined {format_type} format!\n\n"
                     f"Auto-detected:\n"
-                    f"  • {id_info}\n"
-                    f"  • Target: {metadata['y_col']}\n"
-                    f"  • Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm\n"
-                    f"  • Spectra: {metadata['n_spectra']}\n\n"
+                    f"  - {id_info}\n"
+                    f"  - Target: {metadata['y_col']}\n"
+                    f"  - Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm\n"
+                    f"  - Spectra: {metadata['n_spectra']}\n\n"
                     f"No reference file needed - all data is in one file.\n"
                     f"Click 'Load Data' to proceed."
                 )
@@ -7622,7 +8232,7 @@ class SpectralPredictApp:
 
             except Exception as e:
                 self.detection_status.config(
-                    text=f"⚠ Error reading combined file: {str(e)}",
+                    text=f"[!] Error reading combined file: {str(e)}",
                     foreground=self.colors['accent']
                 )
                 messagebox.showerror("Error", f"Could not parse combined file:\n{str(e)}")
@@ -7637,7 +8247,7 @@ class SpectralPredictApp:
                 self.spectral_data_path.set(str(xlsx_files[0]))
                 self.detected_type = "excel"
                 self.detection_status.config(
-                    text="✓ Detected Excel spectra file - select reference file below",
+                    text="Detected Excel spectra file - select reference file below",
                     foreground=self.colors['success']
                 )
 
@@ -7648,14 +8258,14 @@ class SpectralPredictApp:
                     self._auto_detect_columns()
                 elif len(ref_files) > 1:
                     self.detection_status.config(
-                        text=f"✓ Detected Excel spectra - {len(ref_files)} reference files found, select manually",
+                        text=f"> Detected Excel spectra - {len(ref_files)} reference files found, select manually",
                         foreground=self.colors['accent']
                     )
             else:
                 # Multiple Excel files - need user to clarify
                 self.detected_type = "excel"
                 self.detection_status.config(
-                    text=f"⚠ Found {len(xlsx_files)} Excel files - select files manually",
+                    text=f"[!] Found {len(xlsx_files)} Excel files - select files manually",
                     foreground=self.colors['accent']
                 )
             return
@@ -7663,11 +8273,11 @@ class SpectralPredictApp:
         # No supported files found
         self.detected_type = None
         self.detection_status.config(
-            text="✗ No supported spectral files found",
+            text="[X] No supported spectral files found",
             foreground=self.colors['warning']
         )
         messagebox.showwarning("No Spectral Data",
-            "No supported spectral files found in this directory.\n\nSupported formats:\n• .asd (ASD files)\n• .csv (CSV spectral data)\n• .xlsx/.xls (Excel files)\n• .spc (GRAMS/Thermo Galactic)\n• .jdx/.dx (JCAMP-DX files)\n• .dpt/.dat/.asc (ASCII text files)\n• .0/.1/.2/etc (Bruker OPUS files)\n• .sp (PerkinElmer files)\n• Combined CSV/TXT/Excel (single file with all spectra + targets)")
+            "No supported spectral files found in this directory.\n\nSupported formats:\n- .asd (ASD files)\n- .csv (CSV spectral data)\n- .xlsx/.xls (Excel files)\n- .spc (GRAMS/Thermo Galactic)\n- .jdx/.dx (JCAMP-DX files)\n- .dpt/.dat/.asc (ASCII text files)\n- .0/.1/.2/etc (Bruker OPUS files)\n- .sp (PerkinElmer files)\n- Combined CSV/TXT/Excel (single file with all spectra + targets)")
 
     def _browse_reference_file(self):
         """Browse for reference file (CSV or Excel)."""
@@ -7711,7 +8321,7 @@ class SpectralPredictApp:
                 self.id_column.set(columns[1])
                 self.target_column.set(columns[2])
 
-            self.tab1_status.config(text=f"✓ Detected {len(columns)} columns")
+            self.tab1_status.config(text=f"> Detected {len(columns)} columns")
         except Exception as e:
             messagebox.showerror("Error", f"Could not read reference file:\n{e}")
 
@@ -7942,8 +8552,8 @@ class SpectralPredictApp:
 
         # Populate with sources
         for source in self.data_source_manager.sources:
-            has_y = "✓" if source.y is not None else "✗"
-            has_ref = "✓" if source.ref is not None else "✗"
+            has_y = ">" if source.y is not None else "[X]"
+            has_ref = ">" if source.ref is not None else "[X]"
             wl_range = f"{source.wavelength_range[0]:.1f}-{source.wavelength_range[1]:.1f}"
 
             self.data_sources_tree.insert('', 'end',
@@ -8131,10 +8741,10 @@ class SpectralPredictApp:
                             ref = metadata_df  # All metadata columns with real names
                             y = None  # Don't pre-designate target
 
-                            print(f"✓ Loaded combined Excel from sheet '{sheet_name}': {len(X)} samples, {len(X.columns)} wavelengths")
-                            print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
+                            print(f"> Loaded combined Excel from sheet '{sheet_name}': {len(X)} samples, {len(X.columns)} wavelengths")
+                            print(f"  - Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
                             if ref is not None:
-                                print(f"  • Metadata columns: {', '.join(ref.columns)}")
+                                print(f"  - Metadata columns: {', '.join(ref.columns)}")
                             loaded = True
                             break  # Success - stop trying other sheets
                         except Exception as e:
@@ -8177,10 +8787,10 @@ class SpectralPredictApp:
                         ref = metadata_df  # All metadata columns with real names
                         y = None  # Don't pre-designate target
 
-                        print(f"✓ Loaded combined CSV: {len(X)} samples, {len(X.columns)} wavelengths")
-                        print(f"  • Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
+                        print(f"> Loaded combined CSV: {len(X)} samples, {len(X.columns)} wavelengths")
+                        print(f"  - Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
                         if ref is not None:
-                            print(f"  • Metadata columns: {', '.join(ref.columns)}")
+                            print(f"  - Metadata columns: {', '.join(ref.columns)}")
                     except Exception as e:
                         print(f"Combined CSV failed: {str(e)}")
 
@@ -8201,7 +8811,7 @@ class SpectralPredictApp:
                         try:
                             X, metadata = read_csv_spectra(spectra_path)
                             format_type = 'csv'
-                            print(f"✓ Loaded as single spectrum CSV: {len(X)} samples, {len(X.columns)} wavelengths")
+                            print(f"> Loaded as single spectrum CSV: {len(X)} samples, {len(X.columns)} wavelengths")
                         except Exception as e2:
                             # Both formats failed - show helpful error
                             import traceback
@@ -8907,7 +9517,7 @@ class SpectralPredictApp:
 
             if not self.detected_type:
                 messagebox.showwarning("No Data Detected",
-                    "Could not detect spectral data type.\n\nPlease ensure the directory contains:\n• .asd files\n• .csv files\n• .spc files (GRAMS)")
+                    "Could not detect spectral data type.\n\nPlease ensure the directory contains:\n- .asd files\n- .csv files\n- .spc files (GRAMS)")
                 return
 
             # Load spectral data based on detected type
@@ -8944,13 +9554,13 @@ class SpectralPredictApp:
 
                 # Show success message
                 format_name = "Excel" if self.detected_type == "combined_excel" else "CSV/TXT"
-                print(f"\n✓ Loaded combined {format_name} format:")
-                print(f"  • Spectra: {metadata['n_spectra']}")
-                print(f"  • Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm")
-                print(f"  • Specimen ID: {metadata['specimen_id_col']}")
-                print(f"  • Target: {metadata['y_col']}")
+                print(f"\n> Loaded combined {format_name} format:")
+                print(f"  - Spectra: {metadata['n_spectra']}")
+                print(f"  - Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm")
+                print(f"  - Specimen ID: {metadata['specimen_id_col']}")
+                print(f"  - Target: {metadata['y_col']}")
                 if metadata.get('metadata_cols'):
-                    print(f"  • Metadata columns: {', '.join(metadata['metadata_cols'])}")
+                    print(f"  - Metadata columns: {', '.join(metadata['metadata_cols'])}")
 
             elif self.detected_type == "asd":
                 X, metadata = read_asd_dir(self.spectral_data_path.get())
@@ -9282,7 +9892,7 @@ class SpectralPredictApp:
                     # Update data sources tracking
                     self.data_sources.append((source_path, new_n_samples))
                     self._update_data_sources_display()
-                    print(f"✓ Appended {new_n_samples} samples from: {source_path}")
+                    print(f"> Appended {new_n_samples} samples from: {source_path}")
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -9363,7 +9973,7 @@ class SpectralPredictApp:
             # Update data type detection UI
             self._update_data_type_status_ui()
 
-            self.tab1_status.config(text=f"✓ Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
+            self.tab1_status.config(text=f"> Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
             # Enable interactive controls
             self.update_wl_button.config(state='normal')
             self.absorbance_checkbox.config(state='normal')
@@ -9377,7 +9987,7 @@ class SpectralPredictApp:
             import traceback
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to load data:\n{e}")
-            self.tab1_status.config(text="✗ Error loading data")
+            self.tab1_status.config(text="[X] Error loading data")
 
     def _show_alignment_report(self, alignment_info):
         """Display a report showing which files were matched and which were excluded."""
@@ -9390,29 +10000,29 @@ class SpectralPredictApp:
         # Build report message
         report_lines = [
             "=== DATA ALIGNMENT REPORT ===\n",
-            f"✓ Successfully matched: {len(matched)} samples",
+            f"> Successfully matched: {len(matched)} samples",
         ]
 
         if fuzzy:
             report_lines.append("  (Used fuzzy filename matching)")
 
         if n_nan > 0:
-            report_lines.append(f"\n⚠️ Dropped {n_nan} samples with missing target values")
+            report_lines.append(f"\n[!] Dropped {n_nan} samples with missing target values")
 
         if unmatched_spectra:
-            report_lines.append(f"\n❌ Spectral files WITHOUT reference data ({len(unmatched_spectra)}):")
+            report_lines.append(f"\n[X] Spectral files WITHOUT reference data ({len(unmatched_spectra)}):")
             # Show first 10, then indicate if there are more
             show_count = min(10, len(unmatched_spectra))
             for i in range(show_count):
-                report_lines.append(f"   • {unmatched_spectra[i]}")
+                report_lines.append(f"   - {unmatched_spectra[i]}")
             if len(unmatched_spectra) > show_count:
                 report_lines.append(f"   ... and {len(unmatched_spectra) - show_count} more")
 
         if unmatched_ref:
-            report_lines.append(f"\n⚠️ Reference entries WITHOUT spectral data ({len(unmatched_ref)}):")
+            report_lines.append(f"\n[!] Reference entries WITHOUT spectral data ({len(unmatched_ref)}):")
             show_count = min(10, len(unmatched_ref))
             for i in range(show_count):
-                report_lines.append(f"   • {unmatched_ref[i]}")
+                report_lines.append(f"   - {unmatched_ref[i]}")
             if len(unmatched_ref) > show_count:
                 report_lines.append(f"   ... and {len(unmatched_ref) - show_count} more")
 
@@ -9499,7 +10109,7 @@ class SpectralPredictApp:
         # Check for duplicate IDs
         if new_ids.duplicated().any():
             dup_ids = new_ids[new_ids.duplicated()].unique()
-            print(f"\n⚠️ WARNING: Found {new_ids.duplicated().sum()} duplicate specimen IDs after alignment!")
+            print(f"\n[!] WARNING: Found {new_ids.duplicated().sum()} duplicate specimen IDs after alignment!")
             print(f"Duplicate IDs: {list(dup_ids[:10])}")
             print("This may cause issues with data tracking. Consider using unique specimen IDs.\n")
 
@@ -9508,7 +10118,7 @@ class SpectralPredictApp:
         y_aligned.index = new_ids
         ref.index = new_ids
 
-        print(f"✓ Using '{id_col}' column as specimen IDs")
+        print(f"> Using '{id_col}' column as specimen IDs")
 
         return X_aligned, y_aligned, ref
 
@@ -9557,7 +10167,7 @@ class SpectralPredictApp:
             self._generate_explore_plots()  # Also update Explore tab plots
 
             # Update status
-            self.tab1_status.config(text=f"✓ Updated to {len(self.X)} samples × {self.X.shape[1]} wavelengths")
+            self.tab1_status.config(text=f"> Updated to {len(self.X)} samples × {self.X.shape[1]} wavelengths")
 
             # Update data viewer
             self._populate_data_viewer()
@@ -9608,7 +10218,7 @@ class SpectralPredictApp:
         original = self.original_data_type.get()
         if current != original:
             self.data_type_status_label.config(
-                text=f"⚠️  User override: Treating as {current.capitalize()} (originally {original.capitalize()})",
+                text=f"[!]  User override: Treating as {current.capitalize()} (originally {original.capitalize()})",
                 foreground=self.colors['warning']
             )
         else:
@@ -9671,7 +10281,7 @@ class SpectralPredictApp:
 
             # Update status label
             self.data_type_status_label.config(
-                text=f"✓ Converted to {target_type.capitalize()} (from {current_type})",
+                text=f"> Converted to {target_type.capitalize()} (from {current_type})",
                 foreground=self.colors['accent']
             )
 
@@ -9679,7 +10289,7 @@ class SpectralPredictApp:
             self._generate_plots()
             self._generate_explore_plots()  # Also update Explore tab plots
 
-            print(f"✓ Successfully converted data to {target_type}")
+            print(f"> Successfully converted data to {target_type}")
 
         except Exception as e:
             messagebox.showerror("Conversion Error", f"Failed to convert data:\n{str(e)}")
@@ -9714,7 +10324,7 @@ class SpectralPredictApp:
         # Update status label
         status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence: {confidence:.0f}%)"
         if confidence < 70:
-            status_text += " ⚠️"
+            status_text += " [!]"
 
         self.data_type_status_label.config(text=status_text, foreground=color)
 
@@ -9987,7 +10597,7 @@ class SpectralPredictApp:
             n_cal = len(X_available) - n_val
             if hasattr(self, 'validation_status_label'):
                 self.validation_status_label.config(
-                    text=f"✓ {n_val} validation samples selected ({algorithm})\n"
+                    text=f"> {n_val} validation samples selected ({algorithm})\n"
                          f"Calibration: {n_cal} samples | Validation: {n_val} samples"
                 )
             # Success - status label already updated
@@ -10241,7 +10851,7 @@ class SpectralPredictApp:
 
         # Warn if values seem problematic
         if np.any(data > 1.2):
-            print("⚠️  Warning: Some reflectance values > 1.2. Data may already be absorbance.")
+            print("[!]  Warning: Some reflectance values > 1.2. Data may already be absorbance.")
 
         return np.log10(1.0 / data_safe)
 
@@ -10271,12 +10881,12 @@ class SpectralPredictApp:
         # Warn if negative values were encountered
         n_negative = np.sum(np.power(10, -data) < 0.0)
         if n_negative > 0:
-            print(f"⚠️  Warning: {n_negative} negative values clipped to 0 after conversion.")
+            print(f"[!]  Warning: {n_negative} negative values clipped to 0 after conversion.")
 
         # Info message if values exceed 1.0 (this is acceptable)
         n_above_one = np.sum(reflectance > 1.0)
         if n_above_one > 0:
-            print(f"ℹ️  Info: {n_above_one} reflectance values > 1.0 (this is acceptable for real spectra).")
+            print(f"[i]  Info: {n_above_one} reflectance values > 1.0 (this is acceptable for real spectra).")
 
         return reflectance
 
@@ -10303,13 +10913,13 @@ class SpectralPredictApp:
             return data
 
         if from_type == "reflectance" and to_type == "absorbance":
-            print("Converting reflectance → absorbance (A = log10(1/R))")
+            print("Converting reflectance -> absorbance (A = log10(1/R))")
             return self._convert_reflectance_to_absorbance(data)
         elif from_type == "absorbance" and to_type == "reflectance":
-            print("Converting absorbance → reflectance (R = 10^(-A))")
+            print("Converting absorbance -> reflectance (R = 10^(-A))")
             return self._convert_absorbance_to_reflectance(data)
         else:
-            raise ValueError(f"Unknown conversion: {from_type} → {to_type}")
+            raise ValueError(f"Unknown conversion: {from_type} -> {to_type}")
 
     def _get_spectral_ylabel(self):
         """
@@ -11079,10 +11689,10 @@ class SpectralPredictApp:
             values = (
                 row['Sample_Index'],
                 y_display,  # Use formatted value
-                "✓" if row['T2_Outlier'] else "",
-                "✓" if row['Q_Outlier'] else "",
-                "✓" if row['Maha_Outlier'] else "",
-                "✓" if row['Y_Outlier'] else "",
+                ">" if row['T2_Outlier'] else "",
+                ">" if row['Q_Outlier'] else "",
+                ">" if row['Maha_Outlier'] else "",
+                ">" if row['Y_Outlier'] else "",
                 row['Total_Flags']
             )
 
@@ -11302,7 +11912,7 @@ class SpectralPredictApp:
                 if wl_max is not None:
                     mask = mask & (wavelengths <= wl_max)
                 X_filtered = self.X.loc[:, mask]
-                print(f"ℹ️ Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
+                print(f"[i] Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
 
             # Handle categorical/string targets by encoding them
             y_numeric = self.y.copy()
@@ -11311,7 +11921,7 @@ class SpectralPredictApp:
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
                 y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=X_filtered.index)
-                print(f"ℹ️ Encoded categorical target for correlation: {dict(zip(le.classes_, range(len(le.classes_))))}")
+                print(f"[i] Encoded categorical target for correlation: {dict(zip(le.classes_, range(len(le.classes_))))}")
 
             # Vectorized correlation - computes all correlations in one operation
             correlations = X_filtered.corrwith(pd.Series(y_numeric, index=X_filtered.index))
@@ -11357,14 +11967,14 @@ class SpectralPredictApp:
                 if wl_max is not None:
                     mask = mask & (wavelengths <= wl_max)
                 X_filtered = self.X.loc[:, mask]
-                print(f"ℹ️ Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
+                print(f"[i] Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
 
             # Handle categorical/string targets by encoding them
             y_numeric = self.y.copy()
             if y_numeric.dtype == 'object' or isinstance(y_numeric.iloc[0], str):
                 le = LabelEncoder()
                 y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=X_filtered.index)
-                print(f"ℹ️ Encoded categorical target for VIP: {dict(zip(le.classes_, range(len(le.classes_))))}")
+                print(f"[i] Encoded categorical target for VIP: {dict(zip(le.classes_, range(len(le.classes_))))}")
 
             X_values = X_filtered.values
             y_values = y_numeric.values.reshape(-1, 1)
@@ -11432,7 +12042,7 @@ class SpectralPredictApp:
                 if wl_max is not None:
                     mask = mask & (wavelengths <= wl_max)
                 X_filtered = self.X.loc[:, mask]
-                print(f"ℹ️ Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
+                print(f"[i] Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
 
             # Determine task type
             n_unique = len(np.unique(self.y))
@@ -11601,23 +12211,23 @@ class SpectralPredictApp:
 
         if results['method'] == 'correlation':
             if max_abs > 0.7:
-                interp = "✓ STRONG correlations detected\n\nStrong linear relationships found. Target should be predictable with linear models (PLS, PCR)."
+                interp = "> STRONG correlations detected\n\nStrong linear relationships found. Target should be predictable with linear models (PLS, PCR)."
                 color = '#2e7d32'  # Green
             elif max_abs > 0.4:
                 interp = "○ MODERATE correlations detected\n\nModerate relationships found. May benefit from non-linear models or feature engineering."
                 color = '#f57c00'  # Orange
             else:
-                interp = "⚠ WEAK correlations detected\n\nNo strong linear relationships. Consider:\n• Non-linear models (RF, SVM)\n• Different preprocessing\n• Additional data"
+                interp = "[!] WEAK correlations detected\n\nNo strong linear relationships. Consider:\n- Non-linear models (RF, SVM)\n- Different preprocessing\n- Additional data"
                 color = '#c62828'  # Red
         else:  # RF
             if max_abs > 0.05:
-                interp = "✓ Clear important wavelengths identified\n\nRandom Forest found discriminative wavelengths. Variable selection may help."
+                interp = "> Clear important wavelengths identified\n\nRandom Forest found discriminative wavelengths. Variable selection may help."
                 color = '#2e7d32'
             elif max_abs > 0.02:
                 interp = "○ Some important wavelengths identified\n\nModerate importance spread. Some wavelengths are more predictive than others."
                 color = '#f57c00'
             else:
-                interp = "⚠ Importance spread across wavelengths\n\nNo single wavelengths dominate. May indicate:\n• Complex interactions\n• Noise in data\n• Difficult prediction task"
+                interp = "[!] Importance spread across wavelengths\n\nNo single wavelengths dominate. May indicate:\n- Complex interactions\n- Noise in data\n- Difficult prediction task"
                 color = '#c62828'
 
         self.screening_interpretation.config(text=interp, foreground=color)
@@ -11707,7 +12317,7 @@ class SpectralPredictApp:
             X_existing = X_existing[common_wls]
             X_new = X_new_interp
 
-            print(f"✓ Interpolated to {len(common_wls)} common wavelengths ({wl_min:.0f}-{wl_max:.0f} nm)")
+            print(f"> Interpolated to {len(common_wls)} common wavelengths ({wl_min:.0f}-{wl_max:.0f} nm)")
 
         # Make indices unique to avoid collisions
         new_index_mapping = {}  # Track index changes for metadata
@@ -11927,7 +12537,7 @@ class SpectralPredictApp:
                         'severe': '#ff6b6b',    # Red
                         'extreme': '#d32f2f'    # Dark red
                     }
-                    warning_text = f"⚠ {info['severity'].upper()} IMBALANCE DETECTED"
+                    warning_text = f"[!] {info['severity'].upper()} IMBALANCE DETECTED"
                     self.imbalance_warning_label.config(
                         text=warning_text,
                         foreground=severity_colors.get(info['severity'], '#ff6b6b')
@@ -11942,11 +12552,11 @@ class SpectralPredictApp:
                         self._update_imbalance_method_description(None)
 
                     if recommendation.get('warnings'):
-                        rec_text += "\n\nWarnings:\n" + "\n".join(f"• {w}" for w in recommendation['warnings'])
+                        rec_text += "\n\nWarnings:\n" + "\n".join(f"- {w}" for w in recommendation['warnings'])
 
                     self.imbalance_recommendation_label.config(text=rec_text)
                 else:
-                    self.imbalance_warning_label.config(text="✓ Data is balanced")
+                    self.imbalance_warning_label.config(text="Data is balanced")
                     self.imbalance_recommendation_label.config(text=info['recommendation'])
 
             else:  # regression
@@ -11963,7 +12573,7 @@ class SpectralPredictApp:
 
                 # Show warning if imbalanced
                 if info['is_imbalanced']:
-                    warning_text = f"⚠ {info['severity'].upper()} TARGET IMBALANCE"
+                    warning_text = f"[!] {info['severity'].upper()} TARGET IMBALANCE"
                     self.imbalance_warning_label.config(text=warning_text, foreground='#ff9800')
 
                     # Show recommendation
@@ -11975,11 +12585,11 @@ class SpectralPredictApp:
                         self._update_imbalance_method_description(None)
 
                     if recommendation.get('warnings'):
-                        rec_text += "\n\nWarnings:\n" + "\n".join(f"• {w}" for w in recommendation['warnings'])
+                        rec_text += "\n\nWarnings:\n" + "\n".join(f"- {w}" for w in recommendation['warnings'])
 
                     self.imbalance_recommendation_label.config(text=rec_text)
                 else:
-                    self.imbalance_warning_label.config(text="✓ Target is balanced")
+                    self.imbalance_warning_label.config(text="Target is balanced")
                     self.imbalance_recommendation_label.config(text=info['recommendation'])
 
         except Exception as e:
@@ -12128,7 +12738,7 @@ class SpectralPredictApp:
             if sample_id_col in df_preprocessed.columns:
                 original_col = sample_id_col
                 sample_id_col = f"{sample_id_col}_ID"
-                self._log_progress(f"⚠️  Warning: Sample ID column renamed to '{sample_id_col}' to avoid collision with wavelength column '{original_col}'")
+                self._log_progress(f"[!]  Warning: Sample ID column renamed to '{sample_id_col}' to avoid collision with wavelength column '{original_col}'")
 
             df_export = pd.DataFrame({
                 sample_id_col: self.y.index,
@@ -12147,7 +12757,7 @@ class SpectralPredictApp:
             df_export.to_csv(csv_path, index=False)
 
             # Log success
-            self._log_progress(f"✓ Preprocessed CSV exported: {csv_path}")
+            self._log_progress(f"> Preprocessed CSV exported: {csv_path}")
             self._log_progress(f"  - Window size: {window_size}, Polyorder: 3 (2nd derivative)")
             self._log_progress(f"  - Shape: {df_export.shape[0]} samples × {df_export.shape[1]} columns")
 
@@ -12155,7 +12765,7 @@ class SpectralPredictApp:
 
         except Exception as e:
             error_msg = f"Failed to export preprocessed CSV: {str(e)}"
-            self._log_progress(f"✗ {error_msg}")
+            self._log_progress(f"[X] {error_msg}")
             messagebox.showerror("Export Error", error_msg)
             return None
 
@@ -12229,9 +12839,9 @@ class SpectralPredictApp:
             self._log_progress("="*70)
             csv_path = self._export_preprocessed_csv()
             if csv_path:
-                self._log_progress(f"✓ CSV export complete\n")
+                self._log_progress(f"> CSV export complete\n")
             else:
-                self._log_progress(f"✗ CSV export failed\n")
+                self._log_progress(f"[X] CSV export failed\n")
 
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier))
@@ -12343,7 +12953,7 @@ class SpectralPredictApp:
                 reconstructed_models.append((pipeline, model_name, metadata))
 
             except Exception as e:
-                self._log_progress(f"⚠️ Failed to reconstruct {row.Model}: {e}")
+                self._log_progress(f"[!] Failed to reconstruct {row.Model}: {e}")
                 continue
 
         return reconstructed_models
@@ -12366,8 +12976,8 @@ class SpectralPredictApp:
                     "No Training Data",
                     "Training data is not available.\n\n"
                     "This can happen if:\n"
-                    "• Analysis was run in an older version\n"
-                    "• Application was restarted\n\n"
+                    "- Analysis was run in an older version\n"
+                    "- Application was restarted\n\n"
                     "Please re-run the analysis to cache training data."
                 )
                 return
@@ -12570,12 +13180,12 @@ class SpectralPredictApp:
                 self._log_progress(f"Using top {len(top_models_df)} models (by score) for ensemble:")
 
             if len(top_models_df) == 0:
-                self._log_progress(f"⚠️ No models selected for ensemble, skipping...")
+                self._log_progress(f"[!] No models selected for ensemble, skipping...")
                 return None, None
 
             # Validation: minimum 2 models required
             if len(top_models_df) < 2:
-                self._log_progress(f"⚠️ Need at least 2 models for ensemble (got {len(top_models_df)}), skipping...")
+                self._log_progress(f"[!] Need at least 2 models for ensemble (got {len(top_models_df)}), skipping...")
                 return None, None
 
             # Log selected models
@@ -12587,10 +13197,10 @@ class SpectralPredictApp:
             reconstructed = self._reconstruct_models_from_results(top_models_df, X_filtered, y_filtered, task_type)
 
             if len(reconstructed) < 2:
-                self._log_progress(f"⚠️ Need at least 2 models for ensemble (got {len(reconstructed)}), skipping...")
+                self._log_progress(f"[!] Need at least 2 models for ensemble (got {len(reconstructed)}), skipping...")
                 return None, None
 
-            self._log_progress(f"✓ Successfully reconstructed {len(reconstructed)} models")
+            self._log_progress(f"> Successfully reconstructed {len(reconstructed)} models")
 
             # Extract models and names
             models = [m[0] for m in reconstructed]
@@ -12610,7 +13220,7 @@ class SpectralPredictApp:
                 ensemble_methods.append(('region_stacking', 'Stacking + Region Features'))
 
             if not ensemble_methods:
-                self._log_progress("⚠️ No ensemble methods selected, skipping...")
+                self._log_progress("[!] No ensemble methods selected, skipping...")
                 return None, None
 
             self._log_progress(f"\nTesting {len(ensemble_methods)} ensemble methods...")
@@ -12650,7 +13260,7 @@ class SpectralPredictApp:
                     # Calculate RPD (Ratio of Performance to Deviation)
                     rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
 
-                    self._log_progress(f"✓ {ensemble_name} Results:")
+                    self._log_progress(f"> {ensemble_name} Results:")
                     self._log_progress(f"   RMSE: {rmse:.4f}")
                     self._log_progress(f"   R²:   {r2:.4f}")
                     self._log_progress(f"   MAE:  {mae:.4f}")
@@ -12658,8 +13268,8 @@ class SpectralPredictApp:
 
                     # Add warning for mixture of experts about cross-validated performance
                     if ensemble_type == 'mixture_experts' and r2 > 0.95:
-                        self._log_progress(f"   ⚠️ Note: These metrics are on training data.")
-                        self._log_progress(f"   ⚠️ Actual performance on new data will be lower.")
+                        self._log_progress(f"   [!] Note: These metrics are on training data.")
+                        self._log_progress(f"   [!] Actual performance on new data will be lower.")
 
                     # Store results
                     ensemble_results.append({
@@ -12676,7 +13286,7 @@ class SpectralPredictApp:
                     trained_ensembles[ensemble_type] = ensemble
 
                 except Exception as e:
-                    self._log_progress(f"✗ {ensemble_name} failed: {e}")
+                    self._log_progress(f"[X] {ensemble_name} failed: {e}")
                     import traceback
                     self._log_progress(f"   {traceback.format_exc()}")
                     continue
@@ -12707,21 +13317,21 @@ class SpectralPredictApp:
                     self._log_progress(f"     RMSE: {result['rmse']:.4f} ({rmse_improvement:+.1f}%)")
                     self._log_progress(f"     RPD:  {result['rpd']:.2f}")
 
-                self._log_progress(f"\n✓ Ensemble training complete!")
-                self._log_progress(f"✓ Trained {len(ensemble_results)} ensemble(s)")
+                self._log_progress(f"\n> Ensemble training complete!")
+                self._log_progress(f"> Trained {len(ensemble_results)} ensemble(s)")
                 if is_manual_retrain:
-                    self._log_progress(f"✓ Ensemble results updated in Results tab")
+                    self._log_progress(f"> Ensemble results updated in Results tab")
                 else:
-                    self._log_progress(f"✓ View ensemble results in the Results tab")
+                    self._log_progress(f"> View ensemble results in the Results tab")
 
                 return ensemble_results, trained_ensembles
             else:
-                self._log_progress(f"\n⚠️ No ensembles were successfully trained")
+                self._log_progress(f"\n[!] No ensembles were successfully trained")
                 return None, None
 
         except Exception as e:
             import traceback
-            self._log_progress(f"\n⚠️ Ensemble execution failed: {e}")
+            self._log_progress(f"\n[!] Ensemble execution failed: {e}")
             self._log_progress(f"   {traceback.format_exc()}")
             self._log_progress(f"   Individual model results are still available")
             return None, None
@@ -14088,7 +14698,7 @@ class SpectralPredictApp:
             custom_mlp_hidden = self.mlp_hidden_custom.get().strip()
             if custom_mlp_hidden:
                 try:
-                    # Parse "100,50,25" → (100, 50, 25)
+                    # Parse "100,50,25" -> (100, 50, 25)
                     sizes = tuple(int(x.strip()) for x in custom_mlp_hidden.split(','))
                     if all(s > 0 for s in sizes) and sizes not in mlp_hidden_layer_sizes_list:
                         mlp_hidden_layer_sizes_list.append(sizes)
@@ -14211,9 +14821,9 @@ class SpectralPredictApp:
             if enable_variable_subsets:
                 self._log_progress(f"  Variable counts selected: {variable_counts if variable_counts else 'NONE'}")
                 if not variable_counts:
-                    self._log_progress(f"  ⚠️ WARNING: Variable subsets enabled but no counts selected!")
+                    self._log_progress(f"  [!] WARNING: Variable subsets enabled but no counts selected!")
             else:
-                self._log_progress(f"  ⚠️ Variable subsets are DISABLED - no subset analysis will run")
+                self._log_progress(f"  [!] Variable subsets are DISABLED - no subset analysis will run")
             self._log_progress(f"Region subsets: {'ENABLED' if enable_region_subsets else 'DISABLED'}")
             if enable_region_subsets:
                 self._log_progress(f"  Region analysis depth: {self.n_top_regions.get()} regions")
@@ -14229,7 +14839,7 @@ class SpectralPredictApp:
 
                 # Update progress with exclusion info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
-                    f"\nℹ️ Excluding {len(self.excluded_spectra)} user-selected spectra from analysis...\n"))
+                    f"\n[i] Excluding {len(self.excluded_spectra)} user-selected spectra from analysis...\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
             else:
                 X_filtered = self.X
@@ -14248,11 +14858,11 @@ class SpectralPredictApp:
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
                     f"\n🔬 Validation Set Enabled:\n"))
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
-                    f"   • Calibration samples: {n_cal}\n"))
+                    f"   - Calibration samples: {n_cal}\n"))
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
-                    f"   • Validation samples (held out): {n_val}\n"))
+                    f"   - Validation samples (held out): {n_val}\n"))
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
-                    f"   • Algorithm: {self.validation_algorithm.get()}\n\n"))
+                    f"   - Algorithm: {self.validation_algorithm.get()}\n\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
 
                 self._log_progress(f"\n🔬 VALIDATION SET:")
@@ -14308,16 +14918,16 @@ class SpectralPredictApp:
                         self._log_progress(f"   Requested range: {wl_min:.1f} - {wl_max:.1f} nm ({restricted_wl_count} wavelengths)")
                         self._log_progress(f"   Full imported spectrum: {original_wl_count} wavelengths")
                         self._log_progress(f"")
-                        self._log_progress(f"   ✓ Preprocessing (SNV, derivatives) will use FULL imported spectrum")
-                        self._log_progress(f"   ✓ Variable selection will be constrained to specified range")
-                        self._log_progress(f"   ✓ This ensures proper spectral context for derivatives\n")
+                        self._log_progress(f"   > Preprocessing (SNV, derivatives) will use FULL imported spectrum")
+                        self._log_progress(f"   > Variable selection will be constrained to specified range")
+                        self._log_progress(f"   > This ensures proper spectral context for derivatives\n")
 
                     except ValueError as e:
-                        self._log_progress(f"\n⚠️ WARNING: Invalid wavelength restriction values, ignoring: {e}\n")
+                        self._log_progress(f"\n[!] WARNING: Invalid wavelength restriction values, ignoring: {e}\n")
                         analysis_wl_min_value = None
                         analysis_wl_max_value = None
                     except Exception as e:
-                        self._log_progress(f"\n⚠️ WARNING: Failed to validate wavelength restriction: {e}\n")
+                        self._log_progress(f"\n[!] WARNING: Failed to validate wavelength restriction: {e}\n")
                         analysis_wl_min_value = None
                         analysis_wl_max_value = None
 
@@ -14328,7 +14938,7 @@ class SpectralPredictApp:
                 try:
                     uve_n_comp = int(self.uve_n_components.get())
                 except ValueError:
-                    self._log_progress("⚠️ Warning: Invalid UVE n_components, using auto-determination")
+                    self._log_progress("[!] Warning: Invalid UVE n_components, using auto-determination")
 
             # Collect selected variable selection methods
             selected_varsel_methods = []
@@ -14346,7 +14956,7 @@ class SpectralPredictApp:
             # Default to importance if none selected
             if not selected_varsel_methods:
                 selected_varsel_methods = ['importance']
-                self._log_progress("⚠️ No variable selection method selected, defaulting to 'importance'")
+                self._log_progress("[!] No variable selection method selected, defaulting to 'importance'")
 
             # SAFETY CHECK: Ensure X and y are properly aligned
             if len(X_filtered) != len(y_filtered):
@@ -14357,18 +14967,18 @@ class SpectralPredictApp:
                     f"2. Some samples have missing target values\n\n"
                     f"Try reloading the data or check that the ID column in your CSV matches the spectral file names."
                 )
-                self._log_progress(f"\n❌ ERROR: {error_msg}")
+                self._log_progress(f"\n[X] ERROR: {error_msg}")
                 messagebox.showerror("Alignment Error", error_msg)
                 raise ValueError(error_msg)
 
             # Ensure indices match
             if not X_filtered.index.equals(y_filtered.index):
-                self._log_progress("⚠️ Warning: Realigning X and y indices to ensure consistency...")
+                self._log_progress("[!] Warning: Realigning X and y indices to ensure consistency...")
                 # Realign by taking only common indices
                 common_idx = X_filtered.index.intersection(y_filtered.index)
                 X_filtered = X_filtered.loc[common_idx]
                 y_filtered = y_filtered.loc[common_idx]
-                self._log_progress(f"✓ Realigned to {len(common_idx)} common samples")
+                self._log_progress(f"> Realigned to {len(common_idx)} common samples")
 
             # Adjust max_n_components based on restricted wavelength count
             # PLS cannot use more components than min(n_features, n_samples)
@@ -14378,7 +14988,7 @@ class SpectralPredictApp:
             adjusted_max_components = min(user_max_components, n_features, n_samples)
 
             if adjusted_max_components < user_max_components:
-                self._log_progress(f"\n⚠️ PLS COMPONENT ADJUSTMENT:")
+                self._log_progress(f"\n[!] PLS COMPONENT ADJUSTMENT:")
                 self._log_progress(f"   User setting: {user_max_components} components")
                 self._log_progress(f"   Adjusted to: {adjusted_max_components} (limited by {n_features} features, {n_samples} samples)")
                 self._log_progress(f"   Reason: PLS requires n_components ≤ min(n_features, n_samples)\n")
@@ -14546,7 +15156,7 @@ class SpectralPredictApp:
                 'validation_count': n_validation,
                 'total_samples_original': len(self.X) if self.X is not None else 0
             }
-            print(f"\n✓ Stored training configuration:")
+            print(f"\n> Stored training configuration:")
             print(f"  Calibration samples: {self.last_training_config['n_samples_used']}")
             print(f"  Excluded samples: {self.last_training_config['excluded_count']}")
             print(f"  Validation samples: {self.last_training_config['validation_count']}")
@@ -14625,15 +15235,15 @@ class SpectralPredictApp:
                 'analysis_wl_max': analysis_wl_max_value,
                 'timestamp': datetime.now().isoformat()
             }
-            self._log_progress(f"\n✓ Cached training data for ensemble retraining")
+            self._log_progress(f"\n> Cached training data for ensemble retraining")
 
             # Populate Results tab
             self.root.after(0, lambda: self._populate_results_table(results_df))
 
-            self._log_progress(f"\n✓ Analysis complete!")
+            self._log_progress(f"\n> Analysis complete!")
             self._log_progress(f"Results saved to: {results_path}")
 
-            self.root.after(0, lambda: self.progress_status.config(text="✓ Analysis complete!"))
+            self.root.after(0, lambda: self.progress_status.config(text="Analysis complete!"))
             self.root.after(0, lambda: self.progress_info.config(text="Analysis Complete"))
 
             # Stop running figure animation
@@ -14649,8 +15259,8 @@ class SpectralPredictApp:
             import traceback
             error_msg = traceback.format_exc()
             error_str = str(e)
-            self._log_progress(f"\n✗ Error: {e}\n{error_msg}")
-            self.root.after(0, lambda: self.progress_status.config(text="✗ Analysis failed"))
+            self._log_progress(f"\n[X] Error: {e}\n{error_msg}")
+            self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
 
             # Stop running figure animation on error
             if hasattr(self, 'running_figure'):
@@ -14775,6 +15385,26 @@ class SpectralPredictApp:
         # Cancel all pending scroll region updates for non-visible tabs
         # This prevents unnecessary recalculations when switching tabs
         current_tab = self.notebook.index(self.notebook.select())
+
+        # Sync sidebar selection with notebook tab
+        tab_to_nav = {v: k for k, v in self.nav_to_tab.items()}
+        if current_tab in tab_to_nav and hasattr(self, 'sidebar'):
+            nav_id = tab_to_nav[current_tab]
+            if self.sidebar.current_item != nav_id:
+                # Update sidebar without triggering callback
+                if self.sidebar.current_item and self.sidebar.current_item in self.sidebar.items:
+                    prev = self.sidebar.items[self.sidebar.current_item]
+                    sidebar_bg = self.colors.get('sidebar', '#2D3748')
+                    prev['frame'].config(bg=sidebar_bg)
+                    prev['icon'].config(bg=sidebar_bg)
+                    prev['label'].config(bg=sidebar_bg)
+                if nav_id in self.sidebar.items:
+                    self.sidebar.current_item = nav_id
+                    item = self.sidebar.items[nav_id]
+                    accent = self.colors.get('accent', '#0078D4')
+                    item['frame'].config(bg=accent)
+                    item['icon'].config(bg=accent)
+                    item['label'].config(bg=accent)
 
         # Only keep timers for the current tab, cancel others
         tabs_to_cancel = []
@@ -14986,7 +15616,7 @@ class SpectralPredictApp:
         # This ensures Model Dev can verify it's using the same data configuration as Results tab
         if hasattr(self, 'last_training_config') and self.last_training_config is not None:
             model_config['training_config'] = self.last_training_config
-            print(f"✓ Attached training configuration to model transfer")
+            print(f"> Attached training configuration to model transfer")
             print(f"  Expected calibration samples: {self.last_training_config['n_samples_used']}")
 
             # CRITICAL: Also attach validation configuration
@@ -15010,7 +15640,7 @@ class SpectralPredictApp:
         rank = model_config.get('Rank', 'N/A')
         r2_or_acc = model_config.get('R2', model_config.get('Accuracy', 'N/A'))
         model_name = model_config.get('Model', 'N/A')
-        print(f"✓ Loading Rank {rank}: {model_name} (R²/Acc={r2_or_acc}, n_vars={model_config.get('n_vars', 'N/A')})")
+        print(f"> Loading Rank {rank}: {model_name} (R²/Acc={r2_or_acc}, n_vars={model_config.get('n_vars', 'N/A')})")
 
         # Populate the Model Development tab
         self._load_model_for_refinement(model_config)
@@ -15066,9 +15696,9 @@ class SpectralPredictApp:
 
             # Format comparison
             if r2_improvement > 0:
-                comparison = f"+{r2_improvement:.4f} ✓"
+                comparison = f"+{r2_improvement:.4f} >"
             elif r2_improvement < 0:
-                comparison = f"{r2_improvement:.4f} ✗"
+                comparison = f"{r2_improvement:.4f} [X]"
             else:
                 comparison = "Same"
 
@@ -15102,7 +15732,7 @@ class SpectralPredictApp:
         n_ensembles = len(self.ensemble_results)
         best_method = self.ensemble_results[0]['method']
         self.ensemble_status.config(
-            text=f"✓ {n_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})")
+            text=f"> {n_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})")
 
         # Enable buttons
         self.btn_save_best_ensemble.config(state='normal')
@@ -15457,7 +16087,7 @@ class SpectralPredictApp:
             self._log_progress(f"  Models: {', '.join(ensemble.model_names)}")
 
             save_ensemble(ensemble, filepath, metadata)
-            self._log_progress(f"✓ Ensemble saved successfully!")
+            self._log_progress(f"> Ensemble saved successfully!")
 
             messagebox.showinfo(
                 "Success",
@@ -15468,7 +16098,7 @@ class SpectralPredictApp:
             import traceback
             error_details = traceback.format_exc()
             messagebox.showerror("Save Error", f"Failed to save ensemble:\n{str(e)}\n\n{error_details}")
-            self._log_progress(f"\n❌ Error saving ensemble:\n{error_details}")
+            self._log_progress(f"\n[X] Error saving ensemble:\n{error_details}")
 
     def _export_results_table(self):
         """Export the current results table to a CSV file."""
@@ -15512,7 +16142,7 @@ class SpectralPredictApp:
                 self.results_df.to_csv(filepath, index=False)
 
             # Export successful - status updated
-            self.results_status.config(text=f"✓ Results exported to {Path(filepath).name}")
+            self.results_status.config(text=f"> Results exported to {Path(filepath).name}")
 
         except Exception as e:
             messagebox.showerror(
@@ -15728,7 +16358,7 @@ class SpectralPredictApp:
 
             # Update status
             n_rows = len(export_df)
-            self.data_viewer_status.config(text=f"✓ Exported {n_rows} samples to {Path(filepath).name}")
+            self.data_viewer_status.config(text=f"> Exported {n_rows} samples to {Path(filepath).name}")
 
         except Exception as e:
             messagebox.showerror(
@@ -15741,7 +16371,7 @@ class SpectralPredictApp:
     def _on_data_viewer_edit(self, event=None):
         """Called when user edits a cell in the data viewer."""
         self.data_viewer_modified.set(True)
-        self.modified_label.config(text="⚠ Unsaved changes")
+        self.modified_label.config(text="[!] Unsaved changes")
 
     def _save_data_viewer_changes(self):
         """Save changes from the data viewer back to X, y, and ref."""
@@ -15835,10 +16465,10 @@ class SpectralPredictApp:
 
             # Clear modified flag
             self.data_viewer_modified.set(False)
-            self.modified_label.config(text="✓ Saved")
+            self.modified_label.config(text="Saved")
 
             # Update status
-            self.data_viewer_status.config(text=f"✓ Saved {len(self.X)} samples")
+            self.data_viewer_status.config(text=f"> Saved {len(self.X)} samples")
 
         except Exception as e:
             import traceback
@@ -15918,7 +16548,7 @@ class SpectralPredictApp:
 
             # Refresh display
             self._populate_data_viewer()
-            self.data_viewer_status.config(text=f"✓ Added column '{col_name}'")
+            self.data_viewer_status.config(text=f"> Added column '{col_name}'")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to add column:\n{str(e)}")
@@ -15976,7 +16606,7 @@ class SpectralPredictApp:
 
             # Refresh display
             self._populate_data_viewer()
-            self.data_viewer_status.config(text=f"✓ Deleted column '{col_name}'")
+            self.data_viewer_status.config(text=f"> Deleted column '{col_name}'")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete column:\n{str(e)}")
@@ -16040,7 +16670,7 @@ class SpectralPredictApp:
                 self.ref = pd.DataFrame({col_name: [default_val] * len(self.X)}, index=self.X.index)
 
             self._populate_data_viewer()
-            self.data_viewer_status.config(text=f"✓ Added column '{col_name}'")
+            self.data_viewer_status.config(text=f"> Added column '{col_name}'")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to add column:\n{str(e)}")
@@ -16059,7 +16689,7 @@ class SpectralPredictApp:
                 self.ref = self.ref.drop(columns=[col_name])
 
             self._populate_data_viewer()
-            self.data_viewer_status.config(text=f"✓ Deleted column '{col_name}'")
+            self.data_viewer_status.config(text=f"> Deleted column '{col_name}'")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete column:\n{str(e)}")
@@ -16105,7 +16735,7 @@ class SpectralPredictApp:
 
             # Refresh display
             self._populate_data_viewer()
-            self.data_viewer_status.config(text=f"✓ Deleted {len(indices_to_delete)} sample(s)")
+            self.data_viewer_status.config(text=f"> Deleted {len(indices_to_delete)} sample(s)")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete rows:\n{str(e)}")
@@ -16133,7 +16763,7 @@ class SpectralPredictApp:
                     break
 
         self._populate_data_viewer()
-        self.data_viewer_status.config(text=f"✓ Excluded {len(sample_ids)} sample(s)")
+        self.data_viewer_status.config(text=f"> Excluded {len(sample_ids)} sample(s)")
 
     def _include_selected_rows(self):
         """Remove selected rows from exclusion list."""
@@ -16162,7 +16792,7 @@ class SpectralPredictApp:
             self.excluded_spectra.discard(idx)
 
         self._populate_data_viewer()
-        self.data_viewer_status.config(text=f"✓ Included {len(indices_to_remove)} sample(s)")
+        self.data_viewer_status.config(text=f"> Included {len(indices_to_remove)} sample(s)")
 
     # ========== END DATA VIEWER EDITING METHODS ==========
 
@@ -16226,10 +16856,10 @@ class SpectralPredictApp:
 
         if warnings:
             # Show detailed warning message
-            message = "⚠️ TRAINING CONFIGURATION MISMATCH DETECTED!\n\n"
+            message = "[!] TRAINING CONFIGURATION MISMATCH DETECTED!\n\n"
             message += "The following differences were found between the original training and current state:\n\n"
             for warning in warnings:
-                message += f"• {warning}\n"
+                message += f"- {warning}\n"
             message += "\nThis WILL cause R² scores to differ from the Results tab.\n\n"
             message += "Recommendations:\n"
             message += "1. Reset excluded samples and validation set to match original training\n"
@@ -16251,13 +16881,13 @@ class SpectralPredictApp:
 
             # Also print to console for debugging
             print(f"\n{'='*80}")
-            print("⚠️ TRAINING CONFIGURATION MISMATCH")
+            print("[!] TRAINING CONFIGURATION MISMATCH")
             print(f"{'='*80}")
             for warning in warnings:
-                print(f"  • {warning}")
+                print(f"  - {warning}")
             print(f"{'='*80}\n")
         else:
-            print("\n✓ Training configuration matches current state - R² should be consistent")
+            print("\n> Training configuration matches current state - R² should be consistent")
 
     def _load_default_parameters(self):
         """Load default parameters for fresh model development."""
@@ -16406,6 +17036,8 @@ class SpectralPredictApp:
             except ValueError:
                 print(f"WARNING: Invalid Ridge tol '{tol_str}', using default")
 
+            params['fit_intercept'] = self.refine_ridge_fit_intercept.get()
+
         # ========== Lasso ==========
         elif model_name == 'Lasso':
             alpha_str = self.refine_lasso_alpha.get().strip()
@@ -16423,6 +17055,8 @@ class SpectralPredictApp:
                 print(f"WARNING: Invalid Lasso tol '{tol_str}', using default")
 
             params['max_iter'] = self.refine_lasso_max_iter.get()
+
+            params['fit_intercept'] = self.refine_lasso_fit_intercept.get()
 
         # ========== ElasticNet ==========
         elif model_name == 'ElasticNet':
@@ -16447,6 +17081,8 @@ class SpectralPredictApp:
                 print(f"WARNING: Invalid ElasticNet tol '{tol_str}', using default")
 
             params['max_iter'] = self.refine_elasticnet_max_iter.get()
+
+            params['fit_intercept'] = self.refine_elasticnet_fit_intercept.get()
 
         # ========== RandomForest ==========
         elif model_name == 'RandomForest':
@@ -16589,6 +17225,13 @@ class SpectralPredictApp:
 
             params['activation'] = self.refine_neuralboosted_activation.get()
             params['early_stopping'] = self.refine_neuralboosted_early_stopping.get()
+            params['max_iter'] = self.refine_neuralboosted_max_iter.get()
+
+            tol_str = self.refine_neuralboosted_tol.get().strip()
+            try:
+                params['tol'] = float(tol_str)
+            except ValueError:
+                print(f"WARNING: Invalid NeuralBoosted tol '{tol_str}', using default")
 
         return params
 
@@ -16768,6 +17411,8 @@ class SpectralPredictApp:
                     self.refine_ridge_solver.set(str(params_dict['solver']))
                 if 'tol' in params_dict:
                     self.refine_ridge_tol.set(str(params_dict['tol']))
+                if 'fit_intercept' in params_dict:
+                    self.refine_ridge_fit_intercept.set(bool(params_dict['fit_intercept']))
 
             # ========== Lasso ==========
             elif model_name == 'Lasso':
@@ -16779,6 +17424,8 @@ class SpectralPredictApp:
                     self.refine_lasso_tol.set(str(params_dict['tol']))
                 if 'max_iter' in params_dict:
                     self.refine_lasso_max_iter.set(int(params_dict['max_iter']))
+                if 'fit_intercept' in params_dict:
+                    self.refine_lasso_fit_intercept.set(bool(params_dict['fit_intercept']))
 
             # ========== ElasticNet ==========
             elif model_name == 'ElasticNet':
@@ -16792,6 +17439,8 @@ class SpectralPredictApp:
                     self.refine_elasticnet_tol.set(str(params_dict['tol']))
                 if 'max_iter' in params_dict:
                     self.refine_elasticnet_max_iter.set(int(params_dict['max_iter']))
+                if 'fit_intercept' in params_dict:
+                    self.refine_elasticnet_fit_intercept.set(bool(params_dict['fit_intercept']))
 
             # ========== RandomForest ==========
             elif model_name == 'RandomForest':
@@ -16944,8 +17593,12 @@ class SpectralPredictApp:
                     self.refine_neuralboosted_activation.set(str(params_dict['activation']))
                 if 'early_stopping' in params_dict:
                     self.refine_neuralboosted_early_stopping.set(bool(params_dict['early_stopping']))
+                if 'max_iter' in params_dict:
+                    self.refine_neuralboosted_max_iter.set(int(params_dict['max_iter']))
+                if 'tol' in params_dict:
+                    self.refine_neuralboosted_tol.set(str(params_dict['tol']))
 
-            print(f"✓ Successfully populated {model_name} hyperparameters in UI")
+            print(f"> Successfully populated {model_name} hyperparameters in UI")
 
         except Exception as e:
             print(f"WARNING: Error populating hyperparameters for {model_name}: {e}")
@@ -16966,19 +17619,19 @@ class SpectralPredictApp:
         if 'validation_indices' in config and config.get('validation_set_enabled'):
             self.validation_indices = set(config.get('validation_indices', []))
             self.validation_enabled.set(True)
-            print(f"✓ Restored {len(self.validation_indices)} validation indices from model config")
+            print(f"> Restored {len(self.validation_indices)} validation indices from model config")
         else:
             # Clear validation if not used in original model
             self.validation_indices = set()
             self.validation_enabled.set(False)
-            print("✓ No validation indices to restore (model was trained on all data)")
+            print("> No validation indices to restore (model was trained on all data)")
 
         # CRITICAL: Also restore excluded spectra if available
         # This ensures excluded count matches for validation check
         if 'excluded_spectra' in config:
             self.excluded_spectra = set(config.get('excluded_spectra', []))
             if len(self.excluded_spectra) > 0:
-                print(f"✓ Restored {len(self.excluded_spectra)} excluded samples from model config")
+                print(f"> Restored {len(self.excluded_spectra)} excluded samples from model config")
         else:
             # Don't clear excluded_spectra - user may have manually excluded samples in Data Upload tab
             # Only update if explicitly provided in config
@@ -16989,7 +17642,7 @@ class SpectralPredictApp:
             self._validate_training_configuration(config['training_config'])
         else:
             # Legacy model without training configuration
-            print("\n⚠️  Note: This model was saved before training configuration tracking was added.")
+            print("\n[!]  Note: This model was saved before training configuration tracking was added.")
             print("    Cannot verify if current dataset state matches original training state.")
 
         # Build configuration text
@@ -17085,9 +17738,9 @@ Performance (Classification):
                 # Fallback to top_vars for backward compatibility with old results
                 if model_wavelengths is None and 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
                     model_name = config.get('Model', 'Unknown')
-                    print(f"⚠️  CRITICAL WARNING: Model '{model_name}' missing complete wavelength list ('all_vars')")
-                    print(f"⚠️  Falling back to 'top_vars' - this may cause R² mismatch if model used >30 wavelengths!")
-                    print(f"⚠️  Expected n_vars: {config.get('n_vars', 'unknown')}")
+                    print(f"[!]  CRITICAL WARNING: Model '{model_name}' missing complete wavelength list ('all_vars')")
+                    print(f"[!]  Falling back to 'top_vars' - this may cause R² mismatch if model used >30 wavelengths!")
+                    print(f"[!]  Expected n_vars: {config.get('n_vars', 'unknown')}")
                     try:
                         # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
                         top_vars_str = str(config['top_vars']).strip()
@@ -17096,8 +17749,8 @@ Performance (Classification):
                         model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
                         expected_n_vars = config.get('n_vars', len(model_wavelengths))
                         if len(model_wavelengths) < expected_n_vars:
-                            print(f"⚠️  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
-                            print(f"⚠️  This WILL cause different R² when running refined model!")
+                            print(f"[!]  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
+                            print(f"[!]  This WILL cause different R² when running refined model!")
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
                     except Exception as e:
                         print(f"WARNING: Could not parse top_vars: {e}")
@@ -17179,12 +17832,12 @@ Performance (Classification):
             # Validate against detected task type (not hardcoded 'regression')
             if is_valid_model(model_name, detected_task_type):
                 self.refine_model_type.set(model_name)
-                print(f"✓ Model type '{model_name}' validated and loaded for {detected_task_type}")
+                print(f"> Model type '{model_name}' validated and loaded for {detected_task_type}")
             else:
                 valid_models = get_supported_models(detected_task_type) if get_supported_models is not None else []
                 default_model = 'PLS-DA' if detected_task_type == 'classification' else 'PLS'
-                print(f"⚠️  WARNING: Unknown model type '{model_name}' for {detected_task_type} - defaulting to {default_model}")
-                print(f"⚠️  Valid models: {', '.join(valid_models)}")
+                print(f"[!]  WARNING: Unknown model type '{model_name}' for {detected_task_type} - defaulting to {default_model}")
+                print(f"[!]  Valid models: {', '.join(valid_models)}")
                 self.refine_model_type.set(default_model)
         else:
             # Fallback if registry import failed
@@ -17197,11 +17850,11 @@ Performance (Classification):
                 if model_name == 'PLS' and detected_task_type == 'classification':
                     model_name = 'PLS-DA'
                 self.refine_model_type.set(model_name)
-                print(f"✓ Model type '{model_name}' validated and loaded for {detected_task_type}")
+                print(f"> Model type '{model_name}' validated and loaded for {detected_task_type}")
             else:
                 default_model = 'PLS-DA' if detected_task_type == 'classification' else 'PLS'
-                print(f"⚠️  WARNING: Unknown model type '{model_name}' for {detected_task_type} - defaulting to {default_model}")
-                print(f"⚠️  Valid models: {', '.join(valid_models)}")
+                print(f"[!]  WARNING: Unknown model type '{model_name}' for {detected_task_type} - defaulting to {default_model}")
+                print(f"[!]  Valid models: {', '.join(valid_models)}")
                 self.refine_model_type.set(default_model)
 
         # Set preprocessing method
@@ -17863,9 +18516,9 @@ F1 Score:  {f1:.4f}
         outlier_threshold = 3.0
         outlier_count = np.sum(np.abs(std_residuals) > outlier_threshold)
         if outlier_count > 0:
-            issues.append(f"⚠ {outlier_count} potential outlier(s) detected (|residual| > 3σ)")
+            issues.append(f"[!] {outlier_count} potential outlier(s) detected (|residual| > 3σ)")
         else:
-            assessment_lines.append("✓ No significant outliers detected")
+            assessment_lines.append("> No significant outliers detected")
 
         # Check for normality using Q-Q plot deviation
         # Simple check: compare quantiles at extremes
@@ -17880,9 +18533,9 @@ F1 Score:  {f1:.4f}
 
         # If deviation is more than 50% of std, flag it
         if lower_dev > 0.5 * residual_std or upper_dev > 0.5 * residual_std:
-            issues.append("⚠ Q-Q plot shows deviation from normality at extremes")
+            issues.append("[!] Q-Q plot shows deviation from normality at extremes")
         else:
-            assessment_lines.append("✓ Residuals appear normally distributed")
+            assessment_lines.append("> Residuals appear normally distributed")
 
         # Check for heteroscedasticity (changing variance)
         # Split residuals into lower and upper half by fitted values
@@ -17896,9 +18549,9 @@ F1 Score:  {f1:.4f}
             # If variance ratio is > 2, flag it
             var_ratio = max(lower_half_var, upper_half_var) / (min(lower_half_var, upper_half_var) + 1e-10)
             if var_ratio > 2.0:
-                issues.append("⚠ Possible heteroscedasticity (non-constant variance)")
+                issues.append("[!] Possible heteroscedasticity (non-constant variance)")
             else:
-                assessment_lines.append("✓ Residual variance appears constant")
+                assessment_lines.append("> Residual variance appears constant")
 
         # Add issues to assessment
         if issues:
@@ -17945,25 +18598,25 @@ F1 Score:  {f1:.4f}
 
         # Check for concerning patterns
         if pct_high > 10:
-            issues.append(f"⚠ {n_high} high-leverage points ({pct_high:.1f}%) - Consider investigating data quality")
+            issues.append(f"[!] {n_high} high-leverage points ({pct_high:.1f}%) - Consider investigating data quality")
         elif pct_high > 5:
-            issues.append(f"⚠ {n_high} high-leverage points ({pct_high:.1f}%) - Some influential samples detected")
+            issues.append(f"[!] {n_high} high-leverage points ({pct_high:.1f}%) - Some influential samples detected")
         elif n_high > 0:
-            assessment_lines.append(f"✓ {n_high} high-leverage point(s) ({pct_high:.1f}%) - Within acceptable range")
+            assessment_lines.append(f"> {n_high} high-leverage point(s) ({pct_high:.1f}%) - Within acceptable range")
         else:
-            assessment_lines.append("✓ No high-leverage points detected")
+            assessment_lines.append("> No high-leverage points detected")
 
         # Check moderate leverage
         if pct_moderate > 20:
-            issues.append(f"⚠ {n_moderate} moderate-leverage points ({pct_moderate:.1f}%) - Higher than expected")
+            issues.append(f"[!] {n_moderate} moderate-leverage points ({pct_moderate:.1f}%) - Higher than expected")
         elif n_moderate > 0:
-            assessment_lines.append(f"✓ {n_moderate} moderate-leverage point(s) ({pct_moderate:.1f}%) - Normal distribution")
+            assessment_lines.append(f"> {n_moderate} moderate-leverage point(s) ({pct_moderate:.1f}%) - Normal distribution")
 
         # Overall assessment
         if pct_normal >= 80:
-            assessment_lines.append(f"✓ {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Good data distribution")
+            assessment_lines.append(f"> {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Good data distribution")
         elif pct_normal >= 70:
-            assessment_lines.append(f"✓ {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Acceptable")
+            assessment_lines.append(f"> {n_normal} samples ({pct_normal:.1f}%) have normal leverage - Acceptable")
 
         # Add issues to assessment
         if issues:
@@ -18249,7 +18902,7 @@ F1 Score:  {f1:.4f}
 
                         # Check for exact match (INCLUDING ORDER)
                         if original_wl == reconstructed_wl:
-                            print(f"✓ Perfect match - wavelengths AND ORDER are identical")
+                            print(f"> Perfect match - wavelengths AND ORDER are identical")
                         else:
                             # Find differences
                             missing = sorted(set(original_wl) - set(reconstructed_wl))
@@ -18258,11 +18911,11 @@ F1 Score:  {f1:.4f}
                             # Check if just ordering differs (same set, different order)
                             same_set = (set(original_wl) == set(reconstructed_wl))
 
-                            print(f"\n⚠️  WAVELENGTH MISMATCH DETECTED!")
+                            print(f"\n[!]  WAVELENGTH MISMATCH DETECTED!")
                             print(f"{'='*80}")
 
                             if same_set:
-                                print(f"⚠️  ORDERING DIFFERENCE (same wavelengths, different order)!")
+                                print(f"[!]  ORDERING DIFFERENCE (same wavelengths, different order)!")
                                 print(f"  This will cause R² differences even though wavelengths match.")
                                 print(f"\n  First 10 original order:      {original_wl[:10]}")
                                 print(f"  First 10 reconstructed order: {reconstructed_wl[:10]}")
@@ -18287,7 +18940,7 @@ F1 Score:  {f1:.4f}
                                     if len(extra) > 10:
                                         print(f"  ... and {len(extra)-10} more")
 
-                            print(f"\n⚠️  This explains the R² difference between Results and Model Dev!")
+                            print(f"\n[!]  This explains the R² difference between Results and Model Dev!")
                             print(f"{'='*80}")
 
                         print(f"{'='*80}\n")
@@ -18320,11 +18973,11 @@ F1 Score:  {f1:.4f}
 
                 if original_folds is not None:
                     if n_folds != original_folds:
-                        print(f"\n⚠️  WARNING: CV FOLDS MISMATCH!")
+                        print(f"\n[!]  WARNING: CV FOLDS MISMATCH!")
                         print(f"  Original model trained with: {original_folds}-fold CV")
                         print(f"  Current refinement using: {n_folds}-fold CV")
-                        print(f"  → This may cause R² differences from Results tab!")
-                        print(f"  → Consider using {original_folds} folds to match original training\n")
+                        print(f"  -> This may cause R² differences from Results tab!")
+                        print(f"  -> Consider using {original_folds} folds to match original training\n")
 
             # Determine data source (respect current wavelength filter)
             if self.X is not None:
@@ -18385,7 +19038,7 @@ F1 Score:  {f1:.4f}
             print(f"  Excluded samples: {len(excluded_indices) if excluded_indices else 0}")
             print(f"  Validation enabled: {self.validation_enabled.get()}")
             print(f"  Validation samples: {len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0}")
-            print(f"  → Calibration samples for CV: {len(X_base_df)}")
+            print(f"  -> Calibration samples for CV: {len(X_base_df)}")
 
             # Check if we have saved training configuration from the original search
             if hasattr(self, 'loaded_model_config') and self.loaded_model_config and 'training_config' in self.loaded_model_config:
@@ -18401,13 +19054,13 @@ F1 Score:  {f1:.4f}
                     original_samples = training_config['n_samples_used']
                     current_samples = len(X_base_df)
                     if original_samples != current_samples:
-                        print(f"\n⚠️  WARNING: SAMPLE COUNT MISMATCH!")
+                        print(f"\n[!]  WARNING: SAMPLE COUNT MISMATCH!")
                         print(f"  Original training used: {original_samples} samples")
                         print(f"  Current refinement uses: {current_samples} samples")
                         print(f"  Difference: {current_samples - original_samples:+d} samples")
-                        print(f"  → This WILL cause R² values to differ from Results tab!")
+                        print(f"  -> This WILL cause R² values to differ from Results tab!")
             else:
-                print(f"\n⚠️  Note: Training configuration not saved in results")
+                print(f"\n[!]  Note: Training configuration not saved in results")
                 print(f"  (Model was saved before configuration tracking was added)")
                 print(f"  Cannot verify if dataset state matches original training")
 
@@ -18497,7 +19150,7 @@ F1 Score:  {f1:.4f}
                 default_deriv = deriv_map.get(preprocess, 0)
                 if default_deriv is None:
                     # This is deriv_snv without config - we can't determine the derivative order
-                    print(f"\n⚠️  CRITICAL WARNING: Cannot determine derivative order for 'deriv_snv'!")
+                    print(f"\n[!]  CRITICAL WARNING: Cannot determine derivative order for 'deriv_snv'!")
                     print(f"  'deriv_snv' can be either 1st or 2nd derivative")
                     print(f"  Without config data, assuming 1st derivative (may be wrong!)")
                     print(f"  R² WILL BE INCORRECT if this assumption is wrong!")
@@ -18540,7 +19193,7 @@ F1 Score:  {f1:.4f}
             if use_full_spectrum_preprocessing:
                 print(f"DEBUG: Derivative + subset detected. Using PATH A (preprocess full spectrum, then subset).")
                 print(f"DEBUG: This preserves derivative context for non-contiguous wavelengths.")
-                print(f"DEBUG: Preprocessing {len(X_base_df.columns)} wavelengths → subsetting to {len(selected_wl)} wavelengths")
+                print(f"DEBUG: Preprocessing {len(X_base_df.columns)} wavelengths -> subsetting to {len(selected_wl)} wavelengths")
             else:
                 if is_derivative:
                     print(f"DEBUG: Full-spectrum derivative detected. Using PATH B (preprocess inside CV).")
@@ -18660,23 +19313,23 @@ F1 Score:  {f1:.4f}
                                     )
 
                             if param_mismatches:
-                                print(f"\n⚠️  WARNING: Parameter mismatches detected!")
+                                print(f"\n[!]  WARNING: Parameter mismatches detected!")
                                 for mismatch in param_mismatches:
                                     print(mismatch)
-                                print(f"⚠️  This may cause R² differences from Results tab!")
+                                print(f"[!]  This may cause R² differences from Results tab!")
 
                             if missing_critical:
-                                print(f"\n⚠️  CRITICAL WARNING: Missing critical parameters for {model_name}!")
-                                print(f"⚠️  These parameters significantly affect model behavior and R² values:")
+                                print(f"\n[!]  CRITICAL WARNING: Missing critical parameters for {model_name}!")
+                                print(f"[!]  These parameters significantly affect model behavior and R² values:")
                                 for missing in missing_critical:
                                     print(missing)
-                                print(f"⚠️  R² WILL differ from Results tab due to missing critical parameters!")
+                                print(f"[!]  R² WILL differ from Results tab due to missing critical parameters!")
 
                             if params_not_loaded:
-                                print(f"\n⚠️  WARNING: Some parameters not in saved results!")
+                                print(f"\n[!]  WARNING: Some parameters not in saved results!")
                                 for missing in params_not_loaded:
                                     print(missing)
-                                print(f"⚠️  This may cause R² differences from Results tab!")
+                                print(f"[!]  This may cause R² differences from Results tab!")
 
                             print(f"{'='*80}\n")
                         except Exception as e:
@@ -18685,7 +19338,7 @@ F1 Score:  {f1:.4f}
                     # Add warning for NeuralBoosted
                     elif model_name == "NeuralBoosted":
                         if params_from_search.get('early_stopping', False):
-                            print(f"\n⚠️  NOTE: NeuralBoosted with early_stopping=True")
+                            print(f"\n[!]  NOTE: NeuralBoosted with early_stopping=True")
                             print(f"   R² may vary slightly (±0.01-0.02) from Results tab due to")
                             print(f"   validation split differences between CV and full dataset.\n")
 
@@ -18718,7 +19371,7 @@ F1 Score:  {f1:.4f}
                     for key in sorted(final_params.keys()):
                         # Highlight parameters that came from UI
                         if key in ui_params:
-                            print(f"  {key}: {final_params[key]} ← from UI")
+                            print(f"  {key}: {final_params[key]} <- from UI")
                         else:
                             print(f"  {key}: {final_params[key]}")
                     print(f"{'='*80}\n")
@@ -18997,22 +19650,22 @@ F1 Score:  {f1:.4f}
                         abs_diff = abs(results['r2_mean'] - float(loaded_r2))
                         if abs_diff > 0.001:
                             reproducibility_note = f"""
-⚠️  REPRODUCIBILITY NOTE ({model_name}):
+[!]  REPRODUCIBILITY NOTE ({model_name}):
   Small differences are expected if parameter capture was incomplete.
   Expected variance: ±0.001 to ±0.005
   Your difference: {abs_diff:.4f}
-  {'✓ Within expected range' if abs_diff <= 0.01 else '⚠️  Larger than expected - check parameter capture'}
+  {'> Within expected range' if abs_diff <= 0.01 else '[!]  Larger than expected - check parameter capture'}
 """
                 elif model_name == "NeuralBoosted":
                     if r2_diff != "N/A" and loaded_r2 != "N/A":
                         abs_diff = abs(results['r2_mean'] - float(loaded_r2))
                         reproducibility_note = f"""
-ℹ️  REPRODUCIBILITY NOTE (NeuralBoosted):
+[i]  REPRODUCIBILITY NOTE (NeuralBoosted):
   With early_stopping=True, some variance is expected due to
   validation split differences between CV folds and full dataset.
   Expected variance: ±0.01 to ±0.02
   Your difference: {abs_diff:.4f}
-  {'✓ Within expected range' if abs_diff <= 0.03 else '⚠️  Larger than expected - investigate'}
+  {'> Within expected range' if abs_diff <= 0.03 else '[!]  Larger than expected - investigate'}
 """
 
                 results_text = f"""Refined Model Results:
@@ -19174,13 +19827,13 @@ Configuration:
         self.refine_run_button_selection.config(state='normal')
 
         if is_error:
-            self.refine_status.config(text="✗ Error running refined model")
+            self.refine_status.config(text="[X] Error running refined model")
             self.refine_save_button.config(state='disabled')
             self.refine_save_button_results.config(state='disabled')
             self.export_code_button.config(state='disabled')
             messagebox.showerror("Error", "Failed to run refined model. See results area for details.")
         else:
-            self.refine_status.config(text="✓ Refined model complete")
+            self.refine_status.config(text="Refined model complete")
             # Enable Save Model and Export Code buttons after successful run
             self.refine_save_button.config(state='normal')
             self.refine_save_button_results.config(state='normal')
@@ -19320,7 +19973,7 @@ Configuration:
             )
 
             # Model saved successfully - update status
-            self.refine_status.config(text=f"✓ Model saved to {Path(filepath).name}")
+            self.refine_status.config(text=f"> Model saved to {Path(filepath).name}")
 
         except Exception as e:
             import traceback
@@ -19688,13 +20341,13 @@ Configuration:
         Parse flexible range specifications for hyperparameters.
 
         Supports:
-        - Single values: "150" → [150]
-        - Lists: "50, 100, 200" → [50, 100, 200]
-        - Ranges: "50-200 step 50" → [50, 100, 150, 200]
-        - Mixed: "10, 50-100 step 25, 200" → [10, 50, 75, 100, 200]
-        - None values: "None, 10, 20" → [None, 10, 20]
-        - Float values: "0.01, 0.1, 1.0" → [0.01, 0.1, 1.0]
-        - String values: "relu, tanh, sigmoid" → ['relu', 'tanh', 'sigmoid']
+        - Single values: "150" -> [150]
+        - Lists: "50, 100, 200" -> [50, 100, 200]
+        - Ranges: "50-200 step 50" -> [50, 100, 150, 200]
+        - Mixed: "10, 50-100 step 25, 200" -> [10, 50, 75, 100, 200]
+        - None values: "None, 10, 20" -> [None, 10, 20]
+        - Float values: "0.01, 0.1, 1.0" -> [0.01, 0.1, 1.0]
+        - String values: "relu, tanh, sigmoid" -> ['relu', 'tanh', 'sigmoid']
 
         Args:
             spec_string: String specification to parse
@@ -20713,7 +21366,7 @@ Configuration:
                 n_wavelengths = len(self.prediction_data.columns)
 
                 self.pred_data_status.config(
-                    text=f"✓ Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths"
+                    text=f"> Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths"
                 )
                 # Validation set loaded - status updated
                 return
@@ -20780,7 +21433,7 @@ Configuration:
             n_wavelengths = len(self.prediction_data.columns)
 
             self.pred_data_status.config(
-                text=f"✓ Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
+                text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
             )
             # Data loaded - status updated
 
@@ -20938,11 +21591,11 @@ Configuration:
 
             # Update status
             if successful_models == len(self.loaded_models):
-                self.pred_status.config(text=f"✓ Complete! {successful_models} models applied successfully.")
+                self.pred_status.config(text=f"> Complete! {successful_models} models applied successfully.")
             else:
                 failed = len(self.loaded_models) - successful_models
                 self.pred_status.config(
-                    text=f"⚠ Complete with warnings: {successful_models} succeeded, {failed} failed."
+                    text=f"[!] Complete with warnings: {successful_models} succeeded, {failed} failed."
                 )
             # Predictions complete - status updated
 
@@ -21397,7 +22050,7 @@ Configuration:
                     # Add status if available
                     if ad_data and 'distance_status' in ad_data:
                         status = ad_data['distance_status'][i]
-                        status_display = {'good': '✓ Good', 'caution': '⚠ Caution', 'extrapolation': '⚠️ Extrap'}
+                        status_display = {'good': '> Good', 'caution': '[!] Caution', 'extrapolation': '[!] Extrap'}
                         row_values.append(status_display.get(status, status))
                     else:
                         row_values.append("N/A")
@@ -21481,13 +22134,13 @@ Configuration:
                         n_vars = metadata.get('n_vars', 'Unknown')
                         wavelengths = metadata.get('wavelengths', None)
 
-                        stats_text += f"  • Variables: {n_vars}\n"
+                        stats_text += f"  - Variables: {n_vars}\n"
 
                         # Format wavelengths if available and not too many
                         if wavelengths is not None:
                             wl_spec = self._format_wavelengths_as_spec(wavelengths)
                             if wl_spec and len(wl_spec) < 500:  # Only show if reasonable length
-                                stats_text += f"  • Wavelengths: {wl_spec}\n"
+                                stats_text += f"  - Wavelengths: {wl_spec}\n"
 
                     # If validation set, calculate performance metrics
                     if is_validation:
@@ -21501,7 +22154,7 @@ Configuration:
                                 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
                                 accuracy = accuracy_score(y_true, y_pred)
-                                stats_text += f"  ✓ Accuracy:     {accuracy:.4f}\n"
+                                stats_text += f"  > Accuracy:     {accuracy:.4f}\n"
 
                                 # For multi-class, use weighted average
                                 unique_classes = np.unique(np.concatenate([y_true, y_pred]))
@@ -21509,24 +22162,24 @@ Configuration:
                                     precision = precision_score(y_true, y_pred, average='weighted', zero_division=0)
                                     recall = recall_score(y_true, y_pred, average='weighted', zero_division=0)
                                     f1 = f1_score(y_true, y_pred, average='weighted', zero_division=0)
-                                    stats_text += f"  ✓ Precision:    {precision:.4f} (weighted)\n"
-                                    stats_text += f"  ✓ Recall:       {recall:.4f} (weighted)\n"
-                                    stats_text += f"  ✓ F1 Score:     {f1:.4f} (weighted)\n"
+                                    stats_text += f"  > Precision:    {precision:.4f} (weighted)\n"
+                                    stats_text += f"  > Recall:       {recall:.4f} (weighted)\n"
+                                    stats_text += f"  > F1 Score:     {f1:.4f} (weighted)\n"
                                 else:
                                     # Binary classification
                                     precision = precision_score(y_true, y_pred, zero_division=0)
                                     recall = recall_score(y_true, y_pred, zero_division=0)
                                     f1 = f1_score(y_true, y_pred, zero_division=0)
-                                    stats_text += f"  ✓ Precision:    {precision:.4f}\n"
-                                    stats_text += f"  ✓ Recall:       {recall:.4f}\n"
-                                    stats_text += f"  ✓ F1 Score:     {f1:.4f}\n"
+                                    stats_text += f"  > Precision:    {precision:.4f}\n"
+                                    stats_text += f"  > Recall:       {recall:.4f}\n"
+                                    stats_text += f"  > F1 Score:     {f1:.4f}\n"
 
-                                stats_text += f"  • Samples:      {len(y_true)}\n"
-                                stats_text += f"  • Classes:      {len(unique_classes)}\n"
+                                stats_text += f"  - Samples:      {len(y_true)}\n"
+                                stats_text += f"  - Classes:      {len(unique_classes)}\n"
 
                                 # Show class distribution
                                 unique_pred, counts_pred = np.unique(y_pred, return_counts=True)
-                                stats_text += f"  • Pred Distribution:\n"
+                                stats_text += f"  - Pred Distribution:\n"
                                 for cls, cnt in zip(unique_pred, counts_pred):
                                     stats_text += f"      {cls}: {cnt} ({cnt/len(y_pred)*100:.1f}%)\n"
 
@@ -21539,28 +22192,28 @@ Configuration:
                                 rmse = np.sqrt(mean_squared_error(y_true, y_pred))
                                 mae = mean_absolute_error(y_true, y_pred)
 
-                                stats_text += f"  ✓ R² Score:     {r2:.4f}\n"
-                                stats_text += f"  ✓ RMSE:         {rmse:.4f}\n"
-                                stats_text += f"  ✓ MAE:          {mae:.4f}\n"
-                                stats_text += f"  • Samples:      {len(y_true)}\n"
-                                stats_text += f"  • Pred Mean:    {y_pred.mean():.4f}\n"
-                                stats_text += f"  • Actual Mean:  {y_true.mean():.4f}\n"
-                                stats_text += f"  • Pred Range:   [{y_pred.min():.4f}, {y_pred.max():.4f}]\n"
-                                stats_text += f"  • Actual Range: [{y_true.min():.4f}, {y_true.max():.4f}]\n"
+                                stats_text += f"  > R² Score:     {r2:.4f}\n"
+                                stats_text += f"  > RMSE:         {rmse:.4f}\n"
+                                stats_text += f"  > MAE:          {mae:.4f}\n"
+                                stats_text += f"  - Samples:      {len(y_true)}\n"
+                                stats_text += f"  - Pred Mean:    {y_pred.mean():.4f}\n"
+                                stats_text += f"  - Actual Mean:  {y_true.mean():.4f}\n"
+                                stats_text += f"  - Pred Range:   [{y_pred.min():.4f}, {y_pred.max():.4f}]\n"
+                                stats_text += f"  - Actual Range: [{y_true.min():.4f}, {y_true.max():.4f}]\n"
 
                         except Exception as e:
-                            stats_text += f"  ⚠ Could not calculate validation metrics: {e}\n"
+                            stats_text += f"  [!] Could not calculate validation metrics: {e}\n"
                             if is_classification:
-                                stats_text += f"  • Count:  {len(values)}\n"
+                                stats_text += f"  - Count:  {len(values)}\n"
                                 unique_vals, counts = np.unique(values, return_counts=True)
-                                stats_text += f"  • Classes: {len(unique_vals)}\n"
-                                stats_text += f"  • Distribution:\n"
+                                stats_text += f"  - Classes: {len(unique_vals)}\n"
+                                stats_text += f"  - Distribution:\n"
                                 for val, cnt in zip(unique_vals, counts):
                                     stats_text += f"      {val}: {cnt} ({cnt/len(values)*100:.1f}%)\n"
                             else:
-                                stats_text += f"  • Count:  {len(values)}\n"
-                                stats_text += f"  • Mean:   {values.mean():.4f}\n"
-                                stats_text += f"  • Std:    {values.std():.4f}\n"
+                                stats_text += f"  - Count:  {len(values)}\n"
+                                stats_text += f"  - Mean:   {values.mean():.4f}\n"
+                                stats_text += f"  - Std:    {values.std():.4f}\n"
                     else:
                         # Regular prediction statistics (no validation)
                         if is_classification:
@@ -21918,7 +22571,7 @@ Configuration:
                 for model_name, model_data in quality_info['included'].items():
                     r2 = model_data.get('r2', 0)
                     weight = model_data.get('weight', 0) * 100  # Convert to percentage
-                    info_text += f"  • {model_name}\n"
+                    info_text += f"  - {model_name}\n"
                     info_text += f"      R² = {r2:.4f}, Weight = {weight:.1f}%\n"
                 info_text += "\n"
 
@@ -21927,7 +22580,7 @@ Configuration:
                 for model_name, model_data in quality_info['excluded'].items():
                     r2 = model_data.get('r2', 0)
                     reason = model_data.get('reason', 'Unknown')
-                    info_text += f"  • {model_name}\n"
+                    info_text += f"  - {model_name}\n"
                     info_text += f"      R² = {r2:.4f}, Reason: {reason}\n"
                 info_text += "\n"
 
@@ -21957,7 +22610,7 @@ Configuration:
             if 'models' in regional_info and regional_info['models']:
                 info_text += f"Models Used ({len(regional_info['models'])} total):\n"
                 for model_name in regional_info['models']:
-                    info_text += f"  • {model_name}\n"
+                    info_text += f"  - {model_name}\n"
                 info_text += "\n"
 
             if 'regional_rmse' in regional_info:
@@ -22331,8 +22984,8 @@ Configuration:
     #             f"Loaded {len(profiles)} instruments from:\n{filepath}\n\n"
     #             f"Note: Registry contains metadata only.\n\n"
     #             f"To use instruments for Calibration Transfer:\n"
-    #             f"• Re-characterize each instrument with its spectral data file\n"
-    #             f"• This loads the actual spectra needed for transfer models")
+    #             f"- Re-characterize each instrument with its spectral data file\n"
+    #             f"- This loads the actual spectra needed for transfer models")
     #     except Exception as e:
     #         messagebox.showerror("Error",
     #             f"Failed to load registry:\n{str(e)}")
@@ -23006,7 +23659,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: Direct Standardization (DS)\n"
-                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Master: {master_id} -> Slave: {slave_id}\n"
                             f"Ridge Lambda: {lam}\n"
                             f"Matrix Shape: {A.shape}")
 
@@ -23043,7 +23696,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
-                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Master: {master_id} -> Slave: {slave_id}\n"
                             f"Window Size: {window}\n"
                             f"Coefficient Matrix Shape: {B.shape}")
 
@@ -23085,7 +23738,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
-                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Master: {master_id} -> Slave: {slave_id}\n"
                             f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
                             f"Mean R²: {tsr_params['mean_r_squared']:.4f}\n"
                             f"Slope Range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
@@ -23110,8 +23763,8 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
-                            f"Master: {master_id} → Slave: {slave_id}\n"
-                            f"NO TRANSFER SAMPLES NEEDED ✓\n"
+                            f"Master: {master_id} -> Slave: {slave_id}\n"
+                            f"NO TRANSFER SAMPLES NEEDED >\n"
                             f"Components: {ctai_params['n_components']}\n"
                             f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
                             f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
@@ -23167,7 +23820,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
-                            f"Master: {master_id} → Slave: {slave_id}\n"
+                            f"Master: {master_id} -> Slave: {slave_id}\n"
                             f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
                             f"PLS Components: {jypls_params['n_components']}\n"
                             f"CV RMSE: {jypls_params['cv_rmse']:.6f}\n"
@@ -23219,9 +23872,9 @@ Configuration:
                 # Build info text
                 info_lines = [
                     f"Transfer Method: NS-PFCE (Non-supervised Parameter-Free)",
-                    f"Master: {master_id} → Slave: {slave_id}",
+                    f"Master: {master_id} -> Slave: {slave_id}",
                     f"Iterations: {nspfce_params['n_iterations']} / {max_iterations}",
-                    f"Converged: {'Yes ✓' if nspfce_params['converged'] else 'No (max iter reached)'}",
+                    f"Converged: {'Yes >' if nspfce_params['converged'] else 'No (max iter reached)'}",
                 ]
 
                 if use_wavelength_selection:
@@ -24805,7 +25458,7 @@ Configuration:
             info_text += f"Master: {X_m.shape[0]} samples, {len(wl_m)} wavelengths "
             info_text += f"({wl_m[0]:.1f} - {wl_m[-1]:.1f} nm)\n"
             info_text += f"Format: {self.master_data_format}\n"
-            info_text += "⚠ No Y values loaded (simple loading)\n\n"
+            info_text += "[!] No Y values loaded (simple loading)\n\n"
 
         if self.ct_slave_X is not None:
             info_text += f"Slave (with Y values):\n"
@@ -24820,7 +25473,7 @@ Configuration:
             info_text += f"Slave: {X_s.shape[0]} samples, {len(wl_s)} wavelengths "
             info_text += f"({wl_s[0]:.1f} - {wl_s[-1]:.1f} nm)\n"
             info_text += f"Format: {self.slave_data_format}\n"
-            info_text += "⚠ No Y values loaded (simple loading)\n\n"
+            info_text += "[!] No Y values loaded (simple loading)\n\n"
 
         # Check for sample matching (if both enhanced loading used)
         if self.ct_master_X is not None and self.ct_slave_X is not None:
@@ -24836,7 +25489,7 @@ Configuration:
                 info_text += f"  Only in slave: {len(slave_ids) - len(common_ids)}\n"
 
             if len(common_ids) == len(master_ids) == len(slave_ids):
-                info_text += f"  ✓ Perfect match!\n"
+                info_text += f"  > Perfect match!\n"
 
         # Calculate wavelength overlap (works for both loading types)
         wl_m = None
@@ -25184,25 +25837,25 @@ Configuration:
         if asd_files:
             self.ct_master_detected_type = "asd"
             self.ct_master_detection_status.config(
-                text=f"✓ Detected {len(asd_files)} ASD files",
+                text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
             self.ct_master_detected_type = "spc"
             self.ct_master_detection_status.config(
-                text=f"✓ Detected {len(spc_files)} SPC files",
+                text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
             self.ct_master_detected_type = "csv"
             self.ct_master_detection_status.config(
-                text=f"✓ Detected {len(csv_files)} CSV files",
+                text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
             self.ct_master_detected_type = None
             self.ct_master_detection_status.config(
-                text="⚠ No spectral files detected",
+                text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
 
@@ -25321,25 +25974,25 @@ Configuration:
         if asd_files:
             self.ct_master_detected_type = "asd"
             self.ct_master_detection_status.config(
-                text=f"✓ Detected {len(asd_files)} ASD files",
+                text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
             self.ct_master_detected_type = "spc"
             self.ct_master_detection_status.config(
-                text=f"✓ Detected {len(spc_files)} SPC files",
+                text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
             self.ct_master_detected_type = "csv"
             self.ct_master_detection_status.config(
-                text=f"✓ Detected {len(csv_files)} CSV files",
+                text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
             self.ct_master_detected_type = None
             self.ct_master_detection_status.config(
-                text="⚠ No spectral files detected",
+                text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
             return
@@ -25462,7 +26115,7 @@ Configuration:
                 if alignment_info['n_nan_dropped'] > 0:
                     msg += f"Dropped (NaN targets): {alignment_info['n_nan_dropped']}\n"
                 if alignment_info['used_fuzzy_matching']:
-                    msg += f"\n⚠ Used fuzzy filename matching"
+                    msg += f"\n[!] Used fuzzy filename matching"
                 messagebox.showinfo("Alignment Report", msg)
 
             # Store as DataFrames (keep index with sample IDs)
@@ -25503,25 +26156,25 @@ Configuration:
         if asd_files:
             self.ct_slave_detected_type = "asd"
             self.ct_slave_detection_status.config(
-                text=f"✓ Detected {len(asd_files)} ASD files",
+                text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
             self.ct_slave_detected_type = "spc"
             self.ct_slave_detection_status.config(
-                text=f"✓ Detected {len(spc_files)} SPC files",
+                text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
             self.ct_slave_detected_type = "csv"
             self.ct_slave_detection_status.config(
-                text=f"✓ Detected {len(csv_files)} CSV files",
+                text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
             self.ct_slave_detected_type = None
             self.ct_slave_detection_status.config(
-                text="⚠ No spectral files detected",
+                text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
 
@@ -25545,25 +26198,25 @@ Configuration:
         if asd_files:
             self.ct_slave_detected_type = "asd"
             self.ct_slave_detection_status.config(
-                text=f"✓ Detected {len(asd_files)} ASD files",
+                text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
             self.ct_slave_detected_type = "spc"
             self.ct_slave_detection_status.config(
-                text=f"✓ Detected {len(spc_files)} SPC files",
+                text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
             self.ct_slave_detected_type = "csv"
             self.ct_slave_detection_status.config(
-                text=f"✓ Detected {len(csv_files)} CSV files",
+                text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
             self.ct_slave_detected_type = None
             self.ct_slave_detection_status.config(
-                text="⚠ No spectral files detected",
+                text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
             return
@@ -25685,7 +26338,7 @@ Configuration:
                 if alignment_info['n_nan_dropped'] > 0:
                     msg += f"Dropped (NaN targets): {alignment_info['n_nan_dropped']}\n"
                 if alignment_info['used_fuzzy_matching']:
-                    msg += f"\n⚠ Used fuzzy filename matching"
+                    msg += f"\n[!] Used fuzzy filename matching"
                 messagebox.showinfo("Alignment Report", msg)
 
             # Store as DataFrames
@@ -25736,12 +26389,12 @@ Configuration:
             only_slave = slave_ids - master_ids
 
             msg = f"Partial sample overlap detected:\n\n"
-            msg += f"✓ Matched samples: {len(common_ids)}\n"
+            msg += f"> Matched samples: {len(common_ids)}\n"
             if only_master:
-                msg += f"⚠ Only in master: {len(only_master)}\n"
+                msg += f"[!] Only in master: {len(only_master)}\n"
                 msg += f"   Examples: {', '.join(list(only_master)[:3])}\n"
             if only_slave:
-                msg += f"⚠ Only in slave: {len(only_slave)}\n"
+                msg += f"[!] Only in slave: {len(only_slave)}\n"
                 msg += f"   Examples: {', '.join(list(only_slave)[:3])}\n"
             msg += f"\nOnly matched samples will be used for JYPLS-inv."
 
@@ -25749,7 +26402,7 @@ Configuration:
         else:
             # Perfect match!
             messagebox.showinfo("Perfect Match",
-                f"✓ All {len(common_ids)} samples matched between master and slave!")
+                f"> All {len(common_ids)} samples matched between master and slave!")
 
         return True
 
@@ -27001,7 +27654,7 @@ Configuration:
             self.comparison_primary_model = model_dict
             self._update_comparison_primary_display()
 
-            self.comparison_status.config(text=f"✓ Primary model loaded: {model_dict['filename']}",
+            self.comparison_status.config(text=f"> Primary model loaded: {model_dict['filename']}",
                                          foreground='green')
 
         except Exception as e:
@@ -27071,7 +27724,7 @@ Configuration:
             self._update_comparison_auxiliary_display()
 
             self.comparison_status.config(
-                text=f"✓ Loaded {len(filepaths)} auxiliary model(s). Total: {len(self.comparison_auxiliary_models)}",
+                text=f"> Loaded {len(filepaths)} auxiliary model(s). Total: {len(self.comparison_auxiliary_models)}",
                 foreground='green')
 
         except Exception as e:
@@ -27170,7 +27823,7 @@ Configuration:
 
                 self.comparison_data = self.validation_X.copy()
                 self.comparison_data_status.config(
-                    text=f"✓ Loaded {len(self.comparison_data)} samples from validation set",
+                    text=f"> Loaded {len(self.comparison_data)} samples from validation set",
                     foreground='green')
 
             elif source == 'directory':
@@ -27192,7 +27845,7 @@ Configuration:
                 # Convert to DataFrame format (wavelengths as columns, spectra as rows)
                 self.comparison_data = pd.DataFrame(X, columns=wavelengths)
                 self.comparison_data_status.config(
-                    text=f"✓ Loaded {len(self.comparison_data)} spectra from directory",
+                    text=f"> Loaded {len(self.comparison_data)} spectra from directory",
                     foreground='green')
 
             else:  # CSV or Excel
@@ -27212,7 +27865,7 @@ Configuration:
                     file_type = "CSV"
 
                 self.comparison_data_status.config(
-                    text=f"✓ Loaded {len(self.comparison_data)} samples from {file_type}",
+                    text=f"> Loaded {len(self.comparison_data)} samples from {file_type}",
                     foreground='green')
 
             self.comparison_status.config(text="Data loaded. Ready to run comparison.", foreground='green')
@@ -27321,7 +27974,7 @@ Configuration:
 
             # Verify folder still exists
             if not os.path.isdir(folder_path):
-                self._update_live_status("⚠ Error: Folder not found", 'red')
+                self._update_live_status("[!] Error: Folder not found", 'red')
                 self._stop_live_monitoring()
                 return
 
@@ -27339,14 +27992,14 @@ Configuration:
                 wavelengths, X = self._load_spectra_from_directory(folder_path)
 
                 if X is None or len(X) == 0:
-                    self._update_live_status(f"⚠ No valid files found (Last scan: {timestamp})", 'orange')
+                    self._update_live_status(f"[!] No valid files found (Last scan: {timestamp})", 'orange')
                 else:
                     # Convert to DataFrame
                     self.comparison_data = pd.DataFrame(X, columns=wavelengths)
 
                     # Update data status
                     self.comparison_data_status.config(
-                        text=f"✓ Loaded {len(self.comparison_data)} spectra (Live mode)",
+                        text=f"> Loaded {len(self.comparison_data)} spectra (Live mode)",
                         foreground='green'
                     )
 
@@ -27371,7 +28024,7 @@ Configuration:
 
         except Exception as e:
             timestamp = datetime.now().strftime("%H:%M:%S")
-            self._update_live_status(f"⚠ Scan error: {str(e)} ({timestamp})", 'red')
+            self._update_live_status(f"[!] Scan error: {str(e)} ({timestamp})", 'red')
             import traceback
             traceback.print_exc()
 
@@ -27448,7 +28101,7 @@ Configuration:
         # Flag text
         ttk.Label(main_frame, text="Flag message:", style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
-        flag_var = tk.StringVar(value="⚠️ Unreliable")
+        flag_var = tk.StringVar(value="[!] Unreliable")
         ttk.Entry(main_frame, textvariable=flag_var, width=40).pack(anchor='w', pady=(0, 20))
 
         # Buttons
@@ -27461,7 +28114,7 @@ Configuration:
                 return
 
             if not flag_var.get():
-                messagebox.showerror("Error", "Please enter a flag message.\n\nExample: '⚠️ Unreliable' or 'Contaminated'")
+                messagebox.showerror("Error", "Please enter a flag message.\n\nExample: '[!] Unreliable' or 'Contaminated'")
                 return
 
             rule = {
@@ -27473,7 +28126,7 @@ Configuration:
 
             self.comparison_rules.append(rule)
             self._update_comparison_rules_display()
-            self.comparison_status.config(text=f"✓ Rule added ({len(self.comparison_rules)} total)",
+            self.comparison_status.config(text=f"> Rule added ({len(self.comparison_rules)} total)",
                                          foreground='green')
             dialog.destroy()
 
@@ -27506,7 +28159,7 @@ Configuration:
                 transfer_model = calibration_transfer.load_transfer_model(prefix)
 
                 # Create display description
-                description = f"{transfer_model.method.upper()}: {transfer_model.slave_id} → {transfer_model.master_id}"
+                description = f"{transfer_model.method.upper()}: {transfer_model.slave_id} -> {transfer_model.master_id}"
 
                 # Add to list maintaining order
                 self.transfer_models.append({
@@ -27637,7 +28290,7 @@ Configuration:
                 X_current = X_transferred
 
         # Log the transformation
-        transfer_chain_desc = " → ".join([t['description'] for t in self.transfer_models])
+        transfer_chain_desc = " -> ".join([t['description'] for t in self.transfer_models])
         print(f"Successfully applied transfer chain: {transfer_chain_desc}")
 
         return X_current
@@ -27779,7 +28432,7 @@ Configuration:
             self._display_comparison_results()
 
             self.comparison_status.config(
-                text=f"✓ Comparison complete! {len(results)} samples analyzed.",
+                text=f"> Comparison complete! {len(results)} samples analyzed.",
                 foreground='green')
 
         except Exception as e:
@@ -28754,7 +29407,7 @@ Configuration:
         validation_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.library_validation_label = ttk.Label(validation_frame,
-                                                 text="✓ No data loaded yet - validation will occur when you load training data",
+                                                 text="No data loaded yet - validation will occur when you load training data",
                                                  style='TLabel', foreground='gray')
         self.library_validation_label.pack(anchor=tk.W)
 
@@ -28866,7 +29519,7 @@ Configuration:
 
         # EPO status indicator
         self.epo_status_label = ttk.Label(self.epo_settings_frame,
-                                         text="⚠️ No library selected",
+                                         text="[!] No library selected",
                                          style='TLabel', foreground='orange')
         self.epo_status_label.grid(row=epo_row, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
@@ -29345,10 +29998,10 @@ Configuration:
         self.diag_spectrum_plot_label = ttk.Label(spectrum_plot_frame,
                                                   text="📊 Matplotlib plot placeholder\n\n"
                                                        "Would show:\n"
-                                                       " • Original spectra (blue line)\n"
-                                                       " • Corrected spectra (red line)\n"
-                                                       " • Difference (green line)\n"
-                                                       " • Mean ± std bands",
+                                                       " - Original spectra (blue line)\n"
+                                                       " - Corrected spectra (red line)\n"
+                                                       " - Difference (green line)\n"
+                                                       " - Mean ± std bands",
                                                   style='TLabel', justify=tk.CENTER)
         self.diag_spectrum_plot_label.pack(expand=True, pady=30)
         row += 1
@@ -29366,9 +30019,9 @@ Configuration:
 
         self.diag_variance_label = ttk.Label(variance_frame,
                                             text="Apply interference removal to see variance metrics:\n\n"
-                                                 " • Total variance removed: X%\n"
-                                                 " • Variance per component: [X%, Y%, Z%]\n"
-                                                 " • Signal-to-noise ratio improvement: X.XX",
+                                                 " - Total variance removed: X%\n"
+                                                 " - Variance per component: [X%, Y%, Z%]\n"
+                                                 " - Signal-to-noise ratio improvement: X.XX",
                                             style='TLabel', justify=tk.LEFT)
         self.diag_variance_label.pack(anchor=tk.W)
         row += 1
@@ -29411,9 +30064,9 @@ Configuration:
         self.diag_advanced_plot_label = ttk.Label(advanced_plot_frame,
                                                   text="📊 Advanced visualization placeholder\n\n"
                                                        "Click a button above to show:\n"
-                                                       " • PCA scatter plot (before vs after)\n"
-                                                       " • Interferent subspace visualization\n"
-                                                       " • Wavelength weighting profile",
+                                                       " - PCA scatter plot (before vs after)\n"
+                                                       " - Interferent subspace visualization\n"
+                                                       " - Wavelength weighting profile",
                                                   style='TLabel', justify=tk.CENTER)
         self.diag_advanced_plot_label.pack(expand=True, pady=30)
         row += 1
@@ -29640,7 +30293,7 @@ Configuration:
         """Validate library dimensions against current training data."""
         if self.current_interferent_library is None:
             self.library_validation_label.config(
-                text="✓ No library selected",
+                text="No library selected",
                 foreground='gray'
             )
             return
@@ -29650,7 +30303,7 @@ Configuration:
         # Check if training data loaded
         if not hasattr(self, 'X_train') or self.X_train is None:
             self.library_validation_label.config(
-                text="⚠️ No training data loaded yet - cannot validate dimensions",
+                text="[!] No training data loaded yet - cannot validate dimensions",
                 foreground='orange'
             )
             return
@@ -29661,12 +30314,12 @@ Configuration:
 
         if lib_wl == train_wl:
             self.library_validation_label.config(
-                text=f"✓ Library dimensions match training data ({lib_wl} wavelengths)",
+                text=f"> Library dimensions match training data ({lib_wl} wavelengths)",
                 foreground='green'
             )
         else:
             self.library_validation_label.config(
-                text=f"❌ Dimension mismatch! Library: {lib_wl} wl, Training: {train_wl} wl\n"
+                text=f"[X] Dimension mismatch! Library: {lib_wl} wl, Training: {train_wl} wl\n"
                      f"EPO will fail unless dimensions match.",
                 foreground='red'
             )
@@ -29706,7 +30359,7 @@ Configuration:
                      "(Preview plot will appear here showing all spectra in library)"
             )
             self.library_validation_label.config(
-                text="✓ No data loaded yet - validation will occur when you load training data",
+                text="No data loaded yet - validation will occur when you load training data",
                 foreground='gray'
             )
             messagebox.showinfo("Success", "Library removed")
@@ -29929,7 +30582,7 @@ Configuration:
                 self.epo_library_combo.current(0)
                 self._on_epo_library_changed(None)
         else:
-            self.epo_status_label.config(text="⚠️ No libraries loaded (go to Tab 11A)",
+            self.epo_status_label.config(text="[!] No libraries loaded (go to Tab 11A)",
                                         foreground='orange')
 
     def _on_epo_library_changed(self, event):
@@ -29937,7 +30590,7 @@ Configuration:
         library_name = self.advanced_interference_settings['epo']['library'].get()
 
         if not library_name or library_name not in self.interferent_libraries:
-            self.epo_status_label.config(text="⚠️ No library selected", foreground='orange')
+            self.epo_status_label.config(text="[!] No library selected", foreground='orange')
             return
 
         lib = self.interferent_libraries[library_name]
@@ -29945,7 +30598,7 @@ Configuration:
 
         # Update status
         self.epo_status_label.config(
-            text=f"✓ Library '{library_name}': {meta['n_samples']} spectra, {meta['n_wavelengths']} wavelengths",
+            text=f"> Library '{library_name}': {meta['n_samples']} spectra, {meta['n_wavelengths']} wavelengths",
             foreground='green'
         )
 
@@ -30015,7 +30668,7 @@ Configuration:
             enabled_methods.append(f"GLSW (method: {method}, PLS comp: {n_comp})")
 
         if enabled_methods:
-            summary_text = "\n".join([f"✓ {m}" for m in enabled_methods])
+            summary_text = "\n".join([f"> {m}" for m in enabled_methods])
             self.method_summary_label.config(text=summary_text, foreground='green')
         else:
             self.method_summary_label.config(text="No advanced methods enabled", foreground='gray')
@@ -30074,7 +30727,7 @@ Configuration:
             }
 
             self.app_data_info_label.config(
-                text=f"✓ Loaded {len(csv_files)} spectra from folder\n"
+                text=f"> Loaded {len(csv_files)} spectra from folder\n"
                      f"   Shape: {X.shape}\n"
                      f"   Wavelengths: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm",
                 foreground='green'
@@ -30103,7 +30756,7 @@ Configuration:
         }
 
         self.app_data_info_label.config(
-            text=f"✓ Loaded {self.X_train.shape[0]} spectra from Import tab\n"
+            text=f"> Loaded {self.X_train.shape[0]} spectra from Import tab\n"
                  f"   Shape: {self.X_train.shape}\n"
                  f"   Wavelengths: {self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f} nm",
             foreground='green'
@@ -30293,7 +30946,7 @@ Configuration:
             self._app_update_preview_plot()
 
             self.app_status_label.config(
-                text=f"✓ {method} applied successfully (shape: {X.shape} → {X_corrected.shape})",
+                text=f"> {method} applied successfully (shape: {X.shape} -> {X_corrected.shape})",
                 foreground='green'
             )
 
@@ -30477,7 +31130,7 @@ Configuration:
                 ax3.text(0.5, 0.5,
                         f'Difference plot not available:\n'
                         f'Wavelength dimensions changed\n'
-                        f'({len(wavelengths_original)} → {len(wavelengths_corrected)} wavelengths)\n\n'
+                        f'({len(wavelengths_original)} -> {len(wavelengths_corrected)} wavelengths)\n\n'
                         f'Method "{method}" excluded wavelength regions.',
                         transform=ax3.transAxes, ha='center', va='center',
                         fontsize=11, bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
@@ -30508,7 +31161,7 @@ Configuration:
             # If plotting fails, show error in label
             if hasattr(self, 'app_preview_label'):
                 self.app_preview_label.config(
-                    text=f"⚠️ Error generating plot:\n{str(e)}",
+                    text=f"[!] Error generating plot:\n{str(e)}",
                     foreground='red'
                 )
                 self.app_preview_label.pack(expand=True, pady=30)
@@ -30531,12 +31184,12 @@ Configuration:
             # Check if analysis results exist
             if hasattr(self, 'X_train') and self.X_train is not None:
                 self.diag_data_info_label.config(
-                    text=f"✓ Using current analysis data\n   {self.X_train.shape[0]} spectra loaded",
+                    text=f"> Using current analysis data\n   {self.X_train.shape[0]} spectra loaded",
                     foreground='green'
                 )
             else:
                 self.diag_data_info_label.config(
-                    text="⚠️ No analysis data available (load data in Import tab first)",
+                    text="[!] No analysis data available (load data in Import tab first)",
                     foreground='orange'
                 )
 
@@ -30545,12 +31198,12 @@ Configuration:
             if hasattr(self, 'app_spectra_corrected') and self.app_spectra_corrected is not None:
                 X = self.app_spectra_corrected['X']
                 self.diag_data_info_label.config(
-                    text=f"✓ Using corrected spectra from Tab 11C\n   {X.shape[0]} spectra available",
+                    text=f"> Using corrected spectra from Tab 11C\n   {X.shape[0]} spectra available",
                     foreground='green'
                 )
             else:
                 self.diag_data_info_label.config(
-                    text="⚠️ No corrected spectra in Tab 11C (apply correction first)",
+                    text="[!] No corrected spectra in Tab 11C (apply correction first)",
                     foreground='orange'
                 )
 
