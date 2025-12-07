@@ -21,7 +21,7 @@ import os
 import ast
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 from datetime import datetime
 import numpy as np
@@ -1028,6 +1028,8 @@ class SpectralPredictApp:
         self.use_snv = tk.BooleanVar(value=True)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
         self.use_sg2 = tk.BooleanVar(value=True)  # 2nd derivative
+        self.use_sg3 = tk.BooleanVar(value=False)  # 3rd derivative (not default)
+        self.use_sg4 = tk.BooleanVar(value=False)  # 4th derivative (not default)
         self.use_deriv_snv = tk.BooleanVar(value=True)  # deriv_snv (derivative then SNV)
 
         # Interference removal methods (Phase 3: Basic integration)
@@ -3566,16 +3568,25 @@ class SpectralPredictApp:
 
         ttk.Label(control_frame, text="Screening Method:").pack(side='left', padx=(0, 10))
 
-        self.explore_screening_method = tk.StringVar(value="Correlation")
+        self.explore_screening_method = tk.StringVar(value="VIP")
         method_combo = ttk.Combobox(control_frame, textvariable=self.explore_screening_method,
-                                   values=["Correlation", "Random Forest"],
+                                   values=["VIP", "Random Forest"],
                                    state='readonly', width=15)
         method_combo.pack(side='left', padx=(0, 20))
 
         ttk.Label(control_frame, text="Top N:").pack(side='left', padx=(0, 5))
-        self.explore_top_n = tk.IntVar(value=10)
-        ttk.Spinbox(control_frame, from_=5, to=50, textvariable=self.explore_top_n,
+        self.explore_top_n = tk.IntVar(value=50)
+        ttk.Spinbox(control_frame, from_=5, to=200, textvariable=self.explore_top_n,
                    width=5).pack(side='left', padx=(0, 20))
+
+        # Wavelength range filter
+        ttk.Label(control_frame, text="Range:").pack(side='left', padx=(0, 5))
+        self.explore_wl_min = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.explore_wl_min, width=6).pack(side='left')
+        ttk.Label(control_frame, text="-").pack(side='left', padx=2)
+        self.explore_wl_max = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.explore_wl_max, width=6).pack(side='left', padx=(0, 5))
+        ttk.Label(control_frame, text="nm", style='Caption.TLabel').pack(side='left', padx=(0, 20))
 
         ttk.Button(control_frame, text="▶ Run Screening",
                   command=self._run_explore_predictor_screening,
@@ -3610,10 +3621,21 @@ class SpectralPredictApp:
         if self.X is None:
             return
 
-        # Clear and regenerate each plot frame
-        self._generate_explore_spectra_plot()
-        self._generate_explore_derivative_plots()
-        self._generate_explore_target_distribution()
+        # Clear and regenerate each plot frame (with error handling for each)
+        try:
+            self._generate_explore_spectra_plot()
+        except Exception as e:
+            print(f"Warning: Could not generate spectra plot: {e}")
+
+        try:
+            self._generate_explore_derivative_plots()
+        except Exception as e:
+            print(f"Warning: Could not generate derivative plots: {e}")
+
+        try:
+            self._generate_explore_target_distribution()
+        except Exception as e:
+            print(f"Warning: Could not generate target distribution: {e}")
 
     def _generate_explore_spectra_plot(self):
         """Generate the raw spectra plot in the Explore tab."""
@@ -3683,56 +3705,74 @@ class SpectralPredictApp:
                      style='Caption.TLabel').pack(expand=True)
             return
 
-        # Create figure
-        fig = Figure(figsize=(10, 5))
-        ax = fig.add_subplot(111)
+        try:
+            # Create figure
+            fig = Figure(figsize=(10, 5))
+            ax = fig.add_subplot(111)
 
-        # Determine if classification or regression
-        n_unique = len(np.unique(self.y))
-        is_classification = n_unique < 15
+            # Convert to consistent type for comparison (handle mixed float/str)
+            y_values = self.y.copy()
+            if y_values.dtype == 'object':
+                # Convert all to string for consistent comparison
+                y_for_unique = y_values.astype(str)
+            else:
+                y_for_unique = y_values
 
-        if is_classification:
-            # Bar chart for categorical/classification
-            unique_vals, counts = np.unique(self.y, return_counts=True)
-            colors = plt.cm.viridis(np.linspace(0, 1, len(unique_vals)))
-            bars = ax.bar(range(len(unique_vals)), counts, color=colors, edgecolor='white')
-            ax.set_xticks(range(len(unique_vals)))
-            ax.set_xticklabels([str(v) for v in unique_vals], rotation=45, ha='right')
-            ax.set_xlabel('Class', fontsize=12)
-            ax.set_ylabel('Count', fontsize=12)
-            ax.set_title(f'Target Distribution (n={len(self.y)}, {n_unique} classes)',
-                        fontsize=14, fontweight='bold')
+            # Determine if classification or regression
+            n_unique = len(pd.unique(y_for_unique))  # pd.unique doesn't sort, avoids comparison issues
+            is_classification = n_unique < 15 or y_values.dtype == 'object'
 
-            # Add count labels on bars
-            for bar, count in zip(bars, counts):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                       str(count), ha='center', va='bottom', fontsize=10)
-        else:
-            # Histogram for continuous/regression
-            ax.hist(self.y, bins=30, color='steelblue', edgecolor='white', alpha=0.8)
-            ax.axvline(np.mean(self.y), color='red', linestyle='--', linewidth=2,
-                      label=f'Mean: {np.mean(self.y):.2f}')
-            ax.axvline(np.median(self.y), color='orange', linestyle='--', linewidth=2,
-                      label=f'Median: {np.median(self.y):.2f}')
-            ax.set_xlabel('Target Value', fontsize=12)
-            ax.set_ylabel('Frequency', fontsize=12)
-            ax.set_title(f'Target Distribution (n={len(self.y)}, range: {np.min(self.y):.2f} - {np.max(self.y):.2f})',
-                        fontsize=14, fontweight='bold')
-            ax.legend()
+            if is_classification:
+                # Bar chart for categorical/classification - use value_counts instead of np.unique
+                value_counts = pd.Series(y_for_unique).value_counts()
+                unique_vals = value_counts.index.tolist()
+                counts = value_counts.values
+                colors = plt.cm.viridis(np.linspace(0, 1, len(unique_vals)))
+                bars = ax.bar(range(len(unique_vals)), counts, color=colors, edgecolor='white')
+                ax.set_xticks(range(len(unique_vals)))
+                ax.set_xticklabels([str(v) for v in unique_vals], rotation=45, ha='right')
+                ax.set_xlabel('Class', fontsize=12)
+                ax.set_ylabel('Count', fontsize=12)
+                ax.set_title(f'Target Distribution (n={len(self.y)}, {n_unique} classes)',
+                            fontsize=14, fontweight='bold')
 
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+                # Add count labels on bars
+                for bar, count in zip(bars, counts):
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                           str(count), ha='center', va='bottom', fontsize=10)
+            else:
+                # Histogram for continuous/regression
+                ax.hist(self.y, bins=30, color='steelblue', edgecolor='white', alpha=0.8)
+                ax.axvline(np.mean(self.y), color='red', linestyle='--', linewidth=2,
+                          label=f'Mean: {np.mean(self.y):.2f}')
+                ax.axvline(np.median(self.y), color='orange', linestyle='--', linewidth=2,
+                          label=f'Median: {np.median(self.y):.2f}')
+                ax.set_xlabel('Target Value', fontsize=12)
+                ax.set_ylabel('Frequency', fontsize=12)
+                ax.set_title(f'Target Distribution (n={len(self.y)}, range: {np.min(self.y):.2f} - {np.max(self.y):.2f})',
+                            fontsize=14, fontweight='bold')
+                ax.legend()
 
-        # Embed in tkinter
-        canvas = FigureCanvasTkAgg(fig, master=self.explore_target_dist_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill='both', expand=True)
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
 
-        # Add toolbar
-        toolbar_frame = ttk.Frame(self.explore_target_dist_frame)
-        toolbar_frame.pack(fill='x')
-        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
-        toolbar.update()
+            # Embed in tkinter
+            canvas = FigureCanvasTkAgg(fig, master=self.explore_target_dist_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+
+            # Add toolbar
+            toolbar_frame = ttk.Frame(self.explore_target_dist_frame)
+            toolbar_frame.pack(fill='x')
+            toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+            toolbar.update()
+
+        except Exception as e:
+            # Show error message in the frame
+            ttk.Label(self.explore_target_dist_frame,
+                     text=f"Could not generate target distribution: {str(e)}",
+                     style='Caption.TLabel').pack(expand=True)
+            print(f"Target distribution error: {e}")
 
     def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color):
         """Create an interactive spectral plot in a given frame.
@@ -3824,18 +3864,40 @@ class SpectralPredictApp:
         method = self.explore_screening_method.get()
         top_n = self.explore_top_n.get()
 
+        # Parse wavelength range filter
+        wl_range = None
         try:
-            if method == "Correlation":
-                results = self._compute_correlation_screening()
-            else:
+            wl_min_str = self.explore_wl_min.get().strip()
+            wl_max_str = self.explore_wl_max.get().strip()
+            if wl_min_str or wl_max_str:
+                wl_min = float(wl_min_str) if wl_min_str else None
+                wl_max = float(wl_max_str) if wl_max_str else None
+                wl_range = (wl_min, wl_max)
+        except ValueError:
+            pass  # Invalid range values, ignore
+
+        try:
+            if method == "VIP":
+                # Show progress for VIP
+                progress_label = ttk.Label(self.explore_screening_results_frame,
+                                          text="Computing VIP scores (PLS-based)...",
+                                          style='Caption.TLabel')
+                progress_label.pack(expand=True)
+                self.root.update()
+                results = self._compute_vip_screening(top_n=top_n, wl_range=wl_range)
+                progress_label.destroy()
+            elif method == "Random Forest":
                 # Show progress for RF (it's slower)
                 progress_label = ttk.Label(self.explore_screening_results_frame,
                                           text="Computing Random Forest importances... (this may take 10-30 seconds)",
                                           style='Caption.TLabel')
                 progress_label.pack(expand=True)
                 self.root.update()
-                results = self._compute_rf_screening()
+                results = self._compute_rf_screening(top_n=top_n, wl_range=wl_range)
                 progress_label.destroy()
+            else:
+                # Fallback to correlation (legacy)
+                results = self._compute_correlation_screening(top_n=top_n, wl_range=wl_range)
 
             if results is None:
                 messagebox.showerror("Error", "Failed to compute predictor screening.")
@@ -3921,18 +3983,27 @@ class SpectralPredictApp:
         toolbar.update()
 
         # Populate info panel with top wavelengths
-        ttk.Label(info_frame, text=f"Top {top_n} Wavelengths:",
-                 font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 10))
+        ttk.Label(info_frame, text=f"Top {len(top_wls)} Wavelengths:",
+                 font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
 
-        # Create scrollable list
+        # Create scrollable listbox for wavelengths
         list_frame = ttk.Frame(info_frame)
         list_frame.pack(fill='both', expand=True)
+
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        wl_listbox = tk.Listbox(list_frame, width=28, height=20,
+                                yscrollcommand=scrollbar.set,
+                                font=('Consolas', 9))
+        wl_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=wl_listbox.yview)
 
         for i, wl in enumerate(top_wls, 1):
             importance_val = results['importances'][wl] if isinstance(results['importances'], pd.Series) else 0
             sign = "+" if importance_val >= 0 else ""
-            text = f"{i:2d}. {wl:.1f} nm → {sign}{importance_val:.4f}"
-            ttk.Label(list_frame, text=text, font=('Consolas', 9)).pack(anchor='w')
+            text = f"{i:3d}. {wl:.1f} nm → {sign}{importance_val:.4f}"
+            wl_listbox.insert(tk.END, text)
 
         # Add interpretation
         ttk.Separator(info_frame, orient='horizontal').pack(fill='x', pady=10)
@@ -4082,6 +4153,9 @@ class SpectralPredictApp:
             ("end_paste", self._on_data_viewer_edit),
             ("end_delete", self._on_data_viewer_edit),
         ])
+
+        # Bind right-click for context menu on headers
+        self.data_viewer_sheet.bind("<Button-3>", self._on_data_viewer_right_click)
 
         # Initialize undo stack
         self.data_viewer_undo_stack = []
@@ -4542,20 +4616,28 @@ class SpectralPredictApp:
         ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.sg2_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG2'], delay=500)
 
+        self.sg3_checkbox = ttk.Checkbutton(preprocess_frame, text="SG3 (3rd derivative)", variable=self.use_sg3)
+        self.sg3_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Higher order - complex spectral features", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+
+        self.sg4_checkbox = ttk.Checkbutton(preprocess_frame, text="SG4 (4th derivative)", variable=self.use_sg4)
+        self.sg4_checkbox.grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Highest order - rarely needed", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+
         # Advanced: deriv_snv option
         self.deriv_snv_checkbox = ttk.Checkbutton(preprocess_frame, text="deriv_snv (advanced)", variable=self.use_deriv_snv)
-        self.deriv_snv_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        self.deriv_snv_checkbox.grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.deriv_snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['deriv_snv'], delay=500)
 
         # Derivative window size settings
         window_size_label = ttk.Label(preprocess_frame, text="Derivative Window Sizes:", style='Subheading.TLabel')
-        window_size_label.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+        window_size_label.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
         CreateToolTip(window_size_label, text=TOOLTIP_CONTENT['preprocessing']['window_size'], delay=500)
-        ttk.Label(preprocess_frame, text="Select one or more (default: 17 only)", style='Caption.TLabel').grid(row=7, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(preprocess_frame, text="Select one or more (default: 17 only)", style='Caption.TLabel').grid(row=9, column=0, columnspan=2, sticky=tk.W)
 
         window_frame = ttk.Frame(preprocess_frame)
-        window_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=5)
+        window_frame.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(window_frame, text="Window=7", variable=self.window_7).grid(row=0, column=0, padx=5, pady=2)
         ttk.Checkbutton(window_frame, text="Window=11", variable=self.window_11).grid(row=0, column=1, padx=5, pady=2)
@@ -7176,7 +7258,11 @@ class SpectralPredictApp:
 
         self.refine_save_button_results = self._create_accent_button(save_button_frame, text="💾 Save Model",
                                                                       command=self._save_refined_model, state='disabled')
-        self.refine_save_button_results.pack(side='left')
+        self.refine_save_button_results.pack(side='left', padx=(0, 10))
+
+        self.export_code_button = self._create_accent_button(save_button_frame, text="📄 Export Code",
+                                                              command=self._export_for_publication, state='disabled')
+        self.export_code_button.pack(side='left')
         row += 1
 
         # === Performance Metrics ===
@@ -8522,13 +8608,20 @@ class SpectralPredictApp:
             messagebox.showwarning("No Data", "No merged data loaded")
             return
 
-        # Get selected column
-        selected = self.merged_data_sheet.get_currently_selected()
-        if not selected or selected.type_ != "column":
+        # Get selected columns using get_selected_columns() which is more reliable
+        selected_cols = self.merged_data_sheet.get_selected_columns()
+
+        # Also check get_currently_selected() as fallback
+        if not selected_cols:
+            selected = self.merged_data_sheet.get_currently_selected()
+            if selected and hasattr(selected, 'type_') and selected.type_ == "column":
+                selected_cols = {selected.column}
+
+        if not selected_cols:
             messagebox.showwarning("No Selection", "Please select a column header to delete")
             return
 
-        col_idx = selected.column
+        col_idx = min(selected_cols)  # Get the first selected column
         headers = self.merged_data_sheet.headers()
 
         if col_idx >= len(headers):
@@ -11139,16 +11232,16 @@ class SpectralPredictApp:
         # Method selection
         ttk.Label(control_frame, text="Screening Method:").pack(side=tk.LEFT, padx=(0, 5))
 
-        self.screening_method = tk.StringVar(value="correlation")
+        self.screening_method = tk.StringVar(value="vip")
         method_combo = ttk.Combobox(control_frame, textvariable=self.screening_method,
                                     state='readonly', width=20)
-        method_combo['values'] = ['correlation', 'random_forest']
+        method_combo['values'] = ['vip', 'random_forest']
         method_combo.pack(side=tk.LEFT, padx=(0, 15))
 
         # Top N wavelengths
         ttk.Label(control_frame, text="Top N:").pack(side=tk.LEFT, padx=(0, 5))
-        self.screening_top_n = tk.IntVar(value=20)
-        top_n_spinbox = ttk.Spinbox(control_frame, from_=5, to=50, width=5,
+        self.screening_top_n = tk.IntVar(value=50)
+        top_n_spinbox = ttk.Spinbox(control_frame, from_=5, to=200, width=5,
                                     textvariable=self.screening_top_n)
         top_n_spinbox.pack(side=tk.LEFT, padx=(0, 15))
 
@@ -11192,26 +11285,40 @@ class SpectralPredictApp:
         self.screening_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.screening_listbox.yview)
 
-    def _compute_correlation_screening(self):
+    def _compute_correlation_screening(self, top_n=None, wl_range=None):
         """Compute wavelength-target correlations (fast, linear)."""
         if self.X is None or self.y is None:
             return None
 
         try:
+            # Filter wavelength range if specified
+            X_filtered = self.X
+            if wl_range is not None:
+                wl_min, wl_max = wl_range
+                wavelengths = self.X.columns.astype(float)
+                mask = pd.Series(True, index=self.X.columns)
+                if wl_min is not None:
+                    mask = mask & (wavelengths >= wl_min)
+                if wl_max is not None:
+                    mask = mask & (wavelengths <= wl_max)
+                X_filtered = self.X.loc[:, mask]
+                print(f"ℹ️ Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
+
             # Handle categorical/string targets by encoding them
             y_numeric = self.y.copy()
             if y_numeric.dtype == 'object' or isinstance(y_numeric.iloc[0], str):
                 # Label encode string targets
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
-                y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=self.X.index)
+                y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=X_filtered.index)
                 print(f"ℹ️ Encoded categorical target for correlation: {dict(zip(le.classes_, range(len(le.classes_))))}")
 
             # Vectorized correlation - computes all correlations in one operation
-            correlations = self.X.corrwith(pd.Series(y_numeric, index=self.X.index))
+            correlations = X_filtered.corrwith(pd.Series(y_numeric, index=X_filtered.index))
 
             abs_corr = correlations.abs()
-            top_n = self.screening_top_n.get()
+            if top_n is None:
+                top_n = self.screening_top_n.get()
             top_indices = abs_corr.nlargest(top_n).index
 
             return {
@@ -11227,13 +11334,105 @@ class SpectralPredictApp:
             messagebox.showerror("Error", f"Correlation screening failed: {str(e)}")
             return None
 
-    def _compute_rf_screening(self):
+    def _compute_vip_screening(self, top_n=None, wl_range=None):
+        """Compute VIP (Variable Importance in Projection) scores using PLS."""
+        if self.X is None or self.y is None:
+            return None
+
+        try:
+            from sklearn.cross_decomposition import PLSRegression
+            from sklearn.preprocessing import LabelEncoder
+
+            self.screening_status.config(text="Computing VIP scores (PLS-based)...")
+            self.root.update()
+
+            # Filter wavelength range if specified
+            X_filtered = self.X
+            if wl_range is not None:
+                wl_min, wl_max = wl_range
+                wavelengths = self.X.columns.astype(float)
+                mask = pd.Series(True, index=self.X.columns)
+                if wl_min is not None:
+                    mask = mask & (wavelengths >= wl_min)
+                if wl_max is not None:
+                    mask = mask & (wavelengths <= wl_max)
+                X_filtered = self.X.loc[:, mask]
+                print(f"ℹ️ Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
+
+            # Handle categorical/string targets by encoding them
+            y_numeric = self.y.copy()
+            if y_numeric.dtype == 'object' or isinstance(y_numeric.iloc[0], str):
+                le = LabelEncoder()
+                y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=X_filtered.index)
+                print(f"ℹ️ Encoded categorical target for VIP: {dict(zip(le.classes_, range(len(le.classes_))))}")
+
+            X_values = X_filtered.values
+            y_values = y_numeric.values.reshape(-1, 1)
+
+            # Determine optimal number of components (max 10 or n_features/2)
+            n_components = min(10, X_values.shape[1] // 2, X_values.shape[0] - 1)
+            n_components = max(2, n_components)  # At least 2 components
+
+            # Fit PLS model
+            pls = PLSRegression(n_components=n_components)
+            pls.fit(X_values, y_values)
+
+            # Compute VIP scores
+            # VIP = sqrt(p * sum_a(W_ja^2 * SSY_a) / SSY_total)
+            W = pls.x_weights_  # (n_features, n_components)
+            T = pls.x_scores_   # (n_samples, n_components)
+
+            # SSY: explained variance by each component
+            ssy_comp = np.sum(T**2, axis=0) * np.var(y_values, axis=0)
+            ssy_total = np.sum(ssy_comp)
+
+            # VIP calculation
+            n_features = W.shape[0]
+            weight = np.sum((W ** 2) * ssy_comp, axis=1)
+            vip_scores = np.sqrt(n_features * weight / ssy_total)
+
+            importances = pd.Series(vip_scores, index=X_filtered.columns)
+
+            if top_n is None:
+                top_n = self.screening_top_n.get()
+            top_indices = importances.nlargest(top_n).index
+
+            return {
+                'importances': importances,
+                'abs_importances': importances,  # VIP scores are always positive
+                'top_wavelengths': list(top_indices),
+                'top_values': importances[top_indices].values,
+                'wavelengths': importances.index.values,
+                'method': 'vip',
+                'metric_name': 'VIP Score',
+                'threshold': 1.0  # VIP > 1 is typically considered important
+            }
+        except Exception as e:
+            messagebox.showerror("Error", f"VIP screening failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _compute_rf_screening(self, top_n=None, wl_range=None):
         """Compute RF-based feature importances (slower, non-linear)."""
         if self.X is None or self.y is None:
             return None
 
         try:
             from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+
+            # Filter wavelength range if specified
+            X_filtered = self.X
+            if wl_range is not None:
+                wl_min, wl_max = wl_range
+                wavelengths = self.X.columns.astype(float)
+                mask = pd.Series(True, index=self.X.columns)
+                if wl_min is not None:
+                    mask = mask & (wavelengths >= wl_min)
+                if wl_max is not None:
+                    mask = mask & (wavelengths <= wl_max)
+                X_filtered = self.X.loc[:, mask]
+                print(f"ℹ️ Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
 
             # Determine task type
             n_unique = len(np.unique(self.y))
@@ -11254,10 +11453,11 @@ class SpectralPredictApp:
                 rf = RandomForestRegressor(n_estimators=100, max_depth=10,
                                            n_jobs=-1, random_state=42)
 
-            rf.fit(self.X.values, self.y.values)
-            importances = pd.Series(rf.feature_importances_, index=self.X.columns)
+            rf.fit(X_filtered.values, self.y.values)
+            importances = pd.Series(rf.feature_importances_, index=X_filtered.columns)
 
-            top_n = self.screening_top_n.get()
+            if top_n is None:
+                top_n = self.screening_top_n.get()
             top_indices = importances.nlargest(top_n).index
 
             return {
@@ -11284,10 +11484,12 @@ class SpectralPredictApp:
 
         # Run selected screening method
         method = self.screening_method.get()
-        if method == 'correlation':
-            results = self._compute_correlation_screening()
-        else:  # random_forest
+        if method == 'vip':
+            results = self._compute_vip_screening()
+        elif method == 'random_forest':
             results = self._compute_rf_screening()
+        else:  # fallback to correlation (legacy)
+            results = self._compute_correlation_screening()
 
         if results is None:
             self.screening_status.config(text="Screening failed")
@@ -12002,9 +12204,9 @@ class SpectralPredictApp:
             messagebox.showwarning("No Models", "Please select at least one model to test")
             return
 
-        # Switch to Analysis Progress tab (index 4)
-        # Tab indices: 0=Data Management, 1=Import, 2=Data Viewer, 3=Quality Check, 4=Analysis Config, 5=Analysis Progress, 6=Results, 7=Custom Model Dev
-        self.notebook.select(5)
+        # Switch to Analysis Progress tab (index 6)
+        # Tab indices: 0=Data Management, 1=Import, 2=Explore, 3=Data Viewer, 4=Quality Check, 5=Analysis Config, 6=Analysis Progress, 7=Results, 8=Model Dev
+        self.notebook.select(6)
 
         # Clear progress text
         self.progress_text.delete('1.0', tk.END)
@@ -12553,6 +12755,8 @@ class SpectralPredictApp:
                 'snv': self.use_snv.get(),
                 'sg1': self.use_sg1.get(),
                 'sg2': self.use_sg2.get(),
+                'sg3': self.use_sg3.get(),
+                'sg4': self.use_sg4.get(),
                 'deriv_snv': self.use_deriv_snv.get()
             }
 
@@ -14812,7 +15016,7 @@ class SpectralPredictApp:
         self._load_model_for_refinement(model_config)
 
         # Switch to the Model Development tab
-        self.notebook.select(7)  # Tab 7 (index 7)
+        self.notebook.select(8)  # Tab 8 (index 8)
 
         # Always switch to Selection subtab (first subtab) when loading a model
         self.model_dev_notebook.select(0)  # Selection subtab
@@ -15418,6 +15622,10 @@ class SpectralPredictApp:
             self.data_viewer_sheet.set_sheet_data(formatted_data)
             self.data_viewer_sheet.headers(headers)
 
+            # Reset all row backgrounds to default (clear any previous highlighting)
+            for row_idx in range(len(formatted_data)):
+                self.data_viewer_sheet[row_idx].bg = ""
+
             # Highlight excluded samples in pink
             if show_excluded and len(excluded_indices) > 0:
                 # Find row indices of excluded samples in the display dataframe
@@ -15721,13 +15929,20 @@ class SpectralPredictApp:
             messagebox.showwarning("No Data", "No data loaded.")
             return
 
-        # Get selected column
-        selected = self.data_viewer_sheet.get_selected_columns()
-        if not selected:
-            messagebox.showinfo("Delete Column", "Please select a column first by clicking its header.")
+        # Get selected columns using get_selected_columns() which is more reliable
+        selected_cols = self.data_viewer_sheet.get_selected_columns()
+
+        # Also check get_currently_selected() as fallback
+        if not selected_cols:
+            selected = self.data_viewer_sheet.get_currently_selected()
+            if selected and hasattr(selected, 'type_') and selected.type_ == "column":
+                selected_cols = {selected.column}
+
+        if not selected_cols:
+            messagebox.showinfo("Delete Column", "Please click on a column HEADER to select it first.")
             return
 
-        col_idx = selected[0]
+        col_idx = min(selected_cols)  # Get the first selected column
         headers = self.data_viewer_sheet.headers()
 
         if col_idx >= len(headers):
@@ -15760,6 +15975,89 @@ class SpectralPredictApp:
                 self.ref = self.ref.drop(columns=[col_name])
 
             # Refresh display
+            self._populate_data_viewer()
+            self.data_viewer_status.config(text=f"✓ Deleted column '{col_name}'")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete column:\n{str(e)}")
+
+    def _on_data_viewer_right_click(self, event):
+        """Handle right-click on data viewer for context menu."""
+        if self.X is None:
+            return
+
+        try:
+            # Get the region where the click occurred
+            region = self.data_viewer_sheet.identify_region(event)
+
+            if region and hasattr(region, 'type_') and region.type_ == "header":
+                # Right-clicked on column header
+                col_idx = region.column
+                headers = self.data_viewer_sheet.headers()
+
+                if col_idx < len(headers):
+                    col_name = headers[col_idx]
+
+                    # Create context menu
+                    menu = tk.Menu(self.data_viewer_sheet, tearoff=0)
+                    menu.add_command(label=f"Add column after '{col_name}'",
+                                   command=lambda: self._add_column_at_position(col_idx + 1, col_name))
+
+                    # Only allow delete for metadata columns (not Sample ID, Target, or wavelengths)
+                    wavelength_cols = [str(w) for w in self.X.columns]
+                    target_col = self.target_column.get() if hasattr(self, 'target_column') and self.target_column.get() else "Target"
+
+                    if col_name != "Sample ID" and col_name != target_col and col_name != "Target" and col_name not in wavelength_cols:
+                        menu.add_command(label=f"Delete column '{col_name}'",
+                                       command=lambda: self._delete_column_by_name(col_name))
+                    else:
+                        menu.add_command(label=f"Delete column '{col_name}' (protected)", state='disabled')
+
+                    menu.post(event.x_root, event.y_root)
+
+        except Exception as e:
+            print(f"Right-click menu error: {e}")
+
+    def _add_column_at_position(self, position, after_col_name):
+        """Add a new column at a specific position."""
+        col_name = simpledialog.askstring("Add Column", f"Enter name for new column (after '{after_col_name}'):")
+        if not col_name:
+            return
+
+        default_val = simpledialog.askstring("Add Column", f"Enter default value for '{col_name}':", initialvalue="")
+        if default_val is None:
+            return
+
+        try:
+            self._push_data_viewer_undo()
+
+            # Add column to metadata
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                self.combined_metadata_df[col_name] = default_val
+            elif self.ref is not None:
+                self.ref[col_name] = default_val
+            else:
+                self.ref = pd.DataFrame({col_name: [default_val] * len(self.X)}, index=self.X.index)
+
+            self._populate_data_viewer()
+            self.data_viewer_status.config(text=f"✓ Added column '{col_name}'")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add column:\n{str(e)}")
+
+    def _delete_column_by_name(self, col_name):
+        """Delete a column by name (used by context menu)."""
+        if not messagebox.askyesno("Delete Column", f"Delete column '{col_name}'?"):
+            return
+
+        try:
+            self._push_data_viewer_undo()
+
+            if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and col_name in self.combined_metadata_df.columns:
+                self.combined_metadata_df = self.combined_metadata_df.drop(columns=[col_name])
+            elif self.ref is not None and col_name in self.ref.columns:
+                self.ref = self.ref.drop(columns=[col_name])
+
             self._populate_data_viewer()
             self.data_viewer_status.config(text=f"✓ Deleted column '{col_name}'")
 
@@ -15823,13 +16121,19 @@ class SpectralPredictApp:
             return
 
         data = self.data_viewer_sheet.get_sheet_data()
-        indices = [data[row][0] for row in selected]
+        # Get sample IDs from selected rows and match them to actual DataFrame indices
+        sample_ids = [data[row][0] for row in selected]
 
-        for idx in indices:
-            self.excluded_spectra.add(idx)
+        # Match sample IDs to actual DataFrame index values (handling type differences)
+        for sample_id in sample_ids:
+            # Find matching index in self.X (could be int or string)
+            for idx in self.X.index:
+                if str(idx) == str(sample_id):
+                    self.excluded_spectra.add(idx)
+                    break
 
         self._populate_data_viewer()
-        self.data_viewer_status.config(text=f"✓ Excluded {len(indices)} sample(s)")
+        self.data_viewer_status.config(text=f"✓ Excluded {len(sample_ids)} sample(s)")
 
     def _include_selected_rows(self):
         """Remove selected rows from exclusion list."""
@@ -15842,13 +16146,23 @@ class SpectralPredictApp:
             return
 
         data = self.data_viewer_sheet.get_sheet_data()
-        indices = [data[row][0] for row in selected]
+        # Get sample IDs from selected rows
+        sample_ids = [data[row][0] for row in selected]
 
-        for idx in indices:
+        # Find and remove matching indices from excluded_spectra (handling type differences)
+        indices_to_remove = []
+        for sample_id in sample_ids:
+            # Find matching index in excluded_spectra
+            for idx in list(self.excluded_spectra):
+                if str(idx) == str(sample_id):
+                    indices_to_remove.append(idx)
+                    break
+
+        for idx in indices_to_remove:
             self.excluded_spectra.discard(idx)
 
         self._populate_data_viewer()
-        self.data_viewer_status.config(text=f"✓ Included {len(indices)} sample(s)")
+        self.data_viewer_status.config(text=f"✓ Included {len(indices_to_remove)} sample(s)")
 
     # ========== END DATA VIEWER EDITING METHODS ==========
 
@@ -18120,8 +18434,12 @@ F1 Score:  {f1:.4f}
                 'snv': 'snv',
                 'sg1': 'deriv',
                 'sg2': 'deriv',
+                'sg3': 'deriv',
+                'sg4': 'deriv',
                 'snv_sg1': 'snv_deriv',
                 'snv_sg2': 'snv_deriv',
+                'snv_sg3': 'snv_deriv',
+                'snv_sg4': 'snv_deriv',
                 'deriv_snv': 'deriv_snv'
             }
 
@@ -18134,9 +18452,13 @@ F1 Score:  {f1:.4f}
                     return 2  # 1st derivative needs poly order 2
                 elif deriv_value == 2:
                     return 3  # 2nd derivative needs poly order 3
+                elif deriv_value == 3:
+                    return 4  # 3rd derivative needs poly order 4
+                elif deriv_value == 4:
+                    return 5  # 4th derivative needs poly order 5
                 else:
-                    print(f"WARNING: Unexpected deriv value {deriv_value}, using polyorder=2")
-                    return 2
+                    # For any higher derivative, use deriv + 1
+                    return max(2, deriv_value + 1)
 
             # Default derivative orders for GUI preprocessing methods
             deriv_map = {
@@ -18144,8 +18466,12 @@ F1 Score:  {f1:.4f}
                 'snv': 0,
                 'sg1': 1,
                 'sg2': 2,
+                'sg3': 3,
+                'sg4': 4,
                 'snv_sg1': 1,
                 'snv_sg2': 2,
+                'snv_sg3': 3,
+                'snv_sg4': 4,
                 'deriv_snv': None  # Ambiguous - must be determined from config
             }
 
@@ -18851,12 +19177,14 @@ Configuration:
             self.refine_status.config(text="✗ Error running refined model")
             self.refine_save_button.config(state='disabled')
             self.refine_save_button_results.config(state='disabled')
+            self.export_code_button.config(state='disabled')
             messagebox.showerror("Error", "Failed to run refined model. See results area for details.")
         else:
             self.refine_status.config(text="✓ Refined model complete")
-            # Enable Save Model button after successful run
+            # Enable Save Model and Export Code buttons after successful run
             self.refine_save_button.config(state='normal')
             self.refine_save_button_results.config(state='normal')
+            self.export_code_button.config(state='normal')
             # Plot the predictions
             self._plot_refined_predictions()
             # Plot diagnostic plots
@@ -19002,6 +19330,239 @@ Configuration:
                 f"Failed to save model:\n\n{str(e)}\n\nSee console for details."
             )
             print(f"Error saving model:\n{error_msg}")
+
+    def _export_for_publication(self):
+        """Export analysis code for publication/reviewers."""
+        # Check if model has been trained
+        if self.refined_model is None:
+            messagebox.showerror(
+                "No Model Trained",
+                "Please run a refined model first before exporting.\n\n"
+                "Click 'Run Model' to train a model, then you can export the code."
+            )
+            return
+
+        # Create export dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Export for Publication")
+        dialog.geometry("900x700")
+        dialog.configure(bg=self.colors['bg'])
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Main frame
+        main_frame = tk.Frame(dialog, bg=self.colors['bg'], padx=20, pady=20)
+        main_frame.pack(fill='both', expand=True)
+
+        # Header
+        header_label = tk.Label(main_frame, text="Export Analysis Code",
+                                font=('Segoe UI', 14, 'bold'),
+                                bg=self.colors['bg'], fg=self.colors['text'])
+        header_label.pack(anchor='w')
+
+        desc_label = tk.Label(main_frame,
+                              text="Generate standalone Python code for reviewers and reproducibility.",
+                              font=('Segoe UI', 10),
+                              bg=self.colors['bg'], fg=self.colors['text_muted'])
+        desc_label.pack(anchor='w', pady=(0, 15))
+
+        # Options frame
+        options_frame = ttk.LabelFrame(main_frame, text="Export Options", padding="10")
+        options_frame.pack(fill='x', pady=(0, 10))
+
+        # Format selection
+        format_frame = tk.Frame(options_frame, bg=self.colors['panel'])
+        format_frame.pack(fill='x', pady=5)
+
+        tk.Label(format_frame, text="Output Format:", bg=self.colors['panel'],
+                 fg=self.colors['text']).pack(side='left')
+
+        format_var = tk.StringVar(value='script')
+        ttk.Radiobutton(format_frame, text="Python Script (.py)", variable=format_var,
+                        value='script').pack(side='left', padx=(10, 5))
+        ttk.Radiobutton(format_frame, text="Jupyter Notebook (.ipynb)", variable=format_var,
+                        value='notebook').pack(side='left', padx=5)
+
+        # Include options
+        include_frame = tk.Frame(options_frame, bg=self.colors['panel'])
+        include_frame.pack(fill='x', pady=5)
+
+        include_viz_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(include_frame, text="Include visualization code (matplotlib)",
+                        variable=include_viz_var).pack(anchor='w')
+
+        include_pred_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(include_frame, text="Include prediction template for new data",
+                        variable=include_pred_var).pack(anchor='w')
+
+        # Preview frame
+        preview_frame = ttk.LabelFrame(main_frame, text="Code Preview", padding="10")
+        preview_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        preview_text = tk.Text(preview_frame, height=20, width=100, font=('Consolas', 9),
+                               bg=self.colors['panel'], fg=self.colors['text'],
+                               wrap=tk.NONE, relief='flat', borderwidth=0)
+        preview_scrollbar_y = ttk.Scrollbar(preview_frame, orient='vertical', command=preview_text.yview)
+        preview_scrollbar_x = ttk.Scrollbar(preview_frame, orient='horizontal', command=preview_text.xview)
+        preview_text.configure(yscrollcommand=preview_scrollbar_y.set, xscrollcommand=preview_scrollbar_x.set)
+
+        preview_scrollbar_y.pack(side='right', fill='y')
+        preview_scrollbar_x.pack(side='bottom', fill='x')
+        preview_text.pack(fill='both', expand=True)
+
+        # Status label
+        status_label = tk.Label(main_frame, text="", font=('Segoe UI', 9),
+                                bg=self.colors['bg'], fg=self.colors['accent'])
+        status_label.pack(anchor='w', pady=(0, 5))
+
+        def generate_preview():
+            """Generate code preview."""
+            try:
+                from spectral_predict.code_generator import CodeGenerator, ExportOptions
+
+                # Build model config from refined model data
+                model_config = {
+                    'model_name': self.refined_config['model_name'],
+                    'preprocessing': self.refined_config['preprocessing'],
+                    'target_name': self.refined_config.get('target_name', 'target'),
+                    'task_type': self.refined_config['task_type'],
+                    'params': self.refined_config.get('params', {}),
+                    'metrics': {
+                        'RMSE': self.refined_performance.get('rmse_mean'),
+                        'R2': self.refined_performance.get('r2_mean'),
+                    } if self.refined_config['task_type'] == 'regression' else {
+                        'Accuracy': self.refined_performance.get('accuracy_mean'),
+                        'F1': self.refined_performance.get('f1_mean'),
+                    },
+                    'variable_indices': None,  # TODO: Add variable selection support
+                    'wavelengths': self.refined_wavelengths,
+                    'cv_folds': self.refined_config.get('cv_folds', 5),
+                }
+
+                options = ExportOptions(
+                    include_visualization=include_viz_var.get(),
+                    include_prediction_template=include_pred_var.get(),
+                    format=format_var.get(),
+                    target_column=self.refined_config.get('target_name', 'target')
+                )
+
+                generator = CodeGenerator(model_config, options)
+
+                if format_var.get() == 'notebook':
+                    notebook = generator.generate_notebook()
+                    n_cells = len(notebook['cells'])
+                    code = f"# Jupyter Notebook Generated\n# Cells: {n_cells}\n\n"
+                    for i, cell in enumerate(notebook['cells'][:8]):
+                        cell_type = cell['cell_type']
+                        source = ''.join(cell.get('source', ['']))[:80]
+                        code += f"# [{i+1}] {cell_type}: {source}...\n"
+                    if n_cells > 8:
+                        code += f"# ... and {n_cells - 8} more cells\n"
+                    code += "\n# Click 'Export to File' to save the complete notebook"
+                else:
+                    code = generator.generate_script()
+
+                preview_text.config(state='normal')
+                preview_text.delete('1.0', tk.END)
+                preview_text.insert('1.0', code)
+                preview_text.config(state='disabled')
+                status_label.config(text=f"Preview generated ({len(code)} characters)", fg=self.colors['accent'])
+
+            except Exception as e:
+                import traceback
+                preview_text.config(state='normal')
+                preview_text.delete('1.0', tk.END)
+                preview_text.insert('1.0', f"# Error generating code:\n# {str(e)}\n\n{traceback.format_exc()}")
+                preview_text.config(state='disabled')
+                status_label.config(text=f"Error: {str(e)}", fg='red')
+
+        def export_to_file():
+            """Export code to file."""
+            try:
+                from spectral_predict.code_generator import CodeGenerator, ExportOptions
+                from datetime import datetime
+
+                model_config = {
+                    'model_name': self.refined_config['model_name'],
+                    'preprocessing': self.refined_config['preprocessing'],
+                    'target_name': self.refined_config.get('target_name', 'target'),
+                    'task_type': self.refined_config['task_type'],
+                    'params': self.refined_config.get('params', {}),
+                    'metrics': {},
+                    'wavelengths': self.refined_wavelengths,
+                    'cv_folds': self.refined_config.get('cv_folds', 5),
+                }
+
+                options = ExportOptions(
+                    include_visualization=include_viz_var.get(),
+                    include_prediction_template=include_pred_var.get(),
+                    format=format_var.get(),
+                    target_column=self.refined_config.get('target_name', 'target')
+                )
+
+                generator = CodeGenerator(model_config, options)
+
+                # Determine file extension and default name
+                if format_var.get() == 'notebook':
+                    ext = '.ipynb'
+                    filetypes = [('Jupyter Notebook', '*.ipynb'), ('All files', '*.*')]
+                else:
+                    ext = '.py'
+                    filetypes = [('Python Script', '*.py'), ('All files', '*.*')]
+
+                default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+
+                filepath = filedialog.asksaveasfilename(
+                    defaultextension=ext,
+                    filetypes=filetypes,
+                    initialfile=default_name,
+                    title="Export Analysis Code"
+                )
+
+                if not filepath:
+                    return
+
+                if format_var.get() == 'notebook':
+                    generator.save_notebook(filepath)
+                else:
+                    generator.save_script(filepath)
+
+                status_label.config(text=f"Saved: {Path(filepath).name}", fg=self.colors['accent'])
+
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export:\n\n{str(e)}")
+                status_label.config(text=f"Error: {str(e)}", fg='red')
+
+        def copy_to_clipboard():
+            """Copy code to clipboard."""
+            code = preview_text.get('1.0', tk.END)
+            if code.strip():
+                dialog.clipboard_clear()
+                dialog.clipboard_append(code)
+                status_label.config(text="Copied to clipboard!", fg=self.colors['accent'])
+            else:
+                status_label.config(text="Nothing to copy - generate preview first", fg='orange')
+
+        # Button frame
+        button_frame = tk.Frame(main_frame, bg=self.colors['bg'])
+        button_frame.pack(fill='x')
+
+        generate_btn = self._create_accent_button(button_frame, text="Generate Preview",
+                                                   command=generate_preview)
+        generate_btn.pack(side='left', padx=(0, 10))
+
+        export_btn = self._create_accent_button(button_frame, text="Export to File",
+                                                 command=export_to_file)
+        export_btn.pack(side='left', padx=(0, 10))
+
+        copy_btn = ttk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard)
+        copy_btn.pack(side='left', padx=(0, 10))
+
+        close_btn = ttk.Button(button_frame, text="Close", command=dialog.destroy)
+        close_btn.pack(side='right')
+
+        # Generate initial preview
+        dialog.after(100, generate_preview)
 
     def _format_wavelengths_as_spec(self, wavelengths):
         """
