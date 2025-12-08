@@ -87,15 +87,16 @@ class ColumnConfigDialog:
         elif not meta_cols:
             meta_text = "None detected"
 
-        # Create modal dialog
+        # Create modal dialog - autosize to fit all content without scrolling
         with dpg.window(
             label="Configure Columns",
             tag=self._dialog_id,
             modal=True,
-            width=500,
-            height=450,
-            pos=[550, 250],
-            no_resize=True,
+            width=520,
+            autosize=True,
+            pos=[500, 200],
+            no_resize=False,
+            no_scrollbar=True,
             on_close=self._on_cancel
         ):
             dpg.add_text("Configure how your data should be interpreted:")
@@ -132,23 +133,25 @@ class ColumnConfigDialog:
 
             with dpg.group(horizontal=True):
                 dpg.add_text("Metadata columns:", color=COLORS["text_muted"])
-                dpg.add_text(meta_text)
+                dpg.add_text(meta_text, wrap=350)
 
-            dpg.add_spacer(height=30)
+            dpg.add_spacer(height=40)
 
-            # Buttons
+            # Buttons - ensure they have enough space
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Cancel",
                     callback=self._on_cancel,
-                    width=100
+                    width=120
                 )
-                dpg.add_spacer(width=-1)
+                dpg.add_spacer(width=20)
                 dpg.add_button(
                     label="Load Data",
                     callback=self._on_confirm,
-                    width=120
+                    width=140
                 )
+
+            dpg.add_spacer(height=20)
 
     def _on_confirm(self, sender=None, app_data=None):
         """Handle Load Data button click."""

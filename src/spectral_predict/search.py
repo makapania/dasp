@@ -23,7 +23,7 @@ from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result
 from .regions import create_region_subsets, format_region_report
-from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection
+from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
 
 
@@ -280,7 +280,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls']  # All methods now functional
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars']  # All methods now functional
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # Warn about unimplemented methods
@@ -402,6 +402,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             'snv': True,
             'sg1': True,
             'sg2': True,
+            'sg3': False,  # Higher-order derivatives not default
+            'sg4': False,  # Higher-order derivatives not default
             'deriv_snv': True
         }
 
@@ -537,6 +539,72 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     "deriv": 2,
                     "window": window,
                     "polyorder": 3,
+                    "interference": interference_to_add
+                })
+
+    if preprocessing_methods.get('sg3', False):
+        # 3rd derivative only
+        for window in window_sizes:
+            preprocess_configs.append({
+                "name": "deriv",
+                "deriv": 3,
+                "window": window,
+                "polyorder": 4,
+                "interference": interference_to_add
+            })
+
+        # If SNV is also selected, add SNV → derivative combination
+        if preprocessing_methods.get('snv', False):
+            for window in window_sizes:
+                preprocess_configs.append({
+                    "name": "snv_deriv",
+                    "deriv": 3,
+                    "window": window,
+                    "polyorder": 4,
+                    "interference": interference_to_add
+                })
+
+        # If deriv_snv is selected, add derivative → SNV combination for 3rd deriv
+        if preprocessing_methods.get('deriv_snv', False):
+            for window in window_sizes:
+                preprocess_configs.append({
+                    "name": "deriv_snv",
+                    "deriv": 3,
+                    "window": window,
+                    "polyorder": 4,
+                    "interference": interference_to_add
+                })
+
+    if preprocessing_methods.get('sg4', False):
+        # 4th derivative only
+        for window in window_sizes:
+            preprocess_configs.append({
+                "name": "deriv",
+                "deriv": 4,
+                "window": window,
+                "polyorder": 5,
+                "interference": interference_to_add
+            })
+
+        # If SNV is also selected, add SNV → derivative combination
+        if preprocessing_methods.get('snv', False):
+            for window in window_sizes:
+                preprocess_configs.append({
+                    "name": "snv_deriv",
+                    "deriv": 4,
+                    "window": window,
+                    "polyorder": 5,
+                    "interference": interference_to_add
+                })
+
+        # If deriv_snv is selected, add derivative → SNV combination for 4th deriv
+        if preprocessing_methods.get('deriv_snv', False):
+            for window in window_sizes:
+                preprocess_configs.append({
+                    "name": "deriv_snv",
+                    "deriv": 4,
+                    "window": window,
+                    "polyorder": 5,
                     "interference": interference_to_add
                 })
 
@@ -851,6 +919,18 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         n_intervals=ipls_n_intervals,
                                         n_components=uve_n_components,
                                         cv_folds=folds,
+                                        random_state=random_state
+                                    )
+
+                                elif varsel_method == 'cars':
+                                    # CARS: Competitive Adaptive Reweighted Sampling
+                                    # Monte Carlo-based method with exponential decay
+                                    importances = cars_selection(
+                                        X_transformed_varsel, y_np,
+                                        n_iterations=50,
+                                        pls_components=uve_n_components,
+                                        cv_folds=folds,
+                                        monte_carlo_samples=80,
                                         random_state=random_state
                                     )
 
@@ -1886,15 +1966,19 @@ def _run_single_config(
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc
 
-    # Save all_vars for ALL subset models (not just those with importance)
-    # This ensures Model Development can reconstruct the exact subset used
+    # Save all_vars for ALL models (including full spectrum)
+    # This ensures Model Development can reconstruct the exact wavelengths used
+    # CRITICAL: For full models, 'wavelengths' is already filtered by wl_min/wl_max
+    # so we must save it to allow exact replication
     if subset_tag != "full" and subset_indices is not None:
-        # Save ALL wavelengths used in the subset model
+        # Subset model: save only the subset wavelengths
         subset_wavelengths = wavelengths[subset_indices]
         all_vars_str = ','.join([f"{w:.1f}" for w in subset_wavelengths])
         result['all_vars'] = all_vars_str
     else:
-        result['all_vars'] = 'N/A'
+        # Full model: save ALL wavelengths used (may be filtered by wl_min/wl_max)
+        all_vars_str = ','.join([f"{w:.1f}" for w in wavelengths])
+        result['all_vars'] = all_vars_str
 
     # Continue with feature importance extraction if model was already fitted above
     if supports_feature_importance(model_name) and fitted_model_for_importance is not None:

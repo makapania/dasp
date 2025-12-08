@@ -1,17 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(timeout 120 python:*)",
-      "Bash(dir /s /b C:Userssponheimgitdaspspectral_predict*.py)",
-      "Bash(dir C:Userssponheimgitdasp /b)",
-      "Bash(timeout 90 python:*)",
-      "Bash(timeout 30 python:*)",
-      "Bash(timeout 60 python:*)",
-      "Bash(dir /s /b C:Userssponheimgitdaspspectral_predict_v3*.py)",
-      "Bash(python -c:*)",
-      "Bash(pip install:*)",
-      "Bash(cd:*)",
-      "Bash(git add:*)"
+      "Bash(dir:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nchore: Major cleanup - archive old docs and remove v2\n\n- Move obsolete documentation to archive/pre-2025-12/\n- Move v2 (abandoned) to archive/v2-abandoned/\n- Remove old test files and debug scripts\n- Clean up root directory clutter\n- Update v1 and v3 code with recent improvements\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")"
     ],
     "deny": [],
     "ask": []

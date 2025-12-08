@@ -7,7 +7,8 @@ the most informative spectral variables for prediction.
 
 import numpy as np
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
+from sklearn.metrics import mean_squared_error, r2_score
 
 
 def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):
@@ -777,3 +778,689 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
     print(f"Final selection: {n_final_selected} variables")
 
     return combined_importances
+
+
+def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
+                   monte_carlo_samples=80, random_state=42):
+    """
+    Competitive Adaptive Reweighted Sampling (CARS) for variable selection.
+
+    CARS is a Monte Carlo-based method that uses an adaptive reweighted
+    sampling (ARS) strategy combined with exponential decay to select
+    optimal variables. It balances exploration and exploitation.
+
+    Algorithm:
+    1. Initialize all variables with equal weights
+    2. For each Monte Carlo iteration:
+       - Sample variables based on current weights
+       - Build PLS model and evaluate via cross-validation
+       - Update weights based on PLS regression coefficients
+       - Apply exponential decay to force elimination
+    3. Select variables from iteration with lowest RMSECV
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Preprocessed spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values (required for CARS)
+    n_iterations : int, default=50
+        Number of Monte Carlo sampling iterations
+    pls_components : int, default=5
+        Number of PLS components to use in evaluation
+    cv_folds : int, default=5
+        Number of cross-validation folds
+    monte_carlo_samples : int, default=80
+        Percentage of variables to sample in each iteration (as integer)
+    random_state : int, default=42
+        Random seed for reproducibility
+
+    Returns
+    -------
+    importances : np.ndarray
+        Variable importance scores (higher = more important)
+        Variables selected in the best iteration get higher scores
+        Shape: (n_features,)
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from spectral_predict.variable_selection import cars_selection
+    >>>
+    >>> # Generate sample data
+    >>> X = np.random.randn(50, 100)  # 50 samples, 100 variables
+    >>> y = np.random.randn(50)
+    >>>
+    >>> # Run CARS variable selection
+    >>> importances = cars_selection(X, y, n_iterations=50)
+    >>>
+    >>> # Get top variables
+    >>> top_indices = np.argsort(importances)[-50:]
+    >>> X_selected = X[:, top_indices]
+
+    References
+    ----------
+    Li, H. D., et al. (2009). "Key wavelengths screening using competitive
+    adaptive reweighted sampling method for multivariate calibration."
+    Analytica Chimica Acta, 648(1), 77-84.
+
+    Notes
+    -----
+    - CARS balances variable selection with prediction performance
+    - Computationally more expensive than SPA (Monte Carlo iterations)
+    - Often produces very compact variable sets (20-50 variables)
+    - Requires target values (supervised selection)
+    - Performance depends on good PLS component selection
+    """
+    # Set random seed
+    rng = np.random.RandomState(random_state)
+
+    # Convert inputs to numpy arrays
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+
+    n_samples, n_variables = X.shape
+
+    # Validate inputs
+    if X.shape[0] != y.shape[0]:
+        raise ValueError("X and y must have same number of samples")
+    if pls_components > min(n_samples, n_variables):
+        pls_components = min(n_samples // 2, n_variables // 2, 10)
+        print(f"Warning: Adjusted pls_components to {pls_components}")
+
+    # Adjust cv_folds if needed
+    if n_samples < cv_folds:
+        cv_folds = max(2, n_samples // 2)
+        print(f"Warning: Adjusted cv_folds to {cv_folds}")
+
+    # Initialize weights
+    weights = np.ones(n_variables)
+
+    # Storage for history
+    rmsecv_history = []
+    n_selected_history = []
+    selected_vars_history = []
+
+    print(f"CARS: Running {n_iterations} Monte Carlo iterations...")
+
+    # Monte Carlo iterations
+    for iteration in range(n_iterations):
+        # Exponential decay function for forcing removal
+        # r(k) = a * exp(-k/b) where k is iteration
+        r = 0.8 * np.exp(-2 * iteration / n_iterations)
+
+        # Number of variables to sample in this iteration
+        n_sample = max(int(n_variables * (monte_carlo_samples / 100) * r), pls_components + 1)
+        n_sample = min(n_sample, n_variables)
+
+        # Sample variables based on current weights
+        # Higher weight = higher probability of selection
+        probabilities = weights / weights.sum()
+        selected_vars = rng.choice(
+            n_variables,
+            size=n_sample,
+            replace=False,
+            p=probabilities
+        )
+        selected_vars = np.sort(selected_vars)
+
+        X_subset = X[:, selected_vars]
+
+        # Build PLS model and evaluate
+        try:
+            n_comp = min(pls_components, n_sample - 1, X_subset.shape[0] - 1)
+            pls = PLSRegression(n_components=n_comp)
+
+            # Cross-validation
+            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+            cv_errors = []
+
+            for train_idx, val_idx in kf.split(X_subset):
+                X_train, X_val = X_subset[train_idx], X_subset[val_idx]
+                y_train, y_val = y[train_idx], y[val_idx]
+
+                pls.fit(X_train, y_train)
+                y_pred = pls.predict(X_val)
+                mse = np.mean((y_val - y_pred.ravel()) ** 2)
+                cv_errors.append(mse)
+
+            rmsecv = np.sqrt(np.mean(cv_errors))
+
+            # Fit on full subset to get coefficients
+            pls.fit(X_subset, y)
+
+            # Update weights based on PLS coefficients
+            # Larger absolute coefficient = more important
+            coef = pls.coef_.ravel()
+            new_weights = np.abs(coef)
+
+            # Update only the sampled variables' weights
+            temp_weights = weights.copy()
+            temp_weights[selected_vars] = new_weights
+            weights = temp_weights
+
+            # Normalize weights
+            weights = weights / (weights.sum() + 1e-10)
+
+        except Exception as e:
+            # If PLS fails (e.g., singular matrix), skip this iteration
+            rmsecv = np.inf
+            print(f"  Iteration {iteration+1}/{n_iterations}: Failed - {str(e)[:50]}")
+
+        # Record history
+        rmsecv_history.append(rmsecv)
+        n_selected_history.append(n_sample)
+        selected_vars_history.append(selected_vars)
+
+        if iteration % 10 == 0 and rmsecv != np.inf:
+            print(f"  Iteration {iteration+1}/{n_iterations}: {n_sample} vars, RMSECV={rmsecv:.4f}")
+
+    # Find iteration with lowest RMSECV
+    rmsecv_history = np.array(rmsecv_history)
+    valid_iterations = ~np.isinf(rmsecv_history)
+
+    if not np.any(valid_iterations):
+        raise RuntimeError("CARS failed: no valid iterations")
+
+    best_iteration = np.argmin(rmsecv_history[valid_iterations])
+    best_iteration_idx = np.where(valid_iterations)[0][best_iteration]
+
+    selected_indices = selected_vars_history[best_iteration_idx]
+    best_rmsecv = rmsecv_history[best_iteration_idx]
+
+    # Create importance scores
+    # Variables selected in best iteration get scores based on their selection order
+    importances = np.zeros(n_variables)
+    for rank, var_idx in enumerate(selected_indices):
+        # Assign scores: first selected gets n_sample, last gets 1
+        importances[var_idx] = len(selected_indices) - rank
+
+    print(f"\nCARS complete:")
+    print(f"  Best iteration: {best_iteration_idx+1}/{n_iterations}")
+    print(f"  Selected {len(selected_indices)} variables")
+    print(f"  Best RMSECV: {best_rmsecv:.4f}")
+
+    return importances
+
+
+# =============================================================================
+# Enhanced iPLS Helper Functions
+# =============================================================================
+
+def _create_intervals(wavelengths, n_intervals):
+    """
+    Create equal-width intervals based on wavelength range.
+
+    Parameters
+    ----------
+    wavelengths : np.ndarray
+        Wavelength values for each feature
+    n_intervals : int
+        Number of intervals to create
+
+    Returns
+    -------
+    intervals : list of tuple
+        Each tuple contains (start_idx, end_idx, start_wl, end_wl)
+    """
+    wavelengths = np.asarray(wavelengths)
+    n_features = len(wavelengths)
+
+    # Calculate interval size in features
+    interval_size = n_features // n_intervals
+
+    intervals = []
+    for i in range(n_intervals):
+        start_idx = i * interval_size
+        if i == n_intervals - 1:
+            end_idx = n_features  # Last interval gets remaining features
+        else:
+            end_idx = (i + 1) * interval_size
+
+        if end_idx > start_idx:
+            start_wl = wavelengths[start_idx]
+            end_wl = wavelengths[end_idx - 1]  # -1 because end_idx is exclusive
+            intervals.append((start_idx, end_idx, start_wl, end_wl))
+
+    return intervals
+
+
+def _evaluate_interval_pls(X, y, cv_folds):
+    """
+    Evaluate PLS model on given variables using cross-validation.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data subset (n_samples, n_features_subset)
+    y : np.ndarray
+        Target values
+    cv_folds : int
+        Number of cross-validation folds
+
+    Returns
+    -------
+    rmsecv : float
+        Cross-validated RMSE
+    r2 : float
+        Cross-validated R²
+    """
+    n_samples, n_features = X.shape
+
+    # Auto-select number of components
+    n_components = min(10, n_features // 2, n_samples // 2)
+    n_components = max(1, n_components)
+
+    try:
+        pls = PLSRegression(n_components=n_components, scale=False)
+        y_pred = cross_val_predict(pls, X, y, cv=cv_folds)
+
+        rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+        r2 = r2_score(y, y_pred)
+
+        return rmsecv, r2
+    except Exception:
+        # Return poor scores on failure
+        return np.inf, -1.0
+
+
+def _get_combined_indices(intervals, interval_ids):
+    """
+    Get combined variable indices for selected intervals.
+
+    Parameters
+    ----------
+    intervals : list of tuple
+        Interval definitions from _create_intervals()
+    interval_ids : list of int
+        Indices of intervals to combine
+
+    Returns
+    -------
+    indices : np.ndarray
+        Combined variable indices (sorted)
+    """
+    indices = []
+    for interval_id in sorted(interval_ids):
+        start_idx, end_idx, _, _ = intervals[interval_id]
+        indices.extend(range(start_idx, end_idx))
+    return np.array(indices, dtype=int)
+
+
+def _get_wavelength_ranges(intervals, interval_ids):
+    """
+    Get wavelength ranges for selected intervals.
+
+    Parameters
+    ----------
+    intervals : list of tuple
+        Interval definitions from _create_intervals()
+    interval_ids : list of int
+        Indices of selected intervals
+
+    Returns
+    -------
+    ranges : list of tuple
+        Each tuple contains (start_wl, end_wl)
+    """
+    ranges = []
+    for interval_id in sorted(interval_ids):
+        _, _, start_wl, end_wl = intervals[interval_id]
+        ranges.append((start_wl, end_wl))
+    return ranges
+
+
+# =============================================================================
+# Enhanced iPLS Functions
+# =============================================================================
+
+def ipls_forward(X, y, wavelengths, n_intervals=20, max_combine=5, cv_folds=5, random_state=42):
+    """
+    Forward Interval PLS (iPLS) - iteratively adds best intervals.
+
+    This implements the proper iPLS algorithm from Nørgaard et al. (2000).
+    The spectrum is divided into intervals, each evaluated independently,
+    then intervals are iteratively combined to find the best subset.
+
+    Algorithm:
+    1. Divide spectrum into n_intervals equal segments
+    2. Evaluate each interval independently using PLS with CV
+    3. Rank intervals by RMSECV (lower = better)
+    4. Forward selection: start with best, iteratively add intervals that improve model
+    5. Return all individual intervals + best combinations
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    wavelengths : np.ndarray
+        Wavelength values for each feature (used for labeling)
+    n_intervals : int, default=20
+        Number of intervals to divide spectrum into
+    max_combine : int, default=5
+        Maximum number of intervals to combine in forward selection
+    cv_folds : int, default=5
+        Number of CV folds for evaluation
+    random_state : int, default=42
+        Random seed for reproducibility
+
+    Returns
+    -------
+    subsets : list of dict
+        Each dict contains:
+        - 'indices': np.ndarray of variable indices
+        - 'tag': str like 'fwd_iPLS_1400-1500nm' or 'fwd_iPLS_2int'
+        - 'rmsecv': float (CV RMSE)
+        - 'r2': float (CV R²)
+        - 'n_intervals': int (number of intervals in this subset)
+        - 'interval_ids': list of interval indices
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from spectral_predict.variable_selection import ipls_forward
+    >>>
+    >>> # Generate sample spectral data
+    >>> X = np.random.randn(50, 200)  # 50 samples, 200 wavelengths
+    >>> y = np.random.randn(50)
+    >>> wavelengths = np.linspace(1000, 2500, 200)
+    >>>
+    >>> # Run forward iPLS
+    >>> subsets = ipls_forward(X, y, wavelengths, n_intervals=20, max_combine=5)
+    >>>
+    >>> # Get best subset (lowest RMSECV)
+    >>> best_subset = min(subsets, key=lambda s: s['rmsecv'])
+    >>> X_selected = X[:, best_subset['indices']]
+
+    References
+    ----------
+    Nørgaard, L., et al. (2000). "Interval Partial Least-Squares Regression (iPLS)."
+    Applied Spectroscopy 54(3): 413-419.
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    wavelengths = np.asarray(wavelengths)
+
+    n_samples, n_features = X.shape
+
+    # Adjust cv_folds if needed
+    if n_samples < cv_folds:
+        cv_folds = max(2, n_samples // 2)
+
+    # Create intervals
+    intervals = _create_intervals(wavelengths, n_intervals)
+
+    print(f"Forward iPLS: Evaluating {len(intervals)} intervals...")
+
+    # Step 1: Evaluate each interval independently
+    interval_scores = []
+    for i, interval in enumerate(intervals):
+        start_idx, end_idx, start_wl, end_wl = interval
+        X_interval = X[:, start_idx:end_idx]
+
+        rmsecv, r2 = _evaluate_interval_pls(X_interval, y, cv_folds)
+
+        interval_scores.append({
+            'interval_id': i,
+            'start_idx': start_idx,
+            'end_idx': end_idx,
+            'start_wl': start_wl,
+            'end_wl': end_wl,
+            'rmsecv': rmsecv,
+            'r2': r2
+        })
+
+        print(f"  Interval {i+1}/{len(intervals)} ({start_wl:.0f}-{end_wl:.0f}nm): "
+              f"RMSECV={rmsecv:.4f}, R²={r2:.4f}")
+
+    # Sort intervals by RMSECV (lower = better)
+    interval_scores.sort(key=lambda x: x['rmsecv'])
+
+    # Build result list
+    subsets = []
+
+    # Add all individual intervals (ranked by RMSECV)
+    for rank, interval in enumerate(interval_scores):
+        indices = np.arange(interval['start_idx'], interval['end_idx'])
+        tag = f"fwd_iPLS_{interval['start_wl']:.0f}-{interval['end_wl']:.0f}nm"
+
+        subsets.append({
+            'indices': indices,
+            'tag': tag,
+            'rmsecv': interval['rmsecv'],
+            'r2': interval['r2'],
+            'n_intervals': 1,
+            'interval_ids': [interval['interval_id']],
+            'rank': rank + 1
+        })
+
+    # Step 2: Forward selection - combine intervals
+    print(f"\nForward selection (combining up to {max_combine} intervals)...")
+
+    # Start with best single interval
+    selected_intervals = [interval_scores[0]['interval_id']]
+    best_rmsecv = interval_scores[0]['rmsecv']
+
+    for n_selected in range(2, min(max_combine + 1, len(intervals) + 1)):
+        # Try adding each remaining interval
+        best_addition = None
+        best_new_rmsecv = best_rmsecv
+
+        remaining = [s for s in interval_scores if s['interval_id'] not in selected_intervals]
+
+        for candidate in remaining:
+            # Combine indices
+            test_intervals = selected_intervals + [candidate['interval_id']]
+            combined_indices = _get_combined_indices(intervals, test_intervals)
+
+            X_combined = X[:, combined_indices]
+            rmsecv, r2 = _evaluate_interval_pls(X_combined, y, cv_folds)
+
+            if rmsecv < best_new_rmsecv:
+                best_new_rmsecv = rmsecv
+                best_addition = {
+                    'interval_id': candidate['interval_id'],
+                    'rmsecv': rmsecv,
+                    'r2': r2,
+                    'test_intervals': test_intervals
+                }
+
+        if best_addition is None:
+            # No improvement, stop
+            print(f"  {n_selected} intervals: No improvement, stopping")
+            break
+
+        # Add best interval
+        selected_intervals.append(best_addition['interval_id'])
+        best_rmsecv = best_addition['rmsecv']
+
+        # Create subset entry
+        combined_indices = _get_combined_indices(intervals, selected_intervals)
+        wl_ranges = _get_wavelength_ranges(intervals, selected_intervals)
+
+        if len(wl_ranges) <= 3:
+            wl_str = '+'.join([f"{s:.0f}-{e:.0f}" for s, e in wl_ranges])
+            tag = f"fwd_iPLS_{n_selected}int_{wl_str}nm"
+        else:
+            tag = f"fwd_iPLS_{n_selected}int"
+
+        subsets.append({
+            'indices': combined_indices,
+            'tag': tag,
+            'rmsecv': best_addition['rmsecv'],
+            'r2': best_addition['r2'],
+            'n_intervals': n_selected,
+            'interval_ids': selected_intervals.copy()
+        })
+
+        print(f"  {n_selected} intervals: RMSECV={best_addition['rmsecv']:.4f}, "
+              f"R²={best_addition['r2']:.4f}")
+
+    print(f"\nForward iPLS complete: {len(subsets)} subsets generated")
+    return subsets
+
+
+def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42):
+    """
+    Backward Interval PLS (biPLS) - iteratively removes worst intervals.
+
+    This implements backward interval PLS from Leardi & Nørgaard (2004).
+    Starts with all intervals and iteratively removes the worst until
+    no further improvement is observed.
+
+    Algorithm:
+    1. Divide spectrum into n_intervals equal segments
+    2. Start with all intervals included
+    3. Iteratively remove the interval whose removal most improves RMSECV
+    4. Stop when removal no longer improves the model
+    5. Return progression of removals
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    wavelengths : np.ndarray
+        Wavelength values for each feature
+    n_intervals : int, default=20
+        Number of intervals to divide spectrum into
+    cv_folds : int, default=5
+        Number of CV folds
+    random_state : int, default=42
+        Random seed
+
+    Returns
+    -------
+    subsets : list of dict
+        Each dict contains:
+        - 'indices': np.ndarray of variable indices
+        - 'tag': str like 'bwd_iPLS_18int' or 'bwd_iPLS_final'
+        - 'rmsecv': float
+        - 'r2': float
+        - 'n_intervals': int
+        - 'interval_ids': list of remaining interval indices
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from spectral_predict.variable_selection import ipls_backward
+    >>>
+    >>> # Generate sample spectral data
+    >>> X = np.random.randn(50, 200)  # 50 samples, 200 wavelengths
+    >>> y = np.random.randn(50)
+    >>> wavelengths = np.linspace(1000, 2500, 200)
+    >>>
+    >>> # Run backward iPLS
+    >>> subsets = ipls_backward(X, y, wavelengths, n_intervals=20)
+    >>>
+    >>> # Get final optimized subset
+    >>> optimal = [s for s in subsets if s.get('is_optimal', False)]
+
+    References
+    ----------
+    Leardi, R. & Nørgaard, L. (2004). "Sequential application of backward interval
+    PLS and genetic algorithms for the selection of relevant spectral regions."
+    Journal of Chemometrics.
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    wavelengths = np.asarray(wavelengths)
+
+    n_samples, n_features = X.shape
+
+    if n_samples < cv_folds:
+        cv_folds = max(2, n_samples // 2)
+
+    # Create intervals
+    intervals = _create_intervals(wavelengths, n_intervals)
+
+    print(f"Backward iPLS: Starting with {len(intervals)} intervals...")
+
+    # Start with all intervals
+    remaining_intervals = list(range(len(intervals)))
+
+    # Evaluate full model
+    full_indices = _get_combined_indices(intervals, remaining_intervals)
+    best_rmsecv, best_r2 = _evaluate_interval_pls(X[:, full_indices], y, cv_folds)
+
+    print(f"  Full spectrum ({len(intervals)} intervals): RMSECV={best_rmsecv:.4f}, R²={best_r2:.4f}")
+
+    subsets = []
+
+    # Iteratively remove worst interval
+    while len(remaining_intervals) > 1:
+        best_removal = None
+        best_new_rmsecv = best_rmsecv
+
+        for interval_id in remaining_intervals:
+            # Try removing this interval
+            test_intervals = [i for i in remaining_intervals if i != interval_id]
+            test_indices = _get_combined_indices(intervals, test_intervals)
+
+            rmsecv, r2 = _evaluate_interval_pls(X[:, test_indices], y, cv_folds)
+
+            if rmsecv < best_new_rmsecv:
+                best_new_rmsecv = rmsecv
+                best_removal = {
+                    'removed_id': interval_id,
+                    'remaining': test_intervals,
+                    'rmsecv': rmsecv,
+                    'r2': r2
+                }
+
+        if best_removal is None:
+            # No improvement from any removal
+            print(f"  {len(remaining_intervals)} intervals: No improvement from removal, stopping")
+            break
+
+        # Apply removal
+        removed_interval = intervals[best_removal['removed_id']]
+        remaining_intervals = best_removal['remaining']
+        best_rmsecv = best_removal['rmsecv']
+
+        print(f"  Removed interval {removed_interval[2]:.0f}-{removed_interval[3]:.0f}nm -> "
+              f"{len(remaining_intervals)} intervals: RMSECV={best_removal['rmsecv']:.4f}")
+
+        # Create subset entry
+        combined_indices = _get_combined_indices(intervals, remaining_intervals)
+
+        tag = f"bwd_iPLS_{len(remaining_intervals)}int"
+
+        subsets.append({
+            'indices': combined_indices,
+            'tag': tag,
+            'rmsecv': best_removal['rmsecv'],
+            'r2': best_removal['r2'],
+            'n_intervals': len(remaining_intervals),
+            'interval_ids': remaining_intervals.copy()
+        })
+
+    # Add final optimized selection with wavelength info
+    if len(subsets) > 0:
+        final = subsets[-1]
+        wl_ranges = _get_wavelength_ranges(intervals, final['interval_ids'])
+
+        # Create descriptive final tag
+        if len(wl_ranges) <= 3:
+            wl_str = '+'.join([f"{s:.0f}-{e:.0f}" for s, e in wl_ranges])
+            final_tag = f"bwd_iPLS_final_{wl_str}nm"
+        else:
+            min_wl = min(s for s, e in wl_ranges)
+            max_wl = max(e for s, e in wl_ranges)
+            final_tag = f"bwd_iPLS_final_{min_wl:.0f}-{max_wl:.0f}nm"
+
+        subsets.append({
+            'indices': final['indices'].copy(),
+            'tag': final_tag,
+            'rmsecv': final['rmsecv'],
+            'r2': final['r2'],
+            'n_intervals': final['n_intervals'],
+            'interval_ids': final['interval_ids'].copy(),
+            'is_optimal': True
+        })
+
+    print(f"\nBackward iPLS complete: {len(subsets)} subsets generated")
+    return subsets

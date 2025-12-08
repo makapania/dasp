@@ -20,9 +20,32 @@ from .model_config import (
     get_variable_selection_config,
 )
 from .models import get_model, get_feature_importances
-from .preprocess import SNV, SavgolDerivative
+from .preprocess import SNV, SavgolDerivative, Absorbance
 from .regions import create_region_subsets
+# Import baseline correction classes
+try:
+    from .baseline import BaselinePolynomial, BaselineAsLS, BaselineAirPLS, SavgolSmooth
+    HAS_BASELINE = True
+except ImportError:
+    HAS_BASELINE = False
 from .variable_selection import ipls_forward as run_ipls_forward, ipls_backward as run_ipls_backward
+
+# Import Bayesian search components
+try:
+    from .bayesian_search import SearchMode, run_bayesian_search, HAS_OPTUNA
+except ImportError:
+    # Bayesian search not available
+    SearchMode = None
+    run_bayesian_search = None
+    HAS_OPTUNA = False
+
+# Import NSGA-II multi-objective search
+try:
+    from .nsga2_search import run_nsga2_search, pareto_to_dataframe, PYMOO_AVAILABLE
+except ImportError:
+    run_nsga2_search = None
+    pareto_to_dataframe = None
+    PYMOO_AVAILABLE = False
 
 
 def run_auto_search(
@@ -34,6 +57,9 @@ def run_auto_search(
     folds: int = 5,
     random_state: int = 42,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    # Search mode selection
+    search_mode: str = 'grid',
+    bayesian_n_trials: int = 50,
     # User-specified options (override tier defaults)
     preproc_methods: Optional[List[str]] = None,
     window_sizes: Optional[List[int]] = None,
@@ -49,6 +75,37 @@ def run_auto_search(
     ipls_backward: bool = True,
     pls_max_lv: Optional[int] = None,
     custom_models: Optional[List[str]] = None,
+    # Custom hyperparameter grids (override defaults)
+    custom_hyperparam_grids: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    # Wavelength range selection
+    wl_range_min: Optional[float] = None,
+    wl_range_max: Optional[float] = None,
+    # Data conversion
+    convert_absorbance: bool = False,
+    # Baseline correction
+    baseline_method: Optional[str] = None,
+    baseline_params: Optional[Dict[str, Any]] = None,
+    # Smoothing
+    enable_smoothing: bool = False,
+    smoothing_window: int = 11,
+    smoothing_order: int = 2,
+    # GA Preprocessing Optimization
+    ga_preprocess: bool = False,
+    ga_preprocess_population: int = 32,
+    ga_preprocess_generations: int = 50,
+    ga_preprocess_cv_folds: int = 5,
+    # GA-PLS Wavelength Selection
+    ga_pls: bool = False,
+    ga_pls_population: int = 64,
+    ga_pls_generations: int = 100,
+    ga_pls_n_runs: int = 5,
+    ga_pls_threshold: float = 0.6,
+    # NSGA-II Multi-Objective Optimization
+    nsga2_population: int = 50,
+    nsga2_generations: int = 100,
+    nsga2_min_wavelengths: int = 10,
+    # Combined GA Workflow
+    combined_ga_workflow: bool = False,
 ) -> pd.DataFrame:
     """
     Run automated model search with full preprocessing, variable selection,
@@ -72,6 +129,11 @@ def run_auto_search(
         Random seed for reproducibility
     progress_callback : callable, optional
         Called with progress updates: {'stage', 'message', 'current', 'total', 'best_score'}
+    search_mode : str, default='grid'
+        Search mode: 'grid' for exhaustive grid search or 'bayesian' for Optuna-based
+        Bayesian optimization. Bayesian search is faster for large hyperparameter spaces.
+    bayesian_n_trials : int, default=50
+        Number of trials for Bayesian optimization (only used if search_mode='bayesian')
     preproc_methods : list, optional
         Preprocessing methods to test (e.g., ['snv', 'deriv1', 'snv_deriv1'])
     window_sizes : list, optional
@@ -101,19 +163,58 @@ def run_auto_search(
     X = np.asarray(X)
     y = np.asarray(y)
 
+    # Apply absorbance conversion if requested (before any preprocessing)
+    if convert_absorbance:
+        if progress_callback:
+            progress_callback({'message': 'Converting to absorbance (log10(1/R))...', 'stage': 'conversion'})
+        X = Absorbance().fit_transform(X)
+
+    # Apply baseline correction if requested (after absorbance, before other preprocessing)
+    if baseline_method and HAS_BASELINE:
+        if progress_callback:
+            progress_callback({'message': f'Applying baseline correction ({baseline_method})...', 'stage': 'baseline'})
+        params = baseline_params or {}
+        if baseline_method.lower() == 'polynomial':
+            baseline_corrector = BaselinePolynomial(**params)
+        elif baseline_method.lower() == 'asls':
+            baseline_corrector = BaselineAsLS(**params)
+        elif baseline_method.lower() == 'airpls':
+            baseline_corrector = BaselineAirPLS(**params)
+        else:
+            baseline_corrector = None
+        if baseline_corrector is not None:
+            X = baseline_corrector.fit_transform(X)
+
+    # Apply smoothing if requested (after baseline, before other preprocessing)
+    if enable_smoothing and HAS_BASELINE:
+        if progress_callback:
+            progress_callback({'message': 'Applying Savitzky-Golay smoothing...', 'stage': 'smoothing'})
+        smoother = SavgolSmooth(window_length=smoothing_window, polyorder=smoothing_order)
+        X = smoother.fit_transform(X)
+
     # Get models from tier or use custom list
     if custom_models:
         models_to_test = custom_models
     else:
         models_to_test = get_tier_models(tier, task_type)
 
+    # Capture whether user explicitly requested variable selection for Bayesian mode
+    # (before defaults are applied for grid search)
+    user_requested_varsel = varsel_methods is not None and len(varsel_methods) > 0
+
     # Use user-specified options or defaults
     if preproc_methods is None:
         preproc_methods = ['snv', 'deriv1', 'deriv2', 'snv_deriv1']
+        print(f"[Search] Using default preprocessing: {preproc_methods}")
+    else:
+        print(f"[Search] Using user-specified preprocessing: {preproc_methods}")
     if window_sizes is None:
         window_sizes = [7, 19]
+        print(f"[Search] Using default window sizes: {window_sizes}")
+    else:
+        print(f"[Search] Using user-specified window sizes: {window_sizes}")
     if varsel_methods is None:
-        varsel_methods = ['importance', 'spa']
+        varsel_methods = ['importance', 'spa']  # Default for grid search
     if var_counts is None:
         var_counts = [20, 50, 100, 250]
 
@@ -134,6 +235,20 @@ def run_auto_search(
         'params': varsel_params or {},  # Method-specific parameters
     }
 
+    # GA-PLS convenience integration - add to varsel_methods if ga_pls=True
+    if ga_pls:
+        if 'ga_pls' not in varsel_config['methods']:
+            varsel_config['methods'].append('ga_pls')
+        # Set GA-PLS parameters
+        varsel_config['params']['ga_pls'] = {
+            'population_size': ga_pls_population,
+            'n_generations': ga_pls_generations,
+            'n_runs': ga_pls_n_runs,
+            'selection_threshold': ga_pls_threshold,
+        }
+        print(f"[GA-PLS] Enabled with pop={ga_pls_population}, gen={ga_pls_generations}, "
+              f"runs={ga_pls_n_runs}, threshold={ga_pls_threshold}")
+
     # iPLS config (handled as Phase 4, separate from generic variable selection)
     ipls_config = {
         'enabled': enable_ipls and wavelengths is not None and task_type == 'regression',
@@ -145,6 +260,261 @@ def run_auto_search(
     # Build preprocessing configurations
     preproc_configs = _build_preprocessing_configs(preproc_config)
 
+    # GA PREPROCESSING OPTIMIZATION - Find optimal preprocessing before search
+    if ga_preprocess:
+        print(f"[GA Preprocessing] Starting optimization (pop={ga_preprocess_population}, gen={ga_preprocess_generations})")
+        print(f"[GA Preprocessing] Exploring 10 preproc types, 17 window sizes, 4 baseline methods, 9 smoothing options")
+        try:
+            from .ga_preprocessing import optimize_preprocessing
+            GA_PREPROC_AVAILABLE = True
+        except ImportError:
+            GA_PREPROC_AVAILABLE = False
+
+        if GA_PREPROC_AVAILABLE:
+            if progress_callback:
+                progress_callback({
+                    'stage': 'ga_preprocessing',
+                    'message': 'Optimizing preprocessing with GA...',
+                    'current': 0,
+                    'total': ga_preprocess_generations
+                })
+
+            # Run GA preprocessing optimization
+            ga_result = optimize_preprocessing(
+                X, y,
+                population_size=ga_preprocess_population,
+                n_generations=ga_preprocess_generations,
+                cv_folds=ga_preprocess_cv_folds,
+                random_state=random_state,
+                verbose=1
+            )
+
+            # Use only the optimized preprocessing config
+            preproc_configs = [(ga_result['best_name'], ga_result['best_transform'])]
+
+            if progress_callback:
+                progress_callback({
+                    'stage': 'ga_preprocessing',
+                    'message': f"GA Preprocessing: {ga_result['best_config']} (RMSECV={ga_result['best_rmsecv']:.4f})",
+                    'current': ga_preprocess_generations,
+                    'total': ga_preprocess_generations
+                })
+
+            print(f"[GA Preprocessing] Using optimized config: {ga_result['best_name']}")
+        else:
+            print("[GA Preprocessing] Module not available, using standard preprocessing")
+
+    # COMBINED GA WORKFLOW - Run GA-PLS on preprocessed data once
+    # This is more efficient than running GA-PLS during each model configuration
+    ga_selected_mask = None  # Will hold wavelength selection mask
+    if combined_ga_workflow:
+        try:
+            from .ga_pls import ga_pls_selection
+            GA_PLS_AVAILABLE = True
+        except ImportError:
+            GA_PLS_AVAILABLE = False
+
+        if GA_PLS_AVAILABLE:
+            # Apply best preprocessing (if GA preprocessing was used)
+            if preproc_configs and preproc_configs[0][1] is not None:
+                X_preproc = preproc_configs[0][1](X)
+                print(f"[Combined GA] Applied preprocessing: {preproc_configs[0][0]}")
+            else:
+                X_preproc = X
+
+            if progress_callback:
+                progress_callback({
+                    'stage': 'ga_pls_combined',
+                    'message': 'Running GA-PLS wavelength selection...',
+                    'current': 0,
+                    'total': ga_pls_generations
+                })
+
+            # Run GA-PLS
+            importances = ga_pls_selection(
+                X_preproc, y,
+                population_size=ga_pls_population,
+                n_generations=ga_pls_generations,
+                n_runs=ga_pls_n_runs,
+                task_type=task_type,
+                cv_folds=folds,
+                random_state=random_state,
+                verbose=1
+            )
+
+            # Create selection mask
+            ga_selected_mask = importances >= ga_pls_threshold
+            n_selected = np.sum(ga_selected_mask)
+
+            if progress_callback:
+                progress_callback({
+                    'stage': 'ga_pls_combined',
+                    'message': f'GA-PLS: {n_selected} wavelengths selected (threshold={ga_pls_threshold})',
+                    'current': ga_pls_generations,
+                    'total': ga_pls_generations
+                })
+
+            print(f"[Combined GA] GA-PLS selected {n_selected}/{X.shape[1]} wavelengths")
+
+            # Reduce X to selected wavelengths for all subsequent processing
+            if n_selected > 0 and n_selected < X.shape[1]:
+                X = X[:, ga_selected_mask]
+                if wavelengths is not None:
+                    wavelengths = wavelengths[ga_selected_mask]
+                print(f"[Combined GA] Data reduced to {X.shape[1]} wavelengths")
+
+            # Disable per-config GA-PLS since we already did it
+            if 'ga_pls' in varsel_config['methods']:
+                varsel_config['methods'].remove('ga_pls')
+                print("[Combined GA] Disabled per-config GA-PLS (already applied)")
+        else:
+            print("[Combined GA] GA-PLS not available, skipping wavelength selection")
+
+    # BAYESIAN SEARCH MODE - Route to Bayesian optimization if requested
+    # Bayesian mode is TRUE AUTOML: Optuna explores all preprocessing and variable selection
+    # automatically. User only controls which models to consider.
+    if search_mode.lower() == 'bayesian':
+        if not HAS_OPTUNA:
+            raise ImportError(
+                "Bayesian search requires Optuna. Install with: pip install optuna\n"
+                "Falling back to grid search mode."
+            )
+
+        # === AUTOML MODE: Override preprocessing with comprehensive search space ===
+        # Bayesian mode explores ALL preprocessing options automatically
+        bayesian_preproc_methods = ['raw', 'snv', 'deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2']
+        bayesian_window_sizes = [7, 11, 17, 21]
+
+        # Include baseline correction methods if available
+        if HAS_BASELINE:
+            bayesian_preproc_methods += ['baseline_poly', 'baseline_asls']
+
+        print(f"[Bayesian] Using comprehensive preprocessing: {bayesian_preproc_methods}")
+        print(f"[Bayesian] Window sizes: {bayesian_window_sizes}")
+
+        # Build comprehensive preprocessing config for Bayesian search
+        bayesian_preproc_config = {
+            'methods': bayesian_preproc_methods,
+            'window_sizes': bayesian_window_sizes,
+        }
+        bayesian_preproc_configs = _build_preprocessing_configs(bayesian_preproc_config)
+        print(f"[Bayesian] Built {len(bayesian_preproc_configs)} preprocessing configurations")
+
+        # Always include variable selection in Bayesian AutoML mode
+        include_varsel = True
+        bayesian_varsel_methods = ['importance', 'vip', 'spa']
+        bayesian_var_counts = [20, 50, 100, 250]
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'bayesian_search',
+                'message': 'Starting Bayesian AutoML (exploring all preprocessing + variable selection)...',
+                'current': 0,
+                'total': bayesian_n_trials
+            })
+
+        # Run Bayesian search with comprehensive search space
+        best_config, study = run_bayesian_search(
+            X=X,
+            y=y,
+            task_type=task_type,
+            models_to_try=models_to_test,  # User controls which models
+            preprocess_configs=bayesian_preproc_configs,  # AutoML: all preprocessing
+            n_trials=bayesian_n_trials,
+            cv_folds=folds,
+            random_state=random_state,
+            progress_callback=progress_callback,
+            # AutoML: always include variable selection
+            include_variable_selection=include_varsel,
+            varsel_methods=bayesian_varsel_methods,
+            varsel_counts=bayesian_var_counts,
+            varsel_params=varsel_params
+        )
+
+        # Extract variable selection info if present
+        varsel_info = best_config.get('variable_selection', {})
+        varsel_method = varsel_info.get('method', 'full')
+        varsel_n_vars = varsel_info.get('n_vars')
+
+        # Build variable tag for DataFrame
+        if varsel_method != 'full' and varsel_n_vars is not None:
+            var_tag = f'{varsel_method}_top{varsel_n_vars}'
+            n_vars = varsel_n_vars
+        else:
+            var_tag = 'full'
+            n_vars = X.shape[1]
+
+        # Convert to DataFrame format matching grid search
+        if task_type == 'regression':
+            df = pd.DataFrame([{
+                'Model': best_config['model'],
+                'Preprocessing': best_config['preprocessing'],
+                'Variables': var_tag,
+                'N_Variables': n_vars,
+                'Params': _format_params(best_config['params']),
+                'RMSE': best_config['score'],
+                'R2': None,  # Would need to recompute
+                'Top_Variables': '',
+            }])
+        else:
+            df = pd.DataFrame([{
+                'Model': best_config['model'],
+                'Preprocessing': best_config['preprocessing'],
+                'Variables': var_tag,
+                'N_Variables': n_vars,
+                'Params': _format_params(best_config['params']),
+                'Accuracy': best_config['score'],
+                'ROC_AUC': None,  # Would need to recompute
+                'Top_Variables': '',
+            }])
+
+        return df
+
+    # NSGA-II MULTI-OBJECTIVE SEARCH MODE
+    # Pareto optimization of prediction error vs wavelength count vs model complexity
+    if search_mode.lower() == 'nsga2':
+        if not PYMOO_AVAILABLE:
+            raise ImportError(
+                "NSGA-II search requires pymoo. Install with: pip install pymoo>=0.6.0\n"
+                "Falling back to grid search mode."
+            )
+
+        print(f"[NSGA-II] Starting multi-objective optimization (pop={nsga2_population}, gen={nsga2_generations})")
+        print(f"[NSGA-II] Using internal comprehensive preprocessing (10 types, 15 window sizes)")
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'nsga2_search',
+                'message': 'Starting NSGA-II multi-objective optimization...',
+                'current': 0,
+                'total': nsga2_generations
+            })
+
+        # Run NSGA-II search with user-selected models
+        nsga2_result = run_nsga2_search(
+            X=X,
+            y=y,
+            task_type=task_type,
+            population_size=nsga2_population,
+            n_generations=nsga2_generations,
+            cv_folds=folds,
+            min_wavelengths=nsga2_min_wavelengths,
+            random_state=random_state,
+            verbose=1,
+            progress_callback=progress_callback,
+            models=models_to_test,  # Pass user-selected models
+        )
+
+        # Convert Pareto front to DataFrame
+        df = pareto_to_dataframe(nsga2_result, X.shape[1], task_type)
+
+        # Store full NSGA-II result as attribute for GUI access
+        if len(df) > 0:
+            df.attrs['nsga2_result'] = nsga2_result
+
+        return df
+
+    # GRID SEARCH MODE (default) - Continue with existing logic
     # Handle categorical labels for classification
     label_encoder = None
     if task_type == 'classification':
@@ -217,20 +587,63 @@ def run_auto_search(
 
     total_configs = phase1_total + phase2_total + phase3_total + phase4_total
 
+    # Prepare wavelength range filtering
+    wl_mask = None
+    wavelengths_filtered = wavelengths
+    if wavelengths is not None and (wl_range_min is not None or wl_range_max is not None):
+        wl_mask = np.ones(len(wavelengths), dtype=bool)
+        if wl_range_min is not None:
+            wl_mask &= (wavelengths >= wl_range_min)
+        if wl_range_max is not None:
+            wl_mask &= (wavelengths <= wl_range_max)
+        wavelengths_filtered = wavelengths[wl_mask]
+
+        n_filtered = wl_mask.sum()
+        if progress_callback:
+            progress_callback({
+                'stage': 'info',
+                'message': f'Wavelength range: {wl_range_min:.0f}-{wl_range_max:.0f} nm ({n_filtered} of {len(wavelengths)} wavelengths)',
+                'current': 0,
+                'total': total_configs,
+                'best_score': None
+            })
+
+        # Check for valid variable selection methods with reduced wavelengths
+        if n_filtered < 50:
+            # Filter out methods that need many wavelengths
+            methods_needing_many_wl = {'uve', 'cars', 'uve-spa'}
+            original_methods = varsel_config.get('methods', [])
+            varsel_config['methods'] = [m for m in original_methods if m.lower() not in methods_needing_many_wl]
+            if len(varsel_config['methods']) < len(original_methods):
+                if progress_callback:
+                    progress_callback({
+                        'stage': 'info',
+                        'message': f'Note: Some variable selection methods disabled due to narrow wavelength range',
+                        'current': 0,
+                        'total': total_configs,
+                        'best_score': None
+                    })
+
     # Phase 1: Test all preprocessing + model combinations
     for preproc_name, preproc_func in preproc_configs:
-        # Apply preprocessing
+        # Apply preprocessing to FULL spectrum
         try:
             X_processed = preproc_func(X) if preproc_func else X
         except Exception as e:
             print(f"Preprocessing {preproc_name} failed: {e}")
             continue
 
+        # Apply wavelength range filtering AFTER preprocessing
+        if wl_mask is not None:
+            X_processed = X_processed[:, wl_mask]
+
         # Test each model
         for model_name in models_to_test:
-            # Get hyperparameter grid (same for all tiers)
-            # For PLS/PLS-DA, use pls_max_lv if provided
-            if model_name in ['PLS', 'PLS-DA'] and pls_max_lv is not None:
+            # Get hyperparameter grid - check for custom grid first
+            if custom_hyperparam_grids and model_name in custom_hyperparam_grids:
+                # Use user-provided custom hyperparameter grid
+                hyperparam_grid = custom_hyperparam_grids[model_name]
+            elif model_name in ['PLS', 'PLS-DA'] and pls_max_lv is not None:
                 hyperparam_grid = get_hyperparameter_grid(model_name, max_lv=pls_max_lv)
             else:
                 hyperparam_grid = get_hyperparameter_grid(model_name)
@@ -250,7 +663,7 @@ def run_auto_search(
                 result = _test_single_config(
                     X_processed, y, model_name, task_type,
                     preproc_name, 'full', params, cv, random_state,
-                    wavelengths=wavelengths
+                    wavelengths=wavelengths_filtered
                 )
 
                 if result:
@@ -266,11 +679,12 @@ def run_auto_search(
     # Phase 2: Variable selection (if enabled for this tier)
     if varsel_config['methods'] and len(varsel_config['counts']) > 0:
         varsel_results = _run_variable_selection(
-            X, y, wavelengths, task_type, tier,
+            X, y, wavelengths_filtered, task_type, tier,
             preproc_configs, models_to_test,
             varsel_config, cv, random_state,
             progress_callback, best_score,
-            start_config_num=config_num, total_configs=total_configs
+            start_config_num=config_num, total_configs=total_configs,
+            wl_mask=wl_mask
         )
         results.extend(varsel_results)
         config_num += len(varsel_results)
@@ -285,13 +699,14 @@ def run_auto_search(
                     best_score = result['Accuracy']
 
     # Phase 3: Region analysis (if enabled and wavelengths available)
-    if varsel_config.get('enable_regions', False) and wavelengths is not None:
+    if varsel_config.get('enable_regions', False) and wavelengths_filtered is not None:
         region_results = _run_region_analysis(
-            X, y, wavelengths, task_type, tier,
+            X, y, wavelengths_filtered, task_type, tier,
             preproc_configs, models_to_test,
             varsel_config, cv, random_state,
             progress_callback, best_score,
-            start_config_num=config_num, total_configs=total_configs
+            start_config_num=config_num, total_configs=total_configs,
+            wl_mask=wl_mask
         )
         results.extend(region_results)
         config_num += len(region_results)
@@ -308,11 +723,12 @@ def run_auto_search(
     # Phase 4: iPLS interval analysis (if enabled, regression only)
     if ipls_config['enabled']:
         ipls_results = _run_ipls_analysis(
-            X, y, wavelengths, task_type,
+            X, y, wavelengths_filtered, task_type,
             preproc_configs, models_to_test,
             ipls_config, cv, random_state,
             progress_callback, best_score,
-            start_config_num=config_num, total_configs=total_configs
+            start_config_num=config_num, total_configs=total_configs,
+            wl_mask=wl_mask
         )
         results.extend(ipls_results)
 
@@ -343,6 +759,12 @@ def run_manual_search(
     random_state: int = 42,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     wavelengths: Optional[np.ndarray] = None,
+    wl_range_min: Optional[float] = None,
+    wl_range_max: Optional[float] = None,
+    convert_absorbance: bool = False,
+    # Baseline correction
+    baseline_method: Optional[str] = None,
+    baseline_params: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """
     Run manual model training with user-specified settings.
@@ -377,6 +799,28 @@ def run_manual_search(
     """
     X = np.asarray(X)
     y = np.asarray(y)
+
+    # Apply absorbance conversion if requested (before any preprocessing)
+    if convert_absorbance:
+        if progress_callback:
+            progress_callback({'message': 'Converting to absorbance (log10(1/R))...', 'stage': 'conversion'})
+        X = Absorbance().fit_transform(X)
+
+    # Apply baseline correction if requested (after absorbance, before other preprocessing)
+    if baseline_method and HAS_BASELINE:
+        if progress_callback:
+            progress_callback({'message': f'Applying baseline correction ({baseline_method})...', 'stage': 'baseline'})
+        params = baseline_params or {}
+        if baseline_method.lower() == 'polynomial':
+            baseline_corrector = BaselinePolynomial(**params)
+        elif baseline_method.lower() == 'asls':
+            baseline_corrector = BaselineAsLS(**params)
+        elif baseline_method.lower() == 'airpls':
+            baseline_corrector = BaselineAirPLS(**params)
+        else:
+            baseline_corrector = None
+        if baseline_corrector is not None:
+            X = baseline_corrector.fit_transform(X)
 
     if model_params is None:
         model_params = {}
@@ -417,6 +861,25 @@ def run_manual_search(
     else:
         X_processed = X
 
+    # Apply wavelength range filtering AFTER preprocessing
+    wavelengths_filtered = wavelengths
+    if wavelengths is not None and (wl_range_min is not None or wl_range_max is not None):
+        wl_mask = np.ones(len(wavelengths), dtype=bool)
+        if wl_range_min is not None:
+            wl_mask &= (wavelengths >= wl_range_min)
+        if wl_range_max is not None:
+            wl_mask &= (wavelengths <= wl_range_max)
+        X_processed = X_processed[:, wl_mask]
+        wavelengths_filtered = wavelengths[wl_mask]
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'info',
+                'message': f'Wavelength range: {wl_range_min:.0f}-{wl_range_max:.0f} nm ({wl_mask.sum()} wavelengths)',
+                'current': 0,
+                'total': 1
+            })
+
     if progress_callback:
         progress_callback({
             'stage': 'model_testing',
@@ -429,7 +892,7 @@ def run_manual_search(
     result = _test_single_config(
         X_processed, y, model_name, task_type,
         preproc_name, 'full', model_params, cv, random_state,
-        wavelengths=wavelengths
+        wavelengths=wavelengths_filtered
     )
 
     if result:
@@ -498,6 +961,48 @@ def _build_preprocessing_configs(preproc_config: Dict[str, Any]) -> List[Tuple[s
                     return SNV().fit_transform(X_deriv)
                 configs.append((name, transform))
 
+        elif method == 'deriv3':
+            for window in window_sizes:
+                name = f'deriv3_w{window}'
+                configs.append((name, lambda X, w=window: SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X)))
+
+        elif method == 'deriv4':
+            for window in window_sizes:
+                name = f'deriv4_w{window}'
+                configs.append((name, lambda X, w=window: SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X)))
+
+        elif method == 'snv_deriv3':
+            for window in window_sizes:
+                name = f'snv_deriv3_w{window}'
+                def transform(X, w=window):
+                    X_snv = SNV().fit_transform(X)
+                    return SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_snv)
+                configs.append((name, transform))
+
+        elif method == 'snv_deriv4':
+            for window in window_sizes:
+                name = f'snv_deriv4_w{window}'
+                def transform(X, w=window):
+                    X_snv = SNV().fit_transform(X)
+                    return SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_snv)
+                configs.append((name, transform))
+
+        elif method == 'deriv3_snv':
+            for window in window_sizes:
+                name = f'deriv3_snv_w{window}'
+                def transform(X, w=window):
+                    X_deriv = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X)
+                    return SNV().fit_transform(X_deriv)
+                configs.append((name, transform))
+
+        elif method == 'deriv4_snv':
+            for window in window_sizes:
+                name = f'deriv4_snv_w{window}'
+                def transform(X, w=window):
+                    X_deriv = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X)
+                    return SNV().fit_transform(X_deriv)
+                configs.append((name, transform))
+
     return configs
 
 
@@ -513,7 +1018,7 @@ def _test_single_config(
     random_state: int,
     wavelengths: Optional[np.ndarray] = None,
     variable_indices: Optional[np.ndarray] = None,
-    n_top_vars: int = 10
+    n_top_vars: int = 50
 ) -> Optional[Dict[str, Any]]:
     """
     Test a single model configuration and return results.
@@ -525,7 +1030,7 @@ def _test_single_config(
     variable_indices : array, optional
         Indices of variables used (for variable selection runs)
     n_top_vars : int
-        Number of top variables to report
+        Number of top variables to report (default 50)
     """
     try:
         model = get_model(model_name, task_type, random_state, **params)
@@ -580,6 +1085,7 @@ def _test_single_config(
                 'RMSE': rmse,
                 'R2': r2,
                 'Top_Variables': top_vars_str,
+                'variable_indices': variable_indices,  # Store for diagnostics/export
             }
         else:
             acc = accuracy_score(y, y_pred)
@@ -600,6 +1106,7 @@ def _test_single_config(
                 'Accuracy': acc,
                 'ROC_AUC': auc,
                 'Top_Variables': top_vars_str,
+                'variable_indices': variable_indices,  # Store for diagnostics/export
             }
 
     except Exception as e:
@@ -621,7 +1128,8 @@ def _run_variable_selection(
     progress_callback: Optional[Callable],
     current_best: Optional[float],
     start_config_num: int = 0,
-    total_configs: int = 0
+    total_configs: int = 0,
+    wl_mask: Optional[np.ndarray] = None
 ) -> List[Dict[str, Any]]:
     """
     Run variable selection methods and test reduced models.
@@ -655,11 +1163,15 @@ def _run_variable_selection(
     }
 
     for preproc_name, preproc_func in preproc_configs:
-        # Apply preprocessing
+        # Apply preprocessing to FULL spectrum
         try:
             X_processed = preproc_func(X) if preproc_func else X
         except:
             continue
+
+        # Apply wavelength range filtering AFTER preprocessing
+        if wl_mask is not None:
+            X_processed = X_processed[:, wl_mask]
 
         # Run each variable selection method separately
         for method in methods:
@@ -786,6 +1298,41 @@ def _get_single_method_importances(
             n_intervals = params.get('n_intervals', 20)
             return ipls_selection(X, y, n_intervals=n_intervals, random_state=random_state)
 
+        elif method == 'ga_pls':
+            # Genetic Algorithm PLS wavelength selection
+            from .variable_selection import GA_PLS_AVAILABLE
+            if not GA_PLS_AVAILABLE:
+                print("GA-PLS not available. Ensure ga_pls.py is present.")
+                return None
+            from .ga_pls import ga_pls_selection
+            params = varsel_params.get('ga_pls', {})
+            # Extract GA-PLS parameters with defaults
+            population_size = params.get('population_size', 64)
+            n_generations = params.get('n_generations', 100)
+            n_runs = params.get('n_runs', 5)
+            crossover_rate = params.get('crossover_rate', 0.6)
+            mutation_rate = params.get('mutation_rate', 0.01)
+            selection_threshold = params.get('selection_threshold', 0.6)
+            enable_permutation_test = params.get('enable_permutation_test', False)
+            n_components = params.get('n_components', 10)
+            cv_folds = params.get('cv_folds', 5)
+            verbose = params.get('verbose', 1)
+            return ga_pls_selection(
+                X, y,
+                population_size=population_size,
+                n_generations=n_generations,
+                n_runs=n_runs,
+                crossover_rate=crossover_rate,
+                mutation_rate=mutation_rate,
+                selection_threshold=selection_threshold,
+                enable_permutation_test=enable_permutation_test,
+                n_components=n_components,
+                cv_folds=cv_folds,
+                task_type=task_type,
+                random_state=random_state,
+                verbose=verbose
+            )
+
         else:
             print(f"Unknown variable selection method: {method}")
             return None
@@ -858,6 +1405,40 @@ def _get_variable_importances(
                 n_intervals = params.get('n_intervals', 20)
                 imp = ipls_selection(X, y, n_intervals=n_intervals, random_state=random_state)
 
+            elif method == 'ga_pls':
+                # Genetic Algorithm PLS wavelength selection
+                from .variable_selection import GA_PLS_AVAILABLE
+                if not GA_PLS_AVAILABLE:
+                    print("GA-PLS not available. Skipping.")
+                    continue
+                from .ga_pls import ga_pls_selection
+                params = varsel_params.get('ga_pls', {})
+                population_size = params.get('population_size', 64)
+                n_generations = params.get('n_generations', 100)
+                n_runs = params.get('n_runs', 5)
+                crossover_rate = params.get('crossover_rate', 0.6)
+                mutation_rate = params.get('mutation_rate', 0.01)
+                selection_threshold = params.get('selection_threshold', 0.6)
+                enable_permutation_test = params.get('enable_permutation_test', False)
+                n_components = params.get('n_components', 10)
+                cv_folds = params.get('cv_folds', 5)
+                verbose = params.get('verbose', 1)
+                imp = ga_pls_selection(
+                    X, y,
+                    population_size=population_size,
+                    n_generations=n_generations,
+                    n_runs=n_runs,
+                    crossover_rate=crossover_rate,
+                    mutation_rate=mutation_rate,
+                    selection_threshold=selection_threshold,
+                    enable_permutation_test=enable_permutation_test,
+                    n_components=n_components,
+                    cv_folds=cv_folds,
+                    task_type=task_type,
+                    random_state=random_state,
+                    verbose=verbose
+                )
+
             else:
                 continue
 
@@ -888,7 +1469,8 @@ def _run_region_analysis(
     progress_callback: Optional[Callable],
     current_best: Optional[float],
     start_config_num: int = 0,
-    total_configs: int = 0
+    total_configs: int = 0,
+    wl_mask: Optional[np.ndarray] = None
 ) -> List[Dict[str, Any]]:
     """
     Run region-based analysis and test models on spectral regions.
@@ -940,12 +1522,16 @@ def _run_region_analysis(
     n_top_regions = varsel_config.get('n_top_regions', 5)
 
     for preproc_name, preproc_func in preproc_configs:
-        # Apply preprocessing
+        # Apply preprocessing to FULL spectrum
         try:
             X_processed = preproc_func(X) if preproc_func else X
         except Exception as e:
             print(f"Preprocessing {preproc_name} failed in region analysis: {e}")
             continue
+
+        # Apply wavelength range filtering AFTER preprocessing
+        if wl_mask is not None:
+            X_processed = X_processed[:, wl_mask]
 
         # Create region subsets for this preprocessed data
         try:
@@ -1020,7 +1606,8 @@ def _run_ipls_analysis(
     progress_callback: Optional[Callable],
     current_best: Optional[float],
     start_config_num: int = 0,
-    total_configs: int = 0
+    total_configs: int = 0,
+    wl_mask: Optional[np.ndarray] = None
 ) -> List[Dict[str, Any]]:
     """
     Run iPLS interval analysis with proper interval-based subsets.
@@ -1083,12 +1670,16 @@ def _run_ipls_analysis(
     run_backward = ipls_config.get('backward', True)
 
     for preproc_name, preproc_func in preproc_configs:
-        # Apply preprocessing
+        # Apply preprocessing to FULL spectrum
         try:
             X_processed = preproc_func(X) if preproc_func else X
         except Exception as e:
             print(f"Preprocessing {preproc_name} failed in iPLS analysis: {e}")
             continue
+
+        # Apply wavelength range filtering AFTER preprocessing
+        if wl_mask is not None:
+            X_processed = X_processed[:, wl_mask]
 
         # Collect all iPLS subsets for this preprocessing
         all_subsets = []
@@ -1239,6 +1830,12 @@ def run_search(
             random_state=random_state,
             progress_callback=progress_callback,
             wavelengths=kwargs.get('wavelengths'),
+            wl_range_min=kwargs.get('wl_range_min'),
+            wl_range_max=kwargs.get('wl_range_max'),
+            convert_absorbance=kwargs.get('convert_absorbance', False),
+            # Baseline correction
+            baseline_method=kwargs.get('baseline_method'),
+            baseline_params=kwargs.get('baseline_params'),
         )
     else:
         return run_auto_search(
@@ -1262,4 +1859,14 @@ def run_search(
             ipls_backward=kwargs.get('ipls_backward', True),
             pls_max_lv=kwargs.get('pls_max_lv'),
             custom_models=kwargs.get('custom_models'),
+            custom_hyperparam_grids=kwargs.get('custom_hyperparam_grids'),
+            wl_range_min=kwargs.get('wl_range_min'),
+            wl_range_max=kwargs.get('wl_range_max'),
+            convert_absorbance=kwargs.get('convert_absorbance', False),
+            # Baseline correction
+            baseline_method=kwargs.get('baseline_method'),
+            baseline_params=kwargs.get('baseline_params'),
+            enable_smoothing=kwargs.get('enable_smoothing', False),
+            smoothing_window=kwargs.get('smoothing_window', 11),
+            smoothing_order=kwargs.get('smoothing_order', 2),
         )

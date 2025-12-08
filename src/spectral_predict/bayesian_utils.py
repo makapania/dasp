@@ -10,7 +10,7 @@ This module provides helper functions for:
 
 import optuna
 from optuna.samplers import TPESampler, RandomSampler
-from optuna.pruners import MedianPruner, SuccessiveHalvingPruner
+from optuna.pruners import MedianPruner, SuccessiveHalvingPruner, PercentilePruner
 import numpy as np
 from typing import Dict, Any, Optional, Callable
 import logging
@@ -81,10 +81,12 @@ def create_optuna_study(
 
     # Configure pruner
     if pruner == 'Median':
-        pruner_obj = MedianPruner(
+        # Use PercentilePruner with 25th percentile (less aggressive than MedianPruner)
+        # This keeps top 75% of trials instead of top 50%, avoiding over-pruning
+        pruner_obj = PercentilePruner(
+            percentile=25,       # Keep trials in top 75% (less aggressive)
             n_startup_trials=5,  # Don't prune first 5 trials
-            n_warmup_steps=2,    # Wait 2 CV folds before pruning
-            interval_steps=1     # Check after each fold
+            n_warmup_steps=2     # Wait 2 CV folds before pruning
         )
     elif pruner == 'Halving':
         pruner_obj = SuccessiveHalvingPruner(
@@ -197,7 +199,7 @@ def create_objective_function(
     from .models import build_model
     from .model_registry import supports_subset_analysis
     from .models import get_feature_importances
-    from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection
+    from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
 
     # Calculate n_classes for classification tasks
     n_classes = len(np.unique(y)) if task_type == 'classification' else 2
@@ -363,6 +365,19 @@ def create_objective_function(
                                     n_intervals=ipls_n_intervals,
                                     n_components=uve_n_components,
                                     cv_folds=folds,
+                                    random_state=random_state
+                                )
+                            elif varsel_method == 'cars':
+                                # CARS: Competitive Adaptive Reweighted Sampling
+                                folds = filtered_kwargs.get('folds', 5)
+                                random_state = 42  # Use fixed random state
+                                uve_n_components = 5  # Use default
+                                importances = cars_selection(
+                                    X, y,
+                                    n_iterations=50,
+                                    pls_components=uve_n_components,
+                                    cv_folds=folds,
+                                    monte_carlo_samples=80,
                                     random_state=random_state
                                 )
                             else:

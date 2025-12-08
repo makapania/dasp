@@ -101,6 +101,14 @@ except ImportError:
     HAS_CATBOOST = False
     CatBoostRegressor = None
 
+# Check for SHAP availability (model interpretability)
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:
+    HAS_SHAP = False
+    shap = None
+
 # Import data management module
 try:
     from spectral_predict.data_management import (
@@ -819,52 +827,36 @@ class SidebarNavigation:
         self.title_label = spacer  # Keep reference for update_colors compatibility
 
     def _create_content_area(self):
-        """Create the scrollable content area for navigation items."""
-        # Canvas for scrolling
-        self.canvas = tk.Canvas(self.frame,
-                               bg=self.colors.get('sidebar', '#2D3748'),
-                               highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(self.frame, orient='vertical',
-                                       command=self.canvas.yview)
-
-        self.content_frame = tk.Frame(self.canvas,
+        """Create the content area for navigation items (no scrolling needed)."""
+        # Simple frame for content - no scrolling, items should fit
+        self.content_frame = tk.Frame(self.frame,
                                      bg=self.colors.get('sidebar', '#2D3748'))
+        self.content_frame.pack(side='top', fill='both', expand=True)
 
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.content_frame,
-                                                        anchor='nw')
-
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
-        # Pack canvas (scrollbar hidden initially, shown if needed)
-        self.canvas.pack(side='left', fill='both', expand=True)
-
-        # Bind events for scrolling
-        self.content_frame.bind('<Configure>', self._on_content_configure)
-        self.canvas.bind('<Configure>', self._on_canvas_configure)
-
-        # Mouse wheel scrolling
-        self.canvas.bind('<Enter>', lambda e: self._bind_mousewheel())
-        self.canvas.bind('<Leave>', lambda e: self._unbind_mousewheel())
+        # Keep canvas reference as None for compatibility
+        self.canvas = None
+        self.scrollbar = None
+        self.canvas_window = None
 
     def _on_content_configure(self, event):
-        """Update scroll region when content changes."""
-        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+        """No-op: scrolling disabled."""
+        pass
 
     def _on_canvas_configure(self, event):
-        """Update content width when canvas is resized."""
-        self.canvas.itemconfig(self.canvas_window, width=event.width)
+        """No-op: scrolling disabled."""
+        pass
 
     def _bind_mousewheel(self):
-        """Bind mouse wheel to canvas scrolling."""
-        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+        """No-op: scrolling disabled."""
+        pass
 
     def _unbind_mousewheel(self):
-        """Unbind mouse wheel scrolling."""
-        self.canvas.unbind_all('<MouseWheel>')
+        """No-op: scrolling disabled."""
+        pass
 
     def _on_mousewheel(self, event):
-        """Handle mouse wheel scrolling."""
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        """No-op: scrolling disabled."""
+        pass
 
     def _create_collapse_toggle(self):
         """Create the collapse/expand toggle button at the bottom."""
@@ -1100,7 +1092,8 @@ class SidebarNavigation:
 
         self.frame.config(bg=sidebar_bg)
         self.title_label.config(bg=sidebar_bg)  # title_label is now just a spacer frame
-        self.canvas.config(bg=sidebar_bg)
+        if self.canvas is not None:
+            self.canvas.config(bg=sidebar_bg)
         self.content_frame.config(bg=sidebar_bg)
         self.collapse_btn.config(bg=sidebar_bg, fg=text_color,
                                 activebackground=colors.get('sidebar_hover', '#3D4858'),
@@ -1171,6 +1164,10 @@ class SpectralPredictApp:
         self.refined_cv_indices = None  # CV sample indices for mapping predictions back to specimen IDs
         self.refined_label_encoder = None  # Label encoder for categorical targets (classification)
         self.task_type_detection_label = None  # Will be created in Import tab
+
+        # SHAP interpretability storage
+        self.shap_values = None  # SHAP values for trained model
+        self.shap_explainer = None  # SHAP explainer object
 
         # Data Management Tab (Tab 0) variables
         self.data_source_manager = DataSourceManager() if HAS_DATA_MANAGEMENT else None
@@ -2556,25 +2553,25 @@ class SpectralPredictApp:
             label_font = ('Ubuntu', 11)
             button_font = ('Ubuntu', 10, 'bold')
 
-        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=140)
-        top_bar.pack(fill='x', padx=20, pady=(20, 10))
+        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=70)
+        top_bar.pack(fill='x', padx=10, pady=(10, 5))
         top_bar.pack_propagate(False)
 
-        # Left side: Logo and title
+        # Left side: Logo and title (compact layout)
         title_frame = tk.Frame(top_bar, bg=self.colors['bg'])
         title_frame.pack(side='left', fill='y')
 
-        # ASP Logo - Rainbow cobra with spectral bar (150px tall)
-        self.logo_label = self._create_logo_label(title_frame, size=150)
-        self.logo_label.pack(side='left', padx=(0, 15), pady=0)
+        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px)
+        self.logo_label = self._create_logo_label(title_frame, size=75)
+        self.logo_label.pack(side='left', padx=(0, 10), pady=0)
 
-        # "Advanced Spectral Prediction" text to the right of logo - larger, single line
+        # "Advanced Spectral Prediction" text to the right of logo (reduced font)
         text_frame = tk.Frame(title_frame, bg=self.colors['bg'])
-        text_frame.pack(side='left', fill='y', pady=40)
+        text_frame.pack(side='left', fill='y', pady=15)
 
         tk.Label(text_frame,
                 text="Advanced Spectral Prediction",
-                font=('Segoe UI', 24, 'bold'),
+                font=('Segoe UI', 16, 'bold'),
                 fg=self.colors['text'],
                 bg=self.colors['bg']).pack(anchor='w')
 
@@ -2588,7 +2585,7 @@ class SpectralPredictApp:
                 fg=self.colors['text_light'],
                 bg=self.colors['bg']).pack(side='left', padx=(0, 10))
 
-        # Create theme buttons with hover effects
+        # Create theme buttons with hover effects (compact)
         self.theme_buttons = {}
         for theme_name, theme_data in self.themes.items():
             btn = tk.Button(theme_frame,
@@ -2599,11 +2596,11 @@ class SpectralPredictApp:
                           activebackground=theme_data['accent_dark'],
                           relief='flat',
                           borderwidth=0,
-                          padx=15,
-                          pady=8,
+                          padx=10,
+                          pady=4,
                           cursor='hand2',
                           command=lambda tn=theme_name: self._switch_theme(tn))
-            btn.pack(side='left', padx=3)
+            btn.pack(side='left', padx=2)
 
             # Add hover effect
             def on_enter(e, b=btn, td=theme_data):
@@ -8052,6 +8049,67 @@ class SpectralPredictApp:
 
         self.leverage_plot_frame = ttk.Frame(leverage_frame)
         self.leverage_plot_frame.pack(fill='both', expand=True)
+
+        # === SHAP Model Interpretability ===
+        ttk.Label(content_frame, text="Model Interpretability (SHAP)", style='Heading.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        shap_frame = ttk.LabelFrame(content_frame, text="SHAP Explanations - Why did the model predict this?", padding="20")
+        shap_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Add explanatory text for SHAP
+        shap_help_frame = ttk.Frame(shap_frame)
+        shap_help_frame.pack(fill='x', padx=10, pady=(5, 15))
+
+        shap_help_text = (
+            "SHAP (SHapley Additive exPlanations) explains predictions by showing each wavelength's contribution.\n\n"
+            "- Summary Plot: Shows which wavelengths drive predictions across all samples (red=high, blue=low values).\n"
+            "- Single Sample: Explains why a specific sample got its prediction (waterfall of contributions).\n"
+            "- Positive SHAP = pushes prediction UP | Negative SHAP = pushes prediction DOWN\n\n"
+            "> Use for: Regulatory explanations, method validation, understanding outlier predictions"
+        )
+
+        shap_help_label = ttk.Label(shap_help_frame, text=shap_help_text,
+                                    style='Caption.TLabel', justify='left', wraplength=1200)
+        shap_help_label.pack(anchor='w')
+
+        # SHAP controls frame
+        shap_controls_frame = ttk.Frame(shap_frame)
+        shap_controls_frame.pack(fill='x', padx=10, pady=(0, 10))
+
+        # Check if SHAP is available
+        if HAS_SHAP:
+            self.shap_compute_btn = self._create_accent_button(
+                shap_controls_frame, text="🔍 Compute SHAP Values",
+                command=self._compute_shap_values, state='disabled'
+            )
+            self.shap_compute_btn.pack(side='left', padx=(0, 10))
+
+            ttk.Label(shap_controls_frame, text="Sample to explain:", style='TLabel').pack(side='left', padx=(20, 5))
+            self.shap_sample_var = tk.StringVar(value="0")
+            self.shap_sample_spinbox = ttk.Spinbox(shap_controls_frame, from_=0, to=999,
+                                                    textvariable=self.shap_sample_var, width=8)
+            self.shap_sample_spinbox.pack(side='left', padx=(0, 10))
+
+            self.shap_single_btn = self._create_accent_button(
+                shap_controls_frame, text="📊 Explain Sample",
+                command=self._explain_single_sample, state='disabled'
+            )
+            self.shap_single_btn.pack(side='left')
+
+            self.shap_status_label = ttk.Label(shap_controls_frame, text="", style='Caption.TLabel')
+            self.shap_status_label.pack(side='left', padx=(20, 0))
+        else:
+            no_shap_label = ttk.Label(shap_controls_frame,
+                                      text="⚠️ SHAP library not installed. Run: pip install shap",
+                                      style='Caption.TLabel', foreground='orange')
+            no_shap_label.pack(anchor='w')
+
+        # SHAP plot frame
+        self.shap_plot_frame = ttk.Frame(shap_frame)
+        self.shap_plot_frame.pack(fill='both', expand=True)
 
         # Status
         self.refine_status = ttk.Label(content_frame, text="No results available yet", style='Caption.TLabel')
@@ -15582,7 +15640,7 @@ class SpectralPredictApp:
                 self._stop_live_monitoring()
 
         # Auto-refresh calibration transfer instruments when switching to that tab (index 10)
-        if current_tab == 10 and self.instrument_profiles:
+        if current_tab == 10 and hasattr(self, 'instrument_profiles') and self.instrument_profiles:
             inst_ids = list(self.instrument_profiles.keys())
             self.ct_master_instrument_combo['values'] = inst_ids
             self.ct_slave_instrument_combo['values'] = inst_ids
@@ -17289,6 +17347,7 @@ class SpectralPredictApp:
             params['colsample_bytree'] = self.refine_lgbm_colsample_bytree.get()
             params['reg_alpha'] = self.refine_lgbm_reg_alpha.get()
             params['reg_lambda'] = self.refine_lgbm_reg_lambda.get()
+            params['bagging_freq'] = 1  # Required when subsample < 1.0 to enable bagging
 
         # ========== CatBoost ==========
         elif model_name == 'CatBoost':
@@ -17882,7 +17941,8 @@ Performance (Classification):
                         all_vars_str = str(config['all_vars']).strip()
                         wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
-                        model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
+                        # Don't sort - preserve importance order from search results
+                        # Sorting destroys feature order which affects PLS R² reproducibility
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
                     except Exception as e:
                         print(f"WARNING: Could not parse all_vars: {e}")
@@ -17899,7 +17959,8 @@ Performance (Classification):
                         top_vars_str = str(config['top_vars']).strip()
                         wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
-                        model_wavelengths = sorted(model_wavelengths)  # Sort for formatting
+                        # Don't sort - preserve importance order from search results
+                        # Sorting destroys feature order which affects PLS R² reproducibility
                         expected_n_vars = config.get('n_vars', len(model_wavelengths))
                         if len(model_wavelengths) < expected_n_vars:
                             print(f"[!]  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
@@ -18990,6 +19051,239 @@ F1 Score:  {f1:.4f}
 
         self._add_plot_export_button(self.leverage_plot_frame, fig, "confidence_distribution")
 
+    def _compute_shap_values(self):
+        """Compute SHAP values for the trained model."""
+        if not HAS_SHAP:
+            messagebox.showwarning("SHAP Not Available", "SHAP library is not installed.\nRun: pip install shap")
+            return
+
+        if self.refined_model is None:
+            messagebox.showwarning("No Model", "Please train a model first.")
+            return
+
+        if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
+            messagebox.showwarning("No Data", "No training data available for SHAP computation.")
+            return
+
+        # Update status
+        if hasattr(self, 'shap_status_label'):
+            self.shap_status_label.config(text="Computing SHAP values...")
+        self.root.update()
+
+        try:
+            model = self.refined_model
+            X_data = self.refined_X_cv
+            model_name = self.refined_config.get('model_name', 'Unknown')
+
+            # Choose appropriate SHAP explainer based on model type
+            if model_name in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
+                # Linear models - use LinearExplainer or KernelExplainer
+                try:
+                    self.shap_explainer = shap.LinearExplainer(model, X_data)
+                    self.shap_values = self.shap_explainer.shap_values(X_data)
+                except Exception:
+                    # Fallback to KernelExplainer for complex pipelines
+                    background = shap.sample(X_data, min(100, len(X_data)))
+                    self.shap_explainer = shap.KernelExplainer(model.predict, background)
+                    self.shap_values = self.shap_explainer.shap_values(X_data)
+
+            elif model_name in ['RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
+                # Tree-based models - use TreeExplainer (fast)
+                try:
+                    self.shap_explainer = shap.TreeExplainer(model)
+                    self.shap_values = self.shap_explainer.shap_values(X_data)
+                    # For classification, shap_values may be a list (one per class)
+                    if isinstance(self.shap_values, list):
+                        # Use the positive class (index 1) or first class
+                        self.shap_values = self.shap_values[1] if len(self.shap_values) > 1 else self.shap_values[0]
+                except Exception as e:
+                    # Fallback to KernelExplainer
+                    background = shap.sample(X_data, min(100, len(X_data)))
+                    self.shap_explainer = shap.KernelExplainer(model.predict, background)
+                    self.shap_values = self.shap_explainer.shap_values(X_data)
+
+            else:
+                # Other models (MLP, SVM, etc.) - use KernelExplainer
+                background = shap.sample(X_data, min(100, len(X_data)))
+                self.shap_explainer = shap.KernelExplainer(model.predict, background)
+                self.shap_values = self.shap_explainer.shap_values(X_data)
+
+            # Plot SHAP summary
+            self._plot_shap_summary()
+
+            # Enable single sample explanation button
+            if hasattr(self, 'shap_single_btn'):
+                self.shap_single_btn.config(state='normal')
+                # Update spinbox max
+                self.shap_sample_spinbox.config(to=len(X_data) - 1)
+
+            if hasattr(self, 'shap_status_label'):
+                self.shap_status_label.config(text=f"SHAP computed for {len(X_data)} samples")
+
+        except Exception as e:
+            if hasattr(self, 'shap_status_label'):
+                self.shap_status_label.config(text=f"Error: {str(e)[:50]}")
+            messagebox.showerror("SHAP Error", f"Failed to compute SHAP values:\n{str(e)}")
+
+    def _plot_shap_summary(self):
+        """Plot SHAP summary showing feature importance with direction."""
+        if self.shap_values is None:
+            return
+
+        # Clear existing plot
+        for widget in self.shap_plot_frame.winfo_children():
+            widget.destroy()
+
+        X_data = self.refined_X_cv
+
+        # Get wavelengths for feature names
+        if hasattr(self, 'refined_wavelengths') and self.refined_wavelengths is not None:
+            feature_names = [f"{w:.1f}" for w in self.refined_wavelengths]
+        else:
+            feature_names = [f"F{i}" for i in range(X_data.shape[1])]
+
+        # Create figure for SHAP summary
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
+
+        # Compute mean absolute SHAP values for feature importance ranking
+        mean_abs_shap = np.abs(self.shap_values).mean(axis=0)
+        top_n = min(30, len(mean_abs_shap))  # Show top 30 features
+        top_indices = np.argsort(mean_abs_shap)[-top_n:][::-1]
+
+        # Create beeswarm-like plot (simplified)
+        shap_subset = self.shap_values[:, top_indices]
+        X_subset = X_data[:, top_indices]
+        feature_names_subset = [feature_names[i] for i in top_indices]
+
+        # Normalize feature values for coloring (0 to 1)
+        X_norm = np.zeros_like(X_subset)
+        for j in range(X_subset.shape[1]):
+            col = X_subset[:, j]
+            if col.max() - col.min() > 0:
+                X_norm[:, j] = (col - col.min()) / (col.max() - col.min())
+            else:
+                X_norm[:, j] = 0.5
+
+        # Plot each feature
+        for i, (feat_idx, feat_name) in enumerate(zip(range(top_n), feature_names_subset)):
+            y_pos = top_n - 1 - i  # Reverse so most important at top
+            shap_vals = shap_subset[:, i]
+            colors = X_norm[:, i]
+
+            # Add jitter for visibility
+            y_jitter = y_pos + np.random.uniform(-0.3, 0.3, len(shap_vals))
+
+            scatter = ax.scatter(shap_vals, y_jitter, c=colors, cmap='coolwarm',
+                               alpha=0.6, s=20, edgecolors='none')
+
+        ax.axvline(x=0, color='gray', linestyle='-', linewidth=0.5)
+        ax.set_yticks(range(top_n))
+        ax.set_yticklabels(feature_names_subset[::-1])
+        ax.set_xlabel('SHAP Value (impact on prediction)', fontsize=11)
+        ax.set_title('SHAP Feature Importance - Top Wavelengths', fontsize=12, fontweight='bold')
+
+        # Add colorbar
+        cbar = fig.colorbar(scatter, ax=ax, shrink=0.6, aspect=30)
+        cbar.set_label('Feature Value\n(low → high)', fontsize=9)
+
+        # Add interpretation text
+        ax.text(0.02, 0.02, 'Red = high feature value | Blue = low feature value\nPositive SHAP = increases prediction',
+                transform=ax.transAxes, fontsize=8, verticalalignment='bottom',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.shap_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self._add_plot_export_button(self.shap_plot_frame, fig, "shap_summary")
+
+    def _explain_single_sample(self):
+        """Explain a single sample's prediction using SHAP waterfall."""
+        if self.shap_values is None:
+            messagebox.showwarning("No SHAP Values", "Please compute SHAP values first.")
+            return
+
+        try:
+            sample_idx = int(self.shap_sample_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid Sample", "Please enter a valid sample index.")
+            return
+
+        if sample_idx < 0 or sample_idx >= len(self.shap_values):
+            messagebox.showwarning("Invalid Sample", f"Sample index must be between 0 and {len(self.shap_values) - 1}")
+            return
+
+        # Clear existing plot
+        for widget in self.shap_plot_frame.winfo_children():
+            widget.destroy()
+
+        X_data = self.refined_X_cv
+        sample_shap = self.shap_values[sample_idx]
+
+        # Get wavelengths for feature names
+        if hasattr(self, 'refined_wavelengths') and self.refined_wavelengths is not None:
+            feature_names = [f"{w:.1f}" for w in self.refined_wavelengths]
+        else:
+            feature_names = [f"F{i}" for i in range(len(sample_shap))]
+
+        # Create waterfall-style plot
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
+
+        # Get top contributors (positive and negative)
+        top_n = 20
+        sorted_indices = np.argsort(np.abs(sample_shap))[::-1][:top_n]
+
+        # Sort by SHAP value for waterfall
+        sorted_shap = sample_shap[sorted_indices]
+        sorted_names = [feature_names[i] for i in sorted_indices]
+        sorted_values = X_data[sample_idx, sorted_indices]
+
+        # Create horizontal bar chart
+        colors = ['#ff6b6b' if v > 0 else '#4ecdc4' for v in sorted_shap]
+        y_pos = np.arange(len(sorted_shap))
+
+        bars = ax.barh(y_pos, sorted_shap, color=colors, edgecolor='black', linewidth=0.5)
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels([f"{name} = {val:.3f}" for name, val in zip(sorted_names, sorted_values)])
+        ax.axvline(x=0, color='gray', linestyle='-', linewidth=1)
+        ax.set_xlabel('SHAP Value Contribution', fontsize=11)
+
+        # Get prediction info
+        y_pred = self.refined_y_pred[sample_idx] if hasattr(self, 'refined_y_pred') else 'N/A'
+        y_true = self.refined_y_true[sample_idx] if hasattr(self, 'refined_y_true') else 'N/A'
+        base_value = self.shap_explainer.expected_value if hasattr(self.shap_explainer, 'expected_value') else 0
+        if isinstance(base_value, np.ndarray):
+            base_value = base_value[0] if len(base_value) == 1 else base_value.mean()
+
+        ax.set_title(f'Sample {sample_idx} Explanation\nPredicted: {y_pred:.3f} | Actual: {y_true:.3f} | Base: {base_value:.3f}',
+                     fontsize=12, fontweight='bold')
+
+        # Add legend
+        ax.text(0.98, 0.02, 'Red = pushes UP | Teal = pushes DOWN',
+                transform=ax.transAxes, fontsize=9, ha='right', va='bottom',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        fig.tight_layout()
+
+        # Add to GUI
+        canvas = FigureCanvasTkAgg(fig, self.shap_plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        self._add_plot_export_button(self.shap_plot_frame, fig, f"shap_sample_{sample_idx}")
+
+        # Add button to return to summary
+        btn_frame = ttk.Frame(self.shap_plot_frame)
+        btn_frame.pack(pady=5)
+        back_btn = self._create_accent_button(btn_frame, text="← Back to Summary", command=self._plot_shap_summary)
+        back_btn.pack()
+
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
         if self.X is None or self.y is None:
@@ -19320,7 +19614,8 @@ F1 Score:  {f1:.4f}
 
             # CRITICAL FIX: Detect if we have derivative preprocessing + variable subset
             # This matches the behavior in search.py (lines 434-449)
-            is_derivative = preprocess in ['sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+            # Use the actual deriv parameter instead of hardcoded list (more robust)
+            is_derivative = (deriv is not None and deriv > 0)
             base_full_vars = len(X_base_df.columns)
             if self.selected_model_config is not None:
                 cfg_full_vars = self.selected_model_config.get('full_vars')
@@ -19330,11 +19625,12 @@ F1 Score:  {f1:.4f}
                     except (TypeError, ValueError):
                         pass
             is_subset = len(selected_wl) < base_full_vars
-            # CRITICAL FIX: Use PATH A ONLY for derivative + subset (non-contiguous wavelengths)
-            # - Derivative subsets need full spectral context for correct Savitzky-Golay windows
-            # - Full-spectrum derivatives should use PATH B to avoid data leakage in CV
-            # - This matches search.py behavior (skip_preprocessing=True only for derivative subsets)
-            use_full_spectrum_preprocessing = is_derivative and is_subset
+            # CRITICAL FIX: ALWAYS use PATH A (preprocess outside CV) to match search.py
+            # search.py ALWAYS does:
+            # 1. Preprocess full data OUTSIDE CV (lines 681-685)
+            # 2. Run models with skip_spectral_preprocessing=True (line 814)
+            # SNV/derivatives have no learned params, so no data leakage concern
+            use_full_spectrum_preprocessing = True  # Match search.py behavior
 
             # Debug output for preprocessing parameters
             print(f"\nDEBUG: Preprocessing Parameters:")
@@ -19371,11 +19667,16 @@ F1 Score:  {f1:.4f}
                     n_components = int(lvs_value)
                     print(f"DEBUG: Using n_components={n_components} from loaded model config")
 
+            # CRITICAL: Use n_components as max to prevent clipping
+            # When reproducing a model, we must use the EXACT n_components from training
+            # Otherwise get_model clips n_components to max_n_components and results won't match
+            effective_max_n_components = max(n_components, self.max_n_components.get())
+
             model = get_model(
                 model_name,
                 task_type=task_type,
                 n_components=n_components,  # Use exact n_components from original model
-                max_n_components=self.max_n_components.get(),
+                max_n_components=effective_max_n_components,  # Prevent clipping
                 max_iter=self.refine_max_iter.get()
             )
 
@@ -19613,13 +19914,26 @@ F1 Score:  {f1:.4f}
                 print(f"  X_preprocessed shape: {X_full_preprocessed.shape}")
                 print(f"  X_preprocessed[0,:5] (first spectrum, first 5 values): {X_full_preprocessed[0,:5]}")
 
-                # 3. Find indices of selected wavelengths in original data
-                all_wavelengths = X_base_df.columns.astype(float).values
+                # 3. Find indices of selected wavelengths in the data
+                # NOTE: Savitzky-Golay with mode='interp' (default) does NOT reduce features
+                # It pads edges to preserve shape, so wavelengths remain unchanged
+                original_wavelengths = X_base_df.columns.astype(float).values
+                print(f"DEBUG: Original wavelengths: {len(original_wavelengths)}, Preprocessed shape: {X_full_preprocessed.shape[1]}")
+
+                # Find indices of selected wavelengths in the original array
+                # (which matches the preprocessed array since savgol preserves shape)
                 wavelength_indices = []
+                missing_wavelengths = []
                 for wl in selected_wl:
-                    idx = np.where(np.abs(all_wavelengths - wl) < 0.01)[0]
+                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
                     if len(idx) > 0:
                         wavelength_indices.append(idx[0])
+                    else:
+                        missing_wavelengths.append(wl)
+
+                if missing_wavelengths:
+                    print(f"WARNING: {len(missing_wavelengths)} wavelengths not found:")
+                    print(f"  Missing: {missing_wavelengths[:10]}{'...' if len(missing_wavelengths) > 10 else ''}")
 
                 # 4. Subset the PREPROCESSED data (not raw!)
                 X_work = X_full_preprocessed[:, wavelength_indices]
@@ -19646,16 +19960,20 @@ F1 Score:  {f1:.4f}
                 X_work = X_base_df[selected_cols].values
 
                 # Build full pipeline with preprocessing + model
+                # NOTE: Must pass ALL parameters that search.py passes for exact match
+                wavelengths_for_pipeline = X_base_df.columns.astype(float).values if hasattr(X_base_df, 'columns') else None
+
                 pipe_steps = build_preprocessing_pipeline(
                     preprocess_name,
                     deriv,
                     window,
                     polyorder,
-                    baseline_method=baseline_method,
-                    baseline_params=baseline_params,
-                    smoothing=smoothing_enabled,
-                    smoothing_window=smoothing_window_size,
-                    smoothing_polyorder=smoothing_poly
+                    imbalance_method=None,      # GUI handles imbalance separately
+                    imbalance_params=None,
+                    task_type=task_type,
+                    interference=None,          # Match search.py (interference disabled)
+                    wavelengths=wavelengths_for_pipeline,
+                    random_state=42
                 )
 
                 # For PLS-DA, we need PLS + LogisticRegression
@@ -19966,7 +20284,7 @@ Configuration:
 
             # Store full wavelengths for derivative + subset case
             if use_full_spectrum_preprocessing:
-                self.refined_full_wavelengths = list(all_wavelengths)
+                self.refined_full_wavelengths = list(original_wavelengths)
             else:
                 self.refined_full_wavelengths = None
 
@@ -19998,6 +20316,10 @@ Configuration:
             self.refine_save_button.config(state='disabled')
             self.refine_save_button_results.config(state='disabled')
             self.export_code_button.config(state='disabled')
+            # Disable SHAP buttons on error
+            if HAS_SHAP and hasattr(self, 'shap_compute_btn'):
+                self.shap_compute_btn.config(state='disabled')
+                self.shap_single_btn.config(state='disabled')
             messagebox.showerror("Error", "Failed to run refined model. See results area for details.")
         else:
             self.refine_status.config(text="Refined model complete")
@@ -20005,6 +20327,12 @@ Configuration:
             self.refine_save_button.config(state='normal')
             self.refine_save_button_results.config(state='normal')
             self.export_code_button.config(state='normal')
+            # Enable SHAP buttons after successful model training
+            if HAS_SHAP and hasattr(self, 'shap_compute_btn'):
+                self.shap_compute_btn.config(state='normal')
+                # Clear any previous SHAP values
+                self.shap_values = None
+                self.shap_explainer = None
             # Plot the predictions
             self._plot_refined_predictions()
             # Plot diagnostic plots
@@ -20162,6 +20490,15 @@ Configuration:
             )
             return
 
+        # Additional check for config (in case of partial state)
+        if self.refined_config is None or self.refined_performance is None:
+            messagebox.showerror(
+                "Model Configuration Missing",
+                "The model appears to have been trained, but configuration data is missing.\n\n"
+                "Please re-run the model to ensure all data is properly saved."
+            )
+            return
+
         # Create export dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Export for Publication")
@@ -20237,9 +20574,28 @@ Configuration:
 
         def generate_preview():
             """Generate code preview."""
-            try:
-                from spectral_predict.code_generator import CodeGenerator, ExportOptions
+            print("Export Code: generate_preview() CALLED", flush=True)
+            # Show immediate feedback
+            status_label.config(text="Generating preview...", fg='blue')
+            dialog.update()  # Force complete UI refresh (not just idletasks)
 
+            try:
+                print("Export Code: Importing CodeGenerator...", flush=True)
+                from spectral_predict.code_generator import CodeGenerator, ExportOptions
+                print("Export Code: Import successful", flush=True)
+
+                if self.refined_config is None:
+                    print("Export Code ERROR: refined_config is None!")
+                    preview_text.config(state='normal')
+                    preview_text.delete('1.0', tk.END)
+                    preview_text.insert('1.0', "# Error: No model configuration available.\n# Please train a model first.")
+                    preview_text.see('1.0')
+                    preview_text.config(state='disabled')
+                    status_label.config(text="Error: No model configured", fg='red')
+                    dialog.update_idletasks()
+                    return
+
+                print(f"Export Code: Building config for {self.refined_config.get('model_name', 'Unknown')}", flush=True)
                 # Build model config from refined model data
                 model_config = {
                     'model_name': self.refined_config['model_name'],
@@ -20258,6 +20614,7 @@ Configuration:
                     'wavelengths': self.refined_wavelengths,
                     'cv_folds': self.refined_config.get('cv_folds', 5),
                 }
+                print("Export Code: Config built, creating generator...", flush=True)
 
                 options = ExportOptions(
                     include_visualization=include_viz_var.get(),
@@ -20267,6 +20624,7 @@ Configuration:
                 )
 
                 generator = CodeGenerator(model_config, options)
+                print("Export Code: Generator created, generating code...", flush=True)
 
                 if format_var.get() == 'notebook':
                     notebook = generator.generate_notebook()
@@ -20282,19 +20640,28 @@ Configuration:
                 else:
                     code = generator.generate_script()
 
+                print(f"Export Code: Code generated ({len(code)} chars), updating preview...", flush=True)
                 preview_text.config(state='normal')
                 preview_text.delete('1.0', tk.END)
                 preview_text.insert('1.0', code)
+                preview_text.see('1.0')  # Scroll to top
                 preview_text.config(state='disabled')
                 status_label.config(text=f"Preview generated ({len(code)} characters)", fg=self.colors['accent'])
+                print("Export Code: SUCCESS - Preview updated", flush=True)
 
             except Exception as e:
                 import traceback
+                error_msg = traceback.format_exc()
+                print(f"Export Code ERROR: {e}\n{error_msg}", flush=True)
                 preview_text.config(state='normal')
                 preview_text.delete('1.0', tk.END)
-                preview_text.insert('1.0', f"# Error generating code:\n# {str(e)}\n\n{traceback.format_exc()}")
+                preview_text.insert('1.0', f"# Error generating code:\n# {str(e)}\n\n{error_msg}")
+                preview_text.see('1.0')
                 preview_text.config(state='disabled')
                 status_label.config(text=f"Error: {str(e)}", fg='red')
+
+            finally:
+                dialog.update_idletasks()  # Ensure final UI refresh
 
         def export_to_file():
             """Export code to file."""
@@ -20381,8 +20748,14 @@ Configuration:
         close_btn = ttk.Button(button_frame, text="Close", command=dialog.destroy)
         close_btn.pack(side='right')
 
-        # Generate initial preview
-        dialog.after(100, generate_preview)
+        # Ensure dialog is fully visible before generating preview
+        dialog.deiconify()  # Make sure window is shown
+        dialog.lift()  # Bring to front
+        dialog.update()  # Process all pending events
+
+        # Generate initial preview with slight delay to ensure window is rendered
+        # Using after(50) allows the window to fully appear before starting work
+        dialog.after(50, generate_preview)
 
     def _format_wavelengths_as_spec(self, wavelengths):
         """
@@ -21135,8 +21508,6 @@ Configuration:
 
         self._create_accent_button(button_frame3, "🚀 Run All Models",
                                     self._run_predictions).pack(side='left', padx=5)
-        ttk.Button(button_frame3, text="📥 Export to CSV",
-                   command=self._export_predictions, style='Modern.TButton').pack(side='left', padx=5)
 
         # Progress bar
         self.pred_progress = ttk.Progressbar(step3_frame, mode='determinate', length=400)
@@ -21172,13 +21543,20 @@ Configuration:
         content_frame.grid_rowconfigure(row, weight=1)
         row += 1
 
+        # Top controls - Export button
+        export_frame = ttk.Frame(step4_frame)
+        export_frame.grid(row=0, column=0, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(export_frame, text="📥 Export to CSV",
+                   command=self._export_predictions, style='Modern.TButton').pack(side='left', padx=5)
+
         # Predictions table
         ttk.Label(step4_frame, text="Prediction Results:", style='Subheading.TLabel').grid(
-            row=0, column=0, sticky=tk.W, pady=(0, 5))
+            row=1, column=0, sticky=tk.W, pady=(0, 5))
 
         tree_frame = ttk.Frame(step4_frame)
-        tree_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        step4_frame.grid_rowconfigure(1, weight=1)
+        tree_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        step4_frame.grid_rowconfigure(2, weight=1)
         step4_frame.grid_columnconfigure(0, weight=1)
 
         self.predictions_tree = ttk.Treeview(tree_frame, height=12, show='headings')
@@ -21198,10 +21576,10 @@ Configuration:
 
         # Statistics display
         ttk.Label(step4_frame, text="Statistics:", style='Subheading.TLabel').grid(
-            row=2, column=0, sticky=tk.W, pady=(15, 5))
+            row=3, column=0, sticky=tk.W, pady=(15, 5))
 
         stats_text_frame = ttk.Frame(step4_frame)
-        stats_text_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=5)
+        stats_text_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=5)
 
         self.pred_stats_text = tk.Text(stats_text_frame, height=10, width=90,
                                        font=('Consolas', 9),
@@ -21218,10 +21596,10 @@ Configuration:
 
         # Consensus information display
         ttk.Label(step4_frame, text="Consensus Details:", style='Subheading.TLabel').grid(
-            row=4, column=0, sticky=tk.W, pady=(15, 5))
+            row=5, column=0, sticky=tk.W, pady=(15, 5))
 
         consensus_info_frame = ttk.Frame(step4_frame)
-        consensus_info_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=5)
+        consensus_info_frame.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=5)
 
         self.consensus_info_text = tk.Text(consensus_info_frame, height=8, width=90,
                                            font=('Consolas', 9),
@@ -21238,10 +21616,10 @@ Configuration:
 
         # === Prediction Uncertainty ===
         ttk.Label(step4_frame, text="Prediction Uncertainty:", style='Subheading.TLabel').grid(
-            row=6, column=0, sticky=tk.W, pady=(15, 5))
+            row=7, column=0, sticky=tk.W, pady=(15, 5))
 
         uncertainty_frame = ttk.Frame(step4_frame)
-        uncertainty_frame.grid(row=7, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        uncertainty_frame.grid(row=8, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
 
         # Uncertainty table with scrollbars
         uncertainty_tree_frame = ttk.Frame(uncertainty_frame)
@@ -21269,11 +21647,11 @@ Configuration:
 
         # === Step 5: Prediction Plots (Only for Validation Set) ===
         ttk.Label(step4_frame, text="Prediction Plots (Validation Set Only):", style='Subheading.TLabel').grid(
-            row=8, column=0, sticky=tk.W, pady=(15, 5))
+            row=9, column=0, sticky=tk.W, pady=(15, 5))
 
         prediction_plots_frame = ttk.Frame(step4_frame)
-        prediction_plots_frame.grid(row=9, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        step4_frame.grid_rowconfigure(9, weight=1)
+        prediction_plots_frame.grid(row=10, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        step4_frame.grid_rowconfigure(10, weight=1)
 
         self.prediction_plots_frame = ttk.Frame(prediction_plots_frame)
         self.prediction_plots_frame.pack(fill='both', expand=True)

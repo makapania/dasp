@@ -166,3 +166,140 @@ class BaselinePolynomial(BaseEstimator, TransformerMixin):
             X_corrected[i, :] = y - baseline
 
         return X_corrected
+
+
+class BaselineAirPLS(BaseEstimator, TransformerMixin):
+    """
+    Adaptive Iteratively Reweighted Penalized Least Squares (airPLS).
+
+    An improved version of ALS that adaptively determines weights based on
+    the difference between data and fitted baseline, providing better
+    convergence and more robust baseline estimation.
+
+    Parameters
+    ----------
+    lam : float, default=1e5
+        Smoothness parameter. Higher = smoother baseline.
+        Typical range: 1e2 to 1e9
+
+    max_iter : int, default=15
+        Maximum iterations.
+
+    tol : float, default=1e-3
+        Convergence tolerance for weight changes.
+
+    Examples
+    --------
+    >>> from spectral_predict.baseline import BaselineAirPLS
+    >>> # Standard airPLS baseline correction
+    >>> baseline = BaselineAirPLS(lam=1e6)
+    >>> X_corrected = baseline.fit_transform(X_raman)
+
+    Notes
+    -----
+    airPLS improves on ALS by:
+    - Adaptive weight calculation based on fitting residuals
+    - Automatic handling of different peak intensities
+    - Generally faster convergence
+
+    Particularly effective for Raman spectroscopy and NIR with fluorescence.
+
+    References
+    ----------
+    Zhang, Z. M., Chen, S., & Liang, Y. Z. (2010). Baseline correction
+    using adaptive iteratively reweighted penalized least squares.
+    Analyst, 135(5), 1138-1146.
+    """
+
+    def __init__(self, lam=1e5, max_iter=15, tol=1e-3):
+        self.lam = lam
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def fit(self, X, y=None):
+        """Fit transformer (stores number of features)."""
+        X = np.asarray(X, dtype=np.float64)
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def _baseline_airpls_single(self, y):
+        """
+        Compute airPLS baseline for a single spectrum.
+
+        Parameters
+        ----------
+        y : array, shape (n_wavelengths,)
+            Single spectrum
+
+        Returns
+        -------
+        baseline : array, shape (n_wavelengths,)
+            Estimated baseline
+        """
+        L = len(y)
+
+        # Second derivative matrix
+        diags = np.array([1, -2, 1])
+        D = sparse.diags(diags, [0, 1, 2], shape=(L - 2, L), format='csc')
+        DTD = self.lam * D.T @ D
+
+        w = np.ones(L)
+
+        for iteration in range(self.max_iter):
+            W = sparse.diags(w, 0, format='csc')
+            Z = W + DTD
+
+            try:
+                z = spsolve(Z, w * y)
+            except Exception:
+                return np.zeros(L)
+
+            # Compute residuals
+            d = y - z
+
+            # airPLS weight update: exponential decrease for positive residuals
+            # (points above baseline)
+            d_neg = d[d < 0]
+            if len(d_neg) > 0:
+                m = np.abs(d_neg).mean()
+            else:
+                m = 1.0
+
+            # Weight function: exp(-|d|/m) for d > 0, 1 for d <= 0
+            w_new = np.zeros(L)
+            w_new[d <= 0] = 1.0
+            w_new[d > 0] = np.exp(-np.abs(d[d > 0]) / (2 * m + 1e-10))
+
+            # Add small regularization to avoid zero weights
+            w_new = np.maximum(w_new, 1e-6)
+
+            # Check convergence
+            if np.sum(np.abs(w_new - w)) / np.sum(w) < self.tol:
+                break
+
+            w = w_new
+
+        return z
+
+    def transform(self, X):
+        """
+        Apply airPLS baseline correction.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Spectral data
+
+        Returns
+        -------
+        X_corrected : ndarray, shape (n_samples, n_features)
+            Baseline-corrected spectra
+        """
+        X = np.asarray(X, dtype=np.float64)
+        X_corrected = np.zeros_like(X)
+
+        for i in range(X.shape[0]):
+            baseline = self._baseline_airpls_single(X[i, :])
+            X_corrected[i, :] = X[i, :] - baseline
+
+        return X_corrected

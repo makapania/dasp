@@ -1,22 +1,17 @@
 """
-I/O utilities wrapper for v3.
+I/O utilities for v3.
 
-Wraps v1's proven io.py functionality with type-safe interfaces.
+Provides type-safe interfaces for spectral data I/O.
+V3 is now standalone - no V1 dependency.
 """
 
-import sys
 from pathlib import Path
 from typing import Union, Optional, Tuple, List
 import numpy as np
 import pandas as pd
 
-# Add v1 to path
-V1_PATH = Path(__file__).parent.parent.parent / "src"
-if str(V1_PATH) not in sys.path:
-    sys.path.insert(0, str(V1_PATH))
-
-# Import v1 modules
-from spectral_predict import io as v1_io
+# Import v3 io module (standalone)
+from . import io
 
 # Import v3 types
 from .types import SpectralDataset, LoadResult, MergeResult
@@ -37,7 +32,7 @@ def detect_format(path: Union[str, Path]) -> str:
         Format identifier: 'csv', 'excel', 'asd', 'spc', 'jcamp',
         'ascii', 'opus', 'perkinelmer', 'agilent', 'directory', 'unknown'
     """
-    return v1_io.detect_format(path)
+    return io.detect_format(path)
 
 
 def read_csv_spectra(path: Union[str, Path]) -> LoadResult:
@@ -57,7 +52,7 @@ def read_csv_spectra(path: Union[str, Path]) -> LoadResult:
     LoadResult
         Contains SpectralDataset and loading metadata
     """
-    df, metadata = v1_io.read_csv_spectra(path)
+    df, metadata = io.read_csv_spectra(path)
 
     # Convert DataFrame to SpectralDataset
     wavelengths = np.array(df.columns, dtype=float)
@@ -97,7 +92,7 @@ def read_reference(
     pd.DataFrame
         DataFrame indexed by id_column
     """
-    return v1_io.read_reference_csv(path, id_column)
+    return io.read_reference_csv(path, id_column)
 
 
 def align_with_reference(
@@ -141,7 +136,7 @@ def align_with_reference(
     ref_df = read_reference(ref_path, id_column)
 
     # Use v1's align_xy with detailed info
-    X_aligned, y, info = v1_io.align_xy(
+    X_aligned, y, info = io.align_xy(
         X_df, ref_df, id_column, target_column,
         return_alignment_info=True
     )
@@ -295,7 +290,7 @@ def load_spectra_folder(folder_path: Union[str, Path]) -> Tuple[np.ndarray, np.n
         raise ValueError(f"Path is not a directory: {folder_path}")
 
     # Use v1's read_spectra with auto format detection
-    df, metadata = v1_io.read_spectra(str(folder_path), format='auto')
+    df, metadata = io.read_spectra(str(folder_path), format='auto')
 
     if df is None or len(df) == 0:
         raise ValueError(f"No valid spectral files found in folder: {folder_path}")
@@ -345,7 +340,7 @@ def load_spectra(path: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, List[s
         return load_spectra_folder(path)
     else:
         # Load single file using v1's read_spectra
-        df, metadata = v1_io.read_spectra(str(path), format='auto')
+        df, metadata = io.read_spectra(str(path), format='auto')
 
         if df is None or len(df) == 0:
             raise ValueError(f"Could not load spectral data from file: {path}")

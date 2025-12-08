@@ -8,6 +8,7 @@ import dearpygui.dearpygui as dpg
 import numpy as np
 from typing import Optional, List, Callable
 from ..theme import COLORS
+from ..tooltips import add_tooltip, TOOLTIP_CONTENT
 
 
 class SpectraPlot:
@@ -49,6 +50,7 @@ class SpectraPlot:
         self._show_sg1 = False
         self._show_sg2 = False
         self._n_bins = 4  # Number of color bins for gradient (synced with PCA)
+        self._color_by = "Target"  # "Target", "None", or metadata column name
         self._selected_indices = set()  # Currently selected sample indices
         self._displayed_indices = []  # Indices of samples currently displayed (for mapping clicks)
 
@@ -76,6 +78,15 @@ class SpectraPlot:
                     default_value=False,
                     callback=self._on_toggle_sg2,
                     tag=f"{self.tag}_sg2_cb"
+                )
+                dpg.add_spacer(width=20)
+                dpg.add_text("Color by:", color=COLORS["text_muted"])
+                dpg.add_combo(
+                    items=["Target", "None"],
+                    default_value="Target",
+                    callback=self._on_change_color,
+                    tag=f"{self.tag}_color_by",
+                    width=120
                 )
                 dpg.add_spacer(width=20)
                 dpg.add_text("Showing:", color=COLORS["text_muted"])
@@ -111,6 +122,19 @@ class SpectraPlot:
             with dpg.handler_registry(tag=f"{self.tag}_handler"):
                 dpg.add_mouse_click_handler(callback=self._on_plot_click)
 
+        # Set up tooltips
+        self._setup_tooltips()
+
+    def _setup_tooltips(self):
+        """Set up tooltips for spectra plot elements."""
+        add_tooltip(f"{self.tag}_raw_cb",
+            "Show raw (unprocessed) spectra. Displays the original spectral data without any transformations.")
+        add_tooltip(f"{self.tag}_sg1_cb", TOOLTIP_CONTENT['preprocessing']['SG1'])
+        add_tooltip(f"{self.tag}_sg2_cb", TOOLTIP_CONTENT['preprocessing']['SG2'])
+        add_tooltip(f"{self.tag}_color_by",
+            "Color spectra by target value, metadata column, or use uniform color. "
+            "Helps visualize how spectra vary with the target variable.")
+
     def set_data(self, dataset):
         """
         Set the dataset to display.
@@ -122,6 +146,22 @@ class SpectraPlot:
         """
         self._dataset = dataset
 
+        # Update color_by combo with available options
+        color_options = ["Target", "None"]
+        if dataset and dataset.metadata_columns:
+            color_options.extend(list(dataset.metadata_columns.keys()))
+        dpg.configure_item(f"{self.tag}_color_by", items=color_options)
+
+        # Reset to Target if current selection is no longer valid
+        if self._color_by not in color_options:
+            self._color_by = "Target"
+            dpg.set_value(f"{self.tag}_color_by", "Target")
+
+        self._update_plot()
+
+    def _on_change_color(self, sender, app_data):
+        """Handle color by selection change."""
+        self._color_by = app_data
         self._update_plot()
 
     def set_bins(self, n_bins: int):
@@ -161,13 +201,32 @@ class SpectraPlot:
 
         dpg.set_value(f"{self.tag}_count", display_text)
 
-        # Generate colors based on target if available
+        # Generate colors based on color_by setting
         self._legend_info = None  # Reset legend info
-        if ds.has_target and ds.metadata.get('target_type') == 'regression':
-            colors, self._legend_info = self._get_gradient_colors(ds.y[indices])
-        elif ds.has_target and ds.metadata.get('target_type') == 'classification':
-            colors, self._legend_info = self._get_class_colors(ds.y[indices])
-        else:
+        colors = None
+
+        if self._color_by == "None":
+            # Single color for all spectra
+            colors = [(100, 149, 237, 150)] * len(indices)  # Cornflower blue
+        elif self._color_by == "Target":
+            # Color by target variable
+            if ds.has_target and ds.metadata.get('target_type') == 'regression':
+                colors, self._legend_info = self._get_gradient_colors(ds.y[indices])
+            elif ds.has_target and ds.metadata.get('target_type') == 'classification':
+                colors, self._legend_info = self._get_class_colors(ds.y[indices])
+        elif ds.metadata_columns and self._color_by in ds.metadata_columns:
+            # Color by metadata column
+            meta_values = [ds.metadata_columns[self._color_by][i] for i in indices]
+            # Try numeric first, then categorical
+            try:
+                numeric_values = np.array([float(v) for v in meta_values])
+                colors, self._legend_info = self._get_gradient_colors(numeric_values)
+            except (ValueError, TypeError):
+                # Categorical - use class colors
+                colors, self._legend_info = self._get_class_colors(meta_values)
+
+        # Fallback to default blue if no colors generated
+        if colors is None:
             # Default blue color for all
             colors = [(100, 149, 237, 150)] * len(indices)  # Cornflower blue with alpha
 

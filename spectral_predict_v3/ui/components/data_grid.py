@@ -12,12 +12,14 @@ Supports editing capabilities including:
 - Undo/Redo (Ctrl+Z, Ctrl+Y)
 """
 
+import time
 import dearpygui.dearpygui as dpg
 import numpy as np
 from typing import Optional, List, Callable, Dict, Any, Tuple
 from collections import deque
 from copy import deepcopy
 from ..theme import COLORS
+from ..tooltips import add_tooltip, TOOLTIP_CONTENT
 
 
 class EditHistory:
@@ -138,8 +140,19 @@ class DataGrid:
         self._editing_cell = None  # (row, col) currently being edited
         self._edit_input_tag = None  # Tag of input widget for editing
 
+        # Selection tracking
+        self._selected_row = None  # Currently selected row index
+        self._selected_col = None  # Currently selected column index
+        self._selection_anchor = None  # (row, col) anchor for range selection
+        self._has_focus = False  # True if grid was last clicked
+
+        # Double-click tracking for cell editing
+        self._last_click_time = 0
+        self._last_click_cell = None
+
         # Callbacks
         self._on_data_change_callback = None
+        self._on_selection_change_callback = None
 
         self._create_ui()
 
@@ -163,8 +176,8 @@ class DataGrid:
 
             dpg.add_spacer(height=5)
 
-            # Table container
-            dpg.add_child_window(
+            # Table container (with right-click handler binding)
+            container = dpg.add_child_window(
                 tag=f"{self.tag}_table_container",
                 height=-30,
                 horizontal_scrollbar=True
@@ -176,6 +189,96 @@ class DataGrid:
                 tag=self._info_tag,
                 color=COLORS["text_muted"]
             )
+
+        # Set up tooltips
+        self._setup_tooltips()
+
+        # Set up keyboard handlers for copy/paste
+        self._setup_keyboard_handlers()
+
+        # Set up right-click context menu
+        self._setup_context_menu()
+
+    def _setup_context_menu(self):
+        """Set up right-click context menu for copy/paste."""
+        with dpg.window(
+            tag=f"{self.tag}_context_menu",
+            popup=True,
+            show=False,
+            no_title_bar=True,
+            min_size=[120, 10],
+            max_size=[200, 200]
+        ):
+            dpg.add_menu_item(
+                label="Copy (Ctrl+C)",
+                callback=lambda: self.copy_selection()
+            )
+            dpg.add_menu_item(
+                label="Paste (Ctrl+V)",
+                callback=lambda: self.paste_at_selection(),
+                tag=f"{self.tag}_paste_menu_item"
+            )
+            dpg.add_separator()
+            dpg.add_menu_item(
+                label="Select All (Ctrl+A)",
+                callback=lambda: self.select_all()
+            )
+
+    def _setup_tooltips(self):
+        """Set up tooltips for data grid elements."""
+        add_tooltip(f"{self.tag}_all_wl", TOOLTIP_CONTENT['ui']['show_all_wavelengths'])
+
+    def _setup_keyboard_handlers(self):
+        """Set up keyboard handlers for copy/paste operations."""
+        with dpg.handler_registry(tag=f"{self.tag}_keyboard_handler"):
+            dpg.add_key_press_handler(dpg.mvKey_C, callback=self._on_key_c)
+            dpg.add_key_press_handler(dpg.mvKey_V, callback=self._on_key_v)
+            dpg.add_key_press_handler(dpg.mvKey_A, callback=self._on_key_a)
+
+    def _is_grid_focused(self) -> bool:
+        """Check if the data grid has focus.
+
+        Focus is set when a cell is clicked and cleared when clicking elsewhere.
+        For simplicity, we consider the grid focused if there's any selection.
+        """
+        # If there's a selection or the grid was explicitly focused, allow copy/paste
+        if self._has_focus:
+            return True
+        if self._selected_cells:
+            return True
+        if self._selected_row is not None and self._selected_col is not None:
+            return True
+        return False
+
+    def set_focus(self, focused: bool = True):
+        """Set the focus state of the grid."""
+        self._has_focus = focused
+
+    def _on_key_c(self, sender, app_data):
+        """Handle C key press - copy if Ctrl held and grid focused."""
+        if not self._is_grid_focused():
+            return
+        ctrl = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+        if ctrl:
+            self.copy_selection()
+
+    def _on_key_v(self, sender, app_data):
+        """Handle V key press - paste if Ctrl held and grid focused in edit mode."""
+        if not self._is_grid_focused():
+            return
+        if not self._edit_mode:
+            return
+        ctrl = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+        if ctrl:
+            self.paste_at_selection()
+
+    def _on_key_a(self, sender, app_data):
+        """Handle A key press - select all if Ctrl held and grid focused."""
+        if not self._is_grid_focused():
+            return
+        ctrl = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+        if ctrl:
+            self.select_all()
 
     def set_data(self, dataset):
         """
@@ -208,9 +311,10 @@ class DataGrid:
         if ds.has_target:
             columns.append(ds.target_name or 'Target')
 
-        # Add metadata columns (all of them)
+        # Add metadata columns (exclude target to prevent duplication)
         if ds.metadata_columns:
-            columns.extend(list(ds.metadata_columns.keys()))
+            target_name = ds.target_name
+            columns.extend([col for col in ds.metadata_columns.keys() if col != target_name])
 
         # Add wavelength columns
         if self._show_all_wavelengths:
@@ -261,30 +365,37 @@ class DataGrid:
             with dpg.table_row():
                 pass  # Header row placeholder
 
-            # Add data rows
+            # Add data rows with clickable cells for editing
             for row_idx in range(n_samples):
                 with dpg.table_row():
-                    # ID column
-                    dpg.add_text(ds.sample_ids[row_idx])
+                    col_idx = 0
+
+                    # ID column (clickable for editing)
+                    self._render_cell(row_idx, col_idx, ds.sample_ids[row_idx], width=110)
+                    col_idx += 1
 
                     # Target column
                     if ds.has_target:
                         target_val = ds.y[row_idx]
                         if isinstance(target_val, (str, np.str_)):
-                            dpg.add_text(str(target_val))
+                            label = str(target_val)
                         else:
-                            dpg.add_text(f"{target_val:.4f}")
+                            label = f"{target_val:.4f}"
+                        self._render_cell(row_idx, col_idx, label, width=90)
+                        col_idx += 1
 
                     # Metadata columns
                     if ds.metadata_columns:
                         for meta_col in ds.metadata_columns.keys():
                             val = ds.metadata_columns[meta_col][row_idx]
-                            dpg.add_text(str(val))
+                            self._render_cell(row_idx, col_idx, val, width=90)
+                            col_idx += 1
 
-                    # Wavelength columns
+                    # Wavelength columns (clickable for editing)
                     for wl_idx in wl_indices:
                         val = ds.X[row_idx, wl_idx]
-                        dpg.add_text(f"{val:.{self._wavelength_decimals}f}")
+                        self._render_cell(row_idx, col_idx, f"{val:.{self._wavelength_decimals}f}", width=60)
+                        col_idx += 1
 
         # Update status
         target_info = ""
@@ -303,10 +414,178 @@ class DataGrid:
         )
         dpg.set_value(self._info_tag, status)
 
+        # Auto-focus the editing cell input if one exists
+        if self._editing_cell is not None:
+            row, col = self._editing_cell
+            input_tag = f"{self.tag}_cell_input_{row}_{col}"
+            if dpg.does_item_exist(input_tag):
+                dpg.focus_item(input_tag)
+
     def _on_toggle_all_wavelengths(self, sender, app_data):
         """Handle all wavelengths toggle."""
         self._show_all_wavelengths = app_data
         self._rebuild_table()
+
+    def _render_cell(self, row_idx: int, col_idx: int, value: Any, width: int = 60):
+        """
+        Render a cell as either input (if being edited) or selectable.
+
+        Parameters
+        ----------
+        row_idx : int
+            Row index
+        col_idx : int
+            Column index
+        value : Any
+            Cell value to display
+        width : int
+            Width for input field
+        """
+        if self._editing_cell == (row_idx, col_idx):
+            # Render as input field for true in-cell editing
+            input_tag = f"{self.tag}_cell_input_{row_idx}_{col_idx}"
+            dpg.add_input_text(
+                default_value=str(value),
+                tag=input_tag,
+                width=width,
+                on_enter=True,
+                callback=self._on_cell_input_enter,
+                user_data=(row_idx, col_idx)
+            )
+        else:
+            # Normal selectable cell
+            dpg.add_selectable(
+                label=str(value),
+                callback=self._on_cell_click,
+                user_data=(row_idx, col_idx),
+                span_columns=False
+            )
+
+    def _on_cell_input_enter(self, sender, app_data, user_data):
+        """Handle Enter key in cell input - save and exit edit mode."""
+        self._save_current_edit()
+        self._editing_cell = None
+        self._rebuild_table()
+
+    def _on_cell_click(self, sender, app_data, user_data):
+        """
+        Handle cell click for selection and editing.
+
+        Parameters
+        ----------
+        sender : int
+            DPG item ID that was clicked
+        app_data : any
+            Application data (selection state)
+        user_data : tuple
+            (row_idx, col_idx) of the clicked cell
+        """
+        row, col = user_data
+
+        # Check for double-click (same cell within 300ms)
+        current_time = time.time()
+        double_click = (
+            self._last_click_cell == (row, col) and
+            current_time - self._last_click_time < 0.3
+        )
+        self._last_click_time = current_time
+        self._last_click_cell = (row, col)
+
+        # Check for modifier keys
+        shift = dpg.is_key_down(dpg.mvKey_LShift) or dpg.is_key_down(dpg.mvKey_RShift)
+        ctrl = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+
+        if shift and self._selection_anchor is not None:
+            # Extend selection from anchor to clicked cell
+            self._select_range(self._selection_anchor, (row, col))
+        elif ctrl:
+            # Toggle single cell in selection
+            if (row, col) in self._selected_cells:
+                self._selected_cells.discard((row, col))
+            else:
+                self._selected_cells.add((row, col))
+        else:
+            # Single cell selection, set as new anchor
+            self._selected_cells = {(row, col)}
+            self._selection_anchor = (row, col)
+
+        # Always update current selection position
+        self._selected_row = row
+        self._selected_col = col
+
+        # Set focus to this grid
+        self._has_focus = True
+
+        # Update status to show selection
+        n_selected = len(self._selected_cells)
+        if n_selected > 1:
+            dpg.set_value(self._info_tag, f"Selected: {n_selected} cells (Ctrl+C to copy)")
+        elif n_selected == 1:
+            dpg.set_value(self._info_tag, f"Cell ({row}, {col}) selected (double-click to edit)")
+
+        # Notify selection change
+        if self._on_selection_change_callback:
+            self._on_selection_change_callback(row, col)
+
+        # Double-click in edit mode opens cell editor
+        if self._edit_mode and double_click and not shift and not ctrl:
+            self.edit_cell(row, col)
+
+    def _select_range(self, anchor: Tuple[int, int], end: Tuple[int, int]):
+        """Select rectangular region from anchor to end point."""
+        self._selected_cells.clear()
+        r1, c1 = anchor
+        r2, c2 = end
+        for r in range(min(r1, r2), max(r1, r2) + 1):
+            for c in range(min(c1, c2), max(c1, c2) + 1):
+                self._selected_cells.add((r, c))
+
+    def select_all(self):
+        """Select all cells in the grid."""
+        if self._dataset is None:
+            return
+        n_rows = self._dataset.n_samples
+        n_cols = self._get_total_columns()
+        self._selected_cells.clear()
+        for r in range(n_rows):
+            for c in range(n_cols):
+                self._selected_cells.add((r, c))
+        self._selection_anchor = (0, 0)
+        self._selected_row = 0
+        self._selected_col = 0
+
+    def _get_total_columns(self) -> int:
+        """Get total number of logical columns in the grid."""
+        if self._dataset is None:
+            return 0
+        ds = self._dataset
+        count = 1  # ID column
+        if ds.has_target:
+            count += 1
+        if ds.metadata_columns:
+            # Exclude target from count
+            count += sum(1 for col in ds.metadata_columns.keys() if col != ds.target_name)
+        count += ds.n_wavelengths
+        return count
+
+    def get_selected_row(self) -> Optional[int]:
+        """Get currently selected row index."""
+        return self._selected_row
+
+    def get_selected_col(self) -> Optional[int]:
+        """Get currently selected column index."""
+        return self._selected_col
+
+    def set_on_selection_change(self, callback: Callable):
+        """
+        Set callback for when selection changes.
+
+        Parameters
+        ----------
+        callback : callable
+            Function(row, col) called when selection changes
+        """
+        self._on_selection_change_callback = callback
 
     def clear(self):
         """Clear the grid."""
@@ -383,9 +662,10 @@ class DataGrid:
                 return ds.y[row]
             col_idx += 1
 
-        # Metadata columns
+        # Metadata columns (exclude target to match display)
         if ds.metadata_columns:
-            meta_keys = list(ds.metadata_columns.keys())
+            target_name = ds.target_name
+            meta_keys = [k for k in ds.metadata_columns.keys() if k != target_name]
             if col < col_idx + len(meta_keys):
                 meta_key = meta_keys[col - col_idx]
                 return ds.metadata_columns[meta_key][row]
@@ -448,9 +728,10 @@ class DataGrid:
                 return True
             col_idx += 1
 
-        # Metadata columns - editable
+        # Metadata columns - editable (exclude target to match display)
         if ds.metadata_columns:
-            meta_keys = list(ds.metadata_columns.keys())
+            target_name = ds.target_name
+            meta_keys = [k for k in ds.metadata_columns.keys() if k != target_name]
             if col < col_idx + len(meta_keys):
                 meta_key = meta_keys[col - col_idx]
                 ds.metadata_columns[meta_key][row] = value
@@ -504,7 +785,9 @@ class DataGrid:
             col_idx += 1
 
         if ds.metadata_columns:
-            meta_count = len(ds.metadata_columns)
+            # Exclude target from metadata count to match display
+            target_name = ds.target_name
+            meta_count = sum(1 for k in ds.metadata_columns.keys() if k != target_name)
             if col < col_idx + meta_count:
                 return 'metadata'
             col_idx += meta_count
@@ -513,7 +796,7 @@ class DataGrid:
 
     def edit_cell(self, row: int, col: int):
         """
-        Start editing a specific cell.
+        Start true spreadsheet-style editing - the cell itself becomes an input field.
 
         Parameters
         ----------
@@ -525,100 +808,158 @@ class DataGrid:
         if not self._edit_mode or self._dataset is None:
             return
 
-        # Cancel any existing edit
-        self._cancel_cell_edit()
+        # If already editing this cell, do nothing
+        if self._editing_cell == (row, col):
+            return
+
+        # Save any existing edit first
+        if self._editing_cell is not None:
+            self._save_current_edit()
 
         # Store original value for undo
         original_value = self._get_cell_value(row, col)
-        if (row, col) not in self._modified_cells:
-            self._modified_cells[(row, col)] = original_value
-
+        self._original_edit_value = original_value
         self._editing_cell = (row, col)
 
-        # Create modal input dialog
-        self._edit_input_tag = f"{self.tag}_edit_input"
+        # Rebuild table with this cell as an input field
+        self._rebuild_table()
 
-        with dpg.window(
-            label="Edit Cell",
-            modal=True,
-            show=True,
-            tag=f"{self.tag}_edit_window",
-            no_resize=True,
-            width=300,
-            height=120,
-            pos=[400, 300]
-        ):
-            dpg.add_text(f"Editing cell ({row}, {col})")
-            dpg.add_spacer(height=5)
+    def _save_current_edit(self):
+        """Save the value from the currently editing cell."""
+        if self._editing_cell is None:
+            return
 
-            current_value = str(original_value) if original_value is not None else ""
-            dpg.add_input_text(
-                tag=self._edit_input_tag,
-                default_value=current_value,
-                width=-1,
-                on_enter=True,
-                callback=self._on_edit_confirm
-            )
+        row, col = self._editing_cell
+        input_tag = f"{self.tag}_cell_input_{row}_{col}"
 
-            dpg.add_spacer(height=10)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="OK",
-                    callback=self._on_edit_confirm,
-                    width=140
-                )
-                dpg.add_button(
-                    label="Cancel",
-                    callback=self._on_edit_cancel,
-                    width=140
-                )
+        if dpg.does_item_exist(input_tag):
+            new_value = dpg.get_value(input_tag)
+            original_value = getattr(self, '_original_edit_value', None)
 
-        # Set focus to input
-        dpg.focus_item(self._edit_input_tag)
+            # Only save if value changed
+            if str(new_value) != str(original_value):
+                if self._set_cell_value(row, col, new_value):
+                    # Record in history
+                    self._edit_history.push({
+                        'type': 'cell_edit',
+                        'row': row,
+                        'col': col,
+                        'old_value': original_value,
+                        'new_value': new_value
+                    })
+
+                    # Notify callback
+                    if self._on_data_change_callback:
+                        self._on_data_change_callback()
+
+        self._editing_cell = None
+        self._original_edit_value = None
+
+    def _get_column_name(self, col: int) -> str:
+        """Get column name by index."""
+        if self._dataset is None:
+            return f"Column {col}"
+
+        ds = self._dataset
+        col_idx = 0
+
+        if col == col_idx:
+            return "ID"
+        col_idx += 1
+
+        if ds.has_target:
+            if col == col_idx:
+                return ds.target_name or "Target"
+            col_idx += 1
+
+        if ds.metadata_columns:
+            meta_keys = list(ds.metadata_columns.keys())
+            if col < col_idx + len(meta_keys):
+                return meta_keys[col - col_idx]
+            col_idx += len(meta_keys)
+
+        # Wavelength column
+        if self._show_all_wavelengths:
+            wl_indices = list(range(ds.n_wavelengths))
+        else:
+            wl_step = max(1, ds.n_wavelengths // 100)
+            wl_indices = list(range(0, ds.n_wavelengths, wl_step))
+
+        wl_col_idx = col - col_idx
+        if wl_col_idx < len(wl_indices):
+            return f"{int(round(ds.wavelengths[wl_indices[wl_col_idx]]))} nm"
+
+        return f"Column {col}"
+
+    def _on_mouse_click_during_edit(self, sender=None, app_data=None):
+        """Handle mouse click while editing - auto-save if clicking outside edit input."""
+        if self._editing_cell is None:
+            return
+
+        # Check if click is inside the edit window
+        if dpg.does_item_exist(f"{self.tag}_edit_window"):
+            # Get edit window position and size
+            pos = dpg.get_item_pos(f"{self.tag}_edit_window")
+            # Auto-save - the click handler fires, so save and close
+            self._on_edit_confirm()
 
     def _on_edit_confirm(self, sender=None, app_data=None):
-        """Confirm cell edit."""
+        """Confirm and save cell edit."""
         if self._editing_cell is None or self._edit_input_tag is None:
             return
 
         row, col = self._editing_cell
         new_value = dpg.get_value(self._edit_input_tag)
 
-        # Try to set the value
-        original_value = self._modified_cells.get((row, col))
-        if self._set_cell_value(row, col, new_value):
-            # Record in history
-            self._edit_history.push({
-                'type': 'cell_edit',
-                'row': row,
-                'col': col,
-                'old_value': original_value,
-                'new_value': new_value
-            })
+        # Get original value
+        original_value = getattr(self, '_original_edit_value', None)
 
-            # Rebuild table to show changes
-            self._rebuild_table()
+        # Only save if value changed
+        if str(new_value) != str(original_value):
+            if self._set_cell_value(row, col, new_value):
+                # Record in history
+                self._edit_history.push({
+                    'type': 'cell_edit',
+                    'row': row,
+                    'col': col,
+                    'old_value': original_value,
+                    'new_value': new_value
+                })
 
-            # Notify callback
-            if self._on_data_change_callback:
-                self._on_data_change_callback()
+                # Notify callback
+                if self._on_data_change_callback:
+                    self._on_data_change_callback()
 
         # Clean up
-        if dpg.does_item_exist(f"{self.tag}_edit_window"):
-            dpg.delete_item(f"{self.tag}_edit_window")
-        self._editing_cell = None
-        self._edit_input_tag = None
+        self._cleanup_edit()
+
+        # Rebuild table to show changes
+        self._rebuild_table()
 
     def _on_edit_cancel(self, sender=None, app_data=None):
-        """Cancel cell edit."""
-        self._cancel_cell_edit()
+        """Cancel cell edit without saving."""
+        self._cleanup_edit()
 
     def _cancel_cell_edit(self):
-        """Cancel any active cell edit."""
+        """Cancel any active cell edit - saves changes first (spreadsheet behavior)."""
+        if self._editing_cell is not None and self._edit_input_tag is not None:
+            # Auto-save current edit before canceling (spreadsheet style)
+            if dpg.does_item_exist(self._edit_input_tag):
+                self._on_edit_confirm()
+                return
+        self._cleanup_edit()
+
+    def _cleanup_edit(self):
+        """Clean up edit state and UI."""
+        # Remove handler registry
+        if dpg.does_item_exist(f"{self.tag}_edit_handler"):
+            dpg.delete_item(f"{self.tag}_edit_handler")
+        # Remove edit window
         if dpg.does_item_exist(f"{self.tag}_edit_window"):
             dpg.delete_item(f"{self.tag}_edit_window")
         self._editing_cell = None
         self._edit_input_tag = None
+        self._original_edit_value = None
 
     def undo(self):
         """Undo the last edit operation."""
@@ -665,6 +1006,12 @@ class DataGrid:
             # Restore old values
             for row, old_val in operation['old_values'].items():
                 self._set_cell_value(row, operation['col'], old_val)
+            self._rebuild_table()
+
+        elif operation['type'] == 'paste':
+            # Restore all old values
+            for (row, col), old_val in operation['old_values'].items():
+                self._set_cell_value(row, col, old_val)
             self._rebuild_table()
 
         if self._on_data_change_callback:
@@ -715,6 +1062,12 @@ class DataGrid:
             # Re-apply fill
             for row in operation['old_values'].keys():
                 self._set_cell_value(row, operation['col'], operation['new_value'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'paste':
+            # Re-apply all pasted values
+            for (row, col), new_val in operation['new_values'].items():
+                self._set_cell_value(row, col, new_val)
             self._rebuild_table()
 
         if self._on_data_change_callback:
@@ -888,7 +1241,7 @@ class DataGrid:
 
     # ==================== Column Operations ====================
 
-    def add_column(self, column_name: str, column_type: str = 'metadata', default_value: Any = ""):
+    def add_column(self, column_name: str, column_type: str = 'metadata', default_value: Any = "") -> bool:
         """
         Add a new column.
 
@@ -900,15 +1253,30 @@ class DataGrid:
             'metadata' or 'spectral' (spectral not yet supported)
         default_value : any
             Default value for all rows
+
+        Returns
+        -------
+        bool
+            True if column was added, False otherwise
         """
-        if self._dataset is None or column_type != 'metadata':
-            return
+        if self._dataset is None:
+            return False
+
+        if column_type != 'metadata':
+            return False  # Only metadata columns supported for now
+
+        if not column_name:
+            return False
 
         ds = self._dataset
 
         # Add to metadata columns
         if ds.metadata_columns is None:
             ds.metadata_columns = {}
+
+        # Check if column already exists
+        if column_name in ds.metadata_columns:
+            return False
 
         ds.metadata_columns[column_name] = [default_value] * ds.n_samples
 
@@ -926,7 +1294,9 @@ class DataGrid:
         if self._on_data_change_callback:
             self._on_data_change_callback()
 
-    def delete_column(self, column_name: str):
+        return True
+
+    def delete_column(self, column_name: str) -> bool:
         """
         Delete a column by name.
 
@@ -934,11 +1304,29 @@ class DataGrid:
         ----------
         column_name : str
             Name of column to delete
+
+        Returns
+        -------
+        bool
+            True if column was deleted, False otherwise
         """
+        if not column_name:
+            return False
+
+        if self._dataset is None:
+            return False
+
+        # Check if column exists
+        if not self._dataset.metadata_columns or column_name not in self._dataset.metadata_columns:
+            return False
+
         self._delete_column(column_name, record_history=True)
         self._rebuild_table()
+
         if self._on_data_change_callback:
             self._on_data_change_callback()
+
+        return True
 
     def _delete_column(self, column_name: str, record_history: bool = True):
         """Internal method to delete a column."""
@@ -1072,5 +1460,239 @@ class DataGrid:
         })
 
         self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    # ==================== Copy/Paste Methods ====================
+
+    def copy_selection(self):
+        """
+        Copy selected cells to clipboard as TSV (tab-separated values).
+
+        Copies either the multi-cell selection or the current single cell.
+        """
+        if self._dataset is None:
+            return
+
+        # Get cells to copy - either multi-selection or current cell
+        cells = self._selected_cells
+        if not cells and self._selected_row is not None and self._selected_col is not None:
+            cells = {(self._selected_row, self._selected_col)}
+
+        if not cells:
+            return
+
+        # Convert to TSV
+        tsv_data = self._cells_to_tsv(cells)
+        if not tsv_data:
+            return
+
+        # Copy to clipboard using pyperclip with tkinter fallback
+        copied = False
+        try:
+            import pyperclip
+            pyperclip.copy(tsv_data)
+            copied = True
+        except ImportError:
+            try:
+                import tkinter as tk
+                root = tk.Tk()
+                root.withdraw()
+                root.clipboard_clear()
+                root.clipboard_append(tsv_data)
+                root.update()
+                root.destroy()
+                copied = True
+            except Exception:
+                pass  # Silent fail if clipboard unavailable
+        except Exception:
+            pass
+
+        # Show feedback
+        if copied:
+            n_cells = len(cells)
+            dpg.set_value(self._info_tag, f"Copied {n_cells} cell(s) to clipboard")
+
+    def paste_at_selection(self):
+        """
+        Paste clipboard data starting at the current selection anchor.
+
+        Only works in edit mode. Validates data types before pasting.
+        """
+        if self._dataset is None or not self._edit_mode:
+            return
+
+        # Get paste anchor (top-left of selection or current cell)
+        if self._selected_cells:
+            min_row = min(c[0] for c in self._selected_cells)
+            min_col = min(c[1] for c in self._selected_cells)
+        elif self._selected_row is not None and self._selected_col is not None:
+            min_row, min_col = self._selected_row, self._selected_col
+        else:
+            return
+
+        # Get clipboard content
+        tsv_data = None
+        try:
+            import pyperclip
+            tsv_data = pyperclip.paste()
+        except ImportError:
+            try:
+                import tkinter as tk
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    tsv_data = root.clipboard_get()
+                except tk.TclError:
+                    pass  # Clipboard empty or not text
+                root.destroy()
+            except Exception:
+                pass
+
+        if not tsv_data:
+            return
+
+        # Parse TSV
+        paste_data = self._tsv_to_cells(tsv_data)
+        if not paste_data:
+            return
+
+        # Apply paste with validation
+        self._apply_paste(paste_data, min_row, min_col)
+
+    def _cells_to_tsv(self, cells: set) -> str:
+        """
+        Convert selected cells to TSV string for clipboard.
+
+        Parameters
+        ----------
+        cells : set of (row, col) tuples
+            Cells to convert
+
+        Returns
+        -------
+        str
+            Tab-separated values string
+        """
+        if not cells:
+            return ""
+
+        # Get bounds of selection
+        rows = sorted(set(c[0] for c in cells))
+        cols = sorted(set(c[1] for c in cells))
+
+        lines = []
+        for r in rows:
+            row_values = []
+            for c in cols:
+                if (r, c) in cells:
+                    val = self._get_cell_value(r, c)
+                    if val is None:
+                        row_values.append("")
+                    elif isinstance(val, float):
+                        # Format floats nicely
+                        if val == int(val):
+                            row_values.append(str(int(val)))
+                        else:
+                            row_values.append(f"{val:.6g}")
+                    else:
+                        row_values.append(str(val))
+                else:
+                    row_values.append("")  # Gap in selection
+            lines.append("\t".join(row_values))
+
+        return "\n".join(lines)
+
+    def _tsv_to_cells(self, tsv: str) -> List[List[str]]:
+        """
+        Parse TSV string into 2D list of values.
+
+        Parameters
+        ----------
+        tsv : str
+            Tab-separated values string
+
+        Returns
+        -------
+        list of list of str
+            2D array of cell values
+        """
+        lines = tsv.strip().split("\n")
+        return [line.split("\t") for line in lines]
+
+    def _apply_paste(self, data: List[List[str]], start_row: int, start_col: int):
+        """
+        Apply paste data with validation and undo support.
+
+        Parameters
+        ----------
+        data : list of list of str
+            2D array of values to paste
+        start_row : int
+            Starting row index
+        start_col : int
+            Starting column index
+        """
+        if self._dataset is None:
+            return
+
+        n_samples = self._dataset.n_samples
+        n_cols = self._get_total_columns()
+
+        # Collect all changes for undo
+        old_values = {}
+        changes = []
+
+        for r_offset, row_data in enumerate(data):
+            row = start_row + r_offset
+            if row >= n_samples:
+                break  # Don't expand grid
+
+            for c_offset, value in enumerate(row_data):
+                col = start_col + c_offset
+                if col >= n_cols:
+                    break  # Don't expand grid
+
+                col_type = self._get_column_type(col)
+
+                # Validate based on column type
+                if col_type == 'spectral':
+                    try:
+                        float(value)  # Must be numeric
+                    except (ValueError, TypeError):
+                        continue  # Skip invalid cells
+                elif col_type == 'target':
+                    target_type = self._dataset.metadata.get('target_type', 'regression')
+                    if target_type != 'classification':
+                        try:
+                            float(value)
+                        except (ValueError, TypeError):
+                            continue
+
+                # Store old value
+                old_values[(row, col)] = self._get_cell_value(row, col)
+                changes.append((row, col, value))
+
+        if not changes:
+            return
+
+        # Apply changes
+        for row, col, value in changes:
+            self._set_cell_value(row, col, value)
+
+        # Record in undo history
+        self._edit_history.push({
+            'type': 'paste',
+            'old_values': old_values,
+            'new_values': {(r, c): v for r, c, v in changes},
+            'start_row': start_row,
+            'start_col': start_col
+        })
+
+        self._rebuild_table()
+
+        # Show feedback
+        dpg.set_value(self._info_tag, f"Pasted {len(changes)} cell(s)")
+
         if self._on_data_change_callback:
             self._on_data_change_callback()

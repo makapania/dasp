@@ -11,10 +11,7 @@ from typing import Union, Optional, Callable, List
 import numpy as np
 import pandas as pd
 
-# Add v1 to path
-V1_PATH = Path(__file__).parent.parent.parent / "src"
-if str(V1_PATH) not in sys.path:
-    sys.path.insert(0, str(V1_PATH))
+# V3 is now standalone - no V1 dependency
 
 # Import v3 types and utilities
 from .types import SpectralDataset, LoadResult, MergeResult
@@ -107,7 +104,23 @@ class Engine:
 
         # Extract spectral data
         wl_cols = col_info['wavelength_columns']
-        X = df[wl_cols].values.astype(float)
+        warnings = []
+
+        # Convert to numeric, handling non-numeric values
+        X_df = df[wl_cols].apply(pd.to_numeric, errors='coerce')
+
+        # Count and warn about missing values BEFORE imputation
+        nan_count = X_df.isna().sum().sum()
+        if nan_count > 0:
+            n_samples_affected = X_df.isna().any(axis=1).sum()
+            warnings.append(
+                f"Warning: {nan_count} missing/non-numeric values in {n_samples_affected} samples "
+                f"were replaced with column means"
+            )
+
+        # Impute missing values
+        X_df = X_df.fillna(X_df.mean()).fillna(0)
+        X = X_df.values.astype(float)
         wavelengths = np.array([float(c) for c in wl_cols])
         sample_ids = list(df[id_col].astype(str))
 
@@ -128,19 +141,35 @@ class Engine:
         return LoadResult(
             dataset=dataset,
             format_detected='excel',
-            warnings=[]
+            warnings=warnings
         )
 
     def _load_directory(self, path: Path) -> LoadResult:
         """Load spectral files from a directory."""
-        from spectral_predict import io as v1_io
+        from . import io as v3_io
+        import pandas as pd
 
-        # Use v1's read_spectra which handles directory detection
+        # Use v3's read_spectra which handles directory detection
         try:
-            df, metadata = v1_io.read_spectra(path)
+            df, metadata = v3_io.read_spectra(path)
+            warnings = []
 
-            wavelengths = np.array(df.columns, dtype=float)
-            X = df.values.astype(float)
+            # Convert to numeric, handling non-numeric values
+            df_numeric = df.apply(pd.to_numeric, errors='coerce')
+
+            # Count and warn about missing values BEFORE imputation
+            nan_count = df_numeric.isna().sum().sum()
+            if nan_count > 0:
+                n_samples_affected = df_numeric.isna().any(axis=1).sum()
+                warnings.append(
+                    f"Warning: {nan_count} missing/non-numeric values in {n_samples_affected} samples "
+                    f"were replaced with column means"
+                )
+
+            df_numeric = df_numeric.fillna(df_numeric.mean()).fillna(0)
+
+            wavelengths = np.array([float(c) for c in df.columns])
+            X = df_numeric.values.astype(float)
             sample_ids = list(df.index.astype(str))
 
             dataset = SpectralDataset(
@@ -153,20 +182,36 @@ class Engine:
             return LoadResult(
                 dataset=dataset,
                 format_detected=metadata.get('file_format', 'directory'),
-                warnings=[]
+                warnings=warnings
             )
         except Exception as e:
             raise ValueError(f"Could not load directory {path}: {e}")
 
     def _load_asd_directory(self, path: Path) -> LoadResult:
-        """Load ASD files from directory using v1's io.read_asd_dir."""
-        from spectral_predict import io as v1_io
+        """Load ASD files from directory using v3's io.read_asd_dir."""
+        from . import io as v3_io
+        import pandas as pd
 
-        # Use v1's read_asd_dir which handles ASCII and binary ASD files
-        df, metadata = v1_io.read_asd_dir(path)
+        # Use v3's read_asd_dir which handles ASCII and binary ASD files
+        df, metadata = v3_io.read_asd_dir(path)
+        warnings = []
 
-        wavelengths = np.array(df.columns, dtype=float)
-        X = df.values.astype(float)
+        # Convert to numeric, handling non-numeric values
+        df_numeric = df.apply(pd.to_numeric, errors='coerce')
+
+        # Count and warn about missing values BEFORE imputation
+        nan_count = df_numeric.isna().sum().sum()
+        if nan_count > 0:
+            n_samples_affected = df_numeric.isna().any(axis=1).sum()
+            warnings.append(
+                f"Warning: {nan_count} missing/non-numeric values in {n_samples_affected} samples "
+                f"were replaced with column means"
+            )
+
+        df_numeric = df_numeric.fillna(df_numeric.mean()).fillna(0)
+
+        wavelengths = np.array([float(c) for c in df.columns])
+        X = df_numeric.values.astype(float)
         sample_ids = list(df.index.astype(str))
 
         dataset = SpectralDataset(
@@ -179,7 +224,7 @@ class Engine:
         return LoadResult(
             dataset=dataset,
             format_detected='asd',
-            warnings=[]
+            warnings=warnings
         )
 
     def _load_asd(self, path: Path) -> LoadResult:
@@ -301,12 +346,12 @@ class Engine:
         if not dataset.has_target:
             raise ValueError("Dataset must have target values for model search")
 
-        # Lazy import v1 search
+        # Lazy import v3 search
         if self._search_module is None:
-            from spectral_predict import search
+            from . import search
             self._search_module = search
 
-        # Convert to DataFrame format expected by v1
+        # Convert to DataFrame format expected by search module
         X_df = pd.DataFrame(
             dataset.X,
             index=dataset.sample_ids,
@@ -355,9 +400,9 @@ class Engine:
         np.ndarray
             Preprocessed data
         """
-        # Lazy import
+        # Lazy import v3 preprocess
         if self._preprocess_module is None:
-            from spectral_predict import preprocess
+            from . import preprocess
             self._preprocess_module = preprocess
 
         if method == 'raw' or method is None:

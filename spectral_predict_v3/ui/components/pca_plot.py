@@ -9,6 +9,7 @@ import numpy as np
 from typing import Optional, List, Callable
 from sklearn.decomposition import PCA
 from ..theme import COLORS
+from ..tooltips import add_tooltip
 
 
 class PCAPlot:
@@ -127,6 +128,19 @@ class PCAPlot:
             with dpg.handler_registry(tag=f"{self.tag}_handler"):
                 dpg.add_mouse_click_handler(callback=self._on_plot_click)
 
+        # Set up tooltips
+        self._setup_tooltips()
+
+    def _setup_tooltips(self):
+        """Set up tooltips for PCA plot elements."""
+        add_tooltip(f"{self.tag}_pc_x",
+            "Select principal component for the X axis. PC1 typically captures the most variance.")
+        add_tooltip(f"{self.tag}_pc_y",
+            "Select principal component for the Y axis. PC2 typically captures the second most variance.")
+        add_tooltip(f"{self.tag}_color_by",
+            "Color points by target value, metadata column, or use uniform color. "
+            "Target coloring helps visualize how well PCA separates your classes or values.")
+
     def set_data(self, dataset):
         """
         Set the dataset to display.
@@ -213,11 +227,15 @@ class PCAPlot:
                 self._plot_by_gradient(x_data, y_data, ds.y)
         elif color_by != "None" and color_by != "Target" and color_by in ds.metadata_columns:
             values = ds.metadata_columns[color_by]
-            # Check if numeric
+            # Check if numeric - convert None/empty to NaN
             try:
-                numeric_values = np.array([float(v) for v in values])
+                def safe_float(v):
+                    if v is None or v == '' or (isinstance(v, str) and v.strip() == ''):
+                        return np.nan
+                    return float(v)
+                numeric_values = np.array([safe_float(v) for v in values])
                 self._plot_by_gradient(x_data, y_data, numeric_values)
-            except:
+            except (ValueError, TypeError):
                 self._plot_by_class(x_data, y_data, values)
         else:
             self._plot_single_color(x_data, y_data)
@@ -250,6 +268,20 @@ class PCAPlot:
     def _plot_by_gradient(self, x_data: np.ndarray, y_data: np.ndarray, values: np.ndarray):
         """Plot points colored by gradient based on numeric values."""
         y_axis = f"{self.tag}_y_axis"
+
+        # Filter out NaN/missing values before plotting
+        valid_mask = ~np.isnan(values)
+        if not np.all(valid_mask):
+            n_excluded = np.sum(~valid_mask)
+            print(f"DEBUG: PCA plot excluding {n_excluded} points with NaN values")
+            x_data = x_data[valid_mask]
+            y_data = y_data[valid_mask]
+            values = values[valid_mask]
+
+        # Handle case where all values are NaN
+        if len(values) == 0:
+            self._plot_single_color(x_data, y_data)
+            return
 
         n_bins = self._n_bins
 
@@ -558,3 +590,60 @@ class PCAPlot:
                 dpg.add_theme_color(dpg.mvPlotCol_MarkerOutline, (255, 0, 0, 255), category=dpg.mvThemeCat_Plots)
                 dpg.add_theme_style(dpg.mvPlotStyleVar_MarkerSize, 8, category=dpg.mvThemeCat_Plots)
         dpg.bind_item_theme(f"{self.tag}_selection", theme)
+
+    def set_outliers(self, outlier_indices: List[int]):
+        """
+        Mark outlier samples with distinct red markers on the PCA plot.
+
+        Parameters
+        ----------
+        outlier_indices : List[int]
+            List of sample indices that are outliers
+        """
+        if self._scores is None:
+            return
+
+        # Remove existing outlier markers
+        if dpg.does_item_exist(f"{self.tag}_outliers"):
+            dpg.delete_item(f"{self.tag}_outliers")
+
+        if not outlier_indices:
+            return
+
+        # Get coordinates for outlier points
+        pc_x = self._pc_x
+        pc_y = self._pc_y
+        x_data = self._scores[:, pc_x]
+        y_data = self._scores[:, pc_y]
+
+        # Filter valid indices
+        valid_indices = [i for i in outlier_indices if i < len(x_data)]
+        if not valid_indices:
+            return
+
+        outlier_x = [x_data[i] for i in valid_indices]
+        outlier_y = [y_data[i] for i in valid_indices]
+
+        # Add outlier scatter series
+        y_axis = f"{self.tag}_y_axis"
+        dpg.add_scatter_series(
+            x=outlier_x,
+            y=outlier_y,
+            label=f"Outliers ({len(valid_indices)})",
+            parent=y_axis,
+            tag=f"{self.tag}_outliers"
+        )
+
+        # Outlier style - red X markers
+        with dpg.theme() as theme:
+            with dpg.theme_component(dpg.mvScatterSeries):
+                dpg.add_theme_color(dpg.mvPlotCol_MarkerFill, (255, 50, 50, 255), category=dpg.mvThemeCat_Plots)
+                dpg.add_theme_color(dpg.mvPlotCol_MarkerOutline, (180, 0, 0, 255), category=dpg.mvThemeCat_Plots)
+                dpg.add_theme_style(dpg.mvPlotStyleVar_MarkerSize, 10, category=dpg.mvThemeCat_Plots)
+                dpg.add_theme_style(dpg.mvPlotStyleVar_Marker, dpg.mvPlotMarker_Cross, category=dpg.mvThemeCat_Plots)
+        dpg.bind_item_theme(f"{self.tag}_outliers", theme)
+
+    def clear_outliers(self):
+        """Remove outlier markers from the plot."""
+        if dpg.does_item_exist(f"{self.tag}_outliers"):
+            dpg.delete_item(f"{self.tag}_outliers")

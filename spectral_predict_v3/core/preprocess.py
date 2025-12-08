@@ -4,6 +4,7 @@ Preprocessing transformers for spectral data (v3 standalone).
 Forked from v1 - simplified for v3's numpy-first approach.
 
 Includes:
+- Absorbance (Reflectance to Absorbance conversion)
 - SNV (Standard Normal Variate)
 - SavgolDerivative (Savitzky-Golay derivatives)
 - MSC (Multiplicative Scatter Correction)
@@ -13,6 +14,62 @@ import numpy as np
 from scipy.signal import savgol_filter
 from sklearn.base import BaseEstimator, TransformerMixin
 import warnings
+
+
+class Absorbance(BaseEstimator, TransformerMixin):
+    """
+    Convert reflectance spectra to absorbance using log10(1/R).
+
+    This transformation is commonly used in NIR spectroscopy where
+    reflectance data follows Beer-Lambert law better in absorbance space.
+
+    Parameters
+    ----------
+    clip_min : float, default=1e-6
+        Minimum reflectance value to avoid log(0). Values below this
+        are clipped to prevent infinite absorbance.
+
+    Notes
+    -----
+    - Input should be in reflectance units (0-1 or 0-100%)
+    - If values are > 1, assumes percentage and divides by 100
+    - Very small or zero reflectance values are clipped to avoid log(0)
+    """
+
+    def __init__(self, clip_min=1e-6):
+        self.clip_min = clip_min
+
+    def fit(self, X, y=None):
+        """Fit transformer (no-op for Absorbance)."""
+        return self
+
+    def transform(self, X):
+        """
+        Convert reflectance to absorbance.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Reflectance spectral data
+
+        Returns
+        -------
+        X_abs : ndarray, shape (n_samples, n_features)
+            Absorbance spectra (log10(1/R))
+        """
+        X = np.asarray(X, dtype=np.float64)
+
+        # If values > 1, assume percentage reflectance
+        if np.max(X) > 1.5:
+            X = X / 100.0
+
+        # Clip to avoid log(0) or log(negative)
+        X_clipped = np.clip(X, self.clip_min, None)
+
+        # Convert: A = log10(1/R) = -log10(R)
+        X_abs = -np.log10(X_clipped)
+
+        return X_abs
 
 
 class SNV(BaseEstimator, TransformerMixin):
@@ -252,3 +309,27 @@ class MSC(BaseEstimator, TransformerMixin):
             X_corrected[i, :] = (X[i, :] - fit[1]) / fit[0]
 
         return X_corrected
+
+
+# Re-export baseline correction classes for convenient access
+# These are fully implemented in baseline.py
+try:
+    from .baseline import (
+        BaselinePolynomial,
+        BaselineAsLS,
+        BaselineAirPLS,
+        SavgolSmooth,
+    )
+    __all__ = [
+        'Absorbance',
+        'SNV',
+        'SavgolDerivative',
+        'MSC',
+        'BaselinePolynomial',
+        'BaselineAsLS',
+        'BaselineAirPLS',
+        'SavgolSmooth',
+    ]
+except ImportError:
+    # Baseline module not available
+    __all__ = ['Absorbance', 'SNV', 'SavgolDerivative', 'MSC']

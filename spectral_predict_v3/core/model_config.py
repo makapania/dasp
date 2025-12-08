@@ -81,17 +81,26 @@ HYPERPARAMETER_GRIDS = {
     ],
 
     'LightGBM': [
-        {'n_estimators': n, 'learning_rate': lr, 'num_leaves': nl}
+        {'n_estimators': n, 'learning_rate': lr, 'num_leaves': nl,
+         'min_child_samples': mcs, 'reg_lambda': reg}
         for n in [100, 200]
-        for lr in [0.05, 0.1]
-        for nl in [31, 63]
+        for lr in [0.01, 0.05, 0.1]
+        for nl in [7, 15, 31, 50]  # Added 50 from V1
+        for mcs in [5, 10, 20]     # Include V1 default (5) for small datasets
+        for reg in [1.0, 10.0]     # Stronger regularization
     ],
 
     'XGBoost': [
-        {'n_estimators': n, 'learning_rate': lr, 'max_depth': d}
+        {'n_estimators': n, 'learning_rate': lr, 'max_depth': d,
+         'min_child_weight': mcw, 'reg_lambda': reg,
+         'subsample': ss, 'colsample_bytree': cs}
         for n in [100, 200]
-        for lr in [0.05, 0.1]
-        for d in [3, 6]
+        for lr in [0.01, 0.05, 0.1]
+        for d in [3, 5]           # Reduced from [3, 6] to prevent overfitting
+        for mcw in [5, 10]        # Added - critical for small datasets
+        for reg in [1.0, 10.0]    # Stronger regularization
+        for ss in [0.8, 1.0]      # Explore subsampling vs full data
+        for cs in [0.8, 1.0]      # Explore feature subsampling vs full features
     ],
 
     'CatBoost': [

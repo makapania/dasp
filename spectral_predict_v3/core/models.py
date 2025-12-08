@@ -54,17 +54,28 @@ class PLSDA(BaseEstimator, ClassifierMixin):
         self.n_components = n_components
         self._pls = None
         self._classes = None
+        self._label_encoder = None
 
     def fit(self, X, y):
+        from sklearn.preprocessing import LabelEncoder
+
+        # Store original classes and encode if string labels
         self._classes = np.unique(y)
+        self._label_encoder = LabelEncoder()
+        y_encoded = self._label_encoder.fit_transform(y)
+
         n_comp = min(self.n_components, X.shape[1], X.shape[0] - 1)
         self._pls = PLSRegression(n_components=n_comp)
-        self._pls.fit(X, y)
+        self._pls.fit(X, y_encoded)
         return self
 
     def predict(self, X):
         y_pred = self._pls.predict(X).ravel()
-        return np.round(y_pred).clip(self._classes.min(), self._classes.max()).astype(int)
+        # Clip to valid class range and round
+        n_classes = len(self._classes)
+        y_pred_int = np.round(y_pred).clip(0, n_classes - 1).astype(int)
+        # Decode back to original labels
+        return self._label_encoder.inverse_transform(y_pred_int)
 
     @property
     def coef_(self):
@@ -138,13 +149,17 @@ def get_model(model_name, task_type='regression', random_state=42, n_jobs=-1, **
         elif model_name == 'LightGBM':
             if not HAS_LIGHTGBM:
                 return None
-            n_estimators = params.get('n_estimators', 100)
-            learning_rate = params.get('learning_rate', 0.1)
-            num_leaves = params.get('num_leaves', 31)
             return LGBMRegressor(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                num_leaves=num_leaves,
+                n_estimators=params.get('n_estimators', 100),
+                learning_rate=params.get('learning_rate', 0.1),
+                num_leaves=params.get('num_leaves', 31),
+                max_depth=params.get('max_depth', -1),
+                min_child_samples=params.get('min_child_samples', 5),  # Match V1 (was 20)
+                subsample=params.get('subsample', 0.8),  # Match V1 (was 1.0)
+                bagging_freq=1,  # CRITICAL: Required for subsample to work!
+                colsample_bytree=params.get('colsample_bytree', 0.8),  # Match V1 (was 1.0)
+                reg_alpha=params.get('reg_alpha', 0.1),  # Match V1 (was 0.0)
+                reg_lambda=params.get('reg_lambda', 1.0),  # Match V1 (was 0.0)
                 random_state=random_state,
                 verbose=-1,
                 n_jobs=n_jobs
@@ -153,13 +168,17 @@ def get_model(model_name, task_type='regression', random_state=42, n_jobs=-1, **
         elif model_name == 'XGBoost':
             if not HAS_XGBOOST:
                 return None
-            n_estimators = params.get('n_estimators', 100)
-            learning_rate = params.get('learning_rate', 0.1)
-            max_depth = params.get('max_depth', 6)
             return XGBRegressor(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                max_depth=max_depth,
+                n_estimators=params.get('n_estimators', 100),
+                learning_rate=params.get('learning_rate', 0.1),
+                max_depth=params.get('max_depth', 6),
+                subsample=params.get('subsample', 0.8),  # V1 spectral-optimized (was 1.0)
+                colsample_bytree=params.get('colsample_bytree', 0.8),  # V1 spectral-optimized (was 1.0)
+                reg_alpha=params.get('reg_alpha', 0.1),  # V1 spectral-optimized (was 0.0)
+                reg_lambda=params.get('reg_lambda', 1.0),  # V1 spectral-optimized (was 0.0)
+                gamma=params.get('gamma', 0.0),
+                min_child_weight=params.get('min_child_weight', 1),
+                tree_method=params.get('tree_method', 'hist'),  # V1 spectral-optimized
                 random_state=random_state,
                 verbosity=0,
                 n_jobs=n_jobs
@@ -232,13 +251,17 @@ def get_model(model_name, task_type='regression', random_state=42, n_jobs=-1, **
         elif model_name == 'LightGBM':
             if not HAS_LIGHTGBM:
                 return None
-            n_estimators = params.get('n_estimators', 100)
-            learning_rate = params.get('learning_rate', 0.1)
-            num_leaves = params.get('num_leaves', 31)
             return LGBMClassifier(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                num_leaves=num_leaves,
+                n_estimators=params.get('n_estimators', 100),
+                learning_rate=params.get('learning_rate', 0.1),
+                num_leaves=params.get('num_leaves', 15),  # Classification: 15 (V1 default)
+                max_depth=params.get('max_depth', -1),
+                min_child_samples=params.get('min_child_samples', 5),  # Match V1 (was 20)
+                subsample=params.get('subsample', 0.8),  # Match V1 (was 1.0)
+                bagging_freq=1,  # CRITICAL: Required for subsample to work!
+                colsample_bytree=params.get('colsample_bytree', 0.8),  # Match V1 (was 1.0)
+                reg_alpha=params.get('reg_alpha', 0.1),  # Match V1 (was 0.0)
+                reg_lambda=params.get('reg_lambda', 1.0),  # Match V1 (was 0.0)
                 random_state=random_state,
                 verbose=-1,
                 n_jobs=n_jobs
@@ -247,13 +270,17 @@ def get_model(model_name, task_type='regression', random_state=42, n_jobs=-1, **
         elif model_name == 'XGBoost':
             if not HAS_XGBOOST:
                 return None
-            n_estimators = params.get('n_estimators', 100)
-            learning_rate = params.get('learning_rate', 0.1)
-            max_depth = params.get('max_depth', 6)
             return XGBClassifier(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                max_depth=max_depth,
+                n_estimators=params.get('n_estimators', 100),
+                learning_rate=params.get('learning_rate', 0.1),
+                max_depth=params.get('max_depth', 6),
+                subsample=params.get('subsample', 0.8),  # V1 spectral-optimized (was 1.0)
+                colsample_bytree=params.get('colsample_bytree', 0.8),  # V1 spectral-optimized (was 1.0)
+                reg_alpha=params.get('reg_alpha', 0.1),  # V1 spectral-optimized (was 0.0)
+                reg_lambda=params.get('reg_lambda', 1.0),  # V1 spectral-optimized (was 0.0)
+                gamma=params.get('gamma', 0.0),
+                min_child_weight=params.get('min_child_weight', 1),
+                tree_method=params.get('tree_method', 'hist'),  # V1 spectral-optimized
                 random_state=random_state,
                 verbosity=0,
                 n_jobs=n_jobs

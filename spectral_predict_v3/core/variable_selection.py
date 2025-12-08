@@ -11,6 +11,13 @@ import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold, cross_val_score
 
+# Optional GA-PLS import (requires ga_pls.py module)
+try:
+    from .ga_pls import ga_pls_selection
+    GA_PLS_AVAILABLE = True
+except ImportError:
+    GA_PLS_AVAILABLE = False
+
 
 def compute_vip(X, y, n_components=None):
     """

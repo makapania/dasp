@@ -5,6 +5,7 @@ Save, load, and apply trained models with complete preprocessing pipelines.
 """
 
 import pickle
+import hashlib
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,14 @@ def save_model(
     if 'version' not in model_bundle:
         model_bundle['version'] = '3.0'
 
+    # Compute checksum of the model object for integrity verification
+    try:
+        model_bytes = pickle.dumps(model_bundle['model'])
+        model_bundle['_checksum'] = hashlib.sha256(model_bytes).hexdigest()
+    except Exception:
+        # If checksum computation fails, continue without it
+        pass
+
     # Ensure path has .pkl extension
     filepath = str(filepath)
     if not filepath.endswith('.pkl'):
@@ -115,6 +124,22 @@ def load_model(filepath: str) -> Dict[str, Any]:
     for key in required_keys:
         if key not in model_bundle:
             raise ValueError(f"Loaded model bundle is missing required key: {key}")
+
+    # Verify checksum if present (integrity check)
+    if '_checksum' in model_bundle:
+        try:
+            model_bytes = pickle.dumps(model_bundle['model'])
+            actual_checksum = hashlib.sha256(model_bytes).hexdigest()
+            if actual_checksum != model_bundle['_checksum']:
+                raise ValueError(
+                    f"Model file integrity check failed: {filepath}. "
+                    "The file may be corrupted or tampered with."
+                )
+        except ValueError:
+            raise  # Re-raise checksum mismatch error
+        except Exception:
+            # If checksum verification fails for other reasons, log warning but continue
+            print(f"Warning: Could not verify model checksum for {filepath}")
 
     return model_bundle
 
