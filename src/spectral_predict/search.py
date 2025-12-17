@@ -1,6 +1,7 @@
 """Model search with cross-validation and subset selection."""
 
 import os
+import inspect
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -24,7 +25,87 @@ from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
+from .wavelength_selection import vcpa_iriv
+from .ga_pls import ga_pls_selection
+from .ga_lightgbm import ga_lightgbm_selection, HAS_LIGHTGBM
 from .model_registry import supports_subset_analysis, supports_feature_importance
+
+# GA Preprocessing import
+try:
+    from .ga_preprocessing import optimize_preprocessing
+    HAS_GA_PREPROCESS = True
+except ImportError:
+    HAS_GA_PREPROCESS = False
+
+# NSGA-II import
+from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
+
+# Model categories for GA preprocessing
+# Linear models benefit from PLS-based fitness evaluation
+LINEAR_MODELS = {'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet', 'MLP', 'SVR', 'SVC'}
+# Tree models benefit from LightGBM-based fitness evaluation
+TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
+
+
+def _apply_edge_mask(importances: np.ndarray, preprocess_cfg: dict) -> np.ndarray:
+    """Zero out edge importances affected by Savitzky-Golay derivatives.
+
+    Savitzky-Golay derivatives with window W create boundary artifacts in the
+    first/last W//2 wavelengths. This function masks those edge regions by
+    setting their importance scores to zero, preventing variable selection
+    methods from selecting artifact-affected variables.
+
+    Parameters
+    ----------
+    importances : np.ndarray
+        Feature importance scores with shape (n_features,)
+    preprocess_cfg : dict
+        Preprocessing configuration containing 'deriv' and 'window' keys
+
+    Returns
+    -------
+    np.ndarray
+        Importance scores with edge regions zeroed out if SG derivative is used
+
+    Examples
+    --------
+    >>> importances = np.array([0.1, 0.2, 0.3, 0.4, 0.3, 0.2, 0.1])
+    >>> cfg = {'deriv': 1, 'window': 5}
+    >>> masked = _apply_edge_mask(importances, cfg)
+    >>> # First and last 2 elements (5//2 = 2) are zeroed
+    """
+    deriv = preprocess_cfg.get("deriv")
+    window = preprocess_cfg.get("window")
+
+    # No masking needed if no derivative or window specified
+    if not deriv or not window:
+        return importances.copy()
+
+    edge_margin = window // 2
+
+    # Safety check: prevent zeroing entire array
+    if 2 * edge_margin >= len(importances):
+        return importances.copy()
+
+    # Create masked copy
+    masked = importances.copy()
+    masked[:edge_margin] = 0.0
+    masked[-edge_margin:] = 0.0
+
+    return masked
+
+
+def _supports_sample_weight(model):
+    """Check if model.fit() accepts sample_weight parameter.
+
+    Models like PLSRegression don't support sample_weight, so we need to check
+    before passing it to avoid TypeError.
+    """
+    try:
+        sig = inspect.signature(model.fit)
+        return 'sample_weight' in sig.parameters
+    except (ValueError, TypeError):
+        return False
 
 
 def _needs_resampling_pipeline(imbalance_method, task_type):
@@ -34,7 +115,7 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
     Standard sklearn Pipeline doesn't support fit_resample() methods.
     We need imblearn.pipeline.Pipeline for:
     - Classification: SMOTE, ADASYN, RandomUnderSampler, TomekLinks, etc.
-    - Regression: RegressionUndersampler (undersample method)
+    - Regression: undersample, oversample, smogn (resampling methods)
 
     We DON'T need it for:
     - Classification: class_weight (handled by model parameter)
@@ -66,10 +147,11 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
                               'smote_tomek', 'smote_enn']
         return imbalance_method.lower().replace('-', '_') in resampling_methods
 
-    # Regression: only 'undersample' needs imblearn Pipeline
+    # Regression: resampling methods need imblearn Pipeline (fit_resample)
     # 'binning', 'rare_boost', 'balanced' use RegressionSampleWeighter (fit/transform only)
     if task_type == 'regression':
-        return imbalance_method == 'undersample'
+        resampling_methods = ['undersample', 'oversample', 'smogn']
+        return imbalance_method.lower() in resampling_methods
 
     return False
 
@@ -112,7 +194,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                tier='standard', enabled_models=None,
                analysis_wl_min=None, analysis_wl_max=None,
                imbalance_method=None, imbalance_params=None, enable_class_weight=False,
-               reproducible=False, random_state=42):
+               reproducible=False, random_state=42,
+               ga_preprocess=False,
+               ga_preprocess_population=32,
+               ga_preprocess_generations=50,
+               ga_preprocess_cv_folds=5,
+               ga_quick_mode=False):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -267,7 +354,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 imbalance_params=imbalance_params,
                 n_folds=folds
             )
-            print(f"✓ Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
+            print(f"[OK] Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
         except ValueError as e:
             # Re-raise with clear indication this is an upfront validation error
             raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
@@ -280,7 +367,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars']  # All methods now functional
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars', 'vcpa-iriv', 'ga']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # Warn about unimplemented methods
@@ -448,176 +535,295 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Interference methods are enabled - include in configs
         interference_to_add = interference_settings
 
-    preprocess_configs = []
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GA PREPROCESSING OPTIMIZATION (if enabled)
+    # When enabled, this REPLACES user-selected preprocessing with GA-optimized config
+    # ═══════════════════════════════════════════════════════════════════════════
+    if ga_preprocess:
+        if not HAS_GA_PREPROCESS:
+            raise ImportError(
+                "GA Preprocessing requires ga_preprocessing module. "
+                "Please ensure ga_preprocessing.py is available in src/spectral_predict/"
+            )
 
-    # Add raw if selected
-    if preprocessing_methods.get('raw', False):
-        preprocess_configs.append({
-            "name": "raw",
-            "deriv": None,
-            "window": None,
-            "polyorder": None,
-            "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
-        })
-
-    # Add SNV if selected
-    if preprocessing_methods.get('snv', False):
-        preprocess_configs.append({
-            "name": "snv",
-            "deriv": None,
-            "window": None,
-            "polyorder": None,
-            "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
-        })
-
-    # Add derivative configs based on user selections
-    # For each derivative type, we create:
-    # 1. Pure derivative (deriv)
-    # 2. SNV then derivative (snv_deriv) - if SNV is also selected
-    # 3. Derivative then SNV (deriv_snv) - if deriv_snv checkbox is selected
-
-    if preprocessing_methods.get('sg1', False):
-        # 1st derivative only
-        for window in window_sizes:
-            preprocess_configs.append({
-                "name": "deriv",
-                "deriv": 1,
-                "window": window,
-                "polyorder": 2,
-                "interference": interference_to_add
+        if progress_callback:
+            progress_callback({
+                'stage': 'ga_preprocessing',
+                'message': 'Optimizing preprocessing parameters with GA...',
+                'current': 0,
+                'total': ga_preprocess_generations
             })
 
-        # If SNV is also selected, add SNV → derivative combination
+        print(f"\n{'='*70}")
+        print("GA PREPROCESSING OPTIMIZATION")
+        print(f"{'='*70}")
+        print(f"  Population size: {ga_preprocess_population}")
+        print(f"  Generations: {ga_preprocess_generations}")
+        print(f"  CV folds: {ga_preprocess_cv_folds}")
+        print(f"  Task type: {task_type}")
+        print(f"  Note: This REPLACES user-selected preprocessing methods")
+        print(f"{'='*70}\n")
+
+        # Determine which model types are selected
+        has_linear_models = any(m in LINEAR_MODELS for m in models_to_test)
+        has_tree_models = any(m in TREE_MODELS for m in models_to_test)
+
+        # Storage for GA results
+        ga_result_linear = None
+        ga_result_tree = None
+
+        # Run GA optimization for linear models (using PLS fitness)
+        if has_linear_models:
+            print(f"Running GA optimization for LINEAR models (using PLS fitness)...")
+            ga_result_linear = optimize_preprocessing(
+                X.values,  # Convert DataFrame to numpy
+                y.values,  # Convert Series to numpy
+                population_size=ga_preprocess_population,
+                n_generations=ga_preprocess_generations,
+                cv_folds=ga_preprocess_cv_folds,
+                task_type=task_type,
+                random_state=random_state,
+                verbose=1,
+                progress_callback=progress_callback,
+                fitness_model='pls'
+            )
+            print(f"\nLinear Model GA Optimization Complete!")
+            print(f"  Best config: {ga_result_linear['best_config']}")
+            print(f"  Best RMSECV: {ga_result_linear['best_rmsecv']:.4f}\n")
+
+        # Run GA optimization for tree models (using LightGBM fitness)
+        if has_tree_models:
+            print(f"Running GA optimization for TREE models (using LightGBM fitness)...")
+            # Check if LightGBM is available
+            from .ga_preprocessing import HAS_LIGHTGBM_PREPROC
+            fitness_model_tree = 'lightgbm' if HAS_LIGHTGBM_PREPROC else 'pls'
+            if not HAS_LIGHTGBM_PREPROC:
+                print(f"  WARNING: LightGBM not available, falling back to PLS fitness")
+
+            ga_result_tree = optimize_preprocessing(
+                X.values,  # Convert DataFrame to numpy
+                y.values,  # Convert Series to numpy
+                population_size=ga_preprocess_population,
+                n_generations=ga_preprocess_generations,
+                cv_folds=ga_preprocess_cv_folds,
+                task_type=task_type,
+                random_state=random_state,
+                verbose=1,
+                progress_callback=progress_callback,
+                fitness_model=fitness_model_tree
+            )
+            print(f"\nTree Model GA Optimization Complete!")
+            print(f"  Best config: {ga_result_tree['best_config']}")
+            print(f"  Best RMSECV: {ga_result_tree['best_rmsecv']:.4f}\n")
+
+        # Create preprocessing configs from GA results
+        # Store both if we have both model types
+        preprocess_configs = []
+
+        if ga_result_linear is not None:
+            preprocess_configs.append({
+                "name": ga_result_linear['best_name'] + "_linear",
+                "deriv": None,  # GA handles all preprocessing internally
+                "window": None,
+                "polyorder": None,
+                "interference": interference_to_add,
+                "ga_transform": ga_result_linear['best_transform'],
+                "ga_config": ga_result_linear['best_config'],
+                "ga_model_type": "linear",  # Track which model type this is for
+                "ga_genes": ga_result_linear['best_genes'],  # Store genes for serialization
+            })
+
+        if ga_result_tree is not None:
+            preprocess_configs.append({
+                "name": ga_result_tree['best_name'] + "_tree",
+                "deriv": None,  # GA handles all preprocessing internally
+                "window": None,
+                "polyorder": None,
+                "interference": interference_to_add,
+                "ga_transform": ga_result_tree['best_transform'],
+                "ga_config": ga_result_tree['best_config'],
+                "ga_model_type": "tree",  # Track which model type this is for
+                "ga_genes": ga_result_tree['best_genes'],  # Store genes for serialization
+            })
+
+        print(f"{'='*70}\n")
+
+        # Skip normal preprocessing config building
+        skip_normal_preprocessing = True
+    else:
+        skip_normal_preprocessing = False
+
+    if not skip_normal_preprocessing:
+        preprocess_configs = []
+
+        # Add raw if selected
+        if preprocessing_methods.get('raw', False):
+            preprocess_configs.append({
+                "name": "raw",
+                "deriv": None,
+                "window": None,
+                "polyorder": None,
+                "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
+            })
+
+        # Add SNV if selected
         if preprocessing_methods.get('snv', False):
+            preprocess_configs.append({
+                "name": "snv",
+                "deriv": None,
+                "window": None,
+                "polyorder": None,
+                "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
+            })
+
+        # Add derivative configs based on user selections
+        # For each derivative type, we create:
+        # 1. Pure derivative (deriv)
+        # 2. SNV then derivative (snv_deriv) - if SNV is also selected
+        # 3. Derivative then SNV (deriv_snv) - if deriv_snv checkbox is selected
+
+        if preprocessing_methods.get('sg1', False):
+            # 1st derivative only
             for window in window_sizes:
                 preprocess_configs.append({
-                    "name": "snv_deriv",
+                    "name": "deriv",
                     "deriv": 1,
                     "window": window,
                     "polyorder": 2,
                     "interference": interference_to_add
                 })
-
-        # If deriv_snv is selected, add derivative → SNV combination for 1st deriv
-        if preprocessing_methods.get('deriv_snv', False):
+    
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get('snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "snv_deriv",
+                        "deriv": 1,
+                        "window": window,
+                        "polyorder": 2,
+                        "interference": interference_to_add
+                    })
+    
+            # If deriv_snv is selected, add derivative -> SNV combination for 1st deriv
+            if preprocessing_methods.get('deriv_snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "deriv_snv",
+                        "deriv": 1,
+                        "window": window,
+                        "polyorder": 2,
+                        "interference": interference_to_add
+                    })
+    
+        if preprocessing_methods.get('sg2', False):
+            # 2nd derivative only
             for window in window_sizes:
                 preprocess_configs.append({
-                    "name": "deriv_snv",
-                    "deriv": 1,
-                    "window": window,
-                    "polyorder": 2,
-                    "interference": interference_to_add
-                })
-
-    if preprocessing_methods.get('sg2', False):
-        # 2nd derivative only
-        for window in window_sizes:
-            preprocess_configs.append({
-                "name": "deriv",
-                "deriv": 2,
-                "window": window,
-                "polyorder": 3,
-                "interference": interference_to_add
-            })
-
-        # If SNV is also selected, add SNV → derivative combination
-        if preprocessing_methods.get('snv', False):
-            for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "snv_deriv",
+                    "name": "deriv",
                     "deriv": 2,
                     "window": window,
                     "polyorder": 3,
                     "interference": interference_to_add
                 })
-
-        # If deriv_snv is selected, add derivative → SNV combination for 2nd deriv
-        if preprocessing_methods.get('deriv_snv', False):
+    
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get('snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "snv_deriv",
+                        "deriv": 2,
+                        "window": window,
+                        "polyorder": 3,
+                        "interference": interference_to_add
+                    })
+    
+            # If deriv_snv is selected, add derivative -> SNV combination for 2nd deriv
+            if preprocessing_methods.get('deriv_snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "deriv_snv",
+                        "deriv": 2,
+                        "window": window,
+                        "polyorder": 3,
+                        "interference": interference_to_add
+                    })
+    
+        if preprocessing_methods.get('sg3', False):
+            # 3rd derivative only
             for window in window_sizes:
                 preprocess_configs.append({
-                    "name": "deriv_snv",
-                    "deriv": 2,
-                    "window": window,
-                    "polyorder": 3,
-                    "interference": interference_to_add
-                })
-
-    if preprocessing_methods.get('sg3', False):
-        # 3rd derivative only
-        for window in window_sizes:
-            preprocess_configs.append({
-                "name": "deriv",
-                "deriv": 3,
-                "window": window,
-                "polyorder": 4,
-                "interference": interference_to_add
-            })
-
-        # If SNV is also selected, add SNV → derivative combination
-        if preprocessing_methods.get('snv', False):
-            for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "snv_deriv",
+                    "name": "deriv",
                     "deriv": 3,
                     "window": window,
                     "polyorder": 4,
                     "interference": interference_to_add
                 })
-
-        # If deriv_snv is selected, add derivative → SNV combination for 3rd deriv
-        if preprocessing_methods.get('deriv_snv', False):
+    
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get('snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "snv_deriv",
+                        "deriv": 3,
+                        "window": window,
+                        "polyorder": 4,
+                        "interference": interference_to_add
+                    })
+    
+            # If deriv_snv is selected, add derivative -> SNV combination for 3rd deriv
+            if preprocessing_methods.get('deriv_snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "deriv_snv",
+                        "deriv": 3,
+                        "window": window,
+                        "polyorder": 4,
+                        "interference": interference_to_add
+                    })
+    
+        if preprocessing_methods.get('sg4', False):
+            # 4th derivative only
             for window in window_sizes:
                 preprocess_configs.append({
-                    "name": "deriv_snv",
-                    "deriv": 3,
+                    "name": "deriv",
+                    "deriv": 4,
                     "window": window,
-                    "polyorder": 4,
+                    "polyorder": 5,
                     "interference": interference_to_add
                 })
-
-    if preprocessing_methods.get('sg4', False):
-        # 4th derivative only
-        for window in window_sizes:
+    
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get('snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "snv_deriv",
+                        "deriv": 4,
+                        "window": window,
+                        "polyorder": 5,
+                        "interference": interference_to_add
+                    })
+    
+            # If deriv_snv is selected, add derivative -> SNV combination for 4th deriv
+            if preprocessing_methods.get('deriv_snv', False):
+                for window in window_sizes:
+                    preprocess_configs.append({
+                        "name": "deriv_snv",
+                        "deriv": 4,
+                        "window": window,
+                        "polyorder": 5,
+                        "interference": interference_to_add
+                    })
+    
+        # If no preprocessing methods selected, default to raw
+        if not preprocess_configs:
+            print("Warning: No preprocessing methods selected. Defaulting to raw.")
             preprocess_configs.append({
-                "name": "deriv",
-                "deriv": 4,
-                "window": window,
-                "polyorder": 5,
+                "name": "raw",
+                "deriv": None,
+                "window": None,
+                "polyorder": None,
                 "interference": interference_to_add
             })
-
-        # If SNV is also selected, add SNV → derivative combination
-        if preprocessing_methods.get('snv', False):
-            for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "snv_deriv",
-                    "deriv": 4,
-                    "window": window,
-                    "polyorder": 5,
-                    "interference": interference_to_add
-                })
-
-        # If deriv_snv is selected, add derivative → SNV combination for 4th deriv
-        if preprocessing_methods.get('deriv_snv', False):
-            for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "deriv_snv",
-                    "deriv": 4,
-                    "window": window,
-                    "polyorder": 5,
-                    "interference": interference_to_add
-                })
-
-    # If no preprocessing methods selected, default to raw
-    if not preprocess_configs:
-        print("Warning: No preprocessing methods selected. Defaulting to raw.")
-        preprocess_configs.append({
-            "name": "raw",
-            "deriv": None,
-            "window": None,
-            "polyorder": None,
-            "interference": interference_to_add
-        })
 
     # Create CV splitter
     if task_type == "regression":
@@ -666,23 +872,29 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Phase 3: Extract wavelengths for interference removal
         wavelengths = X.columns.astype(float).values if hasattr(X, 'columns') else None
 
-        prep_pipe_steps = build_preprocessing_pipeline(
-            preprocess_cfg["name"],
-            preprocess_cfg["deriv"],
-            preprocess_cfg["window"],
-            preprocess_cfg["polyorder"],
-            imbalance_method=None,  # Imbalance will be added later inside CV folds
-            imbalance_params=None,
-            task_type=task_type,
-            interference=preprocess_cfg.get("interference"),  # Phase 3
-            wavelengths=wavelengths  # Phase 3
-        )
+        # Check if this is a GA-optimized preprocessing config
+        if 'ga_transform' in preprocess_cfg and preprocess_cfg['ga_transform'] is not None:
+            # Use GA transform directly (it already includes all preprocessing)
+            X_preprocessed = preprocess_cfg['ga_transform'](X_np)
+        else:
+            # Use standard preprocessing pipeline
+            prep_pipe_steps = build_preprocessing_pipeline(
+                preprocess_cfg["name"],
+                preprocess_cfg["deriv"],
+                preprocess_cfg["window"],
+                preprocess_cfg["polyorder"],
+                imbalance_method=None,  # Imbalance will be added later inside CV folds
+                imbalance_params=None,
+                task_type=task_type,
+                interference=preprocess_cfg.get("interference"),  # Phase 3
+                wavelengths=wavelengths  # Phase 3
+            )
 
-        # Step 2: Apply preprocessing to full spectrum
-        X_preprocessed = X_np.copy()
-        if prep_pipe_steps:
-            prep_pipeline = Pipeline(prep_pipe_steps)
-            X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
+            # Step 2: Apply preprocessing to full spectrum
+            X_preprocessed = X_np.copy()
+            if prep_pipe_steps:
+                prep_pipeline = Pipeline(prep_pipe_steps)
+                X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
 
         # Store original wavelength count before filtering (needed for Model Dev tab)
         n_original_wavelengths = len(wavelengths)
@@ -761,6 +973,24 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # End of region computation block
 
         for model_name, model_configs in model_grids.items():
+            # ═══════════════════════════════════════════════════════════════════════════
+            # GA PREPROCESSING: Skip incompatible preprocessing configs
+            # When GA preprocessing is enabled, only use the config appropriate for this model type
+            # ═══════════════════════════════════════════════════════════════════════════
+            if ga_preprocess and 'ga_model_type' in preprocess_cfg:
+                # Determine this model's type
+                if model_name in LINEAR_MODELS:
+                    required_ga_type = "linear"
+                elif model_name in TREE_MODELS:
+                    required_ga_type = "tree"
+                else:
+                    # Unknown model type, use linear by default
+                    required_ga_type = "linear"
+
+                # Skip if this preprocessing config doesn't match the model type
+                if preprocess_cfg['ga_model_type'] != required_ga_type:
+                    continue
+
             for model, params in model_configs:
                 current_config += 1
 
@@ -868,6 +1098,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         n_features_for_validation = n_features_varsel  # Define early for SPA/UVE-SPA methods
 
                         # Loop over each selected variable selection method
+                        # DEBUG: Print what methods will be processed
+                        print(f"[DEBUG] Processing variable selection methods: {selected_methods}")
                         for varsel_method in selected_methods:
                             # Get importances computed on preprocessed data
                             try:
@@ -879,7 +1111,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 elif varsel_method == 'spa':
                                     # SPA: Successive Projections Algorithm - reduces collinearity
                                     # Select minimally correlated variables
-                                    n_to_select = min(n_top, n_features_for_validation)
+                                    # Use max variable count as default for SPA feature selection
+                                    default_n_select = max(variable_counts) if variable_counts else 100
+                                    n_to_select = min(default_n_select, n_features_for_validation)
                                     importances = spa_selection(
                                         X_transformed_varsel, y_np,
                                         n_features=n_to_select,
@@ -900,7 +1134,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
                                 elif varsel_method == 'uve_spa':
                                     # UVE-SPA: Hybrid method - filters noise then reduces collinearity
-                                    n_to_select = min(n_top, n_features_for_validation)
+                                    # Use max variable count as default for UVE-SPA feature selection
+                                    default_n_select = max(variable_counts) if variable_counts else 100
+                                    n_to_select = min(default_n_select, n_features_for_validation)
+                                    print(f"    -> Running UVE-SPA (target: {n_to_select} features)")
                                     importances = uve_spa_selection(
                                         X_transformed_varsel, y_np,
                                         n_features=n_to_select,
@@ -911,6 +1148,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         spa_cv_folds=folds,
                                         random_state=random_state
                                     )
+                                    n_nonzero = np.sum(importances > 0) if importances is not None else 0
+                                    print(f"    -> UVE-SPA completed: {n_nonzero} variables with non-zero importance")
 
                                 elif varsel_method == 'ipls':
                                     # iPLS: Interval PLS - selects based on spectral regions
@@ -934,10 +1173,128 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         random_state=random_state
                                     )
 
+                                elif varsel_method == 'vcpa-iriv':
+                                    # VCPA-IRIV: Variable Combination Population Analysis
+                                    # Iterative elimination with binary matrix sampling
+                                    print(f"    -> Running VCPA-IRIV (n_outer=10, n_inner=50)")
+                                    result = vcpa_iriv(
+                                        X_transformed_varsel, y_np,
+                                        n_outer_iterations=10,
+                                        n_inner_iterations=50,
+                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        cv_folds=folds,
+                                        random_state=random_state
+                                    )
+                                    # Extract importance scores from result dict
+                                    # Note: vcpa_iriv returns 'importance_scores', not 'importances'
+                                    importances = result.get('importance_scores', result.get('importances', None))
+
+                                    # VCPA returns importance_scores for ACTIVE indices only
+                                    # We need to create full-length importance array using selected_indices
+                                    selected = result.get('selected_indices', [])
+                                    if importances is not None and len(importances) == len(selected):
+                                        # Map importance scores back to full wavelength array
+                                        full_importances = np.zeros(X_transformed_varsel.shape[1])
+                                        full_importances[selected] = importances
+                                        importances = full_importances
+                                        print(f"    -> VCPA-IRIV selected {len(selected)} variables with importance scores")
+                                    elif len(selected) > 0:
+                                        # Fallback: create binary mask from selected_indices
+                                        importances = np.zeros(X_transformed_varsel.shape[1])
+                                        importances[selected] = 1.0
+                                        print(f"    -> VCPA-IRIV selected {len(selected)} variables (binary mask fallback)")
+                                    else:
+                                        # No variables selected - use uniform importances
+                                        print(f"    -> WARNING: VCPA-IRIV selected no variables, using uniform importances")
+                                        importances = np.ones(X_transformed_varsel.shape[1])
+
+                                elif varsel_method == 'ga':
+                                    # GA Variable Selection: Use model-appropriate fitness
+                                    # Linear models use PLS fitness, tree models use LightGBM fitness
+
+                                    # Determine GA parameters based on quick mode
+                                    if ga_quick_mode:
+                                        ga_pop, ga_gen, ga_runs, ga_early = 16, 25, 1, 10
+                                        print(f"    -> Quick GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}")
+                                    else:
+                                        ga_pop, ga_gen, ga_runs, ga_early = 32, 50, 3, 15
+
+                                    if model_name in LINEAR_MODELS:
+                                        print(f"    -> Using GA-PLS for {model_name} (linear model)")
+                                        importances = ga_pls_selection(
+                                            X_transformed_varsel, y_np,
+                                            task_type=task_type,
+                                            n_components=uve_n_components if uve_n_components is not None else 10,
+                                            cv=folds,
+                                            population_size=ga_pop,
+                                            n_generations=ga_gen,
+                                            n_runs=ga_runs,
+                                            early_stopping=ga_early,
+                                            random_state=random_state,
+                                            progress_callback=progress_callback
+                                        )
+                                    elif model_name in TREE_MODELS:
+                                        if HAS_LIGHTGBM:
+                                            print(f"    -> Using GA-LightGBM for {model_name} (tree model)")
+                                            importances = ga_lightgbm_selection(
+                                                X_transformed_varsel, y_np,
+                                                task_type=task_type,
+                                                cv_folds=folds,
+                                                n_estimators=50,
+                                                num_leaves=15 if task_type == 'classification' else 31,
+                                                population_size=ga_pop,
+                                                n_generations=ga_gen,
+                                                n_runs=ga_runs,
+                                                early_stopping=ga_early,
+                                                random_state=random_state,
+                                                progress_callback=progress_callback
+                                            )
+                                        else:
+                                            print(f"    -> Using GA-PLS for {model_name} (LightGBM not available)")
+                                            importances = ga_pls_selection(
+                                                X_transformed_varsel, y_np,
+                                                task_type=task_type,
+                                                n_components=uve_n_components if uve_n_components is not None else 10,
+                                                cv=folds,
+                                                population_size=ga_pop,
+                                                n_generations=ga_gen,
+                                                n_runs=ga_runs,
+                                                early_stopping=ga_early,
+                                                random_state=random_state,
+                                                progress_callback=progress_callback
+                                            )
+                                    else:
+                                        # Default to GA-PLS for unknown model types
+                                        print(f"    -> Using GA-PLS for {model_name} (default)")
+                                        importances = ga_pls_selection(
+                                            X_transformed_varsel, y_np,
+                                            task_type=task_type,
+                                            n_components=uve_n_components if uve_n_components is not None else 10,
+                                            cv=folds,
+                                            population_size=ga_pop,
+                                            n_generations=ga_gen,
+                                            n_runs=ga_runs,
+                                            early_stopping=ga_early,
+                                            random_state=random_state,
+                                            progress_callback=progress_callback
+                                        )
+
                                 else:
                                     # This shouldn't happen due to filtering, but handle gracefully
                                     print(f"  -> Skipping unimplemented method '{varsel_method}'")
                                     continue
+
+                                # Validate importances array before proceeding
+                                if importances is None:
+                                    print(f"  -> ERROR: {varsel_method} returned None importances, skipping")
+                                    continue
+                                if len(importances) != X_transformed_varsel.shape[1]:
+                                    print(f"  -> ERROR: {varsel_method} returned wrong-sized importances "
+                                          f"({len(importances)} vs {X_transformed_varsel.shape[1]}), skipping")
+                                    continue
+                                if np.all(importances == 0):
+                                    print(f"  -> WARNING: {varsel_method} returned all-zero importances, using uniform")
+                                    importances = np.ones(X_transformed_varsel.shape[1])
 
                                 # Use user-specified variable counts, or default if not provided
                                 if variable_counts is None:
@@ -959,12 +1316,24 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 if not valid_variable_counts:
                                     print(f"  WARNING: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
 
+                                # DEBUG: Show importances summary for this method
+                                print(f"  [DEBUG] {varsel_method} importances: min={np.min(importances):.4f}, max={np.max(importances):.4f}, std={np.std(importances):.4f}")
+
+                                # Apply edge masking for Savitzky-Golay derivatives
+                                importances = _apply_edge_mask(importances, preprocess_cfg)
+
                                 # Run subsets with user-selected counts
+                                results_added_for_method = 0
                                 for n_top in valid_variable_counts:
                                     print(f"  -> Testing top-{n_top} vars ({varsel_method})...", end=" ")
                                     # Select top N most important features based on preprocessed importances
                                     # Use stable sort to ensure deterministic feature ordering when importances are tied
                                     top_indices = np.argsort(importances, kind='stable')[-n_top:][::-1]
+
+                                    # DEBUG: Show first 5 selected wavelengths for comparison
+                                    if n_top == valid_variable_counts[0]:  # Only for first subset size
+                                        selected_wls = wavelengths_varsel[top_indices[:5]]
+                                        print(f"\n      [DEBUG] Top 5 wavelengths for {varsel_method}: {selected_wls}")
 
                                     # For derivative preprocessing: importances are computed on transformed features
                                     # We must use the TRANSFORMED data and skip reapplying preprocessing
@@ -1028,6 +1397,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             random_state=random_state,
                                         )
                                     df_results = add_result(df_results, subset_result)
+                                    results_added_for_method += 1
 
                                     # Show result immediately
                                     if task_type == "regression":
@@ -1046,8 +1416,13 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             if subset_result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
                                                 best_model_so_far = subset_result
 
+                                # Summary for this variable selection method
+                                print(f"  [SUMMARY] {varsel_method}: Added {results_added_for_method} results to dataframe")
+
                             except Exception as e:
+                                import traceback
                                 print(f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}")
+                                print(f"  Full traceback:\n{traceback.format_exc()}")
 
                 # Run region-based subsets for ALL models (not just PLS/RF/MLP/NeuralBoosted)
                 # For derivatives: use preprocessed data to avoid reapplying preprocessing
@@ -1116,13 +1491,22 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             print("  Subset models may rank higher due to lower variable counts.")
             print("  Consider filtering by SubsetTag before ranking for fairer comparison.\n")
 
+    # DEBUG: Count results before scoring
+    print(f"\n[DEBUG] Results before scoring: {len(df_results)} rows")
+    if "SubsetTag" in df_results.columns:
+        print(f"[DEBUG] SubsetTag counts BEFORE scoring:\n{df_results['SubsetTag'].value_counts().to_string()}")
+
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
+
+    # DEBUG: Count results after scoring
+    print(f"\n[DEBUG] Results after scoring: {len(df_ranked)} rows")
+    if "SubsetTag" in df_ranked.columns:
+        print(f"[DEBUG] SubsetTag counts AFTER scoring:\n{df_ranked['SubsetTag'].value_counts().to_string()}")
 
     # =========================================================================
     # RESTORE BLAS SETTINGS (if they were changed for reproducibility)
     # =========================================================================
     if _saved_blas_env is not None:
-        import os
         for var, value in _saved_blas_env.items():
             if value is None:
                 # Variable wasn't set before, remove it
@@ -1263,7 +1647,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 imbalance_params=imbalance_params,
                 n_folds=folds
             )
-            print(f"✓ Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
+            print(f"[OK] Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
         except ValueError as e:
             raise ValueError(f"Configuration Error (detected before optimization):\n\n{e}") from None
 
@@ -1273,10 +1657,14 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     # Create results container
     df_results = create_results_dataframe(task_type)
 
+    # GA preprocessing not currently supported in Bayesian search
+    ga_preprocess = False
+
     # Default preprocessing methods
+    # polyorder must be deriv + 1: {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
     if preprocessing_methods is None:
         preprocessing_methods = [
-            {'name': 'snv', 'deriv': 2, 'window': 15, 'polyorder': 2, 'interference': None},
+            {'name': 'snv', 'deriv': 2, 'window': 15, 'polyorder': 3, 'interference': None},
             {'name': 'snv', 'deriv': 1, 'window': 15, 'polyorder': 2, 'interference': None},
             {'name': 'snv', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
             {'name': 'none', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
@@ -1285,6 +1673,15 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         # Convert GUI dictionary format {'raw': True, 'snv': True, ...} to list format
         # This handles the format passed from the GUI
         preprocess_configs = []
+
+        # Define window sizes based on derivative order
+        # Lower derivatives can use smaller windows; higher derivatives need larger windows
+        # to avoid noise amplification
+        def get_windows_for_deriv(deriv_order):
+            if deriv_order >= 3:
+                return [15, 23, 31, 41]  # Higher derivatives need larger windows
+            else:
+                return [7, 13, 21, 31]  # 1st/2nd derivatives can use smaller windows
 
         # Add raw if selected
         if preprocessing_methods.get('raw', False):
@@ -1306,35 +1703,60 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 'interference': None
             })
 
-        # Add SG1 (1st derivative) if selected
+        # Add SG1 (1st derivative) if selected - test multiple window sizes
         if preprocessing_methods.get('sg1', False):
-            preprocess_configs.append({
-                'name': 'snv',
-                'deriv': 1,
-                'window': 15,
-                'polyorder': 2,
-                'interference': None
-            })
+            for window in get_windows_for_deriv(1):
+                preprocess_configs.append({
+                    'name': 'snv',
+                    'deriv': 1,
+                    'window': window,
+                    'polyorder': 2,
+                    'interference': None
+                })
 
-        # Add SG2 (2nd derivative) if selected
+        # Add SG2 (2nd derivative) if selected - test multiple window sizes
         if preprocessing_methods.get('sg2', False):
-            preprocess_configs.append({
-                'name': 'snv',
-                'deriv': 2,
-                'window': 15,
-                'polyorder': 2,
-                'interference': None
-            })
+            for window in get_windows_for_deriv(2):
+                preprocess_configs.append({
+                    'name': 'snv',
+                    'deriv': 2,
+                    'window': window,
+                    'polyorder': 3,  # polyorder = deriv + 1
+                    'interference': None
+                })
 
-        # Add deriv_snv if selected
+        # Add SG3 (3rd derivative) if selected - test multiple window sizes
+        if preprocessing_methods.get('sg3', False):
+            for window in get_windows_for_deriv(3):
+                preprocess_configs.append({
+                    'name': 'snv',
+                    'deriv': 3,
+                    'window': window,
+                    'polyorder': 4,  # polyorder = deriv + 1
+                    'interference': None
+                })
+
+        # Add SG4 (4th derivative) if selected - test multiple window sizes
+        if preprocessing_methods.get('sg4', False):
+            for window in get_windows_for_deriv(4):
+                preprocess_configs.append({
+                    'name': 'snv',
+                    'deriv': 4,
+                    'window': window,
+                    'polyorder': 5,  # polyorder = deriv + 1
+                    'interference': None
+                })
+
+        # Add deriv_snv if selected - test multiple window sizes
         if preprocessing_methods.get('deriv_snv', False):
-            preprocess_configs.append({
-                'name': 'deriv_snv',
-                'deriv': 2,
-                'window': 15,
-                'polyorder': 2,
-                'interference': None
-            })
+            for window in get_windows_for_deriv(2):
+                preprocess_configs.append({
+                    'name': 'deriv_snv',
+                    'deriv': 2,
+                    'window': window,
+                    'polyorder': 3,  # polyorder = deriv + 1
+                    'interference': None
+                })
 
         preprocessing_methods = preprocess_configs
 
@@ -1374,12 +1796,59 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     # Loop over models and preprocessing methods
     for model_name in models_to_test:
         for preprocess_cfg in preprocessing_methods:
+            # ═══════════════════════════════════════════════════════════════════════════
+            # GA PREPROCESSING: Skip incompatible preprocessing configs
+            # When GA preprocessing is enabled, only use the config appropriate for this model type
+            # ═══════════════════════════════════════════════════════════════════════════
+            if ga_preprocess and 'ga_model_type' in preprocess_cfg:
+                # Determine this model's type
+                if model_name in LINEAR_MODELS:
+                    required_ga_type = "linear"
+                elif model_name in TREE_MODELS:
+                    required_ga_type = "tree"
+                else:
+                    # Unknown model type, use linear by default
+                    required_ga_type = "linear"
+
+                # Skip if this preprocessing config doesn't match the model type
+                if preprocess_cfg['ga_model_type'] != required_ga_type:
+                    continue
+
             current_task += 1
 
             print(f"\n{'='*70}")
             print(f"Optimizing {model_name} [{current_task}/{total_tasks}]")
             print(f"Preprocessing: {preprocess_cfg['name']} (deriv={preprocess_cfg['deriv']})")
             print(f"{'='*70}")
+
+            # ═══════════════════════════════════════════════════════════════════════════
+            # CRITICAL FIX: Apply preprocessing BEFORE Bayesian optimization
+            # This matches the grid search pattern (lines 689-705)
+            # ═══════════════════════════════════════════════════════════════════════════
+
+            # Check if this is a GA-optimized preprocessing config
+            if 'ga_transform' in preprocess_cfg and preprocess_cfg['ga_transform'] is not None:
+                # Use GA transform directly (it already includes all preprocessing)
+                X_preprocessed = preprocess_cfg['ga_transform'](X_np)
+            else:
+                # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
+                prep_pipe_steps = build_preprocessing_pipeline(
+                    preprocess_cfg["name"],
+                    preprocess_cfg["deriv"],
+                    preprocess_cfg["window"],
+                    preprocess_cfg["polyorder"],
+                    imbalance_method=None,  # Imbalance will be added later inside CV folds
+                    imbalance_params=None,
+                    task_type=task_type,
+                    interference=preprocess_cfg.get("interference"),  # Phase 3: interference removal
+                    wavelengths=wavelengths  # Phase 3: needed for interference removal
+                )
+
+                # Step 2: Apply preprocessing to full spectrum
+                X_preprocessed = X_np.copy()
+                if prep_pipe_steps:
+                    prep_pipeline = Pipeline(prep_pipe_steps)
+                    X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
 
             # Update progress callback
             if progress_callback:
@@ -1399,10 +1868,10 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 study_name=f"{model_name}_{preprocess_cfg['name']}_deriv{preprocess_cfg['deriv']}"
             )
 
-            # Create objective function
+            # Create objective function (pass preprocessed data)
             objective_fn = create_objective_function(
                 model_name=model_name,
-                X=X_np,
+                X=X_preprocessed,  # CRITICAL FIX: Use preprocessed data instead of X_np
                 y=y_np,
                 wavelengths=wavelengths,
                 preprocess_cfg=preprocess_cfg,
@@ -1478,7 +1947,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     df_results = pd.concat([df_results, pd.DataFrame([result])], ignore_index=True)
 
                 # Print summary (find best overall result)
-                print(f"✓ Collected {len(results_list)} configurations from {len(study.trials)} trials")
+                print(f"[OK] Collected {len(results_list)} configurations from {len(study.trials)} trials")
 
                 # Find and print best result
                 best_result = study.best_trial
@@ -1491,7 +1960,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 print(f"  Parameters: {best_result.params}")
 
             except Exception as e:
-                print(f"✗ Optimization failed for {model_name}: {type(e).__name__}: {e}")
+                print(f"[X] Optimization failed for {model_name}: {type(e).__name__}: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
@@ -1513,7 +1982,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     if 'CompositeScore' in df_ranked.columns:
         df_ranked = df_ranked.rename(columns={'CompositeScore': 'Score'})
 
-    print(f"\n✓ Bayesian optimization complete!")
+    print(f"\n[OK] Bayesian optimization complete!")
     print(f"  Total models optimized: {len(df_ranked)}")
     if len(df_ranked) > 0:
         best_model = df_ranked.iloc[0]
@@ -1582,9 +2051,13 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             for step_name, step in pipe_clone.steps[:-1]:
                 X_train_transformed = step.transform(X_train_transformed)
 
-            # Refit ONLY the final model step with weights
+            # Refit ONLY the final model step with weights (if supported)
             final_model = pipe_clone.steps[-1][1]
-            final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+            if _supports_sample_weight(final_model):
+                final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+            else:
+                # Model doesn't support sample_weight (e.g., PLS) - fit without it
+                final_model.fit(X_train_transformed, y_train)
 
     # Handle classification sample weights (for models like Ridge that support sample_weight but not class_weight)
     if sample_weight_train is None and use_sample_weight_for_classification and task_type == 'classification':
@@ -1605,12 +2078,18 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
 
-            # Fit the final model with sample weights
+            # Fit the final model with sample weights (if supported)
             final_model = pipe_clone.steps[-1][1]
-            final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+            if _supports_sample_weight(final_model):
+                final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+            else:
+                final_model.fit(X_train_transformed, y_train)
         else:
             # No pipeline, just the model
-            pipe_clone.fit(X_train, y_train, sample_weight=sample_weight_train)
+            if _supports_sample_weight(pipe_clone):
+                pipe_clone.fit(X_train, y_train, sample_weight=sample_weight_train)
+            else:
+                pipe_clone.fit(X_train, y_train)
         sample_weight_train = 'applied'  # Flag that we've already fit
 
     # Standard path: fit if not already done above
@@ -1718,7 +2197,10 @@ def _run_single_config(
     else:
         # Normal behavior: build full pipeline (spectral + imbalance)
         # Phase 3: Extract wavelengths for interference removal
-        wavelengths = X.columns.astype(float).values if hasattr(X, 'columns') else None
+        # Use wavelengths from parameter if available, otherwise try to extract from DataFrame columns
+        wavelengths_for_interference = wavelengths if wavelengths is not None else (
+            X.columns.astype(float).values if hasattr(X, 'columns') else None
+        )
 
         pipe_steps = build_preprocessing_pipeline(
             preprocess_cfg["name"],
@@ -1729,7 +2211,7 @@ def _run_single_config(
             imbalance_params=imbalance_params,
             task_type=task_type,
             interference=preprocess_cfg.get("interference"),  # Phase 3
-            wavelengths=wavelengths  # Phase 3
+            wavelengths=wavelengths_for_interference  # Phase 3
         )
 
     # Handle class_weight for imbalanced classification
@@ -1775,9 +2257,9 @@ def _run_single_config(
         pipe_steps.append(("pls", model))
         # Apply class_weight to LogisticRegression if requested
         if imbalance_method == 'class_weight' and task_type == 'classification':
-            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')))
+            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=random_state, class_weight='balanced')))
         else:
-            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=42)))
+            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=random_state)))
     else:
         pipe_steps.append(("model", model))
 
@@ -1825,9 +2307,9 @@ def _run_single_config(
     # Print summary if imbalance handling was used
     if imbalance_method is not None:
         if imbalance_method == 'class_weight':
-            print(f"  ✓ Imbalance handling: class_weight applied to model")
+            print(f"  [OK] Imbalance handling: class_weight applied to model")
         else:
-            print(f"  ✓ Imbalance handling: {imbalance_method} applied successfully")
+            print(f"  [OK] Imbalance handling: {imbalance_method} applied successfully")
 
     # Average metrics
     if task_type == "regression":
@@ -1956,6 +2438,12 @@ def _run_single_config(
         "random_state": 42,  # CV random state (always 42 in this codebase)
     }
 
+    # Store GA preprocessing genes if present (for Model Development reconstruction)
+    if 'ga_genes' in preprocess_cfg and preprocess_cfg['ga_genes'] is not None:
+        result["ga_genes"] = preprocess_cfg['ga_genes'].tolist()  # Serialize numpy array
+        result["ga_model_type"] = preprocess_cfg.get("ga_model_type", "linear")
+        result["ga_config"] = preprocess_cfg.get("ga_config", "")
+
     if task_type == "regression":
         result["RMSE"] = mean_rmse
         result["R2"] = mean_r2
@@ -1973,11 +2461,11 @@ def _run_single_config(
     if subset_tag != "full" and subset_indices is not None:
         # Subset model: save only the subset wavelengths
         subset_wavelengths = wavelengths[subset_indices]
-        all_vars_str = ','.join([f"{w:.1f}" for w in subset_wavelengths])
+        all_vars_str = ','.join([f"{w:.0f}" for w in subset_wavelengths])
         result['all_vars'] = all_vars_str
     else:
         # Full model: save ALL wavelengths used (may be filtered by wl_min/wl_max)
-        all_vars_str = ','.join([f"{w:.1f}" for w in wavelengths])
+        all_vars_str = ','.join([f"{w:.0f}" for w in wavelengths])
         result['all_vars'] = all_vars_str
 
     # Continue with feature importance extraction if model was already fitted above
@@ -2019,7 +2507,7 @@ def _run_single_config(
                 top_wavelengths = wavelengths[top_indices]
 
             # Format as comma-separated string
-            top_vars_str = ','.join([f"{w:.1f}" for w in top_wavelengths])
+            top_vars_str = ','.join([f"{w:.0f}" for w in top_wavelengths])
             result['top_vars'] = top_vars_str
 
         except Exception as e:
