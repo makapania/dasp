@@ -12662,11 +12662,11 @@ class SpectralPredictApp:
                 if self.imbalance_method.get() not in classification_methods:
                     self.imbalance_method.set('smote')
             else:  # regression
-                regression_methods = ['undersample', 'binning', 'rare_boost', 'balanced']
+                regression_methods = ['smogn', 'oversample', 'smotetomek', 'undersample', 'binning', 'rare_boost', 'balanced']
                 self.imbalance_method_combo['values'] = regression_methods
                 # Set default if current selection is not valid
                 if self.imbalance_method.get() not in regression_methods:
-                    self.imbalance_method.set('undersample')
+                    self.imbalance_method.set('smogn')
 
             if task_type == 'classification':
                 # Detect class imbalance
@@ -12777,6 +12777,10 @@ class SpectralPredictApp:
             'tomek_links': 'Tomek Links - Remove boundary noise',
             'smote_tomek': 'SMOTETomek - Combined over/undersampling',
             'class_weight': 'Class weights - No resampling, weight loss function',
+            # Regression methods
+            'smogn': 'SMOGN - Synthetic minority oversampling for regression (recommended)',
+            'oversample': 'Oversample - Duplicate rare samples with noise injection',
+            'smotetomek': 'SMOGN + Tomek - Oversample then remove borderline samples',
             'undersample': 'Undersample over-represented ranges (ideal for many zeros)',
             'binning': 'Target binning - Weight by target frequency (regression)',
             'rare_boost': 'Rare-value boost - Emphasize uncommon targets (regression)',
@@ -12802,6 +12806,16 @@ class SpectralPredictApp:
                 self.imbalance_widgets['k_neighbors_spin'].grid()
                 self.imbalance_widgets['k_neighbors_desc'].grid()
 
+            elif method in ['smogn', 'oversample', 'smotetomek']:
+                # Show both k_neighbors and n_bins for regression resampling
+                self.imbalance_widgets['k_neighbors_label'].grid()
+                self.imbalance_widgets['k_neighbors_spin'].config(state='normal')
+                self.imbalance_widgets['k_neighbors_spin'].grid()
+                self.imbalance_widgets['k_neighbors_desc'].grid()
+                self.imbalance_widgets['n_bins_label'].grid(row=1, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+                self.imbalance_widgets['n_bins_spin'].config(state='normal')
+                self.imbalance_widgets['n_bins_spin'].grid(row=1, column=1, sticky=tk.W)
+
             elif method in ['undersample', 'binning']:
                 # Show n_bins parameter (for both undersample and binning)
                 self.imbalance_widgets['n_bins_label'].grid(row=0, column=0, sticky=tk.W, pady=5, padx=(0, 10))
@@ -12825,6 +12839,10 @@ class SpectralPredictApp:
         params = {}
         if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek']:
             params['k_neighbors'] = self.k_neighbors.get()
+        elif method in ['smogn', 'oversample', 'smotetomek']:
+            # Regression resampling methods use both k_neighbors and n_bins
+            params['k_neighbors'] = self.k_neighbors.get()
+            params['n_bins'] = self.n_bins.get()
         elif method in ['undersample', 'binning']:
             params['n_bins'] = self.n_bins.get()
         elif method == 'rare_boost':
