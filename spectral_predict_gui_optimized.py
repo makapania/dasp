@@ -1947,11 +1947,18 @@ class SpectralPredictApp:
         self.varsel_uve = tk.BooleanVar(value=False)
         self.varsel_uve_spa = tk.BooleanVar(value=False)
         self.varsel_ipls = tk.BooleanVar(value=False)
+        self.varsel_cars = tk.BooleanVar(value=False)
+        self.varsel_vcpa = tk.BooleanVar(value=False)
+        self.varsel_ga = tk.BooleanVar(value=False)  # Genetic Algorithm
         self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
         self.uve_cutoff_multiplier = tk.DoubleVar(value=1.0)  # UVE threshold (0.7-1.5)
         self.uve_n_components = tk.StringVar(value="")  # PLS components for UVE (empty = auto)
         self.spa_n_random_starts = tk.IntVar(value=10)  # Random starts for SPA
         self.ipls_n_intervals = tk.IntVar(value=20)  # Number of intervals for iPLS
+        # GA parameters
+        self.ga_population_size = tk.IntVar(value=64)
+        self.ga_generations = tk.IntVar(value=100)
+        self.ga_n_runs = tk.IntVar(value=5)
 
         # CSV export option
         self.export_preprocessed_csv = tk.BooleanVar(value=False)
@@ -5497,15 +5504,30 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
+        ttk.Checkbutton(varsel_frame, text="CARS (Competitive Adaptive Reweighted Sampling)",
+                       variable=self.varsel_cars).grid(row=6, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Fast competitive selection",
+                 style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
+                       variable=self.varsel_vcpa).grid(row=7, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+                 style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="GA (Genetic Algorithm)",
+                       variable=self.varsel_ga).grid(row=8, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Evolutionary optimization",
+                 style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
+
         # UVE Prefilter option
         ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
-                       variable=self.apply_uve_prefilter).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+                       variable=self.apply_uve_prefilter).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
 
         # Method parameters
-        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
+        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
 
         params_frame = ttk.Frame(varsel_frame)
-        params_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=5)
+        params_frame.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # UVE parameters
         ttk.Label(params_frame, text="UVE Cutoff:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -5524,8 +5546,18 @@ class SpectralPredictApp:
         ttk.Spinbox(params_frame, from_=5, to=50, textvariable=self.ipls_n_intervals, width=8).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Label(params_frame, text="(default: 20)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(varsel_frame, text="📚 See VARIABLE_SELECTION_IMPLEMENTATION.md for method details",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+        # GA parameters
+        ttk.Label(params_frame, text="GA Population:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="GA Generations:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="GA Runs:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
 
     def _create_tab4c_model_configuration(self):
         """Subtab 4C: Model Configuration - Model selection and advanced model options."""
@@ -15181,6 +15213,12 @@ class SpectralPredictApp:
                 selected_varsel_methods.append('uve_spa')
             if self.varsel_ipls.get():
                 selected_varsel_methods.append('ipls')
+            if self.varsel_cars.get():
+                selected_varsel_methods.append('cars')
+            if self.varsel_vcpa.get():
+                selected_varsel_methods.append('vcpa-iriv')
+            if self.varsel_ga.get():
+                selected_varsel_methods.append('ga')
 
             # Default to importance if none selected
             if not selected_varsel_methods:
@@ -15359,6 +15397,10 @@ class SpectralPredictApp:
                 uve_n_components=uve_n_comp,
                 spa_n_random_starts=self.spa_n_random_starts.get(),
                 ipls_n_intervals=self.ipls_n_intervals.get(),
+                # GA parameters
+                ga_population_size=self.ga_population_size.get(),
+                ga_generations=self.ga_generations.get(),
+                ga_n_runs=self.ga_n_runs.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
