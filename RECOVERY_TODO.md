@@ -14,9 +14,9 @@
 - [x] **3. Data Management opens on Import & Preview** - Should always open on Import & Preview tab
 
 ### Imbalance Handling
-- [ ] **4. Add SMOTE for regression** - Not just classification
-- [ ] **5. Add SMOTE-Tomek for regression**
-- [ ] **6. Add artificial sampling for regression imbalances**
+- [x] **4. Add SMOTE for regression** - RegressionResampler with 'oversample' method
+- [x] **5. Add SMOTE-Tomek for regression** - RegressionResampler with 'smotetomek' method
+- [x] **6. Add artificial sampling for regression imbalances** - RegressionResampler with 'smogn' method
 
 ### Variable Selection
 - [ ] **7. Add CARS** - Competitive Adaptive Reweighted Sampling

@@ -13,6 +13,10 @@ CLASSIFICATION METHODS:
 - SMOTETomek: Combined over/undersampling
 
 REGRESSION METHODS:
+- Undersampling: Remove samples from over-represented target ranges
+- Simple Oversampling: Duplicate minority samples with noise injection
+- SMOGN: Synthetic Minority Over-sampling for reGressioN (SMOTE for regression)
+- SMOGN+Tomek: SMOGN with Tomek links cleaning
 - Target binning with sample weights
 - Rare-value boosting (emphasize underrepresented target ranges)
 
@@ -429,6 +433,355 @@ class RegressionUndersampler(BaseEstimator):
         return X[indices_to_keep], y[indices_to_keep]
 
 
+class RegressionResampler(BaseEstimator):
+    """
+    Synthetic oversampling for regression targets using SMOGN-style methods.
+
+    This class provides SMOTE-like techniques for regression by binning continuous
+    targets, applying interpolation-based oversampling to minority bins, and then
+    unbinning back to continuous values.
+
+    Parameters:
+    -----------
+    method : str, default='smogn'
+        Resampling method:
+        - 'oversample': Simple oversampling with noise injection
+        - 'smogn': SMOGN-style synthetic oversampling (SMOTE for regression)
+        - 'smotetomek': SMOGN + Tomek links cleaning
+    n_bins : int, default=5
+        Number of bins for target binning
+    k_neighbors : int, default=5
+        Number of neighbors for interpolation (SMOGN method)
+    noise_scale : float, default=0.01
+        Noise injection factor for 'oversample' method
+    sampling_strategy : str or float, default='auto'
+        Target sampling ratio:
+        - 'auto': Balance bins to median count
+        - float: Target ratio of minority to majority
+    random_state : int, default=42
+        Random seed for reproducibility
+
+    Example:
+    --------
+    >>> # SMOGN oversampling for regression
+    >>> resampler = RegressionResampler(method='smogn', n_bins=5, k_neighbors=5)
+    >>> X_res, y_res = resampler.fit_resample(X, y)
+    >>> print(f"Original: {len(y)} samples, Resampled: {len(y_res)} samples")
+
+    Note:
+    -----
+    This class should NOT inherit from TransformerMixin because it implements
+    fit_resample() for use with imblearn Pipeline. TransformerMixin would add
+    a transform() method that conflicts with fit_resample() semantics.
+    """
+
+    def __init__(self, method='smogn', n_bins=5, k_neighbors=5,
+                 noise_scale=0.01, sampling_strategy='auto', random_state=42):
+        self.method = method
+        self.n_bins = n_bins
+        self.k_neighbors = k_neighbors
+        self.noise_scale = noise_scale
+        self.sampling_strategy = sampling_strategy
+        self.random_state = random_state
+
+    def fit(self, X, y=None):
+        """Fit the resampler."""
+        return self
+
+    def fit_resample(self, X, y):
+        """
+        Apply synthetic oversampling to regression data.
+
+        Parameters:
+        -----------
+        X : array-like of shape (n_samples, n_features)
+            Feature matrix
+        y : array-like of shape (n_samples,)
+            Target values
+
+        Returns:
+        --------
+        X_res : array of shape (n_samples_res, n_features)
+            Resampled feature matrix
+        y_res : array of shape (n_samples_res,)
+            Resampled target values
+        """
+        X = np.asarray(X)
+        y = np.asarray(y).ravel()
+
+        original_size = len(y)
+
+        # Dispatch to method-specific implementation
+        if self.method == 'oversample':
+            X_res, y_res = self._oversample_simple(X, y)
+        elif self.method == 'smogn':
+            X_res, y_res = self._smogn(X, y)
+        elif self.method == 'smotetomek':
+            X_res, y_res = self._smotetomek(X, y)
+        else:
+            raise ValueError(
+                f"Unknown method: {self.method}. "
+                f"Use 'oversample', 'smogn', or 'smotetomek'."
+            )
+
+        resampled_size = len(y_res)
+        change_pct = 100 * (resampled_size - original_size) / original_size
+
+        print(f"  {self.method.upper()}: {original_size} -> {resampled_size} samples "
+              f"(+{change_pct:.1f}% synthetic oversampling, target range: {y.min():.2f}-{y.max():.2f})")
+
+        return X_res, y_res
+
+    def _oversample_simple(self, X, y):
+        """
+        Simple oversampling: duplicate minority samples with noise injection.
+
+        This method:
+        1. Bins the target into n_bins categories
+        2. Identifies minority bins (below median count)
+        3. Duplicates samples from minority bins
+        4. Adds small Gaussian noise to avoid exact duplicates
+
+        Parameters:
+        -----------
+        X : array of shape (n_samples, n_features)
+        y : array of shape (n_samples,)
+
+        Returns:
+        --------
+        X_res, y_res : resampled arrays
+        """
+        rng = np.random.RandomState(self.random_state)
+
+        # Bin the target
+        bin_edges = np.linspace(y.min(), y.max(), self.n_bins + 1)
+        bin_indices = np.digitize(y, bins=bin_edges[:-1], right=False) - 1
+        bin_indices = np.clip(bin_indices, 0, self.n_bins - 1)
+
+        # Count samples per bin
+        unique_bins, bin_counts = np.unique(bin_indices, return_counts=True)
+        bin_count_dict = dict(zip(unique_bins, bin_counts))
+
+        # Determine target count (median or auto)
+        if self.sampling_strategy == 'auto':
+            target_count = int(np.median(bin_counts))
+        elif isinstance(self.sampling_strategy, float):
+            target_count = int(max(bin_counts) * self.sampling_strategy)
+        else:
+            target_count = int(np.median(bin_counts))
+
+        # Collect original samples
+        X_list = [X]
+        y_list = [y]
+
+        # Oversample minority bins
+        for bin_idx in range(self.n_bins):
+            bin_mask = bin_indices == bin_idx
+            bin_count = bin_count_dict.get(bin_idx, 0)
+
+            if bin_count == 0:
+                continue
+
+            if bin_count < target_count:
+                # Need to oversample this bin
+                n_to_add = target_count - bin_count
+                bin_samples_X = X[bin_mask]
+                bin_samples_y = y[bin_mask]
+
+                # Randomly select samples to duplicate (with replacement)
+                duplicate_indices = rng.choice(len(bin_samples_X), size=n_to_add, replace=True)
+                duplicated_X = bin_samples_X[duplicate_indices]
+                duplicated_y = bin_samples_y[duplicate_indices]
+
+                # Add noise to avoid exact duplicates
+                noise_X = rng.normal(0, self.noise_scale * X.std(axis=0), size=duplicated_X.shape)
+                noise_y = rng.normal(0, self.noise_scale * y.std(), size=duplicated_y.shape)
+
+                duplicated_X = duplicated_X + noise_X
+                duplicated_y = duplicated_y + noise_y
+
+                X_list.append(duplicated_X)
+                y_list.append(duplicated_y)
+
+        # Combine all samples
+        X_res = np.vstack(X_list)
+        y_res = np.hstack(y_list)
+
+        return X_res, y_res
+
+    def _smogn(self, X, y):
+        """
+        SMOGN-style synthetic oversampling for regression.
+
+        This method:
+        1. Bins the target into n_bins categories
+        2. Identifies minority bins (below target count)
+        3. Creates synthetic samples using k-NN interpolation (SMOTE-style)
+        4. Returns continuous-valued targets
+
+        Parameters:
+        -----------
+        X : array of shape (n_samples, n_features)
+        y : array of shape (n_samples,)
+
+        Returns:
+        --------
+        X_res, y_res : resampled arrays
+        """
+        rng = np.random.RandomState(self.random_state)
+
+        # Bin the target
+        bin_edges = np.linspace(y.min(), y.max(), self.n_bins + 1)
+        bin_indices = np.digitize(y, bins=bin_edges[:-1], right=False) - 1
+        bin_indices = np.clip(bin_indices, 0, self.n_bins - 1)
+
+        # Count samples per bin
+        unique_bins, bin_counts = np.unique(bin_indices, return_counts=True)
+        bin_count_dict = dict(zip(unique_bins, bin_counts))
+
+        # Determine target count
+        if self.sampling_strategy == 'auto':
+            target_count = int(np.median(bin_counts))
+        elif isinstance(self.sampling_strategy, float):
+            target_count = int(max(bin_counts) * self.sampling_strategy)
+        else:
+            target_count = int(np.median(bin_counts))
+
+        # Collect original samples
+        X_list = [X]
+        y_list = [y]
+
+        # SMOGN oversampling for minority bins
+        for bin_idx in range(self.n_bins):
+            bin_mask = bin_indices == bin_idx
+            bin_count = bin_count_dict.get(bin_idx, 0)
+
+            if bin_count == 0:
+                continue
+
+            if bin_count < target_count:
+                # Need to oversample this bin
+                n_to_add = target_count - bin_count
+                bin_samples_X = X[bin_mask]
+                bin_samples_y = y[bin_mask]
+
+                # Skip if too few samples for k-NN
+                if bin_count < 2:
+                    # Fall back to simple duplication with noise
+                    duplicate_indices = rng.choice(len(bin_samples_X), size=n_to_add, replace=True)
+                    synthetic_X = bin_samples_X[duplicate_indices]
+                    synthetic_y = bin_samples_y[duplicate_indices]
+                    noise_X = rng.normal(0, self.noise_scale * X.std(axis=0), size=synthetic_X.shape)
+                    noise_y = rng.normal(0, self.noise_scale * y.std(), size=synthetic_y.shape)
+                    synthetic_X = synthetic_X + noise_X
+                    synthetic_y = synthetic_y + noise_y
+                else:
+                    # SMOTE-style interpolation
+                    synthetic_X = []
+                    synthetic_y = []
+
+                    k = min(self.k_neighbors, bin_count - 1)  # Ensure k is valid
+
+                    for _ in range(n_to_add):
+                        # Randomly select a sample from the bin
+                        sample_idx = rng.randint(0, len(bin_samples_X))
+                        sample_X = bin_samples_X[sample_idx]
+                        sample_y = bin_samples_y[sample_idx]
+
+                        # Find k nearest neighbors within the bin
+                        distances = np.linalg.norm(bin_samples_X - sample_X, axis=1)
+                        neighbor_indices = np.argsort(distances)[1:k+1]  # Exclude self
+
+                        # Randomly select one neighbor
+                        neighbor_idx = rng.choice(neighbor_indices)
+                        neighbor_X = bin_samples_X[neighbor_idx]
+                        neighbor_y = bin_samples_y[neighbor_idx]
+
+                        # Interpolate between sample and neighbor
+                        alpha = rng.uniform(0, 1)
+                        new_X = sample_X + alpha * (neighbor_X - sample_X)
+                        new_y = sample_y + alpha * (neighbor_y - sample_y)
+
+                        synthetic_X.append(new_X)
+                        synthetic_y.append(new_y)
+
+                    synthetic_X = np.array(synthetic_X)
+                    synthetic_y = np.array(synthetic_y)
+
+                X_list.append(synthetic_X)
+                y_list.append(synthetic_y)
+
+        # Combine all samples
+        X_res = np.vstack(X_list)
+        y_res = np.hstack(y_list)
+
+        return X_res, y_res
+
+    def _smotetomek(self, X, y):
+        """
+        SMOGN + Tomek links cleaning.
+
+        This method:
+        1. Applies SMOGN oversampling
+        2. Removes Tomek links (borderline samples that are nearest neighbors
+           from different bins)
+
+        Parameters:
+        -----------
+        X : array of shape (n_samples, n_features)
+        y : array of shape (n_samples,)
+
+        Returns:
+        --------
+        X_res, y_res : resampled arrays
+        """
+        # First apply SMOGN
+        X_smogn, y_smogn = self._smogn(X, y)
+
+        # Then remove Tomek links
+        # A Tomek link is a pair of nearest neighbors from different bins
+        rng = np.random.RandomState(self.random_state)
+
+        # Bin the oversampled targets
+        bin_edges = np.linspace(y_smogn.min(), y_smogn.max(), self.n_bins + 1)
+        bin_indices = np.digitize(y_smogn, bins=bin_edges[:-1], right=False) - 1
+        bin_indices = np.clip(bin_indices, 0, self.n_bins - 1)
+
+        # Find Tomek links
+        tomek_indices = set()
+
+        for i in range(len(X_smogn)):
+            # Find nearest neighbor
+            distances = np.linalg.norm(X_smogn - X_smogn[i], axis=1)
+            distances[i] = np.inf  # Exclude self
+            nearest_idx = np.argmin(distances)
+
+            # Check if they form a Tomek link (different bins + mutual nearest neighbors)
+            if bin_indices[i] != bin_indices[nearest_idx]:
+                # Check if i is also the nearest neighbor of nearest_idx
+                distances_reverse = np.linalg.norm(X_smogn - X_smogn[nearest_idx], axis=1)
+                distances_reverse[nearest_idx] = np.inf
+                reverse_nearest_idx = np.argmin(distances_reverse)
+
+                if reverse_nearest_idx == i:
+                    # Tomek link found - mark both for removal
+                    tomek_indices.add(i)
+                    tomek_indices.add(nearest_idx)
+
+        # Remove Tomek links
+        keep_indices = np.array([i for i in range(len(X_smogn)) if i not in tomek_indices])
+
+        if len(keep_indices) == 0:
+            # All samples were Tomek links (unlikely), return SMOGN result
+            warnings.warn("Tomek cleaning removed all samples. Returning SMOGN result.", UserWarning)
+            return X_smogn, y_smogn
+
+        X_res = X_smogn[keep_indices]
+        y_res = y_smogn[keep_indices]
+
+        return X_res, y_res
+
+
 class RegressionSampleWeighter(BaseEstimator, TransformerMixin):
     """
     Compute sample weights for regression based on target distribution.
@@ -549,6 +902,10 @@ def build_imbalance_transformer(method, task_type='classification', random_state
         - 'smote_enn': Combined SMOTE + Edited Nearest Neighbors
 
         Regression methods:
+        - 'undersample': Undersample over-represented target ranges
+        - 'oversample': Simple oversampling with noise injection
+        - 'smogn': SMOGN-style synthetic oversampling (SMOTE for regression)
+        - 'smotetomek': SMOGN + Tomek links cleaning
         - 'binning': Target binning with sample weights
         - 'rare_boost': Rare-value boosting
         - 'balanced': Inverse frequency weighting
@@ -589,12 +946,18 @@ def build_imbalance_transformer(method, task_type='classification', random_state
             if random_state is not None and 'random_state' not in params:
                 params['random_state'] = random_state
             return RegressionUndersampler(**params)
+        elif method in ['oversample', 'smogn', 'smotetomek']:
+            # RegressionResampler for synthetic oversampling
+            if random_state is not None and 'random_state' not in params:
+                params['random_state'] = random_state
+            return RegressionResampler(method=method, **params)
         elif method in ['binning', 'rare_boost', 'balanced']:
             return RegressionSampleWeighter(strategy=method, **params)
         else:
             raise ValueError(
                 f"Unknown regression method: {method}. "
-                f"Use 'undersample', 'binning', 'rare_boost', or 'balanced'."
+                f"Use 'undersample', 'oversample', 'smogn', 'smotetomek', "
+                f"'binning', 'rare_boost', or 'balanced'."
             )
 
     else:
@@ -635,6 +998,9 @@ def get_available_methods(task_type='classification'):
     elif task_type == 'regression':
         return [
             ('undersample', 'Undersample over-represented ranges (e.g., many zeros)'),
+            ('oversample', 'Simple oversampling - Duplicate minority samples with noise'),
+            ('smogn', 'SMOGN - Synthetic oversampling for regression (SMOTE-style)'),
+            ('smotetomek', 'SMOGN + Tomek - Synthetic oversampling with noise cleaning'),
             ('binning', 'Target binning - Weight by target frequency'),
             ('rare_boost', 'Rare-value boost - Emphasize uncommon targets'),
             ('balanced', 'Balanced - Simple inverse frequency')
