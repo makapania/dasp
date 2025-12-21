@@ -3384,6 +3384,7 @@ class SpectralPredictApp:
         self.sidebar.add_section('advanced', 'Advanced', [
             ('calibration', '🔄', 'Cal Transfer'),
             ('interference', '🧬', 'Interference'),
+            ('spectral_library', '📚', 'Spectral Library'),
             ('data_management', '🗃', 'Data Management'),
         ], expanded=False)
 
@@ -3413,6 +3414,7 @@ class SpectralPredictApp:
         self._create_tab9_multi_model_comparison()  # Multi-Model
         self._create_tab10_calibration_transfer()   # Cal Transfer
         self._create_tab11_interference_removal()   # Interference
+        self._create_tab12_spectral_library()       # Spectral Library
 
         # Map nav IDs to notebook tab indices
         self.nav_to_tab = {
@@ -3429,6 +3431,7 @@ class SpectralPredictApp:
             'multi_model': 10,
             'calibration': 11,
             'interference': 12,
+            'spectral_library': 13,
         }
 
         # Now pack the notebook and show it
@@ -31119,6 +31122,812 @@ Configuration:
                   command=self._diag_export_metrics).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(export_diag_frame, text="📋 Generate Report (HTML)",
                   command=self._diag_export_report).pack(side=tk.LEFT)
+
+    # ========================================================================
+    # Tab 12 - Spectral Library Management and Similarity Search
+    # ========================================================================
+
+    def _create_tab12_spectral_library(self):
+        """Tab 12: Spectral Library - Persistent library with similarity search."""
+        # Create main tab frame
+        self.tab12 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab12, text='  📚 Spectral Library  ')
+
+        # Create nested notebook for subtabs
+        self.library_notebook = ttk.Notebook(self.tab12)
+        self.library_notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+
+        # Create the 2 subtabs
+        self._create_tab12a_library_management()
+        self._create_tab12b_similarity_search()
+
+        # Initialize library reference
+        self._spectral_library = None
+
+    def _create_tab12a_library_management(self):
+        """Subtab 12A: Library Management - Add/remove/export spectra."""
+        tab12a = ttk.Frame(self.library_notebook, style='TFrame')
+        self.library_notebook.add(tab12a, text='  📚 Library Management  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab12a, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab12a, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Spectral Library Management", row=row, columnspan=3)
+        row += 1
+
+        # Description
+        desc_text = ("Build a persistent spectral library that grows as you load new data.\n"
+                    "The library automatically detects duplicates and stores spectra for similarity search.")
+        ttk.Label(content_frame, text=desc_text, style='TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # ========================================================================
+        # Section 1: Add to Library
+        # ========================================================================
+        self._create_section_header(content_frame, "Add Spectra to Library", row=row, columnspan=3)
+        row += 1
+
+        add_frame = ttk.Frame(content_frame, style='TFrame')
+        add_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(add_frame, text="Category:", style='TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        self.lib_category_entry = ttk.Entry(add_frame, width=20)
+        self.lib_category_entry.pack(side=tk.LEFT, padx=(0, 15))
+        self.lib_category_entry.insert(0, "Uncategorized")
+
+        ttk.Button(add_frame, text="➕ Add Current Data to Library",
+                  command=self._add_current_to_library).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(add_frame, text="📂 Add from File",
+                  command=self._add_file_to_library).pack(side=tk.LEFT)
+        row += 1
+
+        # Status label for add operations
+        self.lib_add_status = ttk.Label(content_frame, text="", style='TLabel', foreground='green')
+        self.lib_add_status.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # ========================================================================
+        # Section 2: Library Statistics
+        # ========================================================================
+        self._create_section_header(content_frame, "Library Statistics", row=row, columnspan=3)
+        row += 1
+
+        stats_frame = ttk.LabelFrame(content_frame, text="Current Library",
+                                     style='TLabelframe', padding=15)
+        stats_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        self.lib_stats_label = ttk.Label(stats_frame,
+                                         text="Library not loaded. Click 'Refresh' to load.",
+                                         style='TLabel', justify=tk.LEFT)
+        self.lib_stats_label.pack(anchor=tk.W)
+
+        stats_btn_frame = ttk.Frame(stats_frame, style='TFrame')
+        stats_btn_frame.pack(anchor=tk.W, pady=(10, 0))
+
+        ttk.Button(stats_btn_frame, text="🔄 Refresh Stats",
+                  command=self._refresh_library_stats).pack(side=tk.LEFT, padx=(0, 10))
+        row += 1
+
+        # ========================================================================
+        # Section 3: Library Contents
+        # ========================================================================
+        self._create_section_header(content_frame, "Library Contents", row=row, columnspan=3)
+        row += 1
+
+        # Category filter
+        filter_frame = ttk.Frame(content_frame, style='TFrame')
+        filter_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(filter_frame, text="Filter by Category:", style='TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        self.lib_filter_category = ttk.Combobox(filter_frame, state="readonly", width=20)
+        self.lib_filter_category.pack(side=tk.LEFT, padx=(0, 10))
+        self.lib_filter_category['values'] = ['All']
+        self.lib_filter_category.set('All')
+        self.lib_filter_category.bind('<<ComboboxSelected>>', self._on_lib_category_filter_changed)
+        row += 1
+
+        # Library entries listbox
+        list_frame = ttk.Frame(content_frame, style='TFrame')
+        list_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+
+        list_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        self.lib_entries_listbox = tk.Listbox(list_frame, height=8, width=60,
+                                              yscrollcommand=list_scrollbar.set,
+                                              bg=self.colors['bg'], fg=self.colors['text'],
+                                              selectbackground=self.colors['accent'],
+                                              font=('Segoe UI', 10), relief=tk.SOLID, borderwidth=1,
+                                              selectmode=tk.EXTENDED)
+        list_scrollbar.config(command=self.lib_entries_listbox.yview)
+
+        self.lib_entries_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.lib_entries_listbox.bind('<<ListboxSelect>>', self._on_lib_entry_selected)
+        row += 1
+
+        # Entry action buttons
+        action_frame = ttk.Frame(content_frame, style='TFrame')
+        action_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+
+        ttk.Button(action_frame, text="🗑️ Remove Selected",
+                  command=self._remove_selected_lib_entries).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(action_frame, text="📊 Preview Selected",
+                  command=self._preview_lib_entry).pack(side=tk.LEFT, padx=(0, 10))
+        row += 1
+
+        # ========================================================================
+        # Section 4: Export / Clear
+        # ========================================================================
+        self._create_section_header(content_frame, "Export & Manage Library", row=row, columnspan=3)
+        row += 1
+
+        export_frame = ttk.Frame(content_frame, style='TFrame')
+        export_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(export_frame, text="💾 Export Library to CSV",
+                  command=self._export_spectral_library).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(export_frame, text="🗑️ Clear Entire Library",
+                  command=self._clear_spectral_library).pack(side=tk.LEFT, padx=(0, 10))
+        row += 1
+
+        # Library location info
+        ttk.Label(content_frame,
+                 text="Library is stored persistently in your user data directory.",
+                 style='Small.TLabel', foreground='gray').grid(row=row, column=0, columnspan=3,
+                                                               sticky=tk.W, pady=(0, 10))
+
+    def _create_tab12b_similarity_search(self):
+        """Subtab 12B: Similarity Search - Search library for similar spectra."""
+        tab12b = ttk.Frame(self.library_notebook, style='TFrame')
+        self.library_notebook.add(tab12b, text='  🔍 Similarity Search  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab12b, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab12b, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Spectral Similarity Search", row=row, columnspan=3)
+        row += 1
+
+        # Description
+        desc_text = ("Search the spectral library for spectra most similar to a query.\n"
+                    "Multiple similarity metrics are available including HQI, SAM, and derivative correlations.")
+        ttk.Label(content_frame, text=desc_text, style='TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # ========================================================================
+        # Section 1: Query Selection
+        # ========================================================================
+        self._create_section_header(content_frame, "Query Spectrum", row=row, columnspan=3)
+        row += 1
+
+        query_frame = ttk.Frame(content_frame, style='TFrame')
+        query_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(query_frame, text="Query Source:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+
+        self.lib_query_source = tk.StringVar(value='current_data')
+        ttk.Radiobutton(query_frame, text="Current Data", variable=self.lib_query_source,
+                       value='current_data', style='TRadiobutton',
+                       command=self._on_lib_query_source_changed).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(query_frame, text="Library Entry", variable=self.lib_query_source,
+                       value='library', style='TRadiobutton',
+                       command=self._on_lib_query_source_changed).pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        # Query sample selection
+        sample_frame = ttk.Frame(content_frame, style='TFrame')
+        sample_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        ttk.Label(sample_frame, text="Select Sample:", style='TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        self.lib_query_sample = ttk.Combobox(sample_frame, state="readonly", width=40)
+        self.lib_query_sample.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(sample_frame, text="🔄 Refresh Samples",
+                  command=self._refresh_query_samples).pack(side=tk.LEFT)
+        row += 1
+
+        # ========================================================================
+        # Section 2: Search Configuration
+        # ========================================================================
+        self._create_section_header(content_frame, "Search Configuration", row=row, columnspan=3)
+        row += 1
+
+        config_frame = ttk.Frame(content_frame, style='TFrame')
+        config_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        # Metric selection
+        ttk.Label(config_frame, text="Similarity Metric:", style='TLabel').grid(row=0, column=0, padx=(0, 5), sticky=tk.W)
+        self.lib_search_metric = ttk.Combobox(config_frame, state="readonly", width=25)
+        self.lib_search_metric.grid(row=0, column=1, padx=(0, 20), sticky=tk.W)
+        self.lib_search_metric['values'] = [
+            'HQI (Hit Quality Index)',
+            'SAM (Spectral Angle)',
+            'Euclidean Distance',
+            'Cosine Similarity',
+            '1st Derivative Correlation',
+            '2nd Derivative Correlation',
+            'SID (Spectral Info Divergence)',
+        ]
+        self.lib_search_metric.set('HQI (Hit Quality Index)')
+
+        # Top K
+        ttk.Label(config_frame, text="Top Results:", style='TLabel').grid(row=0, column=2, padx=(0, 5), sticky=tk.W)
+        self.lib_top_k = ttk.Spinbox(config_frame, from_=1, to=50, width=5)
+        self.lib_top_k.grid(row=0, column=3, padx=(0, 20), sticky=tk.W)
+        self.lib_top_k.set(10)
+
+        # Category filter
+        ttk.Label(config_frame, text="Category Filter:", style='TLabel').grid(row=1, column=0, padx=(0, 5), pady=(10, 0), sticky=tk.W)
+        self.lib_search_category = ttk.Combobox(config_frame, state="readonly", width=25)
+        self.lib_search_category.grid(row=1, column=1, padx=(0, 20), pady=(10, 0), sticky=tk.W)
+        self.lib_search_category['values'] = ['All Categories']
+        self.lib_search_category.set('All Categories')
+        row += 1
+
+        # Search button
+        search_btn_frame = ttk.Frame(content_frame, style='TFrame')
+        search_btn_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(10, 15))
+
+        ttk.Button(search_btn_frame, text="🔍 Search Library",
+                  command=self._run_library_search).pack(side=tk.LEFT, padx=(0, 10))
+        row += 1
+
+        # ========================================================================
+        # Section 3: Search Results
+        # ========================================================================
+        self._create_section_header(content_frame, "Search Results", row=row, columnspan=3)
+        row += 1
+
+        # Results table
+        results_frame = ttk.Frame(content_frame, style='TFrame')
+        results_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+
+        # Create treeview for results
+        columns = ('rank', 'sample_id', 'score', 'category', 'source')
+        self.lib_results_tree = ttk.Treeview(results_frame, columns=columns, show='headings', height=10)
+
+        self.lib_results_tree.heading('rank', text='Rank')
+        self.lib_results_tree.heading('sample_id', text='Sample ID')
+        self.lib_results_tree.heading('score', text='Score')
+        self.lib_results_tree.heading('category', text='Category')
+        self.lib_results_tree.heading('source', text='Source File')
+
+        self.lib_results_tree.column('rank', width=50, anchor='center')
+        self.lib_results_tree.column('sample_id', width=150)
+        self.lib_results_tree.column('score', width=100, anchor='center')
+        self.lib_results_tree.column('category', width=100)
+        self.lib_results_tree.column('source', width=200)
+
+        results_scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.lib_results_tree.yview)
+        self.lib_results_tree.configure(yscrollcommand=results_scrollbar.set)
+
+        self.lib_results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        results_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        row += 1
+
+        # Results action buttons
+        result_action_frame = ttk.Frame(content_frame, style='TFrame')
+        result_action_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+
+        ttk.Button(result_action_frame, text="📊 Compare with Query",
+                  command=self._compare_with_query).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(result_action_frame, text="💾 Export Results (CSV)",
+                  command=self._export_search_results).pack(side=tk.LEFT)
+        row += 1
+
+        # ========================================================================
+        # Section 4: Metric Information
+        # ========================================================================
+        self._create_section_header(content_frame, "Metric Information", row=row, columnspan=3)
+        row += 1
+
+        metric_info = ttk.LabelFrame(content_frame, text="Available Metrics",
+                                     style='TLabelframe', padding=10)
+        metric_info.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        metric_text = (
+            "• HQI (Hit Quality Index): Squared Pearson correlation (0-1). Industry standard.\n"
+            "• SAM (Spectral Angle): Angle between spectra as vectors. Insensitive to intensity.\n"
+            "• Euclidean Distance: L2 distance. Sensitive to scaling.\n"
+            "• Cosine Similarity: Cosine of angle between spectra (-1 to 1).\n"
+            "• 1st Derivative Correlation: HQI on 1st derivatives. Robust to baseline.\n"
+            "• 2nd Derivative Correlation: HQI on 2nd derivatives. More aggressive baseline removal.\n"
+            "• SID (Spectral Info Divergence): KL divergence between spectral distributions."
+        )
+        ttk.Label(metric_info, text=metric_text, style='TLabel', justify=tk.LEFT).pack(anchor=tk.W)
+
+    # ========================================================================
+    # Tab 12 Helper Methods - Spectral Library
+    # ========================================================================
+
+    def _get_spectral_library(self):
+        """Get or create the spectral library instance."""
+        if self._spectral_library is None:
+            try:
+                from spectral_predict.library_search import get_library
+                self._spectral_library = get_library("local")
+            except ImportError as e:
+                messagebox.showerror("Error", f"Could not load library module: {e}")
+                return None
+        return self._spectral_library
+
+    def _add_current_to_library(self):
+        """Add current data to the spectral library."""
+        if not hasattr(self, 'X') or self.X is None:
+            messagebox.showerror("Error", "No data loaded. Please load data first.")
+            return
+
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        category = self.lib_category_entry.get().strip() or "Uncategorized"
+        source_file = getattr(self, 'current_file', 'Unknown')
+
+        try:
+            # Get wavelengths and data
+            wavelengths = self.X.columns.astype(float).values
+            added, skipped, messages = library.add_spectra_batch(
+                self.X,
+                source_file=source_file,
+                category=category,
+            )
+
+            self.lib_add_status.config(
+                text=f"Added {added} spectra, skipped {skipped} duplicates",
+                foreground='green' if added > 0 else 'orange'
+            )
+
+            # Refresh stats and list
+            self._refresh_library_stats()
+            self._refresh_lib_entries_list()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add spectra: {e}")
+            self.lib_add_status.config(text=f"Error: {e}", foreground='red')
+
+    def _add_file_to_library(self):
+        """Add spectra from file to library."""
+        from tkinter import filedialog
+
+        filepath = filedialog.askopenfilename(
+            title="Select Data File",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx"),
+                ("All files", "*.*")
+            ]
+        )
+        if not filepath:
+            return
+
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        category = self.lib_category_entry.get().strip() or "Uncategorized"
+
+        try:
+            # Load file
+            if filepath.endswith('.csv'):
+                df = pd.read_csv(filepath, index_col=0)
+            elif filepath.endswith('.xlsx'):
+                df = pd.read_excel(filepath, index_col=0)
+            else:
+                messagebox.showerror("Error", "Unsupported file format")
+                return
+
+            # Add to library
+            added, skipped, messages = library.add_spectra_batch(
+                df,
+                source_file=filepath,
+                category=category,
+            )
+
+            self.lib_add_status.config(
+                text=f"Added {added} spectra from {Path(filepath).name}, skipped {skipped} duplicates",
+                foreground='green' if added > 0 else 'orange'
+            )
+
+            # Refresh
+            self._refresh_library_stats()
+            self._refresh_lib_entries_list()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to add file: {e}")
+            self.lib_add_status.config(text=f"Error: {e}", foreground='red')
+
+    def _refresh_library_stats(self):
+        """Refresh library statistics display."""
+        library = self._get_spectral_library()
+        if library is None:
+            self.lib_stats_label.config(text="Library not available")
+            return
+
+        stats = library.get_statistics()
+
+        if stats['total_entries'] == 0:
+            self.lib_stats_label.config(text="Library is empty. Add spectra to get started.")
+        else:
+            # Format category counts
+            cat_str = ", ".join([f"{cat}: {count}" for cat, count in stats.get('categories', {}).items()])
+
+            wl_range = stats.get('wavelength_range')
+            wl_str = f"{wl_range[0]:.1f} - {wl_range[1]:.1f}" if wl_range else "N/A"
+
+            text = (
+                f"Total Entries: {stats['total_entries']}\n"
+                f"Wavelength Range: {wl_str}\n"
+                f"Categories: {cat_str or 'None'}"
+            )
+            self.lib_stats_label.config(text=text)
+
+        # Update category filter dropdowns
+        categories = ['All'] + library.categories
+        self.lib_filter_category['values'] = categories
+        self.lib_search_category['values'] = ['All Categories'] + library.categories
+
+    def _refresh_lib_entries_list(self):
+        """Refresh the library entries listbox."""
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        self.lib_entries_listbox.delete(0, tk.END)
+
+        filter_cat = self.lib_filter_category.get()
+
+        for sample_id in library.sample_ids:
+            entry = library.get_spectrum(sample_id)
+            if entry:
+                if filter_cat == 'All' or entry.category == filter_cat:
+                    display_text = f"{sample_id} [{entry.category or 'Uncategorized'}]"
+                    self.lib_entries_listbox.insert(tk.END, display_text)
+
+    def _on_lib_category_filter_changed(self, event=None):
+        """Handle category filter change."""
+        self._refresh_lib_entries_list()
+
+    def _on_lib_entry_selected(self, event=None):
+        """Handle library entry selection."""
+        pass  # Could display entry details here
+
+    def _remove_selected_lib_entries(self):
+        """Remove selected entries from library."""
+        selection = self.lib_entries_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "No entries selected")
+            return
+
+        if not messagebox.askyesno("Confirm", f"Remove {len(selection)} selected entries?"):
+            return
+
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        # Get sample IDs from selection
+        removed = 0
+        for idx in reversed(selection):
+            text = self.lib_entries_listbox.get(idx)
+            sample_id = text.split(' [')[0]  # Extract ID before category
+            if library.remove_spectrum(sample_id):
+                removed += 1
+
+        messagebox.showinfo("Success", f"Removed {removed} entries")
+        self._refresh_library_stats()
+        self._refresh_lib_entries_list()
+
+    def _preview_lib_entry(self):
+        """Preview selected library entry."""
+        selection = self.lib_entries_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "No entry selected")
+            return
+
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        # Get first selected entry
+        text = self.lib_entries_listbox.get(selection[0])
+        sample_id = text.split(' [')[0]
+        entry = library.get_spectrum(sample_id)
+
+        if entry is None:
+            messagebox.showerror("Error", f"Entry not found: {sample_id}")
+            return
+
+        # Create preview plot
+        if HAS_MATPLOTLIB:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(entry.wavelengths, entry.spectrum, 'b-', linewidth=0.8)
+            ax.set_xlabel('Wavelength')
+            ax.set_ylabel('Intensity')
+            ax.set_title(f"Spectrum: {sample_id}")
+            ax.grid(True, alpha=0.3)
+
+            # Show in popup window
+            preview_win = tk.Toplevel(self.root)
+            preview_win.title(f"Preview: {sample_id}")
+            preview_win.geometry("800x400")
+
+            canvas = FigureCanvasTkAgg(fig, master=preview_win)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+            ttk.Button(preview_win, text="Close", command=preview_win.destroy).pack(pady=5)
+
+    def _export_spectral_library(self):
+        """Export entire library to CSV."""
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        if library.size == 0:
+            messagebox.showwarning("Warning", "Library is empty")
+            return
+
+        from tkinter import filedialog
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Library",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not filepath:
+            return
+
+        try:
+            library.export_to_csv(filepath)
+            messagebox.showinfo("Success", f"Library exported to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed: {e}")
+
+    def _clear_spectral_library(self):
+        """Clear entire spectral library."""
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        if library.size == 0:
+            messagebox.showinfo("Info", "Library is already empty")
+            return
+
+        if not messagebox.askyesno("Confirm",
+            f"This will permanently delete {library.size} entries from the library.\n\n"
+            "Are you sure?"):
+            return
+
+        library.clear()
+        self._refresh_library_stats()
+        self._refresh_lib_entries_list()
+        messagebox.showinfo("Success", "Library cleared")
+
+    def _on_lib_query_source_changed(self):
+        """Handle query source change."""
+        self._refresh_query_samples()
+
+    def _refresh_query_samples(self):
+        """Refresh query sample dropdown based on source."""
+        source = self.lib_query_source.get()
+
+        if source == 'current_data':
+            if hasattr(self, 'X') and self.X is not None:
+                samples = list(self.X.index)
+                self.lib_query_sample['values'] = samples
+                if samples:
+                    self.lib_query_sample.set(samples[0])
+            else:
+                self.lib_query_sample['values'] = ['(No data loaded)']
+                self.lib_query_sample.set('(No data loaded)')
+        else:
+            library = self._get_spectral_library()
+            if library and library.size > 0:
+                self.lib_query_sample['values'] = library.sample_ids
+                self.lib_query_sample.set(library.sample_ids[0])
+            else:
+                self.lib_query_sample['values'] = ['(Library empty)']
+                self.lib_query_sample.set('(Library empty)')
+
+    def _run_library_search(self):
+        """Run similarity search on library."""
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        if library.size == 0:
+            messagebox.showwarning("Warning", "Library is empty. Add spectra first.")
+            return
+
+        # Get query spectrum
+        source = self.lib_query_source.get()
+        sample_id = self.lib_query_sample.get()
+
+        if sample_id in ['(No data loaded)', '(Library empty)']:
+            messagebox.showerror("Error", "No valid query sample selected")
+            return
+
+        try:
+            if source == 'current_data':
+                if not hasattr(self, 'X') or self.X is None:
+                    messagebox.showerror("Error", "No data loaded")
+                    return
+                query = self.X.loc[sample_id].values
+                wavelengths = self.X.columns.astype(float).values
+            else:
+                entry = library.get_spectrum(sample_id)
+                if entry is None:
+                    messagebox.showerror("Error", f"Sample not found: {sample_id}")
+                    return
+                query = entry.spectrum
+                wavelengths = entry.wavelengths
+
+            # Get metric
+            metric_display = self.lib_search_metric.get()
+            metric_map = {
+                'HQI (Hit Quality Index)': 'hqi',
+                'SAM (Spectral Angle)': 'sam',
+                'Euclidean Distance': 'euclidean',
+                'Cosine Similarity': 'cosine',
+                '1st Derivative Correlation': 'deriv1_corr',
+                '2nd Derivative Correlation': 'deriv2_corr',
+                'SID (Spectral Info Divergence)': 'sid',
+            }
+            metric = metric_map.get(metric_display, 'hqi')
+
+            # Get top_k
+            top_k = int(self.lib_top_k.get())
+
+            # Get category filter
+            cat_filter = self.lib_search_category.get()
+            category = None if cat_filter == 'All Categories' else cat_filter
+
+            # Run search
+            results = library.search(query, wavelengths, metric=metric, top_k=top_k, category=category)
+
+            # Store results for export
+            self._lib_search_results = results
+
+            # Display results in treeview
+            for item in self.lib_results_tree.get_children():
+                self.lib_results_tree.delete(item)
+
+            for _, row in results.iterrows():
+                self.lib_results_tree.insert('', tk.END, values=(
+                    row['rank'],
+                    row['sample_id'],
+                    f"{row['score']:.4f}",
+                    row['category'] or 'Uncategorized',
+                    Path(row['source_file']).name if row['source_file'] else ''
+                ))
+
+            if len(results) == 0:
+                messagebox.showinfo("Info", "No matches found")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Search failed: {e}")
+
+    def _compare_with_query(self):
+        """Compare selected result with query spectrum."""
+        selection = self.lib_results_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "No result selected")
+            return
+
+        if not HAS_MATPLOTLIB:
+            messagebox.showerror("Error", "Matplotlib required for plotting")
+            return
+
+        # Get query
+        source = self.lib_query_source.get()
+        sample_id = self.lib_query_sample.get()
+
+        library = self._get_spectral_library()
+        if library is None:
+            return
+
+        try:
+            if source == 'current_data':
+                query = self.X.loc[sample_id].values
+                wavelengths = self.X.columns.astype(float).values
+            else:
+                entry = library.get_spectrum(sample_id)
+                query = entry.spectrum
+                wavelengths = entry.wavelengths
+
+            # Get selected result
+            item = self.lib_results_tree.item(selection[0])
+            result_id = item['values'][1]
+            result_entry = library.get_spectrum(result_id)
+
+            if result_entry is None:
+                messagebox.showerror("Error", f"Result not found: {result_id}")
+                return
+
+            # Align wavelengths if needed
+            from scipy.interpolate import interp1d
+            if not np.allclose(wavelengths, result_entry.wavelengths, rtol=1e-5):
+                f = interp1d(result_entry.wavelengths, result_entry.spectrum,
+                            kind='linear', bounds_error=False, fill_value='extrapolate')
+                result_spectrum = f(wavelengths)
+            else:
+                result_spectrum = result_entry.spectrum
+
+            # Create comparison plot
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(wavelengths, query, 'b-', linewidth=0.8, label=f'Query: {sample_id}')
+            ax.plot(wavelengths, result_spectrum, 'r-', linewidth=0.8, label=f'Match: {result_id}')
+            ax.set_xlabel('Wavelength')
+            ax.set_ylabel('Intensity')
+            ax.set_title(f"Comparison: {sample_id} vs {result_id}")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            # Show in popup window
+            compare_win = tk.Toplevel(self.root)
+            compare_win.title(f"Comparison: {sample_id} vs {result_id}")
+            compare_win.geometry("1000x500")
+
+            canvas = FigureCanvasTkAgg(fig, master=compare_win)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+            ttk.Button(compare_win, text="Close", command=compare_win.destroy).pack(pady=5)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Comparison failed: {e}")
+
+    def _export_search_results(self):
+        """Export search results to CSV."""
+        if not hasattr(self, '_lib_search_results') or self._lib_search_results is None:
+            messagebox.showwarning("Warning", "No search results to export")
+            return
+
+        if len(self._lib_search_results) == 0:
+            messagebox.showwarning("Warning", "No results to export")
+            return
+
+        from tkinter import filedialog
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Search Results",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not filepath:
+            return
+
+        try:
+            self._lib_search_results.to_csv(filepath, index=False)
+            messagebox.showinfo("Success", f"Results exported to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed: {e}")
 
     # ========================================================================
     # Tab 11 Helper Methods - Interferent Library Management

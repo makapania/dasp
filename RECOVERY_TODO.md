@@ -27,19 +27,38 @@
 - [x] **10. Add GA Preprocessing** - Already fully implemented in GUI + backend
 
 ### Ensemble/Buttons
-- [ ] **11. Redo all buttons after Ensemble Models** - Text overlapping graphics, half don't work - FROM SCRATCH
-- [ ] **12. Check Ensembles for classification** - If not supported, disable; if should work, implement
+- [x] **11. Redo all buttons after Ensemble Models** - COMPLETELY REWROTE ensemble_viz.py from scratch:
+  - All 4 visualization functions rewritten with self-explanatory figures
+  - Large readable fonts (12pt+ minimum), auto-scaling figure sizes
+  - Title blocks with descriptions explaining what each figure shows
+  - Interpretation boxes explaining how to read colors/values
+  - All models shown with rankings and exact values
+  - Key insights auto-generated (specialists, generalists, best per region)
+  - Smart button enabling based on ensemble capabilities
+  - Graceful failure with clear user-friendly messages for unsupported ensembles
+- [x] **12. Check Ensembles for classification** - Ensembles do NOT support classification (all ensemble classes use RegressorMixin). Added "Regression Only" label to checkbox, added validation to skip ensembles for classification tasks with clear message, added validation to Train Ensemble button for classification.
 
 ### Optimization
-- [ ] **13. Add NSGA-II** - As addition to Bayesian, works beyond PLS/Ridge
+- [x] **13. Add NSGA-II** - Fully integrated as third optimization option alongside Grid Search and Bayesian:
+  - Added NSGA-II radio button and parameters (Pop/Gens) to UI
+  - Added dispatch logic to run NSGA-II multi-objective optimization
+  - Works with ALL models (PLS, Ridge, Lasso, ElasticNet, RF, LightGBM, XGBoost, CatBoost, SVR, MLP)
+  - Optimizes 3 objectives: error, wavelength count, model complexity
+  - Returns Pareto front with knee point detection for automatic "best compromise" selection
 
 ### Model Config Cleanup
-- [ ] **14. Remove 'Modern' from Gradient Boosting** - Make header blue like others
-- [ ] **15. Remove all "new" logos** - Prerelease = everything is new
-- [ ] **16. Rename 'Advanced Models' to 'Other Models'**
+- [x] **14. Remove 'Modern' from Gradient Boosting** - Changed to just "Gradient Boosting", removed green color override
+- [x] **15. Remove all "new" logos** - Removed all 🆕 emojis from UI labels
+- [x] **16. Rename 'Advanced Models' to 'Other Models'** - Done
 
 ### Preprocessing
-- [ ] **17. Verify SG3 and SG4 integration** - Were not correctly integrated at one point
+- [x] **17. Verify SG3 and SG4 integration** - Verified: preprocess.py, search.py, and GUI all properly support 3rd/4th derivatives
+
+### Performance
+- [x] **18. Add GA Quick Mode** - Added "Quick" checkbox for GA Variable Selection (~10× faster: pop=32, gen=50, runs=2)
+
+### Search Control
+- [x] **19. Add Pause/Resume/Stop** - Added search controller with Pause/Resume/Stop buttons for long-running analyses
 
 ---
 
@@ -47,146 +66,58 @@
 
 *Note: Some overlap with user features above - code exists in `backup_2025-12-20/`*
 
-### Already Have Code For (overlaps with above)
-- [ ] **NSGA-II** → overlaps with #11 - code in `backup_2025-12-20/src/spectral_predict/nsga2_search.py`
-- [ ] **GA-PLS** → overlaps with #7 - code in `backup_2025-12-20/src/spectral_predict/ga_pls.py`
-- [ ] **GA-LightGBM** → extends #7 for tree models - code in `backup_2025-12-20/src/spectral_predict/ga_lightgbm.py`
+### Backend Modules (COMMITTED 2025-12-21)
+- [x] **NSGA-II** - `src/spectral_predict/nsga2_search.py` - Multi-objective optimization
+- [x] **GA-PLS** - `src/spectral_predict/ga_pls.py` - GA wavelength selection for linear models
+- [x] **GA-LightGBM** - `src/spectral_predict/ga_lightgbm.py` - GA wavelength selection for tree models
+- [x] **Library Search** - `src/spectral_predict/library_search.py` - Persistent spectral library
+- [x] **Similarity Metrics** - `src/spectral_predict/similarity_metrics.py` - HQI, SAM, Euclidean, etc.
+- [x] **Search Controller** - `src/spectral_predict/search_controller.py` - Pause/Resume/Stop
 
-### NEW Features (integrate from backup)
-- [ ] **18. Spectral Library Search** - Persistent local library, duplicate detection, wavelength alignment
-  - Code: `backup_2025-12-20/src/spectral_predict/library_search.py`
-- [ ] **19. Similarity Metrics** - HQI, SAM, Euclidean, derivative correlation
-  - Code: `backup_2025-12-20/src/spectral_predict/similarity_metrics.py`
-- [ ] **20. Search Controller** - Thread-safe pause/resume/end for long searches
-  - Code: `backup_2025-12-20/src/spectral_predict/search_controller.py`
-- [ ] **21. Test Suite** - Comprehensive pytest fixtures and test infrastructure
-  - Code: `backup_2025-12-20/tests/`
+### GUI Integration (COMPLETED 2025-12-21)
+- [x] **Library Search GUI** - Added Tab 12 "Spectral Library" with Library Management sub-tab
+- [x] **Similarity Metrics GUI** - Added Similarity Search sub-tab with 7 metrics (HQI, SAM, Euclidean, Cosine, Deriv1/Deriv2 Correlation, SID)
 
----
-
-## Backup Location
-
-All files have been backed up to: `C:\Users\sponheim\git\dasp\backup_2025-12-20\`
-
-Contents:
-- `src/spectral_predict/` - 6 new modules
-- `tests/` - Full test suite (50+ files)
-- `scripts/` - Utility scripts
+### Test Suite (Pending)
+- [ ] **Test Suite** - Integrate pytest tests from `backup_2025-12-20/tests/`
 
 ---
 
-## December 16-20 New Modules (After User Features)
+## Bug Fixes (COMPLETED 2025-12-21)
 
-### NSGA-II Multi-Objective Optimization (`src/spectral_predict/nsga2_search.py`)
-- [ ] Pareto optimization for multiple conflicting objectives
-- [ ] Minimize prediction error (RMSE/1-Accuracy)
-- [ ] Minimize wavelengths (parsimony)
-- [ ] Minimize model complexity (LVs, model type)
-- [ ] Knee point detection for "best compromise"
-- [ ] Uses pymoo library
-
-### Spectral Library Search (`src/spectral_predict/library_search.py`)
-- [ ] Persistent local library storage across sessions
-- [ ] Automatic duplicate detection
-- [ ] Multiple similarity metrics
-- [ ] Wavelength alignment for different instruments
-- [ ] Uses platformdirs for cross-platform storage
-
-### Similarity Metrics (`src/spectral_predict/similarity_metrics.py`)
-- [ ] Hit Quality Index (HQI) - industry standard
-- [ ] Spectral Angle Mapper (SAM)
-- [ ] Euclidean distance
-- [ ] Derivative correlation
-- [ ] Batch similarity computation
-
-### GA-PLS Wavelength Selection (`src/spectral_predict/ga_pls.py`)
-- [ ] Genetic Algorithm for variable selection (Leardi 1998)
-- [ ] Binary chromosome (wavelength selected/excluded)
-- [ ] Multiple GA runs aggregation
-- [ ] Fitness caching for performance
-- [ ] Early stopping
-
-### GA-LightGBM (`src/spectral_predict/ga_lightgbm.py`)
-- [ ] Genetic Algorithm with LightGBM model
-- [ ] Wavelength selection optimization
-
-### Search Controller (`src/spectral_predict/search_controller.py`)
-- [ ] Thread-safe pause/resume/end
-- [ ] Uses threading.Event for cross-thread signaling
-- [ ] Check-and-wait pattern for search loops
+- [x] Fix 1: Edge masking for top_vars display
+- [x] Fix 2: All-zero importances tracking
+- [x] Fix 3: Baseline/smoothing in grid search
+- [x] Fix 4: GA preprocessing in Model Development
+- [x] Fix 5: Expand GA preprocessing to 4 model groups
 
 ---
 
-## High Priority - Test Infrastructure
+## Dependency Cleanup (COMPLETED 2025-12-21)
 
-### Test Framework (`tests/`)
-- [ ] `conftest.py` - Shared pytest fixtures
-- [ ] `fixtures/synthetic_data.py` - Data generators
-- [ ] `gold_standards/` - Reference outputs for regression testing
-- [ ] 50+ test files covering all modules
-
-### Key Test Files
-- [ ] `test_nsga2_search.py` - NSGA-II tests
-- [ ] `test_library_search.py` - Library search tests
-- [ ] `test_ga_pls.py` - GA-PLS tests
-- [ ] `test_ga_lightgbm.py` - GA-LightGBM tests
-- [ ] `test_search_comprehensive.py` - Search integration
-- [ ] `test_end_to_end_workflows.py` - Full workflow tests
-
-### Fixtures
-- [ ] Synthetic spectra (small/medium/large)
-- [ ] Classification data (balanced/imbalanced)
-- [ ] Outlier data with known outliers
-- [ ] Pre-trained model fixtures
+- [x] Make all dependencies required (no optional imports)
+- [x] Add: imbalanced-learn, platformdirs, threadpoolctl
+- [x] Add: specdal, brukeropus, specio-py310, agilent-ir-formats
+- [x] Remove all HAS_* conditional patterns from code
 
 ---
 
-## Medium Priority - Scripts
+## Remaining Work
 
-### Utility Scripts (`scripts/`)
-- [ ] `apply_nsga2_fixes.py` - NSGA-II fixes
-- [ ] `apply_nsga2_phase4.py` - Phase 4 updates
-- [ ] `check_coverage.py` - Coverage analysis
-- [ ] `generate_gold_standards.py` - Generate reference outputs
-- [ ] `run_tests.py` - Test runner
+### Test Suite (Low Priority)
+- [ ] Integrate pytest tests from `backup_2025-12-20/tests/`
+- [ ] 50+ test files for regression testing
 
 ---
 
-## Recent Commit (Already in Git)
+## Completed Summary (2025-12-21)
 
-- `ca74c19` fix: UVE-SPA and VCPA-IRIV results not appearing in Results tab
+All major features from December 16-20 work have been restored:
+- 19 user priority features
+- 6 backend modules
+- 2 GUI integration items (Library Search + Similarity Metrics)
+- 5 bug fixes
+- Dependency cleanup (all required, no optional)
 
----
-
-## Files Location Summary
-
-| Path | Status | Description |
-|------|--------|-------------|
-| `src/spectral_predict/nsga2_search.py` | Backed up | NSGA-II optimization |
-| `src/spectral_predict/library_search.py` | Backed up | Library search |
-| `src/spectral_predict/similarity_metrics.py` | Backed up | Similarity metrics |
-| `src/spectral_predict/ga_pls.py` | Backed up | GA-PLS |
-| `src/spectral_predict/ga_lightgbm.py` | Backed up | GA-LightGBM |
-| `src/spectral_predict/search_controller.py` | Backed up | Search controller |
-| `tests/` | Backed up | Full test suite |
-| `scripts/` | Backed up | Utility scripts |
-| `recovery_blobs/` | Not backed up | Old November blobs (not needed) |
-
----
-
-## Completed
-
-- [x] Create backup directory
-- [x] Backup all new modules
-- [x] Backup test suite
-- [x] Backup scripts
-- [x] Create this TODO file
-
----
-
-## Next Steps
-
-1. Review backed up code quality
-2. Decide what to restore after reset
-3. Test restored functionality
-4. Commit working code
+### Backup Location
+`C:\Users\sponheim\git\dasp\backup_2025-12-20\`
