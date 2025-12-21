@@ -9,7 +9,13 @@ parameters including:
 - Smoothing settings
 
 The GA evaluates preprocessing configurations using cross-validated RMSECV
-with a quick PLS model, then returns the optimal preprocessing transform.
+with either PLS or LightGBM models for fitness evaluation, then returns the
+optimal preprocessing transform.
+
+Fitness Models
+--------------
+- 'pls': Uses PLS regression (default, always available)
+- 'lightgbm': Uses LightGBM (better for tree-based models, requires LightGBM)
 
 References
 ----------
@@ -27,6 +33,15 @@ from sklearn.metrics import mean_squared_error, accuracy_score
 # Import V1 preprocessing transformers
 from .preprocess import SNV, SavgolDerivative, SavgolSmooth
 from .baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
+
+# Import LightGBM for fitness evaluation
+try:
+    from lightgbm import LGBMRegressor, LGBMClassifier
+    HAS_LIGHTGBM_PREPROC = True
+except ImportError:
+    HAS_LIGHTGBM_PREPROC = False
+    LGBMRegressor = None
+    LGBMClassifier = None
 
 
 # =============================================================================
@@ -212,7 +227,8 @@ def evaluate_fitness(
     cv_folds: int = 5,
     n_components: int = 10,
     task_type: str = 'regression',
-    random_state: int = 42
+    random_state: int = 42,
+    fitness_model: str = 'pls'
 ) -> float:
     """
     Evaluate fitness of a preprocessing configuration.
@@ -230,11 +246,14 @@ def evaluate_fitness(
     cv_folds : int
         Number of CV folds
     n_components : int
-        Max PLS components to test
+        Max PLS components to test (used for PLS fitness model)
     task_type : str
         'regression' or 'classification'
     random_state : int
         Random state for CV splitting
+    fitness_model : str
+        Model to use for fitness evaluation: 'pls' or 'lightgbm'
+        Default is 'pls'. Falls back to PLS if LightGBM not available.
 
     Returns
     -------
@@ -271,25 +290,64 @@ def evaluate_fitness(
         else:
             cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-        # Fit PLS with cross-validation
-        pls = PLSRegression(n_components=n_comp, scale=False)
-        y_pred = cross_val_predict(pls, X_preproc, y, cv=cv)
+        # Choose fitness model - fall back to PLS if LightGBM not available
+        use_lightgbm = (fitness_model == 'lightgbm' and HAS_LIGHTGBM_PREPROC)
 
-        if task_type == 'classification':
-            # For classification, threshold predictions and compute accuracy
-            y_class = np.asarray(y)
-            if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-                # Encode string labels
-                from sklearn.preprocessing import LabelEncoder
-                le = LabelEncoder()
-                y_class = le.fit_transform(y_class)
-            y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
-            return accuracy_score(y_class, y_pred_class)
+        if use_lightgbm:
+            # Use LightGBM for fitness evaluation
+            if task_type == 'classification':
+                # For classification, ensure labels are numeric
+                y_class = np.asarray(y)
+                if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                    from sklearn.preprocessing import LabelEncoder
+                    le = LabelEncoder()
+                    y_class = le.fit_transform(y_class)
+                else:
+                    y_class = y_class.astype(int)
+
+                model = LGBMClassifier(
+                    n_estimators=100,
+                    learning_rate=0.1,
+                    max_depth=5,
+                    random_state=random_state,
+                    verbosity=-1,
+                    force_col_wise=True
+                )
+                y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
+                return accuracy_score(y_class, y_pred)
+            else:
+                # Regression
+                model = LGBMRegressor(
+                    n_estimators=100,
+                    learning_rate=0.1,
+                    max_depth=5,
+                    random_state=random_state,
+                    verbosity=-1,
+                    force_col_wise=True
+                )
+                y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
+                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+                return -rmsecv
         else:
-            # Calculate RMSECV
-            rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-            # Return negative RMSECV (we maximize fitness)
-            return -rmsecv
+            # Use PLS for fitness evaluation (default)
+            pls = PLSRegression(n_components=n_comp, scale=False)
+            y_pred = cross_val_predict(pls, X_preproc, y, cv=cv)
+
+            if task_type == 'classification':
+                # For classification, threshold predictions and compute accuracy
+                y_class = np.asarray(y)
+                if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                    # Encode string labels
+                    from sklearn.preprocessing import LabelEncoder
+                    le = LabelEncoder()
+                    y_class = le.fit_transform(y_class)
+                y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
+                return accuracy_score(y_class, y_pred_class)
+            else:
+                # Calculate RMSECV
+                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+                # Return negative RMSECV (we maximize fitness)
+                return -rmsecv
 
     except Exception:
         # Any error = very poor fitness
@@ -376,7 +434,8 @@ def optimize_preprocessing(
     task_type: str = 'regression',
     random_state: int = 42,
     verbose: int = 1,
-    progress_callback: Optional[Callable] = None
+    progress_callback: Optional[Callable] = None,
+    fitness_model: str = 'pls'
 ) -> Dict[str, Any]:
     """
     Optimize spectral preprocessing using genetic algorithm.
@@ -400,7 +459,7 @@ def optimize_preprocessing(
     cv_folds : int
         Number of CV folds for fitness evaluation
     n_components : int
-        Max PLS components for evaluation
+        Max PLS components for evaluation (used when fitness_model='pls')
     elitism : int
         Number of best individuals to preserve each generation
     task_type : str
@@ -416,6 +475,9 @@ def optimize_preprocessing(
         - 'total_generations': total generations
         - 'best_fitness': best fitness
         - 'message': human-readable status
+    fitness_model : str, optional
+        Model to use for fitness evaluation: 'pls' or 'lightgbm'
+        Default is 'pls'. Falls back to PLS if LightGBM not available.
 
     Returns
     -------
@@ -439,6 +501,9 @@ def optimize_preprocessing(
         print(f"GA Preprocessing Optimization")
         print(f"  Data: {n_samples} samples, {n_features} features")
         print(f"  Task: {task_type}")
+        print(f"  Fitness model: {fitness_model.upper()}")
+        if fitness_model == 'lightgbm' and not HAS_LIGHTGBM_PREPROC:
+            print(f"    WARNING: LightGBM not available, falling back to PLS")
         print(f"  Population: {population_size}, Generations: {n_generations}")
         print(f"  CV folds: {cv_folds}, PLS components: {n_components}")
 
@@ -447,7 +512,7 @@ def optimize_preprocessing(
 
     # Evaluate initial fitness
     fitness = np.array([
-        evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state)
+        evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model)
         for ind in population
     ])
 
@@ -497,7 +562,7 @@ def optimize_preprocessing(
 
         # Evaluate fitness
         fitness = np.array([
-            evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state)
+            evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model)
             for ind in population
         ])
 
