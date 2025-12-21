@@ -199,7 +199,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                ga_preprocess_population=32,
                ga_preprocess_generations=50,
                ga_preprocess_cv_folds=5,
-               ga_quick_mode=False):
+               ga_quick_mode=False,
+               # GA variable selection parameters
+               ga_population_size=64,
+               ga_generations=100,
+               ga_n_runs=5):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -1212,12 +1216,17 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     # GA Variable Selection: Use model-appropriate fitness
                                     # Linear models use PLS fitness, tree models use LightGBM fitness
 
-                                    # Determine GA parameters based on quick mode
+                                    # Determine GA parameters based on quick mode or user settings
                                     if ga_quick_mode:
                                         ga_pop, ga_gen, ga_runs, ga_early = 16, 25, 1, 10
                                         print(f"    -> Quick GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}")
                                     else:
-                                        ga_pop, ga_gen, ga_runs, ga_early = 32, 50, 3, 15
+                                        # Use user-specified parameters
+                                        ga_pop = ga_population_size
+                                        ga_gen = ga_generations
+                                        ga_runs = ga_n_runs
+                                        ga_early = 20  # Default early stopping
+                                        print(f"    -> GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}")
 
                                     if model_name in LINEAR_MODELS:
                                         print(f"    -> Using GA-PLS for {model_name} (linear model)")
