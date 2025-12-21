@@ -12,13 +12,7 @@ from sklearn.preprocessing import label_binarize
 from sklearn.base import clone
 from joblib import Parallel, delayed
 
-# Try to import imblearn Pipeline for resampling support
-try:
-    from imblearn.pipeline import Pipeline as ImbPipeline
-    HAS_IMBLEARN = True
-except ImportError:
-    ImbPipeline = None
-    HAS_IMBLEARN = False
+from imblearn.pipeline import Pipeline as ImbPipeline
 
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
@@ -27,15 +21,10 @@ from .regions import create_region_subsets, format_region_report
 from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
-from .ga_lightgbm import ga_lightgbm_selection, HAS_LIGHTGBM
+from .ga_lightgbm import ga_lightgbm_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
 
-# GA Preprocessing import
-try:
-    from .ga_preprocessing import optimize_preprocessing
-    HAS_GA_PREPROCESS = True
-except ImportError:
-    HAS_GA_PREPROCESS = False
+from .ga_preprocessing import optimize_preprocessing
 
 # NSGA-II import
 from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
@@ -564,12 +553,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     # When enabled, this REPLACES user-selected preprocessing with GA-optimized config
     # ═══════════════════════════════════════════════════════════════════════════
     if ga_preprocess:
-        if not HAS_GA_PREPROCESS:
-            raise ImportError(
-                "GA Preprocessing requires ga_preprocessing module. "
-                "Please ensure ga_preprocessing.py is available in src/spectral_predict/"
-            )
-
         if progress_callback:
             progress_callback({
                 'stage': 'ga_preprocessing',
@@ -641,11 +624,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Run GA optimization for tree models (using LightGBM fitness)
         if has_tree_models:
             print(f"Running GA optimization for TREE models (using LightGBM fitness)...")
-            # Check if LightGBM is available
-            from .ga_preprocessing import HAS_LIGHTGBM_PREPROC
-            fitness_model_tree = 'lightgbm' if HAS_LIGHTGBM_PREPROC else 'pls'
-            if not HAS_LIGHTGBM_PREPROC:
-                print(f"  WARNING: LightGBM not available, falling back to PLS fitness")
 
             ga_result_tree = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
@@ -657,7 +635,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 random_state=random_state,
                 verbose=1,
                 progress_callback=progress_callback,
-                fitness_model=fitness_model_tree
+                fitness_model='lightgbm'
             )
             print(f"\nTree Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_tree['best_config']}")
@@ -1453,35 +1431,20 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             progress_callback=progress_callback
                                         )
                                     elif model_name in TREE_MODELS:
-                                        if HAS_LIGHTGBM:
-                                            print(f"    -> Using GA-LightGBM for {model_name} (tree model)")
-                                            importances = ga_lightgbm_selection(
-                                                X_transformed_varsel, y_np,
-                                                task_type=task_type,
-                                                cv_folds=folds,
-                                                n_estimators=50,
-                                                num_leaves=15 if task_type == 'classification' else 31,
-                                                population_size=ga_pop,
-                                                n_generations=ga_gen,
-                                                n_runs=ga_runs,
-                                                early_stopping=ga_early,
-                                                random_state=random_state,
-                                                progress_callback=progress_callback
-                                            )
-                                        else:
-                                            print(f"    -> Using GA-PLS for {model_name} (LightGBM not available)")
-                                            importances = ga_pls_selection(
-                                                X_transformed_varsel, y_np,
-                                                task_type=task_type,
-                                                n_components=uve_n_components if uve_n_components is not None else 10,
-                                                cv=folds,
-                                                population_size=ga_pop,
-                                                n_generations=ga_gen,
-                                                n_runs=ga_runs,
-                                                early_stopping=ga_early,
-                                                random_state=random_state,
-                                                progress_callback=progress_callback
-                                            )
+                                        print(f"    -> Using GA-LightGBM for {model_name} (tree model)")
+                                        importances = ga_lightgbm_selection(
+                                            X_transformed_varsel, y_np,
+                                            task_type=task_type,
+                                            cv_folds=folds,
+                                            n_estimators=50,
+                                            num_leaves=15 if task_type == 'classification' else 31,
+                                            population_size=ga_pop,
+                                            n_generations=ga_gen,
+                                            n_runs=ga_runs,
+                                            early_stopping=ga_early,
+                                            random_state=random_state,
+                                            progress_callback=progress_callback
+                                        )
                                     else:
                                         # Default to GA-PLS for unknown model types
                                         print(f"    -> Using GA-PLS for {model_name} (default)")
@@ -2541,11 +2504,6 @@ def _run_single_config(
         needs_resampling = _needs_resampling_pipeline(imbalance_method, task_type)
 
         if needs_resampling:
-            if not HAS_IMBLEARN:
-                raise ImportError(
-                    f"Imbalance method '{imbalance_method}' requires imbalanced-learn. "
-                    f"Install with: pip install imbalanced-learn"
-                )
             pipe = ImbPipeline(pipe_steps)
         else:
             pipe = Pipeline(pipe_steps)

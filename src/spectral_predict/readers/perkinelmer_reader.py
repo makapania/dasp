@@ -3,8 +3,7 @@
 PerkinElmer instruments produce .sp files containing infrared spectral data
 in a binary format. This module uses the specio library to read these files.
 
-This module requires the optional 'specio' library.
-Install with: pip install specio
+Note: Uses specio-py310 for Python 3.10+ compatibility.
 """
 
 import pandas as pd
@@ -45,14 +44,7 @@ def read_sp_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     >>> print(f"Wavelength range: {spectrum.index.min()}-{spectrum.index.max()}")
     >>> print(f"Number of points: {len(spectrum)}")
     """
-    try:
-        from specio import specread
-    except ImportError:
-        raise ImportError(
-            "PerkinElmer .sp file support requires the 'specio' library.\n"
-            "Install with: pip install specio\n"
-            "Or install all vendor formats: pip install spectral-predict[all-formats]"
-        )
+    from specio import specread
 
     filepath = Path(filepath)
 

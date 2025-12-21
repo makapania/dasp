@@ -13,15 +13,7 @@ from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 from xgboost import XGBRegressor, XGBClassifier
 from lightgbm import LGBMRegressor, LGBMClassifier
 
-# CatBoost is optional (requires Visual Studio on Windows)
-try:
-    from catboost import CatBoostRegressor, CatBoostClassifier
-    HAS_CATBOOST = True
-except ImportError:
-    HAS_CATBOOST = False
-    CatBoostRegressor = None
-    CatBoostClassifier = None
-    print("Warning: CatBoost not available (requires Visual Studio 2022 on Windows). CatBoost models will be disabled.")
+from catboost import CatBoostRegressor, CatBoostClassifier
 
 # Import tiered configuration
 from .model_config import get_tier_models, get_hyperparameters
@@ -209,8 +201,6 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             )
 
         elif model_name == "CatBoost":
-            if not HAS_CATBOOST:
-                raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
             return CatBoostRegressor(
                 iterations=100,
                 learning_rate=0.1,
@@ -297,8 +287,6 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             )
 
         elif model_name == "CatBoost":
-            if not HAS_CATBOOST:
-                raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
             return CatBoostClassifier(
                 iterations=100,
                 learning_rate=0.1,
@@ -395,8 +383,6 @@ def build_model(model_name, params, task_type='regression'):
             )
 
         elif model_name == "CatBoost":
-            if not HAS_CATBOOST:
-                raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
             return CatBoostRegressor(
                 random_state=42,
                 verbose=False,
@@ -461,8 +447,6 @@ def build_model(model_name, params, task_type='regression'):
             )
 
         elif model_name == "CatBoost":
-            if not HAS_CATBOOST:
-                raise ValueError("CatBoost is not available. Install Visual Studio 2022 Build Tools and run: pip install catboost")
             return CatBoostClassifier(
                 random_state=42,
                 verbose=False,
@@ -1216,8 +1200,8 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                 )
             grids["LightGBM"] = lgbm_configs
 
-        # CatBoost Regression - tier-aware with UI overrides (optional - requires Visual Studio)
-        if 'CatBoost' in enabled_models and HAS_CATBOOST:
+        # CatBoost Regression - tier-aware with UI overrides
+        if 'CatBoost' in enabled_models:
             catboost_configs = []
             for iterations in catboost_iterations_list:
                 for lr in catboost_learning_rates:
@@ -1251,8 +1235,6 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                             )
                                         )
             grids["CatBoost"] = catboost_configs
-        elif 'CatBoost' in enabled_models and not HAS_CATBOOST:
-            print("Warning: CatBoost requested but not available. Skipping CatBoost models.")
 
     else:  # classification
         # PLS-DA (PLS + LogisticRegression) - tier-aware
@@ -1540,8 +1522,8 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                                                 )
             grids["LightGBM"] = lgbm_configs
 
-        # CatBoost Classification - tier-aware with UI overrides (optional - requires Visual Studio)
-        if 'CatBoost' in enabled_models and HAS_CATBOOST:
+        # CatBoost Classification - tier-aware with UI overrides
+        if 'CatBoost' in enabled_models:
             catboost_configs = []
             for iterations in catboost_iterations_list:
                 for lr in catboost_learning_rates:
@@ -1559,8 +1541,6 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                             )
                         )
             grids["CatBoost"] = catboost_configs
-        elif 'CatBoost' in enabled_models and not HAS_CATBOOST:
-            print("Warning: CatBoost requested but not available. Skipping CatBoost models.")
 
     return grids
 

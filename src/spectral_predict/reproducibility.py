@@ -65,17 +65,11 @@ def set_blas_threads(n_threads=1):
     # NumExpr (used by pandas)
     os.environ['NUMEXPR_NUM_THREADS'] = n_threads_str
 
-    # Also try to set threadpool size in numpy if already imported
+    # Also set threadpool size in numpy if already imported
     try:
         import numpy as np
-        # Try threadpoolctl if available (more reliable)
-        try:
-            from threadpoolctl import threadpool_limits
-            # This returns a context manager, but calling it sets global limits
-            threadpool_limits(limits=n_threads)
-        except ImportError:
-            # threadpoolctl not available, environment variables should work
-            pass
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(limits=n_threads)
     except ImportError:
         # numpy not yet imported - environment variables will take effect
         pass
@@ -293,8 +287,8 @@ def reproducible_context(n_threads=1, random_state=42):
             # User code will run inside this limit
             threadpool_controller = threadpool_limits(limits=n_threads)
             threadpool_controller.__enter__()
-        except ImportError:
-            pass  # threadpoolctl not available, use environment variables only
+        except Exception:
+            pass  # threadpoolctl failed, use environment variables only
 
         config = {
             'blas_threads': n_threads,
@@ -358,12 +352,9 @@ def restore_default_threads():
     for var in env_vars:
         os.environ.pop(var, None)
 
-    # Also try to reset threadpoolctl if available
-    try:
-        from threadpoolctl import threadpool_limits
-        # Setting limits to None removes restrictions
-        threadpool_limits(limits=None)
-    except ImportError:
-        pass
+    # Also reset threadpoolctl
+    from threadpoolctl import threadpool_limits
+    # Setting limits to None removes restrictions
+    threadpool_limits(limits=None)
 
     print("BLAS thread restrictions removed. Using system defaults (all cores).")

@@ -47,17 +47,10 @@ from sklearn.utils import compute_sample_weight
 from collections import Counter
 import warnings
 
-# Check for imbalanced-learn availability
-try:
-    from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE
-    from imblearn.under_sampling import RandomUnderSampler, TomekLinks
-    from imblearn.combine import SMOTETomek, SMOTEENN
-    HAS_IMBLEARN = True
-except ImportError:
-    HAS_IMBLEARN = False
-    SMOTE = ADASYN = BorderlineSMOTE = None
-    RandomUnderSampler = TomekLinks = None
-    SMOTETomek = SMOTEENN = None
+# imbalanced-learn (required dependency)
+from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE
+from imblearn.under_sampling import RandomUnderSampler, TomekLinks
+from imblearn.combine import SMOTETomek, SMOTEENN
 
 
 # ============================================================================
@@ -233,12 +226,6 @@ class ClassificationResampler(BaseEstimator):
     """
 
     def __init__(self, method='smote', random_state=None, **params):
-        if not HAS_IMBLEARN:
-            raise ImportError(
-                "imbalanced-learn (imblearn) is required for resampling methods. "
-                "Install with: pip install imbalanced-learn"
-            )
-
         self.method = method
         self.random_state = random_state
         self.params = params
@@ -982,9 +969,6 @@ def get_available_methods(task_type='classification'):
     list of tuples: (method_name, description)
     """
     if task_type == 'classification':
-        if not HAS_IMBLEARN:
-            return [('class_weight', 'Model-based class weighting (no resampling)')]
-
         return [
             ('smote', 'SMOTE - Synthetic oversampling (standard)'),
             ('adasyn', 'ADASYN - Adaptive synthetic sampling'),

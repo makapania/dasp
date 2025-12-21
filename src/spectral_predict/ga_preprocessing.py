@@ -36,14 +36,8 @@ from sklearn.metrics import mean_squared_error, accuracy_score
 from .preprocess import SNV, SavgolDerivative, SavgolSmooth
 from .baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
 
-# Import LightGBM for fitness evaluation
-try:
-    from lightgbm import LGBMRegressor, LGBMClassifier
-    HAS_LIGHTGBM_PREPROC = True
-except ImportError:
-    HAS_LIGHTGBM_PREPROC = False
-    LGBMRegressor = None
-    LGBMClassifier = None
+# Import LightGBM for fitness evaluation (required dependency)
+from lightgbm import LGBMRegressor, LGBMClassifier
 
 
 # =============================================================================
@@ -292,10 +286,8 @@ def evaluate_fitness(
         else:
             cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-        # Choose fitness model - fall back to PLS if LightGBM not available
-        use_lightgbm = (fitness_model == 'lightgbm' and HAS_LIGHTGBM_PREPROC)
-
-        if use_lightgbm:
+        # Choose fitness model
+        if fitness_model == 'lightgbm':
             # Use LightGBM for fitness evaluation
             if task_type == 'classification':
                 # For classification, ensure labels are numeric
@@ -581,8 +573,6 @@ def optimize_preprocessing(
         print(f"  Data: {n_samples} samples, {n_features} features")
         print(f"  Task: {task_type}")
         print(f"  Fitness model: {fitness_model.upper()}")
-        if fitness_model == 'lightgbm' and not HAS_LIGHTGBM_PREPROC:
-            print(f"    WARNING: LightGBM not available, falling back to PLS")
         print(f"  Population: {population_size}, Generations: {n_generations}")
         print(f"  CV folds: {cv_folds}, PLS components: {n_components}")
 
