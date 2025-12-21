@@ -15,7 +15,9 @@ optimal preprocessing transform.
 Fitness Models
 --------------
 - 'pls': Uses PLS regression (default, always available)
+- 'mlp': Uses Multi-Layer Perceptron neural network (for Neural/SVM models)
 - 'lightgbm': Uses LightGBM (better for tree-based models, requires LightGBM)
+- 'neuralboosted': Uses NeuralBoosted hybrid (requires NeuralBoosted module, falls back to PLS)
 
 References
 ----------
@@ -328,6 +330,83 @@ def evaluate_fitness(
                 y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
                 rmsecv = np.sqrt(mean_squared_error(y, y_pred))
                 return -rmsecv
+        elif fitness_model == 'mlp':
+            # Use MLP (Multi-Layer Perceptron) for fitness evaluation
+            from sklearn.neural_network import MLPRegressor, MLPClassifier
+
+            if task_type == 'classification':
+                # Classification
+                y_class = np.asarray(y)
+                if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                    # Encode string labels
+                    from sklearn.preprocessing import LabelEncoder
+                    le = LabelEncoder()
+                    y_class = le.fit_transform(y_class)
+                else:
+                    y_class = y_class.astype(int)
+
+                model = MLPClassifier(
+                    hidden_layer_sizes=(100, 50),
+                    max_iter=500,
+                    random_state=random_state,
+                    early_stopping=True,
+                    validation_fraction=0.1
+                )
+                y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
+                return accuracy_score(y_class, y_pred)
+            else:
+                # Regression
+                model = MLPRegressor(
+                    hidden_layer_sizes=(100, 50),
+                    max_iter=500,
+                    random_state=random_state,
+                    early_stopping=True,
+                    validation_fraction=0.1
+                )
+                y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
+                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+                return -rmsecv
+        elif fitness_model == 'neuralboosted':
+            # Use NeuralBoosted for fitness evaluation (with fallback to PLS)
+            try:
+                from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
+
+                if task_type == 'classification':
+                    # Classification
+                    y_class = np.asarray(y)
+                    if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                        # Encode string labels
+                        from sklearn.preprocessing import LabelEncoder
+                        le = LabelEncoder()
+                        y_class = le.fit_transform(y_class)
+                    else:
+                        y_class = y_class.astype(int)
+
+                    model = NeuralBoostedClassifier(random_state=random_state)
+                    y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
+                    return accuracy_score(y_class, y_pred)
+                else:
+                    # Regression
+                    model = NeuralBoostedRegressor(random_state=random_state)
+                    y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
+                    rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+                    return -rmsecv
+            except ImportError:
+                # NeuralBoosted not available, fall back to PLS
+                pls = PLSRegression(n_components=n_comp, scale=False)
+                y_pred = cross_val_predict(pls, X_preproc, y, cv=cv)
+
+                if task_type == 'classification':
+                    y_class = np.asarray(y)
+                    if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                        from sklearn.preprocessing import LabelEncoder
+                        le = LabelEncoder()
+                        y_class = le.fit_transform(y_class)
+                    y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
+                    return accuracy_score(y_class, y_pred_class)
+                else:
+                    rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+                    return -rmsecv
         else:
             # Use PLS for fitness evaluation (default)
             pls = PLSRegression(n_components=n_comp, scale=False)

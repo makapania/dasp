@@ -72,6 +72,9 @@ except ImportError:
     CLASSIFICATION_TIERS = None
     MODEL_TIERS = None
 
+# Import search controller for pause/resume/stop
+from spectral_predict.search_controller import SearchController
+
 # Import interference removal methods
 try:
     from spectral_predict.interference import (
@@ -1163,6 +1166,12 @@ class SpectralPredictApp:
         self.refined_y_proba = None  # Prediction probabilities for classification
         self.refined_cv_indices = None  # CV sample indices for mapping predictions back to specimen IDs
         self.refined_label_encoder = None  # Label encoder for categorical targets (classification)
+
+        # GA preprocessing state (for Model Development tab)
+        self.refined_ga_genes = None  # GA-selected wavelength indices
+        self.refined_ga_config = None  # GA configuration dict (pop_size, max_gen, etc.)
+        self.refined_ga_model_type = None  # Model type used during GA optimization
+        self.refined_ga_transform = None  # Fitted GA transform for applying to new data
         self.task_type_detection_label = None  # Will be created in Import tab
 
         # SHAP interpretability storage
@@ -1367,9 +1376,11 @@ class SpectralPredictApp:
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
-        # Optimization method selection (Grid Search vs Bayesian Optimization)
-        self.optimization_method = tk.StringVar(value="grid")  # "grid" or "bayesian"
+        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II)
+        self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", or "nsga2"
         self.n_bayesian_trials = tk.IntVar(value=50)  # Number of Bayesian optimization trials (default: 50)
+        self.nsga2_population = tk.IntVar(value=50)   # NSGA-II population size
+        self.nsga2_generations = tk.IntVar(value=100)  # NSGA-II number of generations
 
         # Model selection (original models)
         # Standard tier models (enabled by default)
@@ -1458,6 +1469,12 @@ class SpectralPredictApp:
         self.enable_smoothing = tk.BooleanVar(value=False)
         self.smoothing_window = tk.IntVar(value=17)
         self.smoothing_polyorder = tk.IntVar(value=2)
+
+        # GA Preprocessing Optimization (Phase 4)
+        self.enable_ga_preprocessing = tk.BooleanVar(value=False)
+        self.ga_preprocess_population = tk.IntVar(value=32)
+        self.ga_preprocess_generations = tk.IntVar(value=50)
+        self.ga_preprocess_cv_folds = tk.IntVar(value=5)
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
@@ -1959,6 +1976,7 @@ class SpectralPredictApp:
         self.ga_population_size = tk.IntVar(value=64)
         self.ga_generations = tk.IntVar(value=100)
         self.ga_n_runs = tk.IntVar(value=5)
+        self.ga_quick_mode = tk.BooleanVar(value=False)  # Quick mode: pop=32, gen=50, runs=2
 
         # CSV export option
         self.export_preprocessed_csv = tk.BooleanVar(value=False)
@@ -1974,6 +1992,12 @@ class SpectralPredictApp:
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
         self.ensemble_results = None  # Store ensemble predictions and metrics
         self.training_data_cache = None  # Cache for manual ensemble retraining
+
+        # Search control (pause/resume/stop)
+        self.search_controller = None  # Created when search starts
+        self.pause_btn = None  # Button references for state management
+        self.resume_btn = None
+        self.stop_btn = None
 
         # Reproducibility mode (Phase 2)
         self.enable_reproducibility = tk.BooleanVar(value=False)  # Default: OFF for speed
@@ -5073,10 +5097,18 @@ class SpectralPredictApp:
 
         row = 0
 
-        # Run Analysis button at the top
+        # Run Analysis button at the top with Pause/Resume/Stop controls
         run_frame = tk.Frame(content_frame, bg=self.colors['bg'])
         run_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(0, 20))
         self._create_accent_button(run_frame, "▶ Run Analysis", self._run_analysis).pack(side='left')
+
+        # Search control buttons (initially disabled)
+        self.pause_btn = ttk.Button(run_frame, text="⏸ Pause", command=self._pause_search, state='disabled')
+        self.pause_btn.pack(side='left', padx=(10, 2))
+        self.resume_btn = ttk.Button(run_frame, text="▶ Resume", command=self._resume_search, state='disabled')
+        self.resume_btn.pack(side='left', padx=2)
+        self.stop_btn = ttk.Button(run_frame, text="⏹ Stop", command=self._stop_search, state='disabled')
+        self.stop_btn.pack(side='left', padx=2)
         row += 1
 
         # === Analysis Options ===
@@ -5339,6 +5371,58 @@ class SpectralPredictApp:
         self.baseline_options_frame.grid_remove()
         self.smoothing_options_frame.grid_remove()
 
+        # === GA Preprocessing Optimization ===
+        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA Preprocessing Optimization (Experimental)",
+                                                                     subtitle="Use genetic algorithm to automatically find optimal preprocessing")
+        ga_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        ga_preproc_frame = tk.Frame(ga_preproc_card, bg=self.colors['card_bg'])
+        ga_preproc_frame.pack(fill='both', expand=True)
+
+        # Enable GA Preprocessing checkbox
+        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA Preprocessing Optimization",
+                                                    variable=self.enable_ga_preprocessing,
+                                                    command=self._toggle_ga_preprocessing_options)
+        self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+
+        # Help text
+        ttk.Label(ga_preproc_frame,
+                 text="When enabled, GA finds optimal preprocessing instead of testing all selected methods above",
+                 style='Caption.TLabel').grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        # GA parameters frame (hidden when disabled)
+        self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
+        self.ga_preproc_options_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
+
+        ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        ga_pop_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=16, to=128,
+                                      textvariable=self.ga_preprocess_population, width=8)
+        ga_pop_spinbox.grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(self.ga_preproc_options_frame, text="(default: 32)", style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=5)
+
+        ttk.Label(self.ga_preproc_options_frame, text="Generations:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ga_gen_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=10, to=200,
+                                      textvariable=self.ga_preprocess_generations, width=8)
+        ga_gen_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="(default: 50)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=5, pady=(5, 0))
+
+        ttk.Label(self.ga_preproc_options_frame, text="CV Folds:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ga_cv_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=3, to=10,
+                                     textvariable=self.ga_preprocess_cv_folds, width=8)
+        ga_cv_spinbox.grid(row=2, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="(default: 5)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=5, pady=(5, 0))
+
+        # Info about what GA optimizes
+        ttk.Label(ga_preproc_frame,
+                 text="GA optimizes: preprocessing type, S-G window, baseline method/params, smoothing",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        ttk.Label(ga_preproc_frame,
+                 text="Note: Increases analysis time but may find better preprocessing than manual selection",
+                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+
+        # Initially hide GA options
+        self.ga_preproc_options_frame.grid_remove()
+
         # === Advanced Settings: Reproducibility ===
         self._create_section_header(content_frame, "Advanced Settings", row=row, columnspan=2)
         row += 1
@@ -5464,7 +5548,7 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Variable Selection Methods ===
-        self._create_section_header(content_frame, "Variable Selection Methods 🆕", row=row, columnspan=2)
+        self._create_section_header(content_frame, "Variable Selection Methods", row=row, columnspan=2)
         row += 1
 
         # Create card for variable selection
@@ -5514,9 +5598,13 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="GA (Genetic Algorithm)",
-                       variable=self.varsel_ga).grid(row=8, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Evolutionary optimization",
+        ga_row_frame = ttk.Frame(varsel_frame)
+        ga_row_frame.grid(row=8, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(ga_row_frame, text="GA (Genetic Algorithm)",
+                       variable=self.varsel_ga).pack(side=tk.LEFT)
+        ttk.Checkbutton(ga_row_frame, text="Quick",
+                       variable=self.ga_quick_mode).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(varsel_frame, text="Evolutionary optimization (Quick: ~10× faster)",
                  style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
         # UVE Prefilter option
@@ -5589,7 +5677,7 @@ class SpectralPredictApp:
         row += 1
 
         # Tier Selection - use modern card
-        tier_card_outer, tier_card = self._create_card(content_frame, title="Model Tier (Quick Presets) 🆕",
+        tier_card_outer, tier_card = self._create_card(content_frame, title="Model Tier (Quick Presets)",
                                                          subtitle="Select a preset tier to auto-populate model selections")
         tier_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
@@ -5613,31 +5701,42 @@ class SpectralPredictApp:
         self.model_tier.trace_add('write', self._on_tier_changed)
 
         # === Optimization Method Selection ===
-        opt_card_outer, opt_card = self._create_card(content_frame, title="Optimization Method 🆕",
-                                                      subtitle="Choose between Grid Search or Bayesian Optimization")
+        opt_card_outer, opt_card = self._create_card(content_frame, title="Optimization Method",
+                                                      subtitle="Choose optimization strategy")
         opt_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         opt_frame = tk.Frame(opt_card, bg=self.colors['card_bg'])
         opt_frame.pack(fill='both', expand=True)
 
         opt_method_frame = ttk.Frame(opt_frame)
-        opt_method_frame.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=5)
+        opt_method_frame.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian Optimization", variable=self.optimization_method, value="bayesian").grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian", variable=self.optimization_method, value="bayesian").grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=2, sticky=tk.W, padx=5)
 
-        # n_trials input for Bayesian optimization
-        trials_label = ttk.Label(opt_frame, text="Bayesian Trials:", style='Normal.TLabel')
-        trials_label.grid(row=1, column=0, sticky=tk.W, pady=(10, 5))
-        self.n_trials_entry = ttk.Entry(opt_frame, textvariable=self.n_bayesian_trials, width=10)
-        self.n_trials_entry.grid(row=1, column=1, sticky=tk.W, pady=(10, 5))
+        # Parameter frame for optimization-specific settings
+        param_frame = ttk.Frame(opt_frame)
+        param_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(10, 5))
+
+        # Bayesian trials input
+        ttk.Label(param_frame, text="Bayesian Trials:", style='Normal.TLabel').grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        self.n_trials_entry = ttk.Entry(param_frame, textvariable=self.n_bayesian_trials, width=8)
+        self.n_trials_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+
+        # NSGA-II parameters
+        ttk.Label(param_frame, text="NSGA-II Pop:", style='Normal.TLabel').grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
+        ttk.Entry(param_frame, textvariable=self.nsga2_population, width=6).grid(row=0, column=3, sticky=tk.W, padx=(0, 10))
+
+        ttk.Label(param_frame, text="Gens:", style='Normal.TLabel').grid(row=0, column=4, sticky=tk.W, padx=(0, 5))
+        ttk.Entry(param_frame, textvariable=self.nsga2_generations, width=6).grid(row=0, column=5, sticky=tk.W)
 
         # Info label
-        info_text = ("💡 Grid Search: Tests all parameter combinations (slower, exhaustive)\n"
-                    "   Bayesian Optimization: Finds optimal parameters in 30-50 trials (~100x faster)\n"
-                    "   Recommended trials: Quick=20-30, Standard=30-50, Comprehensive=50-100")
+        info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
+                    "   Bayesian: Smart search in 30-50 trials (fast, single-objective)\n"
+                    "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)")
         ttk.Label(opt_frame, text=info_text,
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # Create card for model selection
         models_card_outer, models_card = self._create_card(content_frame, title="Select Models",
@@ -5671,7 +5770,7 @@ class SpectralPredictApp:
         ttk.Label(models_frame, text="L1 regularized, sparse", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.lasso_checkbox, text=TOOLTIP_CONTENT['models']['Lasso'], delay=500)
 
-        self.elasticnet_checkbox = ttk.Checkbutton(models_frame, text="ElasticNet 🆕", variable=self.use_elasticnet)
+        self.elasticnet_checkbox = ttk.Checkbutton(models_frame, text="ElasticNet", variable=self.use_elasticnet)
         self.elasticnet_checkbox.grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Label(models_frame, text="L1+L2 combined regularization", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.elasticnet_checkbox, text=TOOLTIP_CONTENT['models']['ElasticNet'], delay=500)
@@ -5681,25 +5780,25 @@ class SpectralPredictApp:
         ttk.Label(models_frame, text="Nonlinear, robust", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.randomforest_checkbox, text=TOOLTIP_CONTENT['models']['RandomForest'], delay=500)
 
-        # Advanced Models (Column 2)
-        ttk.Label(models_frame, text="Advanced Models", style='Subheading.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5), padx=(40, 0))
+        # Other Models (Column 2)
+        ttk.Label(models_frame, text="Other Models", style='Subheading.TLabel').grid(row=0, column=2, sticky=tk.W, pady=(0, 5), padx=(40, 0))
 
         self.mlp_checkbox = ttk.Checkbutton(models_frame, text="MLP (Multi-Layer Perceptron)", variable=self.use_mlp)
         self.mlp_checkbox.grid(row=1, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Deep learning", style='Caption.TLabel').grid(row=1, column=3, sticky=tk.W, padx=15)
         CreateToolTip(self.mlp_checkbox, text=TOOLTIP_CONTENT['models']['MLP'], delay=500)
 
-        self.svr_checkbox = ttk.Checkbutton(models_frame, text="SVR 🆕", variable=self.use_svr)
+        self.svr_checkbox = ttk.Checkbutton(models_frame, text="SVR", variable=self.use_svr)
         self.svr_checkbox.grid(row=2, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Support Vector Regression", style='Caption.TLabel').grid(row=2, column=3, sticky=tk.W, padx=15)
         CreateToolTip(self.svr_checkbox, text=TOOLTIP_CONTENT['models']['SVR'], delay=500)
 
-        self.svm_checkbox = ttk.Checkbutton(models_frame, text="SVM 🆕", variable=self.use_svm)
+        self.svm_checkbox = ttk.Checkbutton(models_frame, text="SVM", variable=self.use_svm)
         self.svm_checkbox.grid(row=3, column=2, sticky=tk.W, pady=5, padx=(40, 0))
         ttk.Label(models_frame, text="Support Vector Machine (classification)", style='Caption.TLabel').grid(row=3, column=3, sticky=tk.W, padx=15)
 
         # Gradient Boosting Models (Column 3, spanning bottom)
-        ttk.Label(models_frame, text="Modern Gradient Boosting 🆕", style='Subheading.TLabel', foreground=self.colors['success']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        ttk.Label(models_frame, text="Gradient Boosting", style='Subheading.TLabel').grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
 
         self.xgboost_checkbox = ttk.Checkbutton(models_frame, text="XGBoost", variable=self.use_xgboost)
         self.xgboost_checkbox.grid(row=8, column=0, sticky=tk.W, pady=5)
@@ -6921,7 +7020,7 @@ class SpectralPredictApp:
         ensemble_frame.pack(fill='both', expand=True)
 
         # Enable ensemble checkbox
-        ttk.Checkbutton(ensemble_frame, text="Enable Ensemble Methods (combine top models for better predictions)",
+        ttk.Checkbutton(ensemble_frame, text="Enable Ensemble Methods - Regression Only (combine top models for better predictions)",
                        variable=self.enable_ensembles).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 15))
 
         # Ensemble method selection
@@ -7257,6 +7356,9 @@ class SpectralPredictApp:
                    command=self._show_specialization_profile, style='Modern.TButton', state='disabled')
         self.btn_show_specialization.pack(side='left', padx=5)
 
+        # Bind selection event to update button states based on selected ensemble type
+        self.ensemble_tree.bind('<<TreeviewSelect>>', self._on_ensemble_selection_change)
+
         # Ensemble status
         self.ensemble_status = ttk.Label(self.ensemble_frame,
             text="No ensemble results yet. Enable ensembles in Analysis Configuration and run analysis.",
@@ -7494,10 +7596,10 @@ class SpectralPredictApp:
         ttk.Label(preprocess_frame, text="Preprocessing Method:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         self.refine_preprocess = tk.StringVar(value='raw')
         preprocess_combo = ttk.Combobox(preprocess_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
-        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'ga_optimized']
         preprocess_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
 
-        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives",
+        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives | GA: Genetic Algorithm",
                   style='Caption.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(5, 10))
 
         # Window size (for derivatives)
@@ -7545,10 +7647,10 @@ class SpectralPredictApp:
         ttk.Label(preprocess_frame, text="Preprocessing Method:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         self.refine_preprocess = tk.StringVar(value='raw')
         preprocess_combo = ttk.Combobox(preprocess_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
-        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'ga_optimized']
         preprocess_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
 
-        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives",
+        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives | GA: Genetic Algorithm",
                   style='Caption.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(5, 10))
 
         # Window size (for derivatives)
@@ -12901,6 +13003,13 @@ class SpectralPredictApp:
         else:
             self.smoothing_options_frame.grid_remove()
 
+    def _toggle_ga_preprocessing_options(self):
+        """Show/hide GA preprocessing options based on checkbox state."""
+        if self.enable_ga_preprocessing.get():
+            self.ga_preproc_options_frame.grid()
+        else:
+            self.ga_preproc_options_frame.grid_remove()
+
     def _on_baseline_method_changed(self, event):
         """Show/hide method-specific baseline options."""
         method = self.baseline_method.get()
@@ -13030,6 +13139,53 @@ class SpectralPredictApp:
             messagebox.showerror("Export Error", error_msg)
             return None
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Search Control Methods (Pause/Resume/Stop)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _pause_search(self):
+        """Pause the running search."""
+        if self.search_controller:
+            self.search_controller.pause()
+            self._log_progress("[PAUSED] Search paused by user")
+            self._update_search_buttons('paused')
+
+    def _resume_search(self):
+        """Resume a paused search."""
+        if self.search_controller:
+            self.search_controller.resume()
+            self._log_progress("[RESUMED] Search resumed")
+            self._update_search_buttons('running')
+
+    def _stop_search(self):
+        """Stop the running search."""
+        if self.search_controller:
+            self.search_controller.stop()
+            self._log_progress("[STOPPED] Search stopped by user")
+            self._update_search_buttons('idle')
+
+    def _update_search_buttons(self, state):
+        """Update button states based on search state.
+
+        Args:
+            state: 'idle', 'running', or 'paused'
+        """
+        if self.pause_btn is None:
+            return  # Buttons not yet created
+
+        if state == 'idle':
+            self.pause_btn.config(state='disabled')
+            self.resume_btn.config(state='disabled')
+            self.stop_btn.config(state='disabled')
+        elif state == 'running':
+            self.pause_btn.config(state='normal')
+            self.resume_btn.config(state='disabled')
+            self.stop_btn.config(state='normal')
+        elif state == 'paused':
+            self.pause_btn.config(state='disabled')
+            self.resume_btn.config(state='normal')
+            self.stop_btn.config(state='normal')
+
     def _run_analysis(self):
         """Run analysis in background thread."""
         # Validate data is loaded
@@ -13103,6 +13259,10 @@ class SpectralPredictApp:
                 self._log_progress(f"> CSV export complete\n")
             else:
                 self._log_progress(f"[X] CSV export failed\n")
+
+        # Create search controller for pause/resume/stop
+        self.search_controller = SearchController()
+        self._update_search_buttons('running')
 
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier))
@@ -13240,6 +13400,15 @@ class SpectralPredictApp:
                     "- Analysis was run in an older version\n"
                     "- Application was restarted\n\n"
                     "Please re-run the analysis to cache training data."
+                )
+                return
+
+            # === VALIDATION 2B: Check if classification (not supported) ===
+            if self.training_data_cache.get('task_type') == 'classification':
+                messagebox.showerror(
+                    "Classification Not Supported",
+                    "Ensemble methods are only supported for regression tasks.\n\n"
+                    "Classification ensembles may be added in a future version."
                 )
                 return
 
@@ -15273,7 +15442,72 @@ class SpectralPredictApp:
             # Dispatch to Grid Search or Bayesian Optimization based on user selection
             optimization_method = self.optimization_method.get()
 
-            if optimization_method == "bayesian":
+            if optimization_method == "nsga2":
+                # === NSGA-II MULTI-OBJECTIVE OPTIMIZATION ===
+                self._log_progress("\n🧬 Running NSGA-II Multi-Objective Optimization...")
+                self._log_progress(f"   Population size: {self.nsga2_population.get()}")
+                self._log_progress(f"   Generations: {self.nsga2_generations.get()}")
+                self._log_progress(f"   Objectives: Minimize error + wavelengths + complexity")
+                self._log_progress(f"   Output: Pareto front with knee point selection\n")
+
+                from spectral_predict.nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
+
+                # Get wavelengths for proper variable output
+                wavelengths = None
+                if hasattr(X_filtered, 'columns'):
+                    try:
+                        wavelengths = np.array([float(c) for c in X_filtered.columns])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Convert to numpy if DataFrame
+                X_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
+                y_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
+
+                # Run NSGA-II
+                nsga_result = run_nsga2_search(
+                    X=X_np,
+                    y=y_np,
+                    task_type=task_type,
+                    population_size=self.nsga2_population.get(),
+                    n_generations=self.nsga2_generations.get(),
+                    cv_folds=self.folds.get(),
+                    min_wavelengths=10,
+                    random_state=42,
+                    verbose=1,
+                    progress_callback=self._progress_callback,
+                    models=selected_models,
+                )
+
+                # Convert to V1 format for results display
+                results_df = convert_nsga2_to_v1_format(
+                    result=nsga_result,
+                    n_wavelengths=X_np.shape[1],
+                    task_type=task_type,
+                    folds=self.folds.get(),
+                    excluded_count=n_excluded,
+                    validation_count=n_validation,
+                    total_samples_original=n_total_original,
+                    wavelengths=wavelengths,
+                    X=X_np,
+                    y=y_np,
+                    compute_r2=True,
+                )
+
+                # Log Pareto front info
+                if nsga_result.get('pareto_front') is not None and len(nsga_result['pareto_front']) > 0:
+                    self._log_progress(f"\n> NSGA-II Complete!")
+                    self._log_progress(f"  Pareto front size: {len(nsga_result['pareto_front'])} solutions")
+                    self._log_progress(f"  Total evaluations: {nsga_result.get('n_evaluations', 'N/A')}")
+                    if nsga_result.get('knee_solution'):
+                        ks = nsga_result['knee_solution']
+                        self._log_progress(f"  Knee point: {ks['model']} + {ks['preprocessing']}")
+                        self._log_progress(f"    Wavelengths: {ks['n_wavelengths']}")
+                        self._log_progress(f"    Error: {ks['objectives']['error']:.4f}")
+
+                label_encoder = nsga_result.get('label_encoder')
+
+            elif optimization_method == "bayesian":
                 # === BAYESIAN OPTIMIZATION ===
                 self._log_progress("\n🎯 Running Bayesian Hyperparameter Optimization...")
                 self._log_progress(f"   Trials per model: {self.n_bayesian_trials.get()}")
@@ -15397,10 +15631,16 @@ class SpectralPredictApp:
                 uve_n_components=uve_n_comp,
                 spa_n_random_starts=self.spa_n_random_starts.get(),
                 ipls_n_intervals=self.ipls_n_intervals.get(),
-                # GA parameters
+                # GA variable selection parameters
                 ga_population_size=self.ga_population_size.get(),
                 ga_generations=self.ga_generations.get(),
                 ga_n_runs=self.ga_n_runs.get(),
+                ga_quick_mode=self.ga_quick_mode.get(),
+                # GA preprocessing parameters
+                ga_preprocess=self.enable_ga_preprocessing.get(),
+                ga_preprocess_population=self.ga_preprocess_population.get(),
+                ga_preprocess_generations=self.ga_preprocess_generations.get(),
+                ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
@@ -15412,7 +15652,9 @@ class SpectralPredictApp:
                 imbalance_params=imbalance_params,
                 # Reproducibility settings (Phase 2)
                 reproducible=self.enable_reproducibility.get(),
-                random_state=self.reproducibility_random_state.get()
+                random_state=self.reproducibility_random_state.get(),
+                # Search control (pause/resume/stop)
+                controller=self.search_controller
             )
 
             # Store label_encoder for saving with models
@@ -15457,38 +15699,42 @@ class SpectralPredictApp:
             report_dir.mkdir(parents=True, exist_ok=True)
             write_markdown_report(self.target_column.get(), results_df, str(report_dir))
 
-            # === Run Ensemble Methods (if enabled) ===
+            # === Run Ensemble Methods (if enabled and regression) ===
             if self.enable_ensembles.get():
-                ensemble_results, trained_ensembles = self._train_ensembles(
-                    results_df,
-                    X_filtered,
-                    y_filtered,
-                    task_type,
-                    analysis_wl_min_value=analysis_wl_min_value,
-                    analysis_wl_max_value=analysis_wl_max_value,
-                    is_manual_retrain=False
-                )
+                if task_type == 'classification':
+                    self._log_progress("\n[!] Ensemble methods skipped: only supported for regression tasks")
+                    self._log_progress("    Classification ensembles may be added in a future version.")
+                else:
+                    ensemble_results, trained_ensembles = self._train_ensembles(
+                        results_df,
+                        X_filtered,
+                        y_filtered,
+                        task_type,
+                        analysis_wl_min_value=analysis_wl_min_value,
+                        analysis_wl_max_value=analysis_wl_max_value,
+                        is_manual_retrain=False
+                    )
 
-                if ensemble_results is not None:
-                    # Store ensemble results for later use
-                    self.ensemble_results = ensemble_results
-                    self.trained_ensembles = trained_ensembles
-                    # Store training data for visualizations
-                    self.ensemble_X = X_filtered
-                    self.ensemble_y = y_filtered
-                    # Store wavelength metadata for transparency and reproducibility
-                    self.ensemble_metadata = {
-                        'wavelengths': X_filtered.columns.tolist(),
-                        'n_wavelengths': X_filtered.shape[1],
-                        'analysis_wl_min': analysis_wl_min_value,
-                        'analysis_wl_max': analysis_wl_max_value,
-                        'use_full_spectrum_preprocessing': True,
-                        'n_base_models': len(ensemble_results[0]['ensemble'].models) if ensemble_results else 0,
-                        'base_model_names': ensemble_results[0]['ensemble'].model_names if ensemble_results else []
-                    }
+                    if ensemble_results is not None:
+                        # Store ensemble results for later use
+                        self.ensemble_results = ensemble_results
+                        self.trained_ensembles = trained_ensembles
+                        # Store training data for visualizations
+                        self.ensemble_X = X_filtered
+                        self.ensemble_y = y_filtered
+                        # Store wavelength metadata for transparency and reproducibility
+                        self.ensemble_metadata = {
+                            'wavelengths': X_filtered.columns.tolist(),
+                            'n_wavelengths': X_filtered.shape[1],
+                            'analysis_wl_min': analysis_wl_min_value,
+                            'analysis_wl_max': analysis_wl_max_value,
+                            'use_full_spectrum_preprocessing': True,
+                            'n_base_models': len(ensemble_results[0]['ensemble'].models) if ensemble_results else 0,
+                            'base_model_names': ensemble_results[0]['ensemble'].model_names if ensemble_results else []
+                        }
 
-                    # Populate ensemble results table in Tab 5
-                    self.root.after(0, self._populate_ensemble_results)
+                        # Populate ensemble results table in Tab 5
+                        self.root.after(0, self._populate_ensemble_results)
 
             # Store results for Results tab
             self.results_df = results_df
@@ -15524,6 +15770,9 @@ class SpectralPredictApp:
             # Play completion chime
             self.root.after(0, self._play_completion_chime)
 
+            # Disable search control buttons
+            self.root.after(0, lambda: self._update_search_buttons('idle'))
+
             # Analysis complete - status updated
 
         except Exception as e:
@@ -15536,6 +15785,9 @@ class SpectralPredictApp:
             # Stop running figure animation on error
             if hasattr(self, 'running_figure'):
                 self.root.after(0, lambda: self.running_figure.stop_animation())
+
+            # Disable search control buttons on error
+            self.root.after(0, lambda: self._update_search_buttons('idle'))
 
             self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{error_str}"))
 
@@ -16005,11 +16257,59 @@ class SpectralPredictApp:
         self.ensemble_status.config(
             text=f"> {n_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})")
 
-        # Enable buttons
-        self.btn_save_best_ensemble.config(state='normal')
-        self.btn_show_regional_perf.config(state='normal')
-        self.btn_show_weights.config(state='normal')
-        self.btn_show_specialization.config(state='normal')
+        # Update button states based on selected ensemble's capabilities
+        self._on_ensemble_selection_change()
+
+    def _on_ensemble_selection_change(self, event=None):
+        """Update button states when ensemble selection changes."""
+        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+            return
+
+        selection = self.ensemble_tree.selection()
+        if not selection:
+            return
+
+        try:
+            selected_idx = int(selection[0])
+            result = self.ensemble_results[selected_idx]
+            ensemble = result.get('ensemble')
+
+            if ensemble is None:
+                # Disable all visualization buttons
+                self.btn_show_regional_perf.config(state='disabled')
+                self.btn_show_weights.config(state='disabled')
+                self.btn_show_specialization.config(state='disabled')
+                return
+
+            # Check if ensemble supports each visualization
+            has_analyzer = hasattr(ensemble, 'analyzer_') and ensemble.analyzer_ is not None
+            has_weights = hasattr(ensemble, 'weights_') or hasattr(ensemble, 'regional_weights_') or hasattr(ensemble, 'expert_weights_')
+            has_profiles = hasattr(ensemble, 'get_model_profiles')
+            has_training_data = hasattr(self, 'ensemble_X') and hasattr(self, 'ensemble_y')
+
+            # Regional Performance: needs analyzer_ and training data
+            if has_analyzer and has_training_data:
+                self.btn_show_regional_perf.config(state='normal')
+            else:
+                self.btn_show_regional_perf.config(state='disabled')
+
+            # Weights: needs weights_
+            if has_weights:
+                self.btn_show_weights.config(state='normal')
+            else:
+                self.btn_show_weights.config(state='disabled')
+
+            # Specialization: needs get_model_profiles()
+            if has_profiles:
+                self.btn_show_specialization.config(state='normal')
+            else:
+                self.btn_show_specialization.config(state='disabled')
+
+            # Save button always enabled if we have results
+            self.btn_save_best_ensemble.config(state='normal')
+
+        except Exception as e:
+            print(f"Error updating button states: {e}")
 
     def _get_selected_ensemble(self):
         """Get the currently selected ensemble from the tree."""
@@ -16057,7 +16357,7 @@ class SpectralPredictApp:
             for model, name in zip(ensemble.models, ensemble.model_names):
                 predictions_dict[name] = model.predict(self.ensemble_X)
 
-            # Create figure
+            # Create figure (new version has built-in title and explanation)
             fig, axes = plot_regional_performance(
                 analyzer=ensemble.analyzer_,
                 y_true=self.ensemble_y,
@@ -16065,19 +16365,9 @@ class SpectralPredictApp:
                 metric='rmse'
             )
 
-            # Add very explicit explanation text
+            # Show in popup window
             ensemble_method = selected_result['method']
-            n_models = len(ensemble.models)
-            fig.suptitle(
-                f'INDIVIDUAL MODEL PERFORMANCE WITHIN "{ensemble_method}" ENSEMBLE\n'
-                f'Comparing {n_models} Base Models Across Different Prediction Regions\n'
-                f'(Each row = 1 model inside the ensemble | Each column = 1 target value range)\n'
-                f'DARKER BLUE = BETTER (Lower RMSE error)',
-                fontsize=11, y=0.98, weight='bold'
-            )
-
-            # Show in popup window with clearer title
-            fig.canvas.manager.set_window_title(f'Base Model Performance - {ensemble_method} Ensemble')
+            fig.canvas.manager.set_window_title(f'Regional Performance - {ensemble_method} Ensemble')
             plt.show()
 
         except Exception as e:
@@ -16111,20 +16401,11 @@ class SpectralPredictApp:
                 )
                 return
 
-            # Create figure
+            # Create figure (new version has built-in title and explanation)
             fig, axes = plot_ensemble_weights(ensemble=ensemble)
 
-            # Add explicit explanation
+            # Show in popup window
             ensemble_method = selected_result['method']
-            n_models = len(ensemble.models)
-            fig.suptitle(
-                f'MODEL WEIGHTS IN "{ensemble_method}" ENSEMBLE\n'
-                f'How Much Each of the {n_models} Base Models Contributes to Final Predictions\n'
-                f'HIGHER WEIGHT = MORE INFLUENCE on ensemble output',
-                fontsize=11, y=0.98, weight='bold'
-            )
-
-            # Show in popup window with clearer title
             fig.canvas.manager.set_window_title(f'Model Weights - {ensemble_method} Ensemble')
             plt.show()
 
@@ -16153,32 +16434,21 @@ class SpectralPredictApp:
                 return
             ensemble = selected_result['ensemble']
 
-            # Check if ensemble has analyzer (only region-aware ensembles)
-            if not hasattr(ensemble, 'analyzer_'):
+            # Check if ensemble has get_model_profiles method (only region-aware weighted ensembles)
+            if not hasattr(ensemble, 'get_model_profiles'):
                 messagebox.showinfo(
                     "Not Applicable",
-                    f"Specialization profile is only available for region-aware ensembles.\n\n"
+                    f"Specialization profile is only available for region-aware weighted ensembles.\n\n"
                     f"Selected ensemble type: {selected_result['method']}\n\n"
-                    f"Try 'Region-Aware Weighted' or 'Mixture of Experts' ensemble methods."
+                    f"This visualization requires the 'Region-Aware Weighted' ensemble method."
                 )
                 return
 
-            # Create figure
+            # Create figure (new version has built-in title and explanation)
             fig, axes = plot_model_specialization_profile(ensemble=ensemble)
 
-            # Add very explicit explanation
+            # Show in popup window
             ensemble_method = selected_result['method']
-            n_models = len(ensemble.models)
-            model_list = ', '.join(ensemble.model_names[:3]) + (f' + {n_models-3} more' if n_models > 3 else '')
-            fig.suptitle(
-                f'MODEL SPECIALIZATION IN "{ensemble_method}" ENSEMBLE\n'
-                f'Which of the {n_models} Base Models Excel at Different Target Value Ranges\n'
-                f'Models: {model_list}\n'
-                f'(Each line = 1 model\'s performance across low/medium/high values)',
-                fontsize=11, y=0.98, weight='bold'
-            )
-
-            # Show in popup window with clearer title
             fig.canvas.manager.set_window_title(f'Model Specialization - {ensemble_method} Ensemble')
             plt.show()
 
@@ -18150,8 +18420,57 @@ Performance (Classification):
         else:
             gui_preprocess = 'raw'  # Fallback
 
-        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv']:
+        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'ga_optimized']:
             self.refine_preprocess.set(gui_preprocess)
+
+        # Detect and load GA preprocessing if present
+        if 'ga_genes' in config and config['ga_genes']:
+            print(f"\n{'='*80}")
+            print(f"GA PREPROCESSING DETECTED IN LOADED MODEL")
+            print(f"{'='*80}")
+            try:
+                import ast
+
+                # Parse ga_genes (list of wavelength indices)
+                ga_genes_raw = config.get('ga_genes')
+                if isinstance(ga_genes_raw, str):
+                    self.refined_ga_genes = ast.literal_eval(ga_genes_raw)
+                else:
+                    self.refined_ga_genes = ga_genes_raw
+
+                # Parse ga_config (dict of GA parameters)
+                ga_config_raw = config.get('ga_config')
+                if isinstance(ga_config_raw, str):
+                    self.refined_ga_config = ast.literal_eval(ga_config_raw)
+                else:
+                    self.refined_ga_config = ga_config_raw
+
+                # Get ga_model_type (string)
+                self.refined_ga_model_type = config.get('ga_model_type')
+
+                print(f"GA Genes (wavelength indices): {len(self.refined_ga_genes) if self.refined_ga_genes else 0} selected")
+                print(f"GA Config: {self.refined_ga_config}")
+                print(f"GA Model Type: {self.refined_ga_model_type}")
+                print(f"{'='*80}\n")
+
+                # Set preprocessing dropdown to 'ga_optimized'
+                self.refine_preprocess.set('ga_optimized')
+                print(f"> Preprocessing method set to 'ga_optimized'")
+
+            except Exception as e:
+                print(f"WARNING: Could not load GA preprocessing configuration: {e}")
+                import traceback
+                traceback.print_exc()
+                # Clear GA state on error
+                self.refined_ga_genes = None
+                self.refined_ga_config = None
+                self.refined_ga_model_type = None
+        else:
+            # Clear GA state if not present in loaded model
+            self.refined_ga_genes = None
+            self.refined_ga_config = None
+            self.refined_ga_model_type = None
+            self.refined_ga_transform = None
 
         # Enable the run buttons (both Configuration and Selection tabs)
         self.refine_run_button.config(state='normal')
@@ -19937,7 +20256,113 @@ F1 Score:  {f1:.4f}
             baseline_method, baseline_params = self._get_baseline_params()
             smoothing_enabled, smoothing_window_size, smoothing_poly = self._get_smoothing_params()
 
-            if use_full_spectrum_preprocessing:
+            # === GA PREPROCESSING PATH ===
+            # If user selected 'ga_optimized' preprocessing, execute GA variable selection
+            if preprocess_name == 'ga_optimized':
+                print(f"\n{'='*80}")
+                print(f"GA PREPROCESSING PATH ACTIVATED")
+                print(f"{'='*80}")
+
+                # Check if GA module is available
+                try:
+                    from spectral_predict.ga_pls import optimize_ga_preprocessing
+                    print(f"GA preprocessing module imported successfully")
+                except ImportError as e:
+                    print(f"ERROR: GA preprocessing module not available: {e}")
+                    self.refine_status.config(text="ERROR: GA module not found")
+                    messagebox.showerror("GA Module Missing",
+                        "GA preprocessing module (ga_pls.py) is not available.\n"
+                        "Please ensure the module is installed or select a different preprocessing method.")
+                    return
+
+                # Check if we're loading from a saved GA model or running new GA optimization
+                if self.refined_ga_genes is not None and self.refined_ga_config is not None:
+                    # === SCENARIO 1: Loading from saved GA model ===
+                    print(f"\nLOADING GA PREPROCESSING FROM SAVED MODEL")
+                    print(f"  Using pre-optimized wavelength selection:")
+                    print(f"  - {len(self.refined_ga_genes)} wavelengths selected by GA")
+                    print(f"  - GA Config: {self.refined_ga_config}")
+                    print(f"  - GA Model Type: {self.refined_ga_model_type}")
+                    print(f"{'='*80}\n")
+
+                    # Apply saved GA transform (subset to selected wavelengths)
+                    X_full = X_base_df.values
+                    X_work = X_full[:, self.refined_ga_genes]
+
+                    # Store wavelengths for prediction consistency
+                    all_wavelengths = X_base_df.columns.astype(float).values
+                    selected_wl = all_wavelengths[self.refined_ga_genes]
+
+                    print(f"Applied saved GA transform: {X_full.shape} -> {X_work.shape}")
+
+                else:
+                    # === SCENARIO 2: Running new GA optimization ===
+                    print(f"\nRUNNING NEW GA OPTIMIZATION")
+                    print(f"  This will optimize wavelength selection using Genetic Algorithm")
+                    print(f"  Model: {model_name}")
+                    print(f"  Task: {task_type}")
+                    print(f"{'='*80}\n")
+
+                    # Prepare data for GA
+                    X_full = X_base_df.values
+                    all_wavelengths = X_base_df.columns.astype(float).values
+
+                    # Run GA optimization
+                    try:
+                        ga_result = optimize_ga_preprocessing(
+                            X=X_full,
+                            y=y_array,
+                            model_type=model_name,
+                            task_type=task_type,
+                            wavelengths=all_wavelengths,
+                            pop_size=30,
+                            max_gen=100,
+                            cv_folds=n_folds,
+                            random_state=42
+                        )
+
+                        # Extract results
+                        best_genes = ga_result['best_genes']
+                        ga_config = ga_result.get('ga_config', {})
+
+                        # Store GA state for future use
+                        self.refined_ga_genes = best_genes
+                        self.refined_ga_config = ga_config
+                        self.refined_ga_model_type = model_name
+
+                        # Apply GA transform
+                        X_work = X_full[:, best_genes]
+                        selected_wl = all_wavelengths[best_genes]
+
+                        print(f"\nGA OPTIMIZATION COMPLETE")
+                        print(f"  Selected {len(best_genes)} wavelengths from {X_full.shape[1]} total")
+                        print(f"  Fitness (CV R²): {ga_result.get('best_fitness', 'N/A')}")
+                        print(f"{'='*80}\n")
+
+                    except Exception as e:
+                        print(f"ERROR during GA optimization: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        self.refine_status.config(text="ERROR: GA optimization failed")
+                        messagebox.showerror("GA Optimization Failed",
+                            f"GA preprocessing optimization failed:\n{str(e)}\n\n"
+                            "Please check console for details or try a different preprocessing method.")
+                        return
+
+                # Build pipeline with ONLY the model (GA preprocessing already applied)
+                if model_name == "PLS-DA" and task_type == "classification":
+                    from sklearn.linear_model import LogisticRegression
+                    pipe_steps = [
+                        ('pls', model),
+                        ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                    ]
+                else:
+                    pipe_steps = [('model', model)]
+                pipe = Pipeline(pipe_steps)
+
+                print(f"DEBUG: GA pipeline steps: {[name for name, _ in pipe_steps]} (GA preprocessing already applied)")
+
+            elif use_full_spectrum_preprocessing:
                 # === PATH A: Derivative + Subset (matches search.py lines 434-449) ===
                 # 1. Build preprocessing pipeline WITHOUT model
                 prep_steps = build_preprocessing_pipeline(
@@ -20320,7 +20745,10 @@ Configuration:
                 'n_vars': len(selected_wl),
                 'n_samples': X_raw.shape[0],
                 'cv_folds': n_folds,
-                'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing
+                'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
+                'ga_genes': self.refined_ga_genes,
+                'ga_config': self.refined_ga_config,
+                'ga_model_type': self.refined_ga_model_type
             }
 
             # Store predictions for plotting

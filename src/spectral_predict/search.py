@@ -40,11 +40,23 @@ except ImportError:
 # NSGA-II import
 from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
 
-# Model categories for GA preprocessing
-# Linear models benefit from PLS-based fitness evaluation
-LINEAR_MODELS = {'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet', 'MLP', 'SVR', 'SVC'}
-# Tree models benefit from LightGBM-based fitness evaluation
+# Model categories for GA preprocessing (4 specialized groups)
+# Each group uses a fitness model that best represents its characteristics
+
+# PLS-based models: Linear regression with dimension reduction
+PLS_MODELS = {'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
+
+# Neural/SVM models: Non-linear, kernel-based or neural network models
+NEURAL_SVM_MODELS = {'MLP', 'SVR', 'SVC'}
+
+# Tree models: Gradient boosting and ensemble tree methods
 TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
+
+# Neural-boosted hybrid model (single specialized model)
+NEURALBOOSTED_MODELS = {'NeuralBoosted'}
+
+# Backward compatibility: LINEAR_MODELS is union of PLS + Neural/SVM
+LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
 
 
 def _apply_edge_mask(importances: np.ndarray, preprocess_cfg: dict) -> np.ndarray:
@@ -203,7 +215,15 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                # GA variable selection parameters
                ga_population_size=64,
                ga_generations=100,
-               ga_n_runs=5):
+               ga_n_runs=5,
+               # Baseline and smoothing parameters
+               baseline_method=None,
+               baseline_params=None,
+               smoothing=False,
+               smoothing_window=17,
+               smoothing_polyorder=2,
+               # Search control (pause/resume/stop)
+               controller=None):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -568,18 +588,22 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         print(f"  Note: This REPLACES user-selected preprocessing methods")
         print(f"{'='*70}\n")
 
-        # Determine which model types are selected
-        has_linear_models = any(m in LINEAR_MODELS for m in models_to_test)
+        # Determine which model groups are selected (only run GA for groups with models)
+        has_pls_models = any(m in PLS_MODELS for m in models_to_test)
+        has_neural_svm_models = any(m in NEURAL_SVM_MODELS for m in models_to_test)
         has_tree_models = any(m in TREE_MODELS for m in models_to_test)
+        has_neuralboosted_models = any(m in NEURALBOOSTED_MODELS for m in models_to_test)
 
-        # Storage for GA results
-        ga_result_linear = None
+        # Storage for GA results (one per model group)
+        ga_result_pls = None
+        ga_result_neural_svm = None
         ga_result_tree = None
+        ga_result_neuralboosted = None
 
-        # Run GA optimization for linear models (using PLS fitness)
-        if has_linear_models:
-            print(f"Running GA optimization for LINEAR models (using PLS fitness)...")
-            ga_result_linear = optimize_preprocessing(
+        # Run GA optimization for PLS models (using PLS fitness)
+        if has_pls_models:
+            print(f"Running GA optimization for PLS models (using PLS fitness)...")
+            ga_result_pls = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
                 population_size=ga_preprocess_population,
@@ -591,9 +615,28 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 progress_callback=progress_callback,
                 fitness_model='pls'
             )
-            print(f"\nLinear Model GA Optimization Complete!")
-            print(f"  Best config: {ga_result_linear['best_config']}")
-            print(f"  Best RMSECV: {ga_result_linear['best_rmsecv']:.4f}\n")
+            print(f"\nPLS Model GA Optimization Complete!")
+            print(f"  Best config: {ga_result_pls['best_config']}")
+            print(f"  Best RMSECV: {ga_result_pls['best_rmsecv']:.4f}\n")
+
+        # Run GA optimization for Neural/SVM models (using MLP fitness)
+        if has_neural_svm_models:
+            print(f"Running GA optimization for Neural/SVM models (using MLP fitness)...")
+            ga_result_neural_svm = optimize_preprocessing(
+                X.values,  # Convert DataFrame to numpy
+                y.values,  # Convert Series to numpy
+                population_size=ga_preprocess_population,
+                n_generations=ga_preprocess_generations,
+                cv_folds=ga_preprocess_cv_folds,
+                task_type=task_type,
+                random_state=random_state,
+                verbose=1,
+                progress_callback=progress_callback,
+                fitness_model='mlp'
+            )
+            print(f"\nNeural/SVM Model GA Optimization Complete!")
+            print(f"  Best config: {ga_result_neural_svm['best_config']}")
+            print(f"  Best RMSECV: {ga_result_neural_svm['best_rmsecv']:.4f}\n")
 
         # Run GA optimization for tree models (using LightGBM fitness)
         if has_tree_models:
@@ -620,21 +663,63 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             print(f"  Best config: {ga_result_tree['best_config']}")
             print(f"  Best RMSECV: {ga_result_tree['best_rmsecv']:.4f}\n")
 
+        # Run GA optimization for NeuralBoosted model (using NeuralBoosted fitness)
+        if has_neuralboosted_models:
+            print(f"Running GA optimization for NeuralBoosted model (using NeuralBoosted fitness)...")
+            ga_result_neuralboosted = optimize_preprocessing(
+                X.values,  # Convert DataFrame to numpy
+                y.values,  # Convert Series to numpy
+                population_size=ga_preprocess_population,
+                n_generations=ga_preprocess_generations,
+                cv_folds=ga_preprocess_cv_folds,
+                task_type=task_type,
+                random_state=random_state,
+                verbose=1,
+                progress_callback=progress_callback,
+                fitness_model='neuralboosted'
+            )
+            print(f"\nNeuralBoosted Model GA Optimization Complete!")
+            print(f"  Best config: {ga_result_neuralboosted['best_config']}")
+            print(f"  Best RMSECV: {ga_result_neuralboosted['best_rmsecv']:.4f}\n")
+
         # Create preprocessing configs from GA results
-        # Store both if we have both model types
+        # Create one config per model group that has selected models
         preprocess_configs = []
 
-        if ga_result_linear is not None:
+        if ga_result_pls is not None:
             preprocess_configs.append({
-                "name": ga_result_linear['best_name'] + "_linear",
+                "name": ga_result_pls['best_name'] + "_pls",
                 "deriv": None,  # GA handles all preprocessing internally
                 "window": None,
                 "polyorder": None,
                 "interference": interference_to_add,
-                "ga_transform": ga_result_linear['best_transform'],
-                "ga_config": ga_result_linear['best_config'],
-                "ga_model_type": "linear",  # Track which model type this is for
-                "ga_genes": ga_result_linear['best_genes'],  # Store genes for serialization
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder,
+                "ga_transform": ga_result_pls['best_transform'],
+                "ga_config": ga_result_pls['best_config'],
+                "ga_model_type": "pls",  # Track which model group this is for
+                "ga_genes": ga_result_pls['best_genes'],  # Store genes for serialization
+            })
+
+        if ga_result_neural_svm is not None:
+            preprocess_configs.append({
+                "name": ga_result_neural_svm['best_name'] + "_neural_svm",
+                "deriv": None,  # GA handles all preprocessing internally
+                "window": None,
+                "polyorder": None,
+                "interference": interference_to_add,
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder,
+                "ga_transform": ga_result_neural_svm['best_transform'],
+                "ga_config": ga_result_neural_svm['best_config'],
+                "ga_model_type": "neural_svm",  # Track which model group this is for
+                "ga_genes": ga_result_neural_svm['best_genes'],  # Store genes for serialization
             })
 
         if ga_result_tree is not None:
@@ -644,10 +729,33 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 "window": None,
                 "polyorder": None,
                 "interference": interference_to_add,
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder,
                 "ga_transform": ga_result_tree['best_transform'],
                 "ga_config": ga_result_tree['best_config'],
-                "ga_model_type": "tree",  # Track which model type this is for
+                "ga_model_type": "tree",  # Track which model group this is for
                 "ga_genes": ga_result_tree['best_genes'],  # Store genes for serialization
+            })
+
+        if ga_result_neuralboosted is not None:
+            preprocess_configs.append({
+                "name": ga_result_neuralboosted['best_name'] + "_neuralboosted",
+                "deriv": None,  # GA handles all preprocessing internally
+                "window": None,
+                "polyorder": None,
+                "interference": interference_to_add,
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder,
+                "ga_transform": ga_result_neuralboosted['best_transform'],
+                "ga_config": ga_result_neuralboosted['best_config'],
+                "ga_model_type": "neuralboosted",  # Track which model group this is for
+                "ga_genes": ga_result_neuralboosted['best_genes'],  # Store genes for serialization
             })
 
         print(f"{'='*70}\n")
@@ -667,7 +775,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 "deriv": None,
                 "window": None,
                 "polyorder": None,
-                "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
+                "interference": interference_to_add,  # Phase 3: Add interference settings only if enabled
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder
             })
 
         # Add SNV if selected
@@ -677,7 +790,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 "deriv": None,
                 "window": None,
                 "polyorder": None,
-                "interference": interference_to_add  # Phase 3: Add interference settings only if enabled
+                "interference": interference_to_add,  # Phase 3: Add interference settings only if enabled
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder
             })
 
         # Add derivative configs based on user selections
@@ -694,9 +812,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     "deriv": 1,
                     "window": window,
                     "polyorder": 2,
-                    "interference": interference_to_add
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder
                 })
-    
+
             # If SNV is also selected, add SNV -> derivative combination
             if preprocessing_methods.get('snv', False):
                 for window in window_sizes:
@@ -705,9 +828,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 1,
                         "window": window,
                         "polyorder": 2,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
-    
+
             # If deriv_snv is selected, add derivative -> SNV combination for 1st deriv
             if preprocessing_methods.get('deriv_snv', False):
                 for window in window_sizes:
@@ -716,7 +844,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 1,
                         "window": window,
                         "polyorder": 2,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
     
         if preprocessing_methods.get('sg2', False):
@@ -727,9 +860,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     "deriv": 2,
                     "window": window,
                     "polyorder": 3,
-                    "interference": interference_to_add
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder
                 })
-    
+
             # If SNV is also selected, add SNV -> derivative combination
             if preprocessing_methods.get('snv', False):
                 for window in window_sizes:
@@ -738,9 +876,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 2,
                         "window": window,
                         "polyorder": 3,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
-    
+
             # If deriv_snv is selected, add derivative -> SNV combination for 2nd deriv
             if preprocessing_methods.get('deriv_snv', False):
                 for window in window_sizes:
@@ -749,7 +892,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 2,
                         "window": window,
                         "polyorder": 3,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
     
         if preprocessing_methods.get('sg3', False):
@@ -760,9 +908,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     "deriv": 3,
                     "window": window,
                     "polyorder": 4,
-                    "interference": interference_to_add
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder
                 })
-    
+
             # If SNV is also selected, add SNV -> derivative combination
             if preprocessing_methods.get('snv', False):
                 for window in window_sizes:
@@ -771,9 +924,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 3,
                         "window": window,
                         "polyorder": 4,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
-    
+
             # If deriv_snv is selected, add derivative -> SNV combination for 3rd deriv
             if preprocessing_methods.get('deriv_snv', False):
                 for window in window_sizes:
@@ -782,7 +940,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 3,
                         "window": window,
                         "polyorder": 4,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
     
         if preprocessing_methods.get('sg4', False):
@@ -793,9 +956,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     "deriv": 4,
                     "window": window,
                     "polyorder": 5,
-                    "interference": interference_to_add
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder
                 })
-    
+
             # If SNV is also selected, add SNV -> derivative combination
             if preprocessing_methods.get('snv', False):
                 for window in window_sizes:
@@ -804,9 +972,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 4,
                         "window": window,
                         "polyorder": 5,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
-    
+
             # If deriv_snv is selected, add derivative -> SNV combination for 4th deriv
             if preprocessing_methods.get('deriv_snv', False):
                 for window in window_sizes:
@@ -815,7 +988,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         "deriv": 4,
                         "window": window,
                         "polyorder": 5,
-                        "interference": interference_to_add
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder
                     })
     
         # If no preprocessing methods selected, default to raw
@@ -826,7 +1004,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 "deriv": None,
                 "window": None,
                 "polyorder": None,
-                "interference": interference_to_add
+                "interference": interference_to_add,
+                "baseline_method": baseline_method,
+                "baseline_params": baseline_params,
+                "smoothing": smoothing,
+                "smoothing_window": smoothing_window,
+                "smoothing_polyorder": smoothing_polyorder
             })
 
     # Create CV splitter
@@ -863,6 +1046,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
     # Main search loop
     for preprocess_cfg in preprocess_configs:
+        # Check for pause/stop
+        if controller and not controller.check_and_wait():
+            print("Search stopped by user")
+            break
+
         # Compute region subsets on preprocessed data for this preprocessing method
         # This ensures regions are based on the actual preprocessed features
         # ═══════════════════════════════════════════════════════════════════════════
@@ -891,7 +1079,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 imbalance_params=None,
                 task_type=task_type,
                 interference=preprocess_cfg.get("interference"),  # Phase 3
-                wavelengths=wavelengths  # Phase 3
+                wavelengths=wavelengths,  # Phase 3
+                baseline_method=preprocess_cfg.get("baseline_method"),
+                baseline_params=preprocess_cfg.get("baseline_params"),
+                smoothing=preprocess_cfg.get("smoothing", False),
+                smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2)
             )
 
             # Step 2: Apply preprocessing to full spectrum
@@ -977,25 +1170,38 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # End of region computation block
 
         for model_name, model_configs in model_grids.items():
+            # Check for pause/stop
+            if controller and not controller.check_and_wait():
+                break
+
             # ═══════════════════════════════════════════════════════════════════════════
             # GA PREPROCESSING: Skip incompatible preprocessing configs
-            # When GA preprocessing is enabled, only use the config appropriate for this model type
+            # When GA preprocessing is enabled, only use the config appropriate for this model group
             # ═══════════════════════════════════════════════════════════════════════════
             if ga_preprocess and 'ga_model_type' in preprocess_cfg:
-                # Determine this model's type
-                if model_name in LINEAR_MODELS:
-                    required_ga_type = "linear"
+                # Determine this model's group
+                if model_name in PLS_MODELS:
+                    required_ga_type = "pls"
+                elif model_name in NEURAL_SVM_MODELS:
+                    required_ga_type = "neural_svm"
                 elif model_name in TREE_MODELS:
                     required_ga_type = "tree"
+                elif model_name in NEURALBOOSTED_MODELS:
+                    required_ga_type = "neuralboosted"
                 else:
-                    # Unknown model type, use linear by default
-                    required_ga_type = "linear"
+                    # Unknown model type, use pls by default
+                    required_ga_type = "pls"
 
-                # Skip if this preprocessing config doesn't match the model type
+                # Skip if this preprocessing config doesn't match the model group
                 if preprocess_cfg['ga_model_type'] != required_ga_type:
                     continue
 
             for model, params in model_configs:
+                # Check for pause/stop at each config
+                if controller and not controller.check_and_wait():
+                    print("Search stopped by user")
+                    break
+
                 current_config += 1
 
                 # Progress update
@@ -1105,6 +1311,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         # DEBUG: Print what methods will be processed
                         print(f"[DEBUG] Processing variable selection methods: {selected_methods}")
                         for varsel_method in selected_methods:
+                            # Check for pause/stop
+                            if controller and not controller.check_and_wait():
+                                break
+
                             # Get importances computed on preprocessed data
                             try:
                                 if varsel_method == 'importance':
@@ -1218,7 +1428,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
                                     # Determine GA parameters based on quick mode or user settings
                                     if ga_quick_mode:
-                                        ga_pop, ga_gen, ga_runs, ga_early = 16, 25, 1, 10
+                                        ga_pop, ga_gen, ga_runs, ga_early = 32, 50, 2, 10
                                         print(f"    -> Quick GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}")
                                     else:
                                         # Use user-specified parameters
@@ -1293,6 +1503,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     print(f"  -> Skipping unimplemented method '{varsel_method}'")
                                     continue
 
+                                # Track if uniform fallback was used (for debugging/filtering results)
+                                used_uniform_fallback = False
+
                                 # Validate importances array before proceeding
                                 if importances is None:
                                     print(f"  -> ERROR: {varsel_method} returned None importances, skipping")
@@ -1304,6 +1517,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 if np.all(importances == 0):
                                     print(f"  -> WARNING: {varsel_method} returned all-zero importances, using uniform")
                                     importances = np.ones(X_transformed_varsel.shape[1])
+                                    used_uniform_fallback = True
 
                                 # Use user-specified variable counts, or default if not provided
                                 if variable_counts is None:
@@ -1405,6 +1619,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             n_jobs_cv=n_jobs,
                                             random_state=random_state,
                                         )
+
+                                    # Track if uniform fallback was used for this result
+                                    subset_result["uniform_fallback"] = used_uniform_fallback
+
                                     df_results = add_result(df_results, subset_result)
                                     results_added_for_method += 1
 
@@ -1699,7 +1917,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 'deriv': 0,
                 'window': 0,
                 'polyorder': 0,
-                'interference': None
+                'interference': None,
+                'baseline_method': baseline_method,
+                'baseline_params': baseline_params,
+                'smoothing': smoothing,
+                'smoothing_window': smoothing_window,
+                'smoothing_polyorder': smoothing_polyorder
             })
 
         # Add SNV if selected
@@ -1709,7 +1932,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 'deriv': 0,
                 'window': 0,
                 'polyorder': 0,
-                'interference': None
+                'interference': None,
+                'baseline_method': baseline_method,
+                'baseline_params': baseline_params,
+                'smoothing': smoothing,
+                'smoothing_window': smoothing_window,
+                'smoothing_polyorder': smoothing_polyorder
             })
 
         # Add SG1 (1st derivative) if selected - test multiple window sizes
@@ -1720,7 +1948,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     'deriv': 1,
                     'window': window,
                     'polyorder': 2,
-                    'interference': None
+                    'interference': None,
+                    'baseline_method': baseline_method,
+                    'baseline_params': baseline_params,
+                    'smoothing': smoothing,
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder
                 })
 
         # Add SG2 (2nd derivative) if selected - test multiple window sizes
@@ -1731,7 +1964,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     'deriv': 2,
                     'window': window,
                     'polyorder': 3,  # polyorder = deriv + 1
-                    'interference': None
+                    'interference': None,
+                    'baseline_method': baseline_method,
+                    'baseline_params': baseline_params,
+                    'smoothing': smoothing,
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder
                 })
 
         # Add SG3 (3rd derivative) if selected - test multiple window sizes
@@ -1742,7 +1980,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     'deriv': 3,
                     'window': window,
                     'polyorder': 4,  # polyorder = deriv + 1
-                    'interference': None
+                    'interference': None,
+                    'baseline_method': baseline_method,
+                    'baseline_params': baseline_params,
+                    'smoothing': smoothing,
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder
                 })
 
         # Add SG4 (4th derivative) if selected - test multiple window sizes
@@ -1753,7 +1996,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     'deriv': 4,
                     'window': window,
                     'polyorder': 5,  # polyorder = deriv + 1
-                    'interference': None
+                    'interference': None,
+                    'baseline_method': baseline_method,
+                    'baseline_params': baseline_params,
+                    'smoothing': smoothing,
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder
                 })
 
         # Add deriv_snv if selected - test multiple window sizes
@@ -1807,19 +2055,23 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         for preprocess_cfg in preprocessing_methods:
             # ═══════════════════════════════════════════════════════════════════════════
             # GA PREPROCESSING: Skip incompatible preprocessing configs
-            # When GA preprocessing is enabled, only use the config appropriate for this model type
+            # When GA preprocessing is enabled, only use the config appropriate for this model group
             # ═══════════════════════════════════════════════════════════════════════════
             if ga_preprocess and 'ga_model_type' in preprocess_cfg:
-                # Determine this model's type
-                if model_name in LINEAR_MODELS:
-                    required_ga_type = "linear"
+                # Determine this model's group
+                if model_name in PLS_MODELS:
+                    required_ga_type = "pls"
+                elif model_name in NEURAL_SVM_MODELS:
+                    required_ga_type = "neural_svm"
                 elif model_name in TREE_MODELS:
                     required_ga_type = "tree"
+                elif model_name in NEURALBOOSTED_MODELS:
+                    required_ga_type = "neuralboosted"
                 else:
-                    # Unknown model type, use linear by default
-                    required_ga_type = "linear"
+                    # Unknown model type, use pls by default
+                    required_ga_type = "pls"
 
-                # Skip if this preprocessing config doesn't match the model type
+                # Skip if this preprocessing config doesn't match the model group
                 if preprocess_cfg['ga_model_type'] != required_ga_type:
                     continue
 
@@ -1850,7 +2102,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     imbalance_params=None,
                     task_type=task_type,
                     interference=preprocess_cfg.get("interference"),  # Phase 3: interference removal
-                    wavelengths=wavelengths  # Phase 3: needed for interference removal
+                    wavelengths=wavelengths,  # Phase 3: needed for interference removal
+                    baseline_method=preprocess_cfg.get("baseline_method"),
+                    baseline_params=preprocess_cfg.get("baseline_params"),
+                    smoothing=preprocess_cfg.get("smoothing", False),
+                    smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+                    smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2)
                 )
 
                 # Step 2: Apply preprocessing to full spectrum
@@ -2220,7 +2477,12 @@ def _run_single_config(
             imbalance_params=imbalance_params,
             task_type=task_type,
             interference=preprocess_cfg.get("interference"),  # Phase 3
-            wavelengths=wavelengths_for_interference  # Phase 3
+            wavelengths=wavelengths_for_interference,  # Phase 3
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2)
         )
 
     # Handle class_weight for imbalanced classification
@@ -2500,6 +2762,9 @@ def _run_single_config(
             importances = get_feature_importances(
                 fitted_model, model_name, X_transformed, y
             )
+
+            # Apply edge masking for Savitzky-Golay derivatives (consistent with variable selection)
+            importances = _apply_edge_mask(importances, preprocess_cfg)
 
             # Get top N features for display purposes (always top 30)
             n_to_select = min(top_n_vars, len(importances))
