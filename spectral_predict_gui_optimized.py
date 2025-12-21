@@ -976,23 +976,24 @@ class SidebarNavigation:
         item_frame.pack(fill='x')
         item_frame.pack_propagate(False)
 
-        # Icon label with minimal width for tight spacing
+        # Icon label with fixed width for consistent alignment
         icon_label = tk.Label(item_frame,
                              text=icon,
                              font=(self._get_font()[0], 12),
                              bg=self.colors.get('sidebar', '#2D3748'),
                              fg=self._get_sidebar_text_color(),
-                             anchor='w')
-        icon_label.pack(side='left', padx=(SPACING['sm'], 0))
+                             width=4,
+                             anchor='center')
+        icon_label.pack(side='left', padx=(SPACING['xs'], 0))
 
-        # Text label - no left padding for tight icon-text spacing
+        # Text label
         text_label = tk.Label(item_frame,
                              text=label,
                              font=self._get_font(),
                              bg=self.colors.get('sidebar', '#2D3748'),
                              fg=self._get_sidebar_text_color(),
                              anchor='w')
-        text_label.pack(side='left', fill='x', expand=True, padx=(0, SPACING['xs']))
+        text_label.pack(side='left', fill='x', expand=True, padx=SPACING['xs'])
 
         # Store references
         self.items[item_id] = {
@@ -3352,7 +3353,7 @@ class SpectralPredictApp:
         self.sidebar.add_section('advanced', 'Advanced', [
             ('calibration', '🔄', 'Cal Transfer'),
             ('interference', '🧬', 'Interference'),
-            ('data_management', '🗃️', 'Data Management'),
+            ('data_management', '🗃', 'Data Management'),
         ], expanded=False)
 
         # Create content container (holds all content frames)
