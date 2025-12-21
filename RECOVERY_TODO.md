@@ -14,17 +14,17 @@
 - [x] **3. Data Management opens on Import & Preview** - Should always open on Import & Preview tab
 
 ### Imbalance Handling
-- [x] **4. Add SMOTE for regression** - RegressionResampler with 'oversample' method
-- [x] **5. Add SMOTE-Tomek for regression** - RegressionResampler with 'smotetomek' method
-- [x] **6. Add artificial sampling for regression imbalances** - RegressionResampler with 'smogn' method
+- [x] **4. Add SMOTE for regression** - RegressionResampler with 'smogn' method + GUI
+- [x] **5. Add SMOTE-Tomek for regression** - RegressionResampler with 'smotetomek' method + GUI
+- [x] **6. Add artificial sampling for regression imbalances** - RegressionResampler with 'oversample' method + GUI
 
 ### Variable Selection
-- [ ] **7. Add CARS** - Competitive Adaptive Reweighted Sampling
-- [ ] **8. Add VCPA-IRIV** - Variable Combination Population Analysis with IRIV
+- [x] **7. Add CARS** - Already exists in variable_selection.py and GUI
+- [x] **8. Add VCPA-IRIV** - Already exists in wavelength_selection.py and GUI
 
 ### Genetic Algorithm Features
-- [ ] **9. Add GA Variable Selection** - Genetic Algorithm for wavelength selection
-- [ ] **10. Add GA Preprocessing** - Genetic Algorithm for preprocessing optimization
+- [x] **9. Add GA Variable Selection** - Working (slow but functional)
+- [x] **10. Add GA Preprocessing** - Already fully implemented in GUI + backend
 
 ### Ensemble/Buttons
 - [ ] **11. Redo all buttons after Ensemble Models** - Text overlapping graphics, half don't work - FROM SCRATCH
