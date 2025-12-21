@@ -15479,6 +15479,7 @@ class SpectralPredictApp:
                     random_state=42,
                     verbose=1,
                     progress_callback=self._progress_callback,
+                    controller=self.search_controller,
                     models=selected_models,
                 )
 

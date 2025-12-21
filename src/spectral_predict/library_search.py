@@ -205,7 +205,7 @@ class SpectralLibrary:
         # Update wavelength grid if needed
         if self._wavelength_grid is None:
             self._wavelength_grid = wavelengths.copy()
-        elif not np.allclose(self._wavelength_grid, wavelengths, rtol=1e-5):
+        elif len(self._wavelength_grid) == len(wavelengths) and not np.allclose(self._wavelength_grid, wavelengths, rtol=1e-5):
             # Different wavelength grid - will need interpolation for search
             logger.debug(f"New spectrum has different wavelength grid than library")
 
@@ -516,7 +516,7 @@ class SpectralLibrary:
 
         # Save common wavelength grid
         if self._wavelength_grid is not None:
-            wavelengths_dict['__grid__'] = self._wavelength_grid
+            wavelengths_dict['wl___grid__'] = self._wavelength_grid
 
         # Write files
         with open(library_file, 'w') as f:

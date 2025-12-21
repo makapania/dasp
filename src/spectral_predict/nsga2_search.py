@@ -264,9 +264,9 @@ def _decode_hyperparameter_genes(
         - l1_ratio: float, range 0.1 to 0.9 (linear scale)
     """
     # Learning rate: log scale 0.01 to 0.3
-    # Formula: lr = 0.01 * (3.0 ** (gene / 14))
+    # Formula: lr = 0.01 * (30.0 ** (gene / 14))
     # gene=0 -> 0.01, gene=7 -> 0.1, gene=14 -> 0.3
-    lr = 0.01 * (3.0 ** (lr_gene / 14.0))
+    lr = 0.01 * (30.0 ** (lr_gene / 14.0))
 
     # Regularization: log scale 1e-8 to 10.0
     # Formula: reg = 10 ** ((gene/14) * 8 - 8)
