@@ -982,9 +982,9 @@ class SidebarNavigation:
                              font=(self._get_font()[0], 12),
                              bg=self.colors.get('sidebar', '#2D3748'),
                              fg=self._get_sidebar_text_color(),
-                             width=4,
+                             width=2,
                              anchor='center')
-        icon_label.pack(side='left', padx=(SPACING['xs'], 0))
+        icon_label.pack(side='left', padx=(SPACING['sm'], SPACING['xs']))
 
         # Text label
         text_label = tk.Label(item_frame,
@@ -3332,7 +3332,6 @@ class SpectralPredictApp:
 
         # Add navigation sections
         self.sidebar.add_section('data', 'Data', [
-            ('data_management', '🗃️', 'Data Management'),
             ('import_preview', '📁', 'Import & Preview'),
             ('explore', '🔍', 'Explore'),
             ('data_viewer', '📋', 'Data Viewer'),
@@ -3354,6 +3353,7 @@ class SpectralPredictApp:
         self.sidebar.add_section('advanced', 'Advanced', [
             ('calibration', '🔄', 'Cal Transfer'),
             ('interference', '🧬', 'Interference'),
+            ('data_management', '🗃️', 'Data Management'),
         ], expanded=False)
 
         # Create content container (holds all content frames)
@@ -3403,8 +3403,8 @@ class SpectralPredictApp:
         # Now pack the notebook and show it
         self.notebook.pack(fill='both', expand=True)
 
-        # Select the first item
-        self.sidebar.select_item('data_management')
+        # Select the first item (Import & Preview)
+        self.sidebar.select_item('import_preview')
 
         # Bind tab change event (still works when notebook tabs are clicked internally)
         self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
