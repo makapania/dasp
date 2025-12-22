@@ -471,7 +471,8 @@ def vcpa_iriv(
             # Generate binary vector (random subset of variables)
             # Probability of including each variable decreases over iterations
             # to encourage exploration early, exploitation later
-            inclusion_prob = 0.9 * (1 - outer_iter / n_outer_iterations) + 0.2
+            # Cap at 0.9 to ensure randomness (was 1.1 at iter 0, making ALL vars selected)
+            inclusion_prob = min(0.9, 0.9 * (1 - outer_iter / n_outer_iterations) + 0.2)
 
             binary_vector = np.random.rand(n_active) < inclusion_prob
             n_selected = np.sum(binary_vector)
