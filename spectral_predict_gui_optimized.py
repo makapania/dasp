@@ -1965,6 +1965,7 @@ class SpectralPredictApp:
         self.varsel_uve_spa = tk.BooleanVar(value=False)
         self.varsel_ipls = tk.BooleanVar(value=False)
         self.varsel_cars = tk.BooleanVar(value=False)
+        self.varsel_cars_model_aware = tk.BooleanVar(value=False)  # Model-aware CARS toggle
         self.varsel_vcpa = tk.BooleanVar(value=False)
         self.varsel_ga = tk.BooleanVar(value=False)  # Genetic Algorithm
         self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
@@ -5583,9 +5584,13 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS (Competitive Adaptive Reweighted Sampling)",
-                       variable=self.varsel_cars).grid(row=6, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Fast competitive selection",
+        cars_row_frame = ttk.Frame(varsel_frame)
+        cars_row_frame.grid(row=6, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(cars_row_frame, text="CARS (Competitive Adaptive Reweighted Sampling)",
+                       variable=self.varsel_cars).pack(side=tk.LEFT)
+        ttk.Checkbutton(cars_row_frame, text="Model-Aware",
+                       variable=self.varsel_cars_model_aware).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(varsel_frame, text="Fast competitive (Model-Aware: uses LightGBM for trees)",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
         ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
@@ -15389,7 +15394,10 @@ class SpectralPredictApp:
             if self.varsel_ipls.get():
                 selected_varsel_methods.append('ipls')
             if self.varsel_cars.get():
-                selected_varsel_methods.append('cars')
+                if self.varsel_cars_model_aware.get():
+                    selected_varsel_methods.append('cars-aware')
+                else:
+                    selected_varsel_methods.append('cars')
             if self.varsel_vcpa.get():
                 selected_varsel_methods.append('vcpa-iriv')
             if self.varsel_ga.get():

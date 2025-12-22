@@ -525,6 +525,7 @@ def vcpa_iriv(
             break
 
         active_indices = active_indices[keep_mask]
+        importance_scores = importance_scores[keep_mask]  # Keep scores in sync with indices
 
         # Check convergence: if no variables removed, stop
         if np.sum(keep_mask) == n_active:

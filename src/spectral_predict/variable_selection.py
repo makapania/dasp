@@ -781,7 +781,7 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
 
 
 def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
-                   monte_carlo_samples=80, random_state=42):
+                   monte_carlo_samples=80, random_state=42, model_type=None):
     """
     Competitive Adaptive Reweighted Sampling (CARS) for variable selection.
 
@@ -793,8 +793,8 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     1. Initialize all variables with equal weights
     2. For each Monte Carlo iteration:
        - Sample variables based on current weights
-       - Build PLS model and evaluate via cross-validation
-       - Update weights based on PLS regression coefficients
+       - Build model (PLS or LightGBM) and evaluate via cross-validation
+       - Update weights based on model coefficients/importances
        - Apply exponential decay to force elimination
     3. Select variables from iteration with lowest RMSECV
 
@@ -814,6 +814,10 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
         Percentage of variables to sample in each iteration (as integer)
     random_state : int, default=42
         Random seed for reproducibility
+    model_type : str, optional
+        Model name for model-aware selection. If provided and is a tree model
+        (RandomForest, XGBoost, LightGBM, CatBoost), uses LightGBM for evaluation.
+        Otherwise uses PLS (default behavior).
 
     Returns
     -------
@@ -878,6 +882,16 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
         cv_folds = max(2, n_samples // 2)
         print(f"Warning: Adjusted cv_folds to {cv_folds}")
 
+    # Determine if using tree-based evaluation (model-aware mode)
+    TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
+    use_tree_model = model_type in TREE_MODELS if model_type else False
+
+    if use_tree_model:
+        from lightgbm import LGBMRegressor
+        print(f"CARS: Using LightGBM-based evaluation for tree model '{model_type}'")
+    else:
+        print(f"CARS: Using PLS-based evaluation")
+
     # Initialize weights
     weights = np.ones(n_variables)
 
@@ -911,42 +925,69 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
 
         X_subset = X[:, selected_vars]
 
-        # Build PLS model and evaluate
+        # Build model and evaluate
         try:
-            n_comp = min(pls_components, n_sample - 1, X_subset.shape[0] - 1)
-            pls = PLSRegression(n_components=n_comp)
-
             # Cross-validation
             kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
             cv_errors = []
 
-            for train_idx, val_idx in kf.split(X_subset):
-                X_train, X_val = X_subset[train_idx], X_subset[val_idx]
-                y_train, y_val = y[train_idx], y[val_idx]
+            if use_tree_model:
+                # LightGBM-based evaluation for tree models
+                lgb_model = LGBMRegressor(
+                    n_estimators=50,
+                    max_depth=5,
+                    random_state=random_state,
+                    verbose=-1,
+                    n_jobs=1
+                )
 
-                pls.fit(X_train, y_train)
-                y_pred = pls.predict(X_val)
-                mse = np.mean((y_val - y_pred.ravel()) ** 2)
-                cv_errors.append(mse)
+                for train_idx, val_idx in kf.split(X_subset):
+                    X_train, X_val = X_subset[train_idx], X_subset[val_idx]
+                    y_train, y_val = y[train_idx], y[val_idx]
 
-            rmsecv = np.sqrt(np.mean(cv_errors))
+                    lgb_model.fit(X_train, y_train)
+                    y_pred = lgb_model.predict(X_val)
+                    mse = np.mean((y_val - y_pred.ravel()) ** 2)
+                    cv_errors.append(mse)
 
-            # Fit on full subset to get coefficients
-            pls.fit(X_subset, y)
+                rmsecv = np.sqrt(np.mean(cv_errors))
 
-            # Update weights based on PLS coefficients
-            # Larger absolute coefficient = more important
-            coef = pls.coef_.ravel()
+                # Fit on full subset to get feature importances
+                lgb_model.fit(X_subset, y)
+                feature_imp = lgb_model.feature_importances_
 
-            # Update weights for sampled variables based on PLS coefficients
-            # Non-sampled variables keep their current weights
-            weights[selected_vars] = np.abs(coef)
+                # Update weights based on feature importances
+                weights[selected_vars] = feature_imp / (feature_imp.sum() + 1e-10)
+
+            else:
+                # PLS-based evaluation (default)
+                n_comp = min(pls_components, n_sample - 1, X_subset.shape[0] - 1)
+                pls = PLSRegression(n_components=n_comp)
+
+                for train_idx, val_idx in kf.split(X_subset):
+                    X_train, X_val = X_subset[train_idx], X_subset[val_idx]
+                    y_train, y_val = y[train_idx], y[val_idx]
+
+                    pls.fit(X_train, y_train)
+                    y_pred = pls.predict(X_val)
+                    mse = np.mean((y_val - y_pred.ravel()) ** 2)
+                    cv_errors.append(mse)
+
+                rmsecv = np.sqrt(np.mean(cv_errors))
+
+                # Fit on full subset to get coefficients
+                pls.fit(X_subset, y)
+
+                # Update weights based on PLS coefficients
+                # Larger absolute coefficient = more important
+                coef = pls.coef_.ravel()
+                weights[selected_vars] = np.abs(coef)
 
             # Normalize weights to sum to 1
             weights = weights / (weights.sum() + 1e-10)
 
         except Exception as e:
-            # If PLS fails (e.g., singular matrix), skip this iteration
+            # If model fails (e.g., singular matrix), skip this iteration
             rmsecv = np.inf
             print(f"  Iteration {iteration+1}/{n_iterations}: Failed - {str(e)[:50]}")
 

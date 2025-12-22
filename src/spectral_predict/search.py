@@ -380,7 +380,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars', 'vcpa-iriv', 'ga']
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars', 'cars-aware', 'vcpa-iriv', 'ga']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # Warn about unimplemented methods
@@ -1353,16 +1353,21 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         random_state=random_state
                                     )
 
-                                elif varsel_method == 'cars':
+                                elif varsel_method in ('cars', 'cars-aware'):
                                     # CARS: Competitive Adaptive Reweighted Sampling
                                     # Monte Carlo-based method with exponential decay
+                                    # cars-aware: Use model-appropriate fitness (LightGBM for tree models)
+                                    model_type_for_cars = model_name if varsel_method == 'cars-aware' else None
+                                    if model_type_for_cars:
+                                        print(f"    -> Running Model-Aware CARS for {model_name}")
                                     importances = cars_selection(
                                         X_transformed_varsel, y_np,
                                         n_iterations=50,
-                                        pls_components=uve_n_components,
+                                        pls_components=uve_n_components if uve_n_components is not None else 5,
                                         cv_folds=folds,
                                         monte_carlo_samples=80,
-                                        random_state=random_state
+                                        random_state=random_state,
+                                        model_type=model_type_for_cars
                                     )
 
                                 elif varsel_method == 'vcpa-iriv':
@@ -1675,7 +1680,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     if "SubsetTag" in df_results.columns:
         subset_counts = df_results["SubsetTag"].value_counts()
         if len(subset_counts) > 1:
-            print("\n⚠️ WARNING: Ranking includes multiple subset types:")
+            print("\n[WARNING] Ranking includes multiple subset types:")
             for subset_type, count in subset_counts.items():
                 print(f"  - {subset_type}: {count} models")
             print("  Subset models may rank higher due to lower variable counts.")
