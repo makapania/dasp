@@ -7090,7 +7090,7 @@ class SpectralPredictApp:
     def _create_tab4e_validation(self):
         """Subtab 4E: Validation - Holdout validation set configuration."""
         tab4e = ttk.Frame(self.config_notebook, style='TFrame')
-        self.config_notebook.add(tab4e, text='  > Validation  ')
+        self.config_notebook.add(tab4e, text='  ✓ Validation  ')
 
         # Create scrollable content
         canvas = tk.Canvas(tab4e, bg=self.colors['bg'], highlightthickness=0)
