@@ -932,14 +932,12 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
             # Update weights based on PLS coefficients
             # Larger absolute coefficient = more important
             coef = pls.coef_.ravel()
-            new_weights = np.abs(coef)
 
-            # Update only the sampled variables' weights
-            temp_weights = weights.copy()
-            temp_weights[selected_vars] = new_weights
-            weights = temp_weights
+            # Update weights for sampled variables based on PLS coefficients
+            # Non-sampled variables keep their current weights
+            weights[selected_vars] = np.abs(coef)
 
-            # Normalize weights
+            # Normalize weights to sum to 1
             weights = weights / (weights.sum() + 1e-10)
 
         except Exception as e:
@@ -968,12 +966,16 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     selected_indices = selected_vars_history[best_iteration_idx]
     best_rmsecv = rmsecv_history[best_iteration_idx]
 
-    # Create importance scores
-    # Variables selected in best iteration get scores based on their selection order
-    importances = np.zeros(n_variables)
-    for rank, var_idx in enumerate(selected_indices):
-        # Assign scores: first selected gets n_sample, last gets 1
-        importances[var_idx] = len(selected_indices) - rank
+    # Create importance scores based on final accumulated weights
+    # The weights have been adaptively updated across all iterations
+    # Higher weight = variable was consistently important across iterations
+    importances = weights.copy()
+
+    # Zero out variables not selected in best iteration
+    # This ensures only the best iteration's variables get non-zero importance
+    mask = np.zeros(n_variables, dtype=bool)
+    mask[selected_indices] = True
+    importances[~mask] = 0
 
     print(f"\nCARS complete:")
     print(f"  Best iteration: {best_iteration_idx+1}/{n_iterations}")
