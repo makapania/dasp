@@ -175,8 +175,8 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
     # Rank (1 = best)
     df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
 
-    # Sort by rank
-    df = df.sort_values("Rank")
+    # Sort by rank and reset index to ensure sequential IDs for GUI display
+    df = df.sort_values("Rank").reset_index(drop=True)
 
     # Reorder columns: Rank first, top_vars last
     # Get all columns except Rank and top_vars
