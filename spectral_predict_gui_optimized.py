@@ -5104,14 +5104,6 @@ class SpectralPredictApp:
         run_frame = tk.Frame(content_frame, bg=self.colors['bg'])
         run_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(0, 20))
         self._create_accent_button(run_frame, "▶ Run Analysis", self._run_analysis).pack(side='left')
-
-        # Search control buttons (initially disabled)
-        self.pause_btn = ttk.Button(run_frame, text="⏸ Pause", command=self._pause_search, state='disabled')
-        self.pause_btn.pack(side='left', padx=(10, 2))
-        self.resume_btn = ttk.Button(run_frame, text="▶ Resume", command=self._resume_search, state='disabled')
-        self.resume_btn.pack(side='left', padx=2)
-        self.stop_btn = ttk.Button(run_frame, text="⏹ Stop", command=self._stop_search, state='disabled')
-        self.stop_btn.pack(side='left', padx=2)
         row += 1
 
         # === Analysis Options ===
@@ -7239,6 +7231,17 @@ class SpectralPredictApp:
 
         self.time_estimate_label = ttk.Label(progress_info_frame, text="", style='Caption.TLabel')
         self.time_estimate_label.pack(side='right', anchor=tk.E)
+
+        # Search control buttons (Pause/Resume/Stop)
+        control_frame = ttk.Frame(progress_info_frame)
+        control_frame.pack(side='right', padx=(0, 20))
+
+        self.stop_btn = ttk.Button(control_frame, text="⏹ Stop", command=self._stop_search, state='disabled')
+        self.stop_btn.pack(side='right', padx=2)
+        self.resume_btn = ttk.Button(control_frame, text="▶ Resume", command=self._resume_search, state='disabled')
+        self.resume_btn.pack(side='right', padx=2)
+        self.pause_btn = ttk.Button(control_frame, text="⏸ Pause", command=self._pause_search, state='disabled')
+        self.pause_btn.pack(side='right', padx=2)
 
         # Progress text area
         self.progress_text = tk.Text(content_frame, height=30, width=120, font=('Consolas', 10),
