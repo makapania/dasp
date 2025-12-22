@@ -15400,6 +15400,9 @@ class SpectralPredictApp:
                 selected_varsel_methods = ['importance']
                 self._log_progress("[!] No variable selection method selected, defaulting to 'importance'")
 
+            # Log selected variable selection methods
+            self._log_progress(f"  Variable selection methods: {selected_varsel_methods}")
+
             # SAFETY CHECK: Ensure X and y are properly aligned
             if len(X_filtered) != len(y_filtered):
                 error_msg = (
