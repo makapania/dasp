@@ -461,6 +461,11 @@ def vcpa_iriv(
         importance_scores = np.zeros(n_active)
         performance_with_var = []
 
+        # Track iteration success/failure for debugging
+        successful_iterations = 0
+        failed_iterations = 0
+        skipped_iterations = 0
+
         # Inner loop: Binary matrix sampling (VCPA)
         for inner_iter in range(n_inner_iterations):
             # Generate binary vector (random subset of variables)
@@ -473,6 +478,7 @@ def vcpa_iriv(
 
             # Need at least pls_components+1 variables
             if n_selected <= pls_components:
+                skipped_iterations += 1
                 continue
 
             selected_vars = active_indices[binary_vector]
@@ -502,10 +508,20 @@ def vcpa_iriv(
                     # Lower RMSECV = higher importance
                     weight = 1.0 / (rmsecv + 1e-10)
                     importance_scores[binary_vector] += weight
+                    successful_iterations += 1
 
-            except Exception:
-                # Skip if PLS fails
+            except Exception as e:
+                failed_iterations += 1
+                if failed_iterations <= 3:  # Only print first 3 failures
+                    print(f"    VCPA inner iteration failed: {str(e)[:60]}")
                 continue
+
+        # Report iteration status for this outer iteration
+        if successful_iterations == 0:
+            print(f"  WARNING: VCPA outer iter {outer_iter}: ALL {n_inner_iterations} iterations failed/skipped!")
+            print(f"    (skipped={skipped_iterations}, failed={failed_iterations})")
+        elif failed_iterations > 0 or skipped_iterations > 0:
+            print(f"  VCPA outer iter {outer_iter}: {successful_iterations} succeeded, {skipped_iterations} skipped, {failed_iterations} failed")
 
         # Normalize importance scores
         if importance_scores.sum() > 0:
