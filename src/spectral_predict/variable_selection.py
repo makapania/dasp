@@ -864,6 +864,11 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     # Validate inputs
     if X.shape[0] != y.shape[0]:
         raise ValueError("X and y must have same number of samples")
+
+    # Handle None for pls_components (use default)
+    if pls_components is None:
+        pls_components = 5
+
     if pls_components > min(n_samples, n_variables):
         pls_components = min(n_samples // 2, n_variables // 2, 10)
         print(f"Warning: Adjusted pls_components to {pls_components}")
