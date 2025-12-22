@@ -104,6 +104,15 @@
 
 ## Remaining Work
 
+### VCPA-IRIV Performance Issue (High Priority)
+- [ ] **VCPA gives worse results than baseline** - Despite fixes to inclusion_prob (capped at 0.9) and display bug (index reset), VCPA still performs poorly:
+  - Top VCPA model ranks #53, worse than before
+  - Algorithm may need fundamental redesign:
+    - importance_scores reset each outer iteration (loses history)
+    - Threshold-based elimination may be too aggressive
+    - Consider: cumulative importance across iterations, or different elimination strategy
+  - Compare to CARS which works well - understand why CARS succeeds but VCPA fails
+
 ### Test Suite (Low Priority)
 - [ ] Integrate pytest tests from `backup_2025-12-20/tests/`
 - [ ] 50+ test files for regression testing
