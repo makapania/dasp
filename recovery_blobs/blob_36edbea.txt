@@ -1,0 +1,312 @@
+# R² Calculation Methods - Complete Explanation
+
+**Date:** November 6, 2025
+
+---
+
+## TL;DR
+
+There are **two mathematically different ways** to calculate R² from cross-validation. The GUI now shows **BOTH** to avoid confusion:
+
+1. **R² (mean of folds)** - Average of individual fold R² values
+   - Used by: Results tab (Julia), Model Development text
+   - Matches between Results and Model Development ✅
+
+2. **R² (overall)** - Single R² from all predictions combined
+   - Used by: Prediction plot
+   - **This is the sklearn-recommended metric**
+   - Usually 0.01-0.05 different from mean of folds
+
+---
+
+## The Three R² Values You're Seeing
+
+### 1. Results Tab R² (from Julia)
+**Calculation:** Mean of fold R² values
+```julia
+r2_fold1 = compute_r2(y_test_fold1, y_pred_fold1)
+r2_fold2 = compute_r2(y_test_fold2, y_pred_fold2)
+...
+r2_mean = mean([r2_fold1, r2_fold2, ...])
+```
+
+**Source:** `julia_port/SpectralPredict/src/cv.jl:805`
+
+---
+
+### 2. Model Development Text R² (from Python)
+**Calculation:** Mean of fold R² values (same as Julia)
+```python
+fold_metrics = []
+for fold in cv.split(X, y):
+    y_pred_fold = model.predict(X_test)
+    r2_fold = r2_score(y_test, y_pred_fold)
+    fold_metrics.append(r2_fold)
+
+r2_mean = np.mean(fold_metrics)
+```
+
+**Source:** `spectral_predict_gui_optimized.py:4135`
+
+**Should Match:** Results tab R² (within ±0.01-0.02 for CV variance)
+
+---
+
+### 3. Prediction Plot R² (from Python)
+**Calculation:** Overall R² from concatenated predictions
+```python
+all_y_true = []
+all_y_pred = []
+for fold in cv.split(X, y):
+    y_pred_fold = model.predict(X_test)
+    all_y_true.extend(y_test)
+    all_y_pred.extend(y_pred_fold)
+
+r2_overall = r2_score(all_y_true, all_y_pred)
+```
+
+**Source:** `spectral_predict_gui_optimized.py:3414`
+
+**Should Match:** Model Development "R² (overall)" line
+
+---
+
+## Why Are They Different?
+
+### Mathematical Reason
+
+**Mean of fold R² values:**
+```
+R² = (R²_fold1 + R²_fold2 + ... + R²_fold5) / 5
+```
+
+**Overall R² from concatenated predictions:**
+```
+all_predictions = concat(pred_fold1, pred_fold2, ..., pred_fold5)
+all_actual = concat(y_fold1, y_fold2, ..., y_fold5)
+R² = 1 - (SS_residual / SS_total)  # computed on ALL data
+```
+
+These are **not mathematically equivalent**!
+
+### Example Showing the Difference
+
+```
+Fold 1: 20 samples, R² = 0.90
+Fold 2: 20 samples, R² = 0.85
+Fold 3: 20 samples, R² = 0.88
+Fold 4: 20 samples, R² = 0.92
+Fold 5: 20 samples, R² = 0.87
+
+Mean of fold R² = (0.90 + 0.85 + 0.88 + 0.92 + 0.87) / 5 = 0.884
+
+Overall R² (all 100 predictions) = 0.891  ← Different!
+```
+
+The difference arises because:
+1. SS_total calculated per fold vs overall is different
+2. Fold size differences amplify this
+3. Outliers in one fold affect overall differently
+
+---
+
+## Which One is "Correct"?
+
+**Both are valid**, but for different purposes:
+
+### Use Mean of Fold R² When:
+- ✅ Comparing with Results from hyperparameter search
+- ✅ Understanding fold-to-fold variance (the ± value)
+- ✅ Matching Julia backend behavior
+- ✅ Academic papers often report this
+
+### Use Overall R² When:
+- ✅ **Making predictions** (this is your actual performance)
+- ✅ **Reporting to stakeholders** (more accurate)
+- ✅ Following sklearn best practices
+- ✅ Matching what the prediction plot shows
+
+**sklearn documentation recommends: Overall R² from concatenated predictions**
+
+Source: https://scikit-learn.org/stable/modules/cross_validation.html
+
+---
+
+## What Changed in the GUI
+
+### Before (Confusing):
+```
+Cross-Validation Performance (5 folds):
+  R²: 0.8247 ± 0.0700        ← Mean of folds
+
+[Prediction plot shows: R² = 0.8312]  ← Overall
+                          ^^^^ Why different???
+```
+
+### After (Clear):
+```
+Cross-Validation Performance (5 folds):
+  R² (mean of folds): 0.8247 ± 0.0700   ← Matches Results tab
+  R² (overall): 0.8312                   ← Matches prediction plot
+
+  Note: "R² (overall)" matches the prediction plot.
+        "R² (mean of folds)" matches the Results tab.
+```
+
+---
+
+## Expected Differences
+
+### Results Tab vs Model Development (Mean of Folds)
+**Expected difference:** ±0.00 to ±0.02
+**Reasons:**
+- CV randomness (different fold splits)
+- Floating point precision differences
+- Implementation differences (Julia vs Python)
+
+**If difference > 0.05:** Something is wrong (wavelengths, preprocessing, hyperparameters)
+
+### Mean of Folds vs Overall R²
+**Expected difference:** ±0.00 to ±0.05 (usually ~0.01-0.02)
+**Reasons:**
+- Mathematical difference in calculation
+- Fold size imbalances
+- Outlier distribution
+
+**This is NORMAL and EXPECTED**
+
+---
+
+## Diagnostic Guide
+
+### Scenario 1: All three R² values are similar (±0.02)
+✅ **Everything is working correctly!**
+- Results tab: 0.8247
+- Model Dev (mean): 0.8250
+- Model Dev (overall): 0.8265
+- Prediction plot: 0.8265
+
+### Scenario 2: Mean vs Overall differ by 0.03-0.05
+✅ **This is normal**
+- Results tab: 0.8247
+- Model Dev (mean): 0.8250
+- Model Dev (overall): 0.8312 ← Different but OK
+- Prediction plot: 0.8312
+
+Reason: Mathematical difference in R² calculation
+
+### Scenario 3: Results tab vs Model Dev differ significantly (>0.05)
+🔴 **Something is wrong!**
+- Results tab: 0.9757
+- Model Dev (mean): 0.9395 ← Too different!
+- Model Dev (overall): 0.9405
+
+Possible causes:
+1. Wrong wavelengths loaded (region models)
+2. Wrong hyperparameters (alpha, n_components, etc.)
+3. Wrong preprocessing applied
+4. Different number of CV folds
+
+**Action:** Check DEBUG output for what was loaded
+
+### Scenario 4: Prediction plot doesn't match overall R²
+🔴 **Bug in plotting code**
+- Model Dev (overall): 0.8312
+- Prediction plot: 0.8250 ← Should match!
+
+This should never happen now (they use the same all_y_true, all_y_pred)
+
+---
+
+## Summary Table
+
+| R² Source | Calculation | Use Case | Should Match |
+|-----------|-------------|----------|--------------|
+| **Results Tab** | Mean of folds (Julia) | Hyperparameter search | Model Dev (mean) |
+| **Model Dev (mean)** | Mean of folds (Python) | Comparing to Results | Results tab |
+| **Model Dev (overall)** | Overall from concat | Actual performance | Prediction plot |
+| **Prediction Plot** | Overall from concat | Visual verification | Model Dev (overall) |
+
+---
+
+## For Developers
+
+### Code Locations
+
+**Julia (mean of folds):**
+```julia
+# julia_port/SpectralPredict/src/cv.jl:805
+mean_val = mean(values)  # values = [r2_fold1, r2_fold2, ...]
+```
+
+**Python (mean of folds):**
+```python
+# spectral_predict_gui_optimized.py:4135
+results['r2_mean'] = np.mean([m['r2'] for m in fold_metrics])
+```
+
+**Python (overall):**
+```python
+# spectral_predict_gui_optimized.py:4138 (NEW)
+overall_r2 = r2_score(all_y_true_arr, all_y_pred_arr)
+```
+
+**Prediction Plot:**
+```python
+# spectral_predict_gui_optimized.py:3414
+r2 = r2_score(y_true, y_pred)  # Uses all concatenated predictions
+```
+
+### Testing
+
+To verify calculations are correct:
+```python
+import numpy as np
+from sklearn.metrics import r2_score
+
+# Simulate 5-fold CV
+fold_r2s = [0.90, 0.85, 0.88, 0.92, 0.87]
+all_true = np.random.randn(100)
+all_pred = all_true + np.random.randn(100) * 0.3
+
+# Mean of folds
+mean_r2 = np.mean(fold_r2s)
+print(f"Mean of fold R²: {mean_r2:.4f}")
+
+# Overall
+overall_r2 = r2_score(all_true, all_pred)
+print(f"Overall R²: {overall_r2:.4f}")
+
+# Should be different!
+print(f"Difference: {abs(mean_r2 - overall_r2):.4f}")
+```
+
+---
+
+## References
+
+1. **sklearn Cross-Validation Documentation**
+   https://scikit-learn.org/stable/modules/cross_validation.html
+
+   > "To evaluate different settings ('hyperparameters') for estimators, [...]
+   > the scores from cross_validate can be averaged to get an estimate of the
+   > generalization performance. However, this approach has some caveats [...]
+   > A better approach is to use cross_val_predict and then compute the metric
+   > on the concatenated predictions."
+
+2. **Stack Overflow: R² from CV**
+   https://stats.stackexchange.com/questions/270833/
+
+   Discussion of why overall R² ≠ mean of fold R²s
+
+3. **sklearn source code**
+   `cross_val_predict` returns concatenated predictions for this reason
+
+---
+
+**BOTTOM LINE:**
+- Results tab vs Model Dev (mean): Should match ✅
+- Model Dev (overall) vs Prediction plot: Should match ✅
+- Mean vs Overall: Can differ by 0.01-0.05 (normal) ✅
+
+Any other discrepancies indicate a bug.

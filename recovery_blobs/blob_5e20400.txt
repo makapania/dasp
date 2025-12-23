@@ -1,0 +1,136 @@
+# Parameter Loading Safety Verification
+
+## Summary: ALL MODELS AND PREPROCESSING METHODS ARE SAFE ✅
+
+The fixes applied in commit 220b3d7 do NOT negatively impact any model types or preprocessing methods.
+
+---
+
+## CHANGE 1: Window Parameter Loading (lines 3424-3432)
+
+### What It Does
+Loads the `Window` parameter from the CSV config when a model is loaded from Results tab.
+
+### Safety Analysis
+
+**✅ Raw Preprocessing (no derivatives)**
+- Window parameter: NOT used in `build_preprocessing_pipeline('raw')`
+- Returns: `[]` (empty pipeline)
+- Impact: NONE - window setting ignored for raw data
+
+**✅ SNV Preprocessing (no derivatives)**
+- Window parameter: NOT used in `build_preprocessing_pipeline('snv')`
+- Returns: `[("snv", SNV())]` - SNV class doesn't use window
+- Impact: NONE - window setting ignored for SNV-only
+
+**✅ MSC Preprocessing (no derivatives)**
+- Window parameter: NOT used in `build_preprocessing_pipeline('msc')`
+- Returns: `[("msc", MSC())]` - MSC class doesn't use window
+- Impact: NONE - window setting ignored for MSC-only
+
+**✅ Derivative Preprocessing (deriv, snv_deriv, deriv_snv, msc_deriv, etc.)**
+- Window parameter: USED in `SavgolDerivative(deriv=deriv, window=window, polyorder=polyorder)`
+- Impact: CORRECT - matches the window used in original search results
+- This is the INTENDED behavior and fixes the R² discrepancy
+
+**✅ Fresh Model Creation (no model loaded)**
+- If `window` is None or NaN in config, the default value (17) is used
+- Code: `if window is not None and not pd.isna(window):`
+- Impact: NONE - defaults work correctly
+
+---
+
+## CHANGE 2: Alpha Loading Debug Output (lines 4044-4054)
+
+### What It Does
+Adds debug print statements to show:
+1. Model name being loaded
+2. Available config keys
+3. Alpha value (or NOT_FOUND)
+4. Whether alpha loaded successfully (✓) or failed (✗)
+
+### Safety Analysis
+
+**✅ Ridge Regression**
+- Line 4049: `if model_name == 'Ridge' or model_name == 'Lasso':`
+- Alpha loaded from config['alpha'] column in CSV
+- Default: alpha=1.0 (if not loaded)
+- Impact: CORRECT - Ridge uses same loading logic as Lasso
+
+**✅ Lasso Regression**
+- Line 4049: `if model_name == 'Ridge' or model_name == 'Lasso':`
+- Alpha loaded from config['alpha'] column in CSV
+- Default: alpha=1.0 (if not loaded) ← This is why R² collapsed!
+- Impact: CORRECT - debug output will show if alpha fails to load
+
+**✅ PLS Regression**
+- Lines 4025-4029: LVs loaded separately (different parameter)
+- Not affected by alpha loading code
+- Impact: NONE - PLS doesn't use alpha parameter
+
+**✅ RandomForest**
+- Lines 4056-4076: Has separate loading logic for n_trees, max_features, max_depth
+- Not affected by alpha loading code
+- Impact: NONE - RandomForest doesn't use alpha parameter
+
+**✅ MLP (Multi-Layer Perceptron)**
+- Lines 4078-4082: Has separate loading logic for learning_rate
+- Not affected by alpha loading code
+- Impact: NONE - MLP uses different hyperparameters
+
+**✅ NeuralBoosted**
+- Lines 4084-4094: Has separate loading logic for n_estimators, learning_rate, hidden_layer_size, activation
+- Not affected by alpha loading code
+- Impact: NONE - NeuralBoosted uses different hyperparameters
+
+**✅ Fresh Model Creation (no model loaded)**
+- Line 4043: `if self.selected_model_config is not None:`
+- If no model loaded, entire hyperparameter block is skipped
+- Models use defaults from `get_model()` function
+- Impact: NONE - fresh models work as before
+
+---
+
+## VERIFICATION CHECKLIST
+
+### Preprocessing Methods
+- [x] Raw → Window ignored (correct)
+- [x] SNV → Window ignored (correct)
+- [x] MSC → Window ignored (correct)
+- [x] SG1 (1st deriv) → Window used (correct)
+- [x] SG2 (2nd deriv) → Window used (correct)
+- [x] SNV+SG1 → Window used (correct)
+- [x] SNV+SG2 → Window used (correct)
+- [x] Deriv+SNV → Window used (correct)
+- [x] MSC+SG1 → Window used (correct)
+- [x] MSC+SG2 → Window used (correct)
+
+### Model Types
+- [x] PLS → LVs loaded correctly (existing code)
+- [x] Ridge → Alpha loaded with debug output
+- [x] Lasso → Alpha loaded with debug output
+- [x] RandomForest → n_trees/max_features/max_depth loaded (existing code)
+- [x] MLP → learning_rate loaded (existing code)
+- [x] NeuralBoosted → n_estimators/learning_rate/hidden_layer_size loaded (existing code)
+
+### Edge Cases
+- [x] Fresh model creation → Uses defaults (no config loaded)
+- [x] Missing Window in CSV → Uses default window=17
+- [x] Missing Alpha in CSV → Uses default alpha=1.0 (will show in debug output)
+- [x] Invalid Window value → Uses default window=17 (shows WARNING)
+- [x] NaN/None values → Handled with pd.isna() checks
+
+---
+
+## CONCLUSION
+
+**NO REGRESSION INTRODUCED** ✅
+
+The changes are:
+1. **Additive only** - add missing Window loading for derivative preprocessing
+2. **Debug output only** - add print statements to diagnose alpha loading
+3. **Protected by guards** - all changes check for None/NaN before applying
+
+**ALL MODEL TYPES SAFE** ✅
+**ALL PREPROCESSING METHODS SAFE** ✅
+**FRESH MODEL CREATION SAFE** ✅

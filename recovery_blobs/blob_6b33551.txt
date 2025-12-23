@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(python:*)",
+      "Bash(set PYTHONPATH=%CD%)",
+      "Bash(set PYTHONPATH=src)",
+      "Bash(python3:*)",
+      "WebSearch",
+      "Bash(grep:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "WebFetch(domain:dearpygui.readthedocs.io)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

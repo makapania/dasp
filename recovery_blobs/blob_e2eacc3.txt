@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(git add:*)",
+<<<<<<< Updated upstream
+      "Bash(git commit -m \"$(cat <<''EOF''\nchore: Major cleanup - archive old docs and remove v2\n\n- Move obsolete documentation to archive/pre-2025-12/\n- Move v2 (abandoned) to archive/v2-abandoned/\n- Remove old test files and debug scripts\n- Clean up root directory clutter\n- Update v1 and v3 code with recent improvements\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")"
+=======
+      "Bash(git commit:*)",
+      "Bash(git merge:*)",
+      "Bash(git stash:*)"
+>>>>>>> Stashed changes
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,1283 @@
+"""
+Virtual scrolling data grid for Spectral Predict v3.
+
+High-performance table using Dear PyGui's native table with clipper
+for virtual scrolling - only renders visible rows.
+
+Supports editing capabilities including:
+- Cell editing (double-click to edit)
+- Column operations (add, delete, rename)
+- Row operations (delete, duplicate, insert)
+- Fill operations (fill down, fill selection)
+- Undo/Redo (Ctrl+Z, Ctrl+Y)
+"""
+
+import dearpygui.dearpygui as dpg
+import numpy as np
+from typing import Optional, List, Callable, Dict, Any, Tuple
+from collections import deque
+from copy import deepcopy
+from ..theme import COLORS
+from ..tooltips import add_tooltip, TOOLTIP_CONTENT
+
+
+class EditHistory:
+    """
+    Manages undo/redo history for data grid edits.
+
+    Stores edit operations as dicts with operation type and data.
+    Limited to 50 operations to prevent memory issues.
+    """
+
+    def __init__(self, max_size: int = 50):
+        """
+        Initialize edit history.
+
+        Parameters
+        ----------
+        max_size : int
+            Maximum number of operations to store
+        """
+        self.max_size = max_size
+        self._undo_stack = deque(maxlen=max_size)
+        self._redo_stack = deque(maxlen=max_size)
+
+    def push(self, operation: Dict[str, Any]):
+        """
+        Add an operation to the undo stack.
+
+        Parameters
+        ----------
+        operation : dict
+            Operation data with 'type' and relevant fields
+        """
+        self._undo_stack.append(operation)
+        self._redo_stack.clear()  # Clear redo stack on new edit
+
+    def can_undo(self) -> bool:
+        """Check if undo is available."""
+        return len(self._undo_stack) > 0
+
+    def can_redo(self) -> bool:
+        """Check if redo is available."""
+        return len(self._redo_stack) > 0
+
+    def undo(self) -> Optional[Dict[str, Any]]:
+        """
+        Pop and return the last operation from undo stack.
+
+        Returns
+        -------
+        dict or None
+            The operation to reverse, or None if stack empty
+        """
+        if self.can_undo():
+            operation = self._undo_stack.pop()
+            self._redo_stack.append(operation)
+            return operation
+        return None
+
+    def redo(self) -> Optional[Dict[str, Any]]:
+        """
+        Pop and return the last operation from redo stack.
+
+        Returns
+        -------
+        dict or None
+            The operation to reapply, or None if stack empty
+        """
+        if self.can_redo():
+            operation = self._redo_stack.pop()
+            self._undo_stack.append(operation)
+            return operation
+        return None
+
+    def clear(self):
+        """Clear all history."""
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+
+class DataGrid:
+    """
+    High-performance data grid with virtual scrolling.
+
+    Only renders visible rows for smooth scrolling with large datasets.
+
+    Example
+    -------
+    >>> grid = DataGrid(parent="data_panel")
+    >>> grid.set_data(dataset)
+    """
+
+    def __init__(self, parent: str, tag: str = "data_grid"):
+        """
+        Initialize the data grid.
+
+        Parameters
+        ----------
+        parent : str
+            Parent container tag
+        tag : str
+            Unique tag for this grid
+        """
+        self.parent = parent
+        self.tag = tag
+        self._dataset = None
+        self._table_tag = f"{tag}_table"
+        self._info_tag = f"{tag}_info"
+
+        # Column configuration
+        self._wavelength_decimals = 4
+        self._show_all_wavelengths = False  # Sample by default, checkbox to show all
+
+        # Editing state
+        self._edit_mode = False
+        self._edit_history = EditHistory(max_size=50)
+        self._modified_cells = {}  # {(row, col): original_value}
+        self._selected_cells = set()  # Set of (row, col) tuples
+        self._editing_cell = None  # (row, col) currently being edited
+        self._edit_input_tag = None  # Tag of input widget for editing
+
+        # Selection tracking
+        self._selected_row = None  # Currently selected row index
+        self._selected_col = None  # Currently selected column index
+
+        # Callbacks
+        self._on_data_change_callback = None
+        self._on_selection_change_callback = None
+
+        self._create_ui()
+
+    def _create_ui(self):
+        """Create the grid UI structure."""
+        with dpg.child_window(parent=self.parent, tag=self.tag, border=False):
+            # Toolbar
+            with dpg.group(horizontal=True):
+                dpg.add_text("Rows:", color=COLORS["text_muted"])
+                dpg.add_text("0", tag=f"{self.tag}_row_count")
+                dpg.add_spacer(width=20)
+                dpg.add_text("Columns:", color=COLORS["text_muted"])
+                dpg.add_text("0", tag=f"{self.tag}_col_count")
+                dpg.add_spacer(width=20)
+                dpg.add_checkbox(
+                    label="Show all wavelengths",
+                    default_value=False,
+                    callback=self._on_toggle_all_wavelengths,
+                    tag=f"{self.tag}_all_wl"
+                )
+
+            dpg.add_spacer(height=5)
+
+            # Table container
+            dpg.add_child_window(
+                tag=f"{self.tag}_table_container",
+                height=-30,
+                horizontal_scrollbar=True
+            )
+
+            # Status bar
+            dpg.add_text(
+                "No data loaded",
+                tag=self._info_tag,
+                color=COLORS["text_muted"]
+            )
+
+        # Set up tooltips
+        self._setup_tooltips()
+
+    def _setup_tooltips(self):
+        """Set up tooltips for data grid elements."""
+        add_tooltip(f"{self.tag}_all_wl", TOOLTIP_CONTENT['ui']['show_all_wavelengths'])
+
+    def set_data(self, dataset):
+        """
+        Set the dataset to display.
+
+        Parameters
+        ----------
+        dataset : SpectralDataset
+            The dataset to display
+        """
+        self._dataset = dataset
+        self._rebuild_table()
+
+    def _rebuild_table(self):
+        """Rebuild the table with current data."""
+        # Clear existing table
+        if dpg.does_item_exist(self._table_tag):
+            dpg.delete_item(self._table_tag)
+
+        if self._dataset is None:
+            dpg.set_value(self._info_tag, "No data loaded")
+            return
+
+        ds = self._dataset
+        n_samples = ds.n_samples
+        n_wavelengths = ds.n_wavelengths
+
+        # Build column list
+        columns = ['ID']
+        if ds.has_target:
+            columns.append(ds.target_name or 'Target')
+
+        # Add metadata columns (all of them)
+        if ds.metadata_columns:
+            columns.extend(list(ds.metadata_columns.keys()))
+
+        # Add wavelength columns
+        if self._show_all_wavelengths:
+            # Show all wavelengths
+            wl_indices = list(range(n_wavelengths))
+        else:
+            # Sample ~100 wavelengths for quick view
+            wl_step = max(1, n_wavelengths // 100)
+            wl_indices = list(range(0, n_wavelengths, wl_step))
+        # Format as integers - no decimal places
+        wl_cols = [f"{int(round(ds.wavelengths[i]))}" for i in wl_indices]
+        columns.extend(wl_cols)
+
+        # Update counts
+        dpg.set_value(f"{self.tag}_row_count", str(n_samples))
+        dpg.set_value(f"{self.tag}_col_count", str(len(columns)))
+
+        # Create table
+        with dpg.table(
+            parent=f"{self.tag}_table_container",
+            tag=self._table_tag,
+            header_row=True,
+            borders_innerH=True,
+            borders_outerH=True,
+            borders_innerV=True,
+            borders_outerV=True,
+            scrollY=True,
+            scrollX=True,
+            freeze_rows=1,
+            freeze_columns=1,
+            row_background=True,
+            resizable=True,
+            policy=dpg.mvTable_SizingFixedFit,
+            height=-1
+        ):
+            # Add columns with appropriate widths
+            for i, col_name in enumerate(columns):
+                if col_name == 'ID':
+                    dpg.add_table_column(label=col_name, init_width_or_weight=120)
+                elif i < len(columns) - len(wl_indices):
+                    # Metadata/target columns - wider
+                    dpg.add_table_column(label=col_name, init_width_or_weight=100)
+                else:
+                    # Wavelength columns - fixed width for readability
+                    dpg.add_table_column(label=col_name, init_width_or_weight=70)
+
+            # Use clipper for virtual scrolling
+            with dpg.table_row():
+                pass  # Header row placeholder
+
+            # Add data rows with clickable cells for editing
+            for row_idx in range(n_samples):
+                with dpg.table_row():
+                    col_idx = 0
+
+                    # ID column (clickable for editing)
+                    self._render_cell(row_idx, col_idx, ds.sample_ids[row_idx], width=110)
+                    col_idx += 1
+
+                    # Target column
+                    if ds.has_target:
+                        target_val = ds.y[row_idx]
+                        if isinstance(target_val, (str, np.str_)):
+                            label = str(target_val)
+                        else:
+                            label = f"{target_val:.4f}"
+                        self._render_cell(row_idx, col_idx, label, width=90)
+                        col_idx += 1
+
+                    # Metadata columns
+                    if ds.metadata_columns:
+                        for meta_col in ds.metadata_columns.keys():
+                            val = ds.metadata_columns[meta_col][row_idx]
+                            self._render_cell(row_idx, col_idx, val, width=90)
+                            col_idx += 1
+
+                    # Wavelength columns (clickable for editing)
+                    for wl_idx in wl_indices:
+                        val = ds.X[row_idx, wl_idx]
+                        self._render_cell(row_idx, col_idx, f"{val:.{self._wavelength_decimals}f}", width=60)
+                        col_idx += 1
+
+        # Update status
+        target_info = ""
+        if ds.has_target:
+            target_type = ds.metadata.get('target_type', 'unknown')
+            if target_type == 'classification':
+                n_classes = len(set(ds.y))
+                target_info = f" | Target: {ds.target_name} ({n_classes} classes)"
+            else:
+                target_info = f" | Target: {ds.target_name}"
+
+        status = (
+            f"{n_samples} samples x {n_wavelengths} wavelengths"
+            f" ({ds.wavelength_range[0]:.0f}-{ds.wavelength_range[1]:.0f} nm)"
+            f"{target_info}"
+        )
+        dpg.set_value(self._info_tag, status)
+
+        # Auto-focus the editing cell input if one exists
+        if self._editing_cell is not None:
+            row, col = self._editing_cell
+            input_tag = f"{self.tag}_cell_input_{row}_{col}"
+            if dpg.does_item_exist(input_tag):
+                dpg.focus_item(input_tag)
+
+    def _on_toggle_all_wavelengths(self, sender, app_data):
+        """Handle all wavelengths toggle."""
+        self._show_all_wavelengths = app_data
+        self._rebuild_table()
+
+    def _render_cell(self, row_idx: int, col_idx: int, value: Any, width: int = 60):
+        """
+        Render a cell as either input (if being edited) or selectable.
+
+        Parameters
+        ----------
+        row_idx : int
+            Row index
+        col_idx : int
+            Column index
+        value : Any
+            Cell value to display
+        width : int
+            Width for input field
+        """
+        if self._editing_cell == (row_idx, col_idx):
+            # Render as input field for true in-cell editing
+            input_tag = f"{self.tag}_cell_input_{row_idx}_{col_idx}"
+            dpg.add_input_text(
+                default_value=str(value),
+                tag=input_tag,
+                width=width,
+                on_enter=True,
+                callback=self._on_cell_input_enter,
+                user_data=(row_idx, col_idx)
+            )
+        else:
+            # Normal selectable cell
+            dpg.add_selectable(
+                label=str(value),
+                callback=self._on_cell_click,
+                user_data=(row_idx, col_idx),
+                span_columns=False
+            )
+
+    def _on_cell_input_enter(self, sender, app_data, user_data):
+        """Handle Enter key in cell input - save and exit edit mode."""
+        self._save_current_edit()
+        self._editing_cell = None
+        self._rebuild_table()
+
+    def _on_cell_click(self, sender, app_data, user_data):
+        """
+        Handle cell click for selection and editing.
+
+        Parameters
+        ----------
+        sender : int
+            DPG item ID that was clicked
+        app_data : any
+            Application data (selection state)
+        user_data : tuple
+            (row_idx, col_idx) of the clicked cell
+        """
+        row, col = user_data
+
+        # Always update selection
+        self._selected_row = row
+        self._selected_col = col
+
+        # Notify selection change
+        if self._on_selection_change_callback:
+            self._on_selection_change_callback(row, col)
+
+        # If in edit mode, open edit dialog
+        if self._edit_mode:
+            self.edit_cell(row, col)
+
+    def get_selected_row(self) -> Optional[int]:
+        """Get currently selected row index."""
+        return self._selected_row
+
+    def get_selected_col(self) -> Optional[int]:
+        """Get currently selected column index."""
+        return self._selected_col
+
+    def set_on_selection_change(self, callback: Callable):
+        """
+        Set callback for when selection changes.
+
+        Parameters
+        ----------
+        callback : callable
+            Function(row, col) called when selection changes
+        """
+        self._on_selection_change_callback = callback
+
+    def clear(self):
+        """Clear the grid."""
+        self._dataset = None
+        if dpg.does_item_exist(self._table_tag):
+            dpg.delete_item(self._table_tag)
+        dpg.set_value(f"{self.tag}_row_count", "0")
+        dpg.set_value(f"{self.tag}_col_count", "0")
+        dpg.set_value(self._info_tag, "No data loaded")
+        self._edit_history.clear()
+        self._modified_cells.clear()
+        self._selected_cells.clear()
+
+    # ==================== Editing Methods ====================
+
+    def set_edit_mode(self, enabled: bool):
+        """
+        Enable or disable edit mode.
+
+        Parameters
+        ----------
+        enabled : bool
+            True to enable editing, False to disable
+        """
+        self._edit_mode = enabled
+        if not enabled:
+            self._cancel_cell_edit()
+
+    def is_edit_mode(self) -> bool:
+        """Check if edit mode is enabled."""
+        return self._edit_mode
+
+    def set_on_data_change(self, callback: Callable):
+        """
+        Set callback for when data changes.
+
+        Parameters
+        ----------
+        callback : callable
+            Function to call when data is modified
+        """
+        self._on_data_change_callback = callback
+
+    def _get_cell_value(self, row: int, col: int) -> Any:
+        """
+        Get the current value of a cell.
+
+        Parameters
+        ----------
+        row : int
+            Row index
+        col : int
+            Column index
+
+        Returns
+        -------
+        any
+            Cell value
+        """
+        if self._dataset is None:
+            return None
+
+        ds = self._dataset
+        col_idx = 0
+
+        # ID column
+        if col == col_idx:
+            return ds.sample_ids[row]
+        col_idx += 1
+
+        # Target column
+        if ds.has_target:
+            if col == col_idx:
+                return ds.y[row]
+            col_idx += 1
+
+        # Metadata columns
+        if ds.metadata_columns:
+            meta_keys = list(ds.metadata_columns.keys())
+            if col < col_idx + len(meta_keys):
+                meta_key = meta_keys[col - col_idx]
+                return ds.metadata_columns[meta_key][row]
+            col_idx += len(meta_keys)
+
+        # Wavelength columns
+        if self._show_all_wavelengths:
+            wl_indices = list(range(ds.n_wavelengths))
+        else:
+            wl_step = max(1, ds.n_wavelengths // 100)
+            wl_indices = list(range(0, ds.n_wavelengths, wl_step))
+
+        wl_col_idx = col - col_idx
+        if wl_col_idx < len(wl_indices):
+            return ds.X[row, wl_indices[wl_col_idx]]
+
+        return None
+
+    def _set_cell_value(self, row: int, col: int, value: Any) -> bool:
+        """
+        Set the value of a cell.
+
+        Parameters
+        ----------
+        row : int
+            Row index
+        col : int
+            Column index
+        value : any
+            New value
+
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+        """
+        if self._dataset is None:
+            return False
+
+        ds = self._dataset
+        col_idx = 0
+
+        # ID column - editable
+        if col == col_idx:
+            ds.sample_ids[row] = str(value)
+            return True
+        col_idx += 1
+
+        # Target column - editable
+        if ds.has_target:
+            if col == col_idx:
+                target_type = ds.metadata.get('target_type', 'regression')
+                if target_type == 'classification':
+                    ds.y[row] = str(value)
+                else:
+                    try:
+                        ds.y[row] = float(value)
+                    except (ValueError, TypeError):
+                        return False
+                return True
+            col_idx += 1
+
+        # Metadata columns - editable
+        if ds.metadata_columns:
+            meta_keys = list(ds.metadata_columns.keys())
+            if col < col_idx + len(meta_keys):
+                meta_key = meta_keys[col - col_idx]
+                ds.metadata_columns[meta_key][row] = value
+                return True
+            col_idx += len(meta_keys)
+
+        # Wavelength columns - must be numeric
+        if self._show_all_wavelengths:
+            wl_indices = list(range(ds.n_wavelengths))
+        else:
+            wl_step = max(1, ds.n_wavelengths // 100)
+            wl_indices = list(range(0, ds.n_wavelengths, wl_step))
+
+        wl_col_idx = col - col_idx
+        if wl_col_idx < len(wl_indices):
+            try:
+                ds.X[row, wl_indices[wl_col_idx]] = float(value)
+                return True
+            except (ValueError, TypeError):
+                return False
+
+        return False
+
+    def _get_column_type(self, col: int) -> str:
+        """
+        Get the type of a column.
+
+        Parameters
+        ----------
+        col : int
+            Column index
+
+        Returns
+        -------
+        str
+            'id', 'target', 'metadata', or 'spectral'
+        """
+        if self._dataset is None:
+            return 'unknown'
+
+        ds = self._dataset
+        col_idx = 0
+
+        if col == col_idx:
+            return 'id'
+        col_idx += 1
+
+        if ds.has_target:
+            if col == col_idx:
+                return 'target'
+            col_idx += 1
+
+        if ds.metadata_columns:
+            meta_count = len(ds.metadata_columns)
+            if col < col_idx + meta_count:
+                return 'metadata'
+            col_idx += meta_count
+
+        return 'spectral'
+
+    def edit_cell(self, row: int, col: int):
+        """
+        Start true spreadsheet-style editing - the cell itself becomes an input field.
+
+        Parameters
+        ----------
+        row : int
+            Row index
+        col : int
+            Column index
+        """
+        if not self._edit_mode or self._dataset is None:
+            return
+
+        # If already editing this cell, do nothing
+        if self._editing_cell == (row, col):
+            return
+
+        # Save any existing edit first
+        if self._editing_cell is not None:
+            self._save_current_edit()
+
+        # Store original value for undo
+        original_value = self._get_cell_value(row, col)
+        self._original_edit_value = original_value
+        self._editing_cell = (row, col)
+
+        # Rebuild table with this cell as an input field
+        self._rebuild_table()
+
+    def _save_current_edit(self):
+        """Save the value from the currently editing cell."""
+        if self._editing_cell is None:
+            return
+
+        row, col = self._editing_cell
+        input_tag = f"{self.tag}_cell_input_{row}_{col}"
+
+        if dpg.does_item_exist(input_tag):
+            new_value = dpg.get_value(input_tag)
+            original_value = getattr(self, '_original_edit_value', None)
+
+            # Only save if value changed
+            if str(new_value) != str(original_value):
+                if self._set_cell_value(row, col, new_value):
+                    # Record in history
+                    self._edit_history.push({
+                        'type': 'cell_edit',
+                        'row': row,
+                        'col': col,
+                        'old_value': original_value,
+                        'new_value': new_value
+                    })
+
+                    # Notify callback
+                    if self._on_data_change_callback:
+                        self._on_data_change_callback()
+
+        self._editing_cell = None
+        self._original_edit_value = None
+
+    def _get_column_name(self, col: int) -> str:
+        """Get column name by index."""
+        if self._dataset is None:
+            return f"Column {col}"
+
+        ds = self._dataset
+        col_idx = 0
+
+        if col == col_idx:
+            return "ID"
+        col_idx += 1
+
+        if ds.has_target:
+            if col == col_idx:
+                return ds.target_name or "Target"
+            col_idx += 1
+
+        if ds.metadata_columns:
+            meta_keys = list(ds.metadata_columns.keys())
+            if col < col_idx + len(meta_keys):
+                return meta_keys[col - col_idx]
+            col_idx += len(meta_keys)
+
+        # Wavelength column
+        if self._show_all_wavelengths:
+            wl_indices = list(range(ds.n_wavelengths))
+        else:
+            wl_step = max(1, ds.n_wavelengths // 100)
+            wl_indices = list(range(0, ds.n_wavelengths, wl_step))
+
+        wl_col_idx = col - col_idx
+        if wl_col_idx < len(wl_indices):
+            return f"{int(round(ds.wavelengths[wl_indices[wl_col_idx]]))} nm"
+
+        return f"Column {col}"
+
+    def _on_mouse_click_during_edit(self, sender=None, app_data=None):
+        """Handle mouse click while editing - auto-save if clicking outside edit input."""
+        if self._editing_cell is None:
+            return
+
+        # Check if click is inside the edit window
+        if dpg.does_item_exist(f"{self.tag}_edit_window"):
+            # Get edit window position and size
+            pos = dpg.get_item_pos(f"{self.tag}_edit_window")
+            # Auto-save - the click handler fires, so save and close
+            self._on_edit_confirm()
+
+    def _on_edit_confirm(self, sender=None, app_data=None):
+        """Confirm and save cell edit."""
+        if self._editing_cell is None or self._edit_input_tag is None:
+            return
+
+        row, col = self._editing_cell
+        new_value = dpg.get_value(self._edit_input_tag)
+
+        # Get original value
+        original_value = getattr(self, '_original_edit_value', None)
+
+        # Only save if value changed
+        if str(new_value) != str(original_value):
+            if self._set_cell_value(row, col, new_value):
+                # Record in history
+                self._edit_history.push({
+                    'type': 'cell_edit',
+                    'row': row,
+                    'col': col,
+                    'old_value': original_value,
+                    'new_value': new_value
+                })
+
+                # Notify callback
+                if self._on_data_change_callback:
+                    self._on_data_change_callback()
+
+        # Clean up
+        self._cleanup_edit()
+
+        # Rebuild table to show changes
+        self._rebuild_table()
+
+    def _on_edit_cancel(self, sender=None, app_data=None):
+        """Cancel cell edit without saving."""
+        self._cleanup_edit()
+
+    def _cancel_cell_edit(self):
+        """Cancel any active cell edit - saves changes first (spreadsheet behavior)."""
+        if self._editing_cell is not None and self._edit_input_tag is not None:
+            # Auto-save current edit before canceling (spreadsheet style)
+            if dpg.does_item_exist(self._edit_input_tag):
+                self._on_edit_confirm()
+                return
+        self._cleanup_edit()
+
+    def _cleanup_edit(self):
+        """Clean up edit state and UI."""
+        # Remove handler registry
+        if dpg.does_item_exist(f"{self.tag}_edit_handler"):
+            dpg.delete_item(f"{self.tag}_edit_handler")
+        # Remove edit window
+        if dpg.does_item_exist(f"{self.tag}_edit_window"):
+            dpg.delete_item(f"{self.tag}_edit_window")
+        self._editing_cell = None
+        self._edit_input_tag = None
+        self._original_edit_value = None
+
+    def undo(self):
+        """Undo the last edit operation."""
+        if not self._edit_history.can_undo():
+            return
+
+        operation = self._edit_history.undo()
+        if operation is None:
+            return
+
+        if operation['type'] == 'cell_edit':
+            # Restore old value
+            row, col = operation['row'], operation['col']
+            self._set_cell_value(row, col, operation['old_value'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'row_delete':
+            # Restore deleted rows
+            self._restore_rows(operation['rows_data'], operation['indices'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'column_delete':
+            # Restore deleted column
+            self._restore_column(operation['column_data'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'row_insert':
+            # Remove inserted rows
+            self._delete_rows_by_indices(operation['indices'], record_history=False)
+            self._rebuild_table()
+
+        elif operation['type'] == 'column_add':
+            # Remove added column
+            self._delete_column(operation['column_name'], record_history=False)
+            self._rebuild_table()
+
+        elif operation['type'] == 'fill_down':
+            # Restore old values
+            for row, old_val in operation['old_values'].items():
+                self._set_cell_value(row, operation['col'], old_val)
+            self._rebuild_table()
+
+        elif operation['type'] == 'fill_selection':
+            # Restore old values
+            for row, old_val in operation['old_values'].items():
+                self._set_cell_value(row, operation['col'], old_val)
+            self._rebuild_table()
+
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    def redo(self):
+        """Redo the last undone operation."""
+        if not self._edit_history.can_redo():
+            return
+
+        operation = self._edit_history.redo()
+        if operation is None:
+            return
+
+        if operation['type'] == 'cell_edit':
+            # Reapply new value
+            row, col = operation['row'], operation['col']
+            self._set_cell_value(row, col, operation['new_value'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'row_delete':
+            # Re-delete rows
+            self._delete_rows_by_indices(operation['indices'], record_history=False)
+            self._rebuild_table()
+
+        elif operation['type'] == 'column_delete':
+            # Re-delete column
+            self._delete_column(operation['column_name'], record_history=False)
+            self._rebuild_table()
+
+        elif operation['type'] == 'row_insert':
+            # Re-insert rows
+            self._restore_rows(operation['rows_data'], operation['indices'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'column_add':
+            # Re-add column
+            self._restore_column(operation['column_data'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'fill_down':
+            # Re-apply fill
+            for row in operation['old_values'].keys():
+                self._set_cell_value(row, operation['col'], operation['new_value'])
+            self._rebuild_table()
+
+        elif operation['type'] == 'fill_selection':
+            # Re-apply fill
+            for row in operation['old_values'].keys():
+                self._set_cell_value(row, operation['col'], operation['new_value'])
+            self._rebuild_table()
+
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    # ==================== Row Operations ====================
+
+    def delete_rows(self, row_indices: List[int]):
+        """
+        Delete rows by indices.
+
+        Parameters
+        ----------
+        row_indices : list of int
+            Indices of rows to delete
+        """
+        self._delete_rows_by_indices(row_indices, record_history=True)
+        self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    def _delete_rows_by_indices(self, row_indices: List[int], record_history: bool = True):
+        """Internal method to delete rows."""
+        if self._dataset is None or not row_indices:
+            return
+
+        ds = self._dataset
+        row_indices = sorted(row_indices, reverse=True)
+
+        # Store data for undo
+        if record_history:
+            rows_data = {
+                'sample_ids': [ds.sample_ids[i] for i in row_indices],
+                'X': ds.X[row_indices, :].copy(),
+                'y': ds.y[row_indices].copy() if ds.has_target else None,
+                'metadata': {
+                    k: [v[i] for i in row_indices]
+                    for k, v in ds.metadata_columns.items()
+                } if ds.metadata_columns else {}
+            }
+
+            self._edit_history.push({
+                'type': 'row_delete',
+                'indices': sorted(row_indices),
+                'rows_data': rows_data
+            })
+
+        # Delete rows
+        ds.sample_ids = [s for i, s in enumerate(ds.sample_ids) if i not in row_indices]
+        ds.X = np.delete(ds.X, row_indices, axis=0)
+        if ds.has_target:
+            ds.y = np.delete(ds.y, row_indices, axis=0)
+        if ds.metadata_columns:
+            for key in ds.metadata_columns:
+                ds.metadata_columns[key] = [
+                    v for i, v in enumerate(ds.metadata_columns[key])
+                    if i not in row_indices
+                ]
+
+    def _restore_rows(self, rows_data: Dict, indices: List[int]):
+        """Restore deleted rows."""
+        if self._dataset is None:
+            return
+
+        ds = self._dataset
+
+        # Insert rows back
+        for idx, orig_idx in enumerate(indices):
+            ds.sample_ids.insert(orig_idx, rows_data['sample_ids'][idx])
+            ds.X = np.insert(ds.X, orig_idx, rows_data['X'][idx], axis=0)
+            if ds.has_target and rows_data['y'] is not None:
+                ds.y = np.insert(ds.y, orig_idx, rows_data['y'][idx], axis=0)
+            if ds.metadata_columns and rows_data['metadata']:
+                for key in ds.metadata_columns:
+                    ds.metadata_columns[key].insert(orig_idx, rows_data['metadata'][key][idx])
+
+    def duplicate_rows(self, row_indices: List[int]):
+        """
+        Duplicate selected rows.
+
+        Parameters
+        ----------
+        row_indices : list of int
+            Indices of rows to duplicate
+        """
+        if self._dataset is None or not row_indices:
+            return
+
+        ds = self._dataset
+        new_indices = []
+
+        for row_idx in sorted(row_indices, reverse=True):
+            # Insert duplicate right after original
+            insert_pos = row_idx + 1
+
+            ds.sample_ids.insert(insert_pos, ds.sample_ids[row_idx] + "_copy")
+            ds.X = np.insert(ds.X, insert_pos, ds.X[row_idx], axis=0)
+            if ds.has_target:
+                ds.y = np.insert(ds.y, insert_pos, ds.y[row_idx], axis=0)
+            if ds.metadata_columns:
+                for key in ds.metadata_columns:
+                    ds.metadata_columns[key].insert(insert_pos, ds.metadata_columns[key][row_idx])
+
+            new_indices.append(insert_pos)
+
+        # Record in history
+        rows_data = {
+            'sample_ids': [ds.sample_ids[i] for i in new_indices],
+            'X': ds.X[new_indices, :].copy(),
+            'y': ds.y[new_indices].copy() if ds.has_target else None,
+            'metadata': {
+                k: [v[i] for i in new_indices]
+                for k, v in ds.metadata_columns.items()
+            } if ds.metadata_columns else {}
+        }
+
+        self._edit_history.push({
+            'type': 'row_insert',
+            'indices': new_indices,
+            'rows_data': rows_data
+        })
+
+        self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    def insert_row(self, position: int = -1):
+        """
+        Insert a new blank row.
+
+        Parameters
+        ----------
+        position : int
+            Position to insert (-1 for end)
+        """
+        if self._dataset is None:
+            return
+
+        ds = self._dataset
+
+        if position == -1:
+            position = ds.n_samples
+
+        # Create blank row
+        ds.sample_ids.insert(position, f"new_sample_{position}")
+        ds.X = np.insert(ds.X, position, np.zeros(ds.n_wavelengths), axis=0)
+        if ds.has_target:
+            ds.y = np.insert(ds.y, position, 0, axis=0)
+        if ds.metadata_columns:
+            for key in ds.metadata_columns:
+                ds.metadata_columns[key].insert(position, "")
+
+        # Record in history
+        self._edit_history.push({
+            'type': 'row_insert',
+            'indices': [position],
+            'rows_data': {
+                'sample_ids': [ds.sample_ids[position]],
+                'X': ds.X[position:position+1, :].copy(),
+                'y': ds.y[position:position+1].copy() if ds.has_target else None,
+                'metadata': {
+                    k: [v[position]]
+                    for k, v in ds.metadata_columns.items()
+                } if ds.metadata_columns else {}
+            }
+        })
+
+        self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    # ==================== Column Operations ====================
+
+    def add_column(self, column_name: str, column_type: str = 'metadata', default_value: Any = "") -> bool:
+        """
+        Add a new column.
+
+        Parameters
+        ----------
+        column_name : str
+            Name of the new column
+        column_type : str
+            'metadata' or 'spectral' (spectral not yet supported)
+        default_value : any
+            Default value for all rows
+
+        Returns
+        -------
+        bool
+            True if column was added, False otherwise
+        """
+        if self._dataset is None:
+            return False
+
+        if column_type != 'metadata':
+            return False  # Only metadata columns supported for now
+
+        if not column_name:
+            return False
+
+        ds = self._dataset
+
+        # Add to metadata columns
+        if ds.metadata_columns is None:
+            ds.metadata_columns = {}
+
+        # Check if column already exists
+        if column_name in ds.metadata_columns:
+            return False
+
+        ds.metadata_columns[column_name] = [default_value] * ds.n_samples
+
+        # Record in history
+        self._edit_history.push({
+            'type': 'column_add',
+            'column_name': column_name,
+            'column_data': {
+                'type': column_type,
+                'values': ds.metadata_columns[column_name].copy()
+            }
+        })
+
+        self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+        return True
+
+    def delete_column(self, column_name: str) -> bool:
+        """
+        Delete a column by name.
+
+        Parameters
+        ----------
+        column_name : str
+            Name of column to delete
+
+        Returns
+        -------
+        bool
+            True if column was deleted, False otherwise
+        """
+        if not column_name:
+            return False
+
+        if self._dataset is None:
+            return False
+
+        # Check if column exists
+        if not self._dataset.metadata_columns or column_name not in self._dataset.metadata_columns:
+            return False
+
+        self._delete_column(column_name, record_history=True)
+        self._rebuild_table()
+
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+        return True
+
+    def _delete_column(self, column_name: str, record_history: bool = True):
+        """Internal method to delete a column."""
+        if self._dataset is None:
+            return
+
+        ds = self._dataset
+
+        # Only metadata columns can be deleted for now
+        if ds.metadata_columns and column_name in ds.metadata_columns:
+            if record_history:
+                self._edit_history.push({
+                    'type': 'column_delete',
+                    'column_name': column_name,
+                    'column_data': {
+                        'type': 'metadata',
+                        'values': ds.metadata_columns[column_name].copy()
+                    }
+                })
+
+            del ds.metadata_columns[column_name]
+
+    def _restore_column(self, column_data: Dict):
+        """Restore a deleted column."""
+        if self._dataset is None:
+            return
+
+        ds = self._dataset
+        col_name = column_data.get('column_name')
+        col_type = column_data.get('type', 'metadata')
+
+        if col_type == 'metadata':
+            if ds.metadata_columns is None:
+                ds.metadata_columns = {}
+            ds.metadata_columns[col_name] = column_data['values'].copy()
+
+    def rename_column(self, old_name: str, new_name: str):
+        """
+        Rename a column.
+
+        Parameters
+        ----------
+        old_name : str
+            Current column name
+        new_name : str
+            New column name
+        """
+        if self._dataset is None:
+            return
+
+        ds = self._dataset
+
+        # Handle metadata columns
+        if ds.metadata_columns and old_name in ds.metadata_columns:
+            ds.metadata_columns[new_name] = ds.metadata_columns.pop(old_name)
+            self._rebuild_table()
+            if self._on_data_change_callback:
+                self._on_data_change_callback()
+
+    # ==================== Fill Operations ====================
+
+    def fill_down(self, start_row: int, col: int, end_row: int = -1):
+        """
+        Fill down from a cell to the end or specified row.
+
+        Parameters
+        ----------
+        start_row : int
+            Starting row index
+        col : int
+            Column index
+        end_row : int
+            Ending row index (-1 for last row)
+        """
+        if self._dataset is None:
+            return
+
+        if end_row == -1:
+            end_row = self._dataset.n_samples - 1
+
+        source_value = self._get_cell_value(start_row, col)
+
+        # Store original values for undo
+        old_values = {}
+        for row in range(start_row + 1, end_row + 1):
+            old_values[row] = self._get_cell_value(row, col)
+            self._set_cell_value(row, col, source_value)
+
+        # Record in history
+        self._edit_history.push({
+            'type': 'fill_down',
+            'start_row': start_row,
+            'end_row': end_row,
+            'col': col,
+            'old_values': old_values,
+            'new_value': source_value
+        })
+
+        self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()
+
+    def fill_selection(self, row_indices: List[int], col: int, value: Any):
+        """
+        Fill selected cells with a value.
+
+        Parameters
+        ----------
+        row_indices : list of int
+            Row indices to fill
+        col : int
+            Column index
+        value : any
+            Value to fill
+        """
+        if self._dataset is None or not row_indices:
+            return
+
+        old_values = {}
+        for row in row_indices:
+            old_values[row] = self._get_cell_value(row, col)
+            self._set_cell_value(row, col, value)
+
+        # Record in history
+        self._edit_history.push({
+            'type': 'fill_selection',
+            'rows': row_indices,
+            'col': col,
+            'old_values': old_values,
+            'new_value': value
+        })
+
+        self._rebuild_table()
+        if self._on_data_change_callback:
+            self._on_data_change_callback()

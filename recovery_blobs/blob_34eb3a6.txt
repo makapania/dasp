@@ -1,0 +1,462 @@
+"""
+Interval Partial Least Squares (iPLS) for spectral region selection.
+
+Based on:
+    Nørgaard et al. (2000). "Interval partial least-squares regression (iPLS):
+    A comparative chemometric study with an example from near-infrared
+    spectroscopy." Applied Spectroscopy, 54: 413-419.
+
+    Xiaobo et al. (2010). Section 4.5.1, pages 26-27.
+
+iPLS divides the spectrum into intervals and tests each separately with PLS,
+providing a graphical overview of the most informative spectral regions.
+This differs from correlation-based region analysis by using actual PLS
+model performance.
+"""
+
+import numpy as np
+from sklearn.base import BaseEstimator
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import cross_val_predict
+import warnings
+
+
+class IntervalPLS(BaseEstimator):
+    """
+    Interval Partial Least Squares for spectral region selection.
+
+    Divides spectrum into equal-width intervals, builds separate PLS models
+    for each interval, and ranks them by cross-validation performance.
+
+    Parameters
+    ----------
+    n_intervals : int, optional (default=20)
+        Number of intervals to divide spectrum into
+
+    max_n_components : int, optional (default=10)
+        Maximum number of PLS components to test per interval
+
+    cv_folds : int, optional (default=None)
+        Number of cross-validation folds. If None, uses leave-one-out.
+
+    optimize_components : bool, optional (default=True)
+        Whether to optimize number of components per interval.
+        If False, uses max_n_components for all intervals.
+
+    verbose : bool, optional (default=False)
+        Whether to print progress information
+
+    Attributes
+    ----------
+    interval_results_ : list of dict
+        Results for each interval containing:
+        - 'interval_idx': Interval number
+        - 'start_idx': Starting feature index
+        - 'end_idx': Ending feature index (exclusive)
+        - 'n_features': Number of features in interval
+        - 'optimal_n_components': Best number of components
+        - 'rmsecv': Root mean squared error of cross-validation
+        - 'r2': R-squared score
+
+    full_spectrum_result_ : dict
+        Results for full-spectrum model (same structure as interval_results_)
+
+    best_interval_idx_ : int
+        Index of best-performing interval
+
+    ranked_intervals_ : ndarray
+        Interval indices ranked by performance (best first)
+
+    n_intervals_ : int
+        Actual number of intervals created
+
+    interval_boundaries_ : list of tuple
+        (start_idx, end_idx) for each interval
+    """
+
+    def __init__(self, n_intervals=20, max_n_components=10, cv_folds=None,
+                 optimize_components=True, verbose=False):
+        self.n_intervals = n_intervals
+        self.max_n_components = max_n_components
+        self.cv_folds = cv_folds
+        self.optimize_components = optimize_components
+        self.verbose = verbose
+
+    def _create_intervals(self, n_features):
+        """
+        Divide features into equal-width intervals.
+
+        Parameters
+        ----------
+        n_features : int
+            Total number of features
+
+        Returns
+        -------
+        intervals : list of tuple
+            (start_idx, end_idx) for each interval
+        """
+        # Calculate interval width
+        interval_width = n_features // self.n_intervals
+
+        if interval_width < 1:
+            warnings.warn(
+                f"Too many intervals ({self.n_intervals}) for {n_features} features. "
+                f"Reducing to {n_features} intervals."
+            )
+            interval_width = 1
+            n_intervals = n_features
+        else:
+            n_intervals = self.n_intervals
+
+        intervals = []
+        for i in range(n_intervals):
+            start_idx = i * interval_width
+
+            # Last interval includes any remaining features
+            if i == n_intervals - 1:
+                end_idx = n_features
+            else:
+                end_idx = (i + 1) * interval_width
+
+            if end_idx > start_idx:  # Valid interval
+                intervals.append((start_idx, end_idx))
+
+        return intervals
+
+    def _optimize_n_components(self, X, y, max_comp):
+        """
+        Find optimal number of PLS components via cross-validation.
+
+        Parameters
+        ----------
+        X : ndarray
+            Spectra data for this interval
+        y : ndarray
+            Target values
+        max_comp : int
+            Maximum components to test
+
+        Returns
+        -------
+        optimal_n : int
+            Optimal number of components
+        best_rmsecv : float
+            Best RMSECV achieved
+        """
+        n_samples = X.shape[0]
+
+        # Determine CV folds
+        if self.cv_folds is None:
+            cv = min(n_samples, 10)  # LOO if n_samples <= 10, else 10-fold
+        else:
+            cv = min(self.cv_folds, n_samples)
+
+        # Limit max components
+        max_comp = min(max_comp, n_samples - 1, X.shape[1])
+
+        best_rmsecv = np.inf
+        optimal_n = 1
+
+        for n_comp in range(1, max_comp + 1):
+            try:
+                pls = PLSRegression(n_components=n_comp)
+                y_pred = cross_val_predict(pls, X, y, cv=cv)
+                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+
+                if rmsecv < best_rmsecv:
+                    best_rmsecv = rmsecv
+                    optimal_n = n_comp
+
+            except Exception as e:
+                if self.verbose:
+                    warnings.warn(f"Component {n_comp} failed: {e}")
+                break
+
+        return optimal_n, best_rmsecv
+
+    def _evaluate_interval(self, X_interval, y, interval_info):
+        """
+        Build and evaluate PLS model for one interval.
+
+        Parameters
+        ----------
+        X_interval : ndarray
+            Spectra data for this interval
+        y : ndarray
+            Target values
+        interval_info : dict
+            Information about the interval
+
+        Returns
+        -------
+        result : dict
+            Results for this interval
+        """
+        n_features = X_interval.shape[1]
+
+        if n_features == 0:
+            return None
+
+        # Optimize number of components
+        if self.optimize_components:
+            optimal_n_comp, rmsecv = self._optimize_n_components(
+                X_interval, y, self.max_n_components
+            )
+        else:
+            optimal_n_comp = min(self.max_n_components, X_interval.shape[0] - 1, n_features)
+
+            # Evaluate with fixed components
+            try:
+                pls = PLSRegression(n_components=optimal_n_comp)
+                cv = self.cv_folds if self.cv_folds else len(y)
+                y_pred = cross_val_predict(pls, X_interval, y, cv=min(cv, len(y)))
+                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+            except Exception as e:
+                warnings.warn(f"Interval evaluation failed: {e}")
+                rmsecv = np.inf
+
+        # Calculate R²
+        try:
+            pls = PLSRegression(n_components=optimal_n_comp)
+            cv = self.cv_folds if self.cv_folds else len(y)
+            y_pred = cross_val_predict(pls, X_interval, y, cv=min(cv, len(y)))
+
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r2 = 1 - (ss_res / ss_tot)
+        except Exception:
+            r2 = np.nan
+
+        result = {
+            **interval_info,
+            'optimal_n_components': optimal_n_comp,
+            'rmsecv': rmsecv,
+            'r2': r2,
+        }
+
+        return result
+
+    def fit(self, X, y, wavelengths=None):
+        """
+        Perform interval PLS analysis.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Spectra data
+        y : ndarray of shape (n_samples,)
+            Target values
+        wavelengths : ndarray, optional
+            Wavelength values for each feature (for reporting)
+
+        Returns
+        -------
+        self : object
+            Fitted estimator
+        """
+        X = np.asarray(X)
+        y = np.asarray(y).ravel()
+
+        n_samples, n_features = X.shape
+
+        if self.verbose:
+            print("=" * 60)
+            print("INTERVAL PLS (iPLS) ANALYSIS")
+            print("=" * 60)
+            print(f"Samples: {n_samples}")
+            print(f"Features: {n_features}")
+            print(f"Target intervals: {self.n_intervals}")
+            print(f"Max components per interval: {self.max_n_components}")
+
+        # Create intervals
+        intervals = self._create_intervals(n_features)
+        self.n_intervals_ = len(intervals)
+        self.interval_boundaries_ = intervals
+
+        if self.verbose:
+            print(f"Actual intervals created: {self.n_intervals_}")
+            print(f"Average interval width: {n_features / self.n_intervals_:.1f} features")
+
+        # Evaluate each interval
+        interval_results = []
+
+        for i, (start_idx, end_idx) in enumerate(intervals):
+            if self.verbose:
+                print(f"\nEvaluating interval {i+1}/{self.n_intervals_}: "
+                      f"features {start_idx}-{end_idx-1} ({end_idx-start_idx} vars)")
+
+            X_interval = X[:, start_idx:end_idx]
+
+            interval_info = {
+                'interval_idx': i,
+                'start_idx': start_idx,
+                'end_idx': end_idx,
+                'n_features': end_idx - start_idx,
+            }
+
+            # Add wavelength info if provided
+            if wavelengths is not None:
+                interval_info['start_wavelength'] = wavelengths[start_idx]
+                interval_info['end_wavelength'] = wavelengths[end_idx - 1]
+                interval_info['center_wavelength'] = wavelengths[(start_idx + end_idx) // 2]
+
+            result = self._evaluate_interval(X_interval, y, interval_info)
+
+            if result is not None:
+                interval_results.append(result)
+
+                if self.verbose:
+                    print(f"  Optimal components: {result['optimal_n_components']}")
+                    print(f"  RMSECV: {result['rmsecv']:.6f}")
+                    print(f"  R²: {result['r2']:.4f}")
+
+        self.interval_results_ = interval_results
+
+        # Evaluate full spectrum for comparison
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print("FULL SPECTRUM MODEL (for comparison)")
+            print(f"{'='*60}")
+
+        full_info = {
+            'interval_idx': -1,  # Special marker for full spectrum
+            'start_idx': 0,
+            'end_idx': n_features,
+            'n_features': n_features,
+        }
+
+        if wavelengths is not None:
+            full_info['start_wavelength'] = wavelengths[0]
+            full_info['end_wavelength'] = wavelengths[-1]
+            full_info['center_wavelength'] = wavelengths[n_features // 2]
+
+        self.full_spectrum_result_ = self._evaluate_interval(X, y, full_info)
+
+        if self.verbose and self.full_spectrum_result_:
+            print(f"  Optimal components: {self.full_spectrum_result_['optimal_n_components']}")
+            print(f"  RMSECV: {self.full_spectrum_result_['rmsecv']:.6f}")
+            print(f"  R²: {self.full_spectrum_result_['r2']:.4f}")
+
+        # Rank intervals by performance (lowest RMSECV = best)
+        rmsecv_values = [r['rmsecv'] for r in interval_results]
+        self.ranked_intervals_ = np.argsort(rmsecv_values)
+        self.best_interval_idx_ = self.ranked_intervals_[0]
+
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print("RESULTS SUMMARY")
+            print(f"{'='*60}")
+            print(f"Best interval: #{self.best_interval_idx_} "
+                  f"(RMSECV = {interval_results[self.best_interval_idx_]['rmsecv']:.6f})")
+            print(f"Full spectrum RMSECV: {self.full_spectrum_result_['rmsecv']:.6f}")
+
+            improvement = (self.full_spectrum_result_['rmsecv'] -
+                          interval_results[self.best_interval_idx_]['rmsecv'])
+            if improvement > 0:
+                print(f"Improvement: {improvement:.6f} ({100*improvement/self.full_spectrum_result_['rmsecv']:.1f}%)")
+            else:
+                print("Full spectrum performs better")
+
+        return self
+
+    def get_best_interval(self):
+        """
+        Get the best-performing interval.
+
+        Returns
+        -------
+        result : dict
+            Result dictionary for best interval
+        """
+        if not hasattr(self, 'interval_results_'):
+            raise RuntimeError("Must call fit() before get_best_interval()")
+
+        return self.interval_results_[self.best_interval_idx_]
+
+    def get_ranked_intervals(self, top_n=None):
+        """
+        Get intervals ranked by performance.
+
+        Parameters
+        ----------
+        top_n : int, optional
+            Return only top N intervals. If None, returns all.
+
+        Returns
+        -------
+        ranked_results : list of dict
+            Interval results ranked by performance (best first)
+        """
+        if not hasattr(self, 'interval_results_'):
+            raise RuntimeError("Must call fit() before get_ranked_intervals()")
+
+        ranked = [self.interval_results_[i] for i in self.ranked_intervals_]
+
+        if top_n is not None:
+            ranked = ranked[:top_n]
+
+        return ranked
+
+    def get_visualization_data(self):
+        """
+        Get data for creating iPLS visualization plots.
+
+        Returns
+        -------
+        plot_data : dict
+            Dictionary containing:
+            - 'interval_indices': Interval numbers
+            - 'rmsecv_values': RMSECV for each interval
+            - 'r2_values': R² for each interval
+            - 'n_components': Optimal components per interval
+            - 'full_spectrum_rmsecv': Full spectrum RMSECV
+            - 'interval_centers': Center feature index of each interval
+        """
+        if not hasattr(self, 'interval_results_'):
+            raise RuntimeError("Must call fit() before get_visualization_data()")
+
+        plot_data = {
+            'interval_indices': [r['interval_idx'] for r in self.interval_results_],
+            'rmsecv_values': [r['rmsecv'] for r in self.interval_results_],
+            'r2_values': [r['r2'] for r in self.interval_results_],
+            'n_components': [r['optimal_n_components'] for r in self.interval_results_],
+            'full_spectrum_rmsecv': self.full_spectrum_result_['rmsecv'],
+            'full_spectrum_r2': self.full_spectrum_result_['r2'],
+            'interval_centers': [(r['start_idx'] + r['end_idx']) // 2
+                                for r in self.interval_results_],
+        }
+
+        # Add wavelength data if available
+        if 'center_wavelength' in self.interval_results_[0]:
+            plot_data['center_wavelengths'] = [r['center_wavelength']
+                                              for r in self.interval_results_]
+
+        return plot_data
+
+    def transform(self, X, use_best_interval=True):
+        """
+        Select variables from best interval(s).
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Spectra data
+        use_best_interval : bool, optional (default=True)
+            If True, returns only best interval.
+            If False, returns full spectrum.
+
+        Returns
+        -------
+        X_selected : ndarray
+            Selected spectral region
+        """
+        if not hasattr(self, 'interval_results_'):
+            raise RuntimeError("Must call fit() before transform()")
+
+        if use_best_interval:
+            best = self.get_best_interval()
+            return X[:, best['start_idx']:best['end_idx']]
+        else:
+            return X

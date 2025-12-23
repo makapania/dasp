@@ -1,0 +1,380 @@
+# Tab 7 Model Development - UI Layout Diagram
+
+Visual reference for the complete Tab 7 UI layout.
+
+---
+
+## Full Tab Layout
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Tab 7: 🔬 Model Development                                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  ╔═══════════════════════════════════════════════════════════════════════════╗ │
+│  ║  HEADER SECTION                                                           ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════════╣ │
+│  ║  Model Development     Mode: Fresh Development          [🔄 Reset]        ║ │
+│  ║  ─────────────────────────────────────────────────────────────────────    ║ │
+│  ║  ┌─ Configuration Info ───────────────────────────────────────────────┐  ║ │
+│  ║  │ 🆕 Fresh Development Mode                                          │  ║ │
+│  ║  │ Configure all parameters below to develop a new model...           │  ║ │
+│  ║  │ Or switch to Results tab and click 'Load to Model Development'...  │  ║ │
+│  ║  │ (5 lines, read-only, shows loaded model info when loaded)          │  ║ │
+│  ║  └────────────────────────────────────────────────────────────────────┘  ║ │
+│  ╚═══════════════════════════════════════════════════════════════════════════╝ │
+│                                                                                 │
+│  ╔═══════════════════════════════════════════════════════════════════════════╗ │
+│  ║  MODEL PARAMETERS                                                         ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════════╣ │
+│  ║                                                                           ║ │
+│  ║  ┌─── LEFT COLUMN ──────────────┐  ┌─── RIGHT COLUMN ─────────────────┐ ║ │
+│  ║  │                              │  │                                   │ ║ │
+│  ║  │ Model Type:     [PLS      ▼] │  │ Wavelength Specification:        │ ║ │
+│  ║  │ Task Type:      [regression▼]│  │ (One per line, or ranges)        │ ║ │
+│  ║  │ Backend:        [python    ▼]│  │ ┌────────────────────────────┐  │ ║ │
+│  ║  │ Preprocessing:  [raw       ▼]│  │ │                            │  │ ║ │
+│  ║  │                              │  │ │  [wavelength text input]   │  │ ║ │
+│  ║  │ Window Size:                 │  │ │  [4 lines, scrollable]     │  │ ║ │
+│  ║  │  ○ 7  ● 11  ○ 17  ○ 19      │  │ │                            │ ║ │ │
+│  ║  │                              │  │ └────────────────────────────┘  │ ║ │
+│  ║  │ CV Folds:       [5     ▲▼]   │  │                                   │ ║ │
+│  ║  │                              │  │ Presets:                          │ ║ │
+│  ║  │                              │  │ [All] [NIR] [Visible] [Custom...] │ ║ │
+│  ║  │                              │  │                                   │ ║ │
+│  ║  │                              │  │ Wavelengths: 0                    │ ║ │
+│  ║  │                              │  │                                   │ ║ │
+│  ║  │                              │  │ ┌─ Hyperparameters ───────────┐  │ ║ │
+│  ║  │                              │  │ │                             │  │ ║ │
+│  ║  │                              │  │ │ [Dynamic based on model]    │  │ ║ │
+│  ║  │                              │  │ │                             │  │ ║ │
+│  ║  │                              │  │ │ PLS: n_components           │  │ ║ │
+│  ║  │                              │  │ │ Ridge: alpha                │  │ ║ │
+│  ║  │                              │  │ │ etc...                      │  │ ║ │
+│  ║  │                              │  │ │                             │  │ ║ │
+│  ║  │                              │  │ └─────────────────────────────┘  │ ║ │
+│  ║  └──────────────────────────────┘  └───────────────────────────────────┘ ║ │
+│  ╚═══════════════════════════════════════════════════════════════════════════╝ │
+│                                                                                 │
+│  ╔═══════════════════════════════════════════════════════════════════════════╗ │
+│  ║  ACTIONS                                                                  ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════════╣ │
+│  ║  [▶ Run Model Development]  [💾 Save Model (disabled)]                    ║ │
+│  ╚═══════════════════════════════════════════════════════════════════════════╝ │
+│                                                                                 │
+│  ╔═══════════════════════════════════════════════════════════════════════════╗ │
+│  ║  RESULTS                                                                  ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════════╣ │
+│  ║  ┌─────────────────────────────────────────────────────────────────────┐  ║ │
+│  ║  │ No results yet. Configure parameters and click 'Run Model'...       │  ║ │
+│  ║  │                                                                       │  ║ │
+│  ║  │ [After running, shows:]                                               │  ║ │
+│  ║  │ - R² score                                                            │  ║ │
+│  ║  │ - RMSE, MAE                                                           │  ║ │
+│  ║  │ - Fold-by-fold results                                                │  ║ │
+│  ║  │ (8 lines, read-only, monospace font)                                  │  ║ │
+│  ║  └─────────────────────────────────────────────────────────────────────┘  ║ │
+│  ╚═══════════════════════════════════════════════════════════════════════════╝ │
+│                                                                                 │
+│  ╔═══════════════════════════════════════════════════════════════════════════╗ │
+│  ║  DIAGNOSTIC PLOTS                                                         ║ │
+│  ╠═══════════════════════════════════════════════════════════════════════════╣ │
+│  ║  ┌─ Prediction Plot ─┐  ┌─ Residual Diagnostics ┐  ┌─ Model Comparison ┐║ │
+│  ║  │                   │  │                        │  │                    │║ │
+│  ║  │                   │  │                        │  │                    │║ │
+│  ║  │   [Placeholder]   │  │    [Placeholder]       │  │   [Placeholder]    │║ │
+│  ║  │                   │  │                        │  │                    │║ │
+│  ║  │   300 x 250 px    │  │     300 x 250 px       │  │    300 x 250 px    │║ │
+│  ║  │                   │  │                        │  │                    │║ │
+│  ║  └───────────────────┘  └────────────────────────┘  └────────────────────┘║ │
+│  ╚═══════════════════════════════════════════════════════════════════════════╝ │
+│                                                                                 │
+│  Status: Ready. Configure parameters and run model.                            │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Section Details
+
+### 1. Header Section
+**Size:** Full width, ~150px height
+**Contents:**
+- Title (left): "Model Development" (24pt bold)
+- Mode label (center): "Mode: Fresh Development" (14pt, green)
+- Reset button (right): "🔄 Reset to Fresh" (10pt)
+- Config text (below): 5-line read-only text showing model info
+
+**Purpose:** Shows current mode and allows reset
+
+---
+
+### 2. Model Parameters Section
+**Size:** Full width, ~400px height
+**Layout:** 2 equal columns (50/50 split)
+
+#### Left Column (~40% width)
+1. **Model Type** - Combobox (6 options)
+2. **Task Type** - Combobox (2 options)
+3. **Backend** - Combobox (1 option for now)
+4. **Preprocessing** - Combobox (11 options)
+5. **Window Size** - Radio buttons (4 options)
+6. **CV Folds** - Spinbox (3-10)
+
+#### Right Column (~60% width)
+1. **Wavelength Spec** - Text widget (4 lines, scrollable)
+2. **Preset Buttons** - 4 buttons (All, NIR, Visible, Custom)
+3. **Wavelength Count** - Label (updates real-time)
+4. **Hyperparameters** - Dynamic frame (changes with model type)
+
+---
+
+### 3. Actions Section
+**Size:** Full width, ~60px height
+**Contents:**
+- Run button (left): Large accent button
+- Save button (right): Regular button, disabled initially
+
+---
+
+### 4. Results Section
+**Size:** Full width, ~180px height
+**Contents:**
+- 8-line text widget showing:
+  - Cross-validation metrics
+  - R², RMSE, MAE
+  - Per-fold results
+  - Feature importance (if applicable)
+
+---
+
+### 5. Diagnostic Plots Section
+**Size:** Full width, ~280px height
+**Layout:** 3 equal columns (33/33/33 split)
+
+#### Plot 1: Prediction (left)
+- Observed vs Predicted scatter
+- 1:1 reference line
+- R² annotation
+
+#### Plot 2: Residuals (center)
+- Residuals vs Predicted
+- Zero reference line
+- Outlier detection
+
+#### Plot 3: Comparison (right)
+- Multiple runs comparison
+- Bar chart or line plot
+- Legend for runs
+
+---
+
+### 6. Status Bar
+**Size:** Full width, ~30px height
+**Contents:**
+- Status label with real-time updates
+- Gray text, small font
+
+---
+
+## Hyperparameter Variations
+
+### PLS Model
+```
+┌─ Hyperparameters ──────┐
+│ n_components:   [10▲▼] │
+│ (1-50, default 10)     │
+│ Help: Number of PLS... │
+└────────────────────────┘
+```
+
+### Ridge/Lasso Model
+```
+┌─ Hyperparameters ──────┐
+│ alpha:         [1.0   ]│
+│ Help: Regularization...│
+└────────────────────────┘
+```
+
+### RandomForest Model
+```
+┌─ Hyperparameters ──────────┐
+│ n_estimators:     [100 ▲▼] │
+│ max_depth:        [None  ] │
+│ max_features:     [sqrt ▼] │
+│ Help: Configure ensemble...│
+└────────────────────────────┘
+```
+
+### MLP Model
+```
+┌─ Hyperparameters ──────────┐
+│ hidden_layer_sizes: [(100,)]│
+│ learning_rate_init: [0.001] │
+│ Help: Format: (100,50)...  │
+└────────────────────────────┘
+```
+
+### NeuralBoosted Model
+```
+┌─ Hyperparameters ──────────┐
+│ n_estimators:       [50 ▲▼]│
+│ learning_rate:      [0.1  ]│
+│ hidden_layer_size:  [10▲▼] │
+│ Help: Boosted neural...    │
+└────────────────────────────┘
+```
+
+---
+
+## Color Scheme
+
+```
+Background:      #F5F5F5  (light gray)
+Panel:           #FFFFFF  (white)
+Text:            #2C3E50  (dark gray)
+Text Light:      #7F8C8D  (medium gray)
+Accent:          #3498DB  (blue)
+Success:         #27AE60  (green)
+Border:          #E8E8E8  (light border)
+Shadow:          #D0D0D0  (shadow)
+```
+
+---
+
+## Widget Dimensions
+
+| Widget | Width | Height | Notes |
+|--------|-------|--------|-------|
+| Combobox | 200px | 30px | Standard |
+| Entry | 200px | 30px | Standard |
+| Spinbox | 180px | 30px | Slightly smaller |
+| Radio buttons | 40px each | 25px | 4 buttons = 160px total |
+| Text (wavelength) | 350px | 80px | 4 lines |
+| Text (config) | 100% | 100px | 5 lines |
+| Text (results) | 100% | 160px | 8 lines |
+| Plot frame | 300px | 250px | Fixed size |
+| Button (normal) | 150px | 35px | Standard |
+| Button (accent) | 200px | 45px | Larger |
+
+---
+
+## Spacing & Padding
+
+- **Outer padding:** 30px all sides
+- **Section spacing:** 20px between sections
+- **Widget spacing:** 5px vertical between widgets
+- **Column gap:** 20px between left/right columns
+- **Plot gap:** 5px between plot frames
+
+---
+
+## Font Sizes
+
+| Element | Font | Size | Weight |
+|---------|------|------|--------|
+| Title | Segoe UI | 24pt | Bold |
+| Heading | Segoe UI | 14pt | Bold |
+| Subheading | Segoe UI | 11pt | Bold |
+| Label | Segoe UI | 10pt | Normal |
+| Caption | Segoe UI | 9pt | Normal |
+| Text (mono) | Consolas | 9-10pt | Normal |
+
+---
+
+## Responsive Behavior
+
+### Window Width < 1200px
+- Single column layout (left over right)
+- Plot frames stack vertically
+
+### Window Width > 1600px
+- Maximum content width: 1400px
+- Centered with margins
+
+### Vertical Scrolling
+- Canvas with scrollbar
+- Content scrolls smoothly
+- Fixed header at top (doesn't scroll)
+
+---
+
+## Interaction Flow
+
+```
+User Action                     → UI Response
+─────────────────────────────────────────────────
+Select model type               → Hyperparameters update
+Type wavelengths                → Count updates (real-time)
+Click preset button             → Wavelengths populate
+Click "Custom Range"            → Dialog opens
+Click "Reset"                   → Confirmation → Reset all
+Click "Run Model"               → Status updates → (Phase 4)
+Complete run                    → Results show → Save enabled
+Click "Save Model"              → File dialog → Save
+```
+
+---
+
+## State Transitions
+
+```
+Initial State:
+├─ Mode: Fresh Development (green)
+├─ Config: Fresh mode message
+├─ All controls: Default values
+├─ Results: Placeholder text
+├─ Plots: Placeholder labels
+├─ Save button: Disabled
+└─ Status: "Ready..."
+
+After Loading Model (Phase 3):
+├─ Mode: "Loaded from Results (Rank X)" (blue)
+├─ Config: Shows loaded model details
+├─ All controls: Populated from model
+├─ Results: Previous results (if available)
+├─ Plots: Previous plots (if available)
+├─ Save button: Enabled if run completed
+└─ Status: "Model loaded..."
+
+After Running Model (Phase 4):
+├─ Mode: Unchanged
+├─ Config: Unchanged
+├─ Controls: Unchanged (can be modified)
+├─ Results: Shows CV metrics
+├─ Plots: Shows diagnostic plots
+├─ Save button: Enabled
+└─ Status: "Run complete. R²=..."
+
+After Reset:
+├─ Return to Initial State
+└─ All history cleared
+```
+
+---
+
+## Accessibility Features
+
+✅ **Keyboard Navigation:** All controls support Tab navigation
+✅ **Clear Labels:** Every input has descriptive label
+✅ **Help Text:** Contextual help for complex parameters
+✅ **Status Updates:** Real-time feedback on actions
+✅ **Confirmation Dialogs:** Destructive actions require confirmation
+✅ **Readable Fonts:** Segoe UI for clarity, Consolas for code
+✅ **Color Contrast:** High contrast for text on backgrounds
+✅ **Scrollable Content:** Long pages don't clip
+
+---
+
+## Browser/Platform Compatibility
+
+✅ **Windows:** Primary platform (Segoe UI native)
+✅ **macOS:** Falls back to system fonts
+✅ **Linux:** Uses GTK theme integration
+✅ **High DPI:** Scales correctly on 4K displays
+✅ **Small Screens:** Scrollable with minimum width
+
+---
+
+This layout provides a professional, intuitive interface for model development with clear visual hierarchy and logical grouping of related controls.

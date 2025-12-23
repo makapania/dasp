@@ -1,0 +1,53 @@
+
+================================================================================
+COMPREHENSIVE INTEGRATION TEST: ALL 6 MODELS
+================================================================================
+
+Verifying fixes:
+  1. Ridge: alpha=1000.0 in grid
+  2. RandomForest: min_samples_leaf=1
+  3. NeuralBoosted: LBFGS training
+================================================================================
+
+--------------------------------------------------------------------------------
+TEST 1/6: PLS Model
+--------------------------------------------------------------------------------
+✓ Config generation: 8 configurations
+✓ Model fitting: successful
+Model 1/6: PLS (Baseline): Test Failed at C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:172
+  Expression: r2 > 0.5
+   Evaluated: 0.0436506241808583 > 0.5
+
+Stacktrace:
+ [1] top-level scope
+   @ C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:139
+ [2] macro expansion
+   @ C:\Users\sponheim\AppData\Local\Programs\Julia-1.12.1\share\julia\stdlib\v1.12\Test\src\Test.jl:1776 [inlined]
+ [3] macro expansion
+   @ C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:172 [inlined]
+ [4] macro expansion
+   @ C:\Users\sponheim\AppData\Local\Programs\Julia-1.12.1\share\julia\stdlib\v1.12\Test\src\Test.jl:680 [inlined]
+✓ Prediction: R²=0.044, RMSE=3.991
+Model 1/6: PLS (Baseline): Error During Test at C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:138
+  Got exception outside of a @test
+  UndefVarError: `get_feature_importances` not defined in `Main`
+  Hint: It looks like two or more modules export different bindings with this name, resulting in ambiguity. Try explicitly importing it from a particular module, or qualifying the name with the module it should come from.
+  Hint: a global variable of this name also exists in SpectralPredict.
+  Stacktrace:
+   [1] top-level scope
+     @ C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:139
+   [2] macro expansion
+     @ C:\Users\sponheim\AppData\Local\Programs\Julia-1.12.1\share\julia\stdlib\v1.12\Test\src\Test.jl:1776 [inlined]
+   [3] macro expansion
+     @ C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:176 [inlined]
+   [4] include(mod::Module, _path::String)
+     @ Base .\Base.jl:306
+   [5] exec_options(opts::Base.JLOptions)
+     @ Base .\client.jl:317
+   [6] _start()
+     @ Base .\client.jl:550
+Test Summary:             | Pass  Fail  Error  Total  Time
+Model 1/6: PLS (Baseline) |    8     1      1     10  4.3s
+RNG of the outermost testset: Xoshiro(0xa379de7eeeb2a4e8, 0x953dccb6b532b3af, 0xf597b8ff8cfd652a, 0xccd7337c571680d1, 0xc90c4a0730db3f7e)
+ERROR: LoadError: Some tests did not pass: 8 passed, 1 failed, 1 errored, 0 broken.
+in expression starting at C:\Users\sponheim\git\dasp\julia_port\SpectralPredict\test\test_all_models_integration.jl:138

@@ -1,0 +1,671 @@
+# Tab 7 Model Development - Testing Documentation
+
+**Version:** 1.0
+**Last Updated:** 2025-11-07
+
+This document provides comprehensive information about the testing suite for Tab 7 (Custom Model Development) functionality in Spectral Predict.
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Test Suite Structure](#test-suite-structure)
+3. [Running Tests](#running-tests)
+4. [Test Categories](#test-categories)
+5. [Understanding Test Results](#understanding-test-results)
+6. [Troubleshooting](#troubleshooting)
+7. [Contributing New Tests](#contributing-new-tests)
+
+---
+
+## Overview
+
+The Tab 7 testing suite validates all functionality of the Custom Model Development tab, including:
+
+- **Data Loading:** Loading model configurations from Results tab
+- **R² Reproducibility:** Ensuring refined models reproduce original R² values
+- **Wavelength Parsing:** Testing wavelength specification parsing
+- **Preprocessing Paths:** Validating both preprocessing strategies
+- **Hyperparameter Application:** Verifying hyperparameters are applied correctly
+- **Edge Case Handling:** Testing error conditions and boundary cases
+- **Integration:** End-to-end workflow testing
+- **Performance:** Benchmarking execution speed and memory usage
+
+---
+
+## Test Suite Structure
+
+```
+tests/
+├── test_tab7_model_development.py    # Main automated test suite
+├── test_tab7_integration.py          # Integration tests
+├── test_tab7_performance.py          # Performance benchmarks
+├── tab7_test_utils.py                # Test utilities and helpers
+└── ...
+
+TAB7_MANUAL_TEST_PROTOCOL.md         # Manual testing checklist
+TESTING_README.md                     # This document
+```
+
+### Test File Descriptions
+
+#### `test_tab7_model_development.py`
+
+Main automated test suite with 6 test classes:
+
+1. **TestTab7DataLoading**: Tests loading results into Tab 7
+2. **TestTab7Reproducibility**: Tests R² reproduction
+3. **TestTab7WavelengthParsing**: Tests wavelength spec parsing
+4. **TestTab7PreprocessingPaths**: Tests preprocessing paths
+5. **TestTab7HyperparameterApplication**: Tests hyperparameter handling
+6. **TestTab7EdgeCases**: Tests error handling
+
+**Test Count:** ~25 tests
+**Typical Runtime:** 1-3 minutes
+
+#### `test_tab7_integration.py`
+
+Integration tests for end-to-end workflows:
+
+1. **TestTab7QuickStartWorkflow**: Tests with example data
+2. **TestTab7FullDatasetWorkflow**: Tests with larger datasets
+3. **TestTab7ModelSaveLoad**: Tests model persistence
+4. **TestTab7ValidationSetWorkflow**: Tests validation split handling
+5. **TestTab7EndToEndReproducibility**: Tests complex scenarios
+
+**Test Count:** ~15 tests
+**Typical Runtime:** 2-5 minutes
+
+#### `test_tab7_performance.py`
+
+Performance benchmarks:
+
+1. **TestTab7LoadingPerformance**: Loading speed benchmarks
+2. **TestTab7ExecutionPerformance**: Execution time benchmarks
+3. **TestTab7ModelComparisonPerformance**: Model comparison
+4. **TestTab7MemoryUsage**: Memory usage monitoring
+5. **TestTab7PreprocessingPerformance**: Preprocessing benchmarks
+6. **TestTab7ScalabilityBenchmarks**: Scalability tests
+
+**Test Count:** ~20 benchmarks
+**Typical Runtime:** 3-10 minutes
+
+#### `tab7_test_utils.py`
+
+Test utilities providing:
+- Data generation helpers
+- Analysis execution helpers
+- Result validation helpers
+- GUI simulation helpers
+- Comparison utilities
+
+---
+
+## Running Tests
+
+### Prerequisites
+
+```bash
+# Ensure dependencies are installed
+pip install pytest numpy pandas scikit-learn
+
+# Optional: Install psutil for memory monitoring
+pip install psutil
+```
+
+### Running All Tests
+
+```bash
+# Run all Tab 7 tests
+pytest tests/test_tab7*.py -v
+
+# Run with detailed output
+pytest tests/test_tab7*.py -v -s
+
+# Run with test summary
+pytest tests/test_tab7*.py -v --tb=short
+```
+
+### Running Specific Test Files
+
+```bash
+# Main test suite only
+pytest tests/test_tab7_model_development.py -v
+
+# Integration tests only
+pytest tests/test_tab7_integration.py -v
+
+# Performance benchmarks only
+pytest tests/test_tab7_performance.py -v -s
+```
+
+### Running Specific Test Classes
+
+```bash
+# Run only reproducibility tests
+pytest tests/test_tab7_model_development.py::TestTab7Reproducibility -v
+
+# Run only wavelength parsing tests
+pytest tests/test_tab7_model_development.py::TestTab7WavelengthParsing -v
+```
+
+### Running Specific Tests
+
+```bash
+# Run a single test
+pytest tests/test_tab7_model_development.py::TestTab7Reproducibility::test_pls_r2_match -v
+```
+
+### Running with Coverage
+
+```bash
+# Install coverage
+pip install pytest-cov
+
+# Run with coverage report
+pytest tests/test_tab7*.py --cov=spectral_predict_gui_optimized --cov-report=html
+
+# Open coverage report
+open htmlcov/index.html  # macOS
+start htmlcov/index.html # Windows
+```
+
+---
+
+## Test Categories
+
+### 1. Data Loading Tests
+
+**Purpose:** Verify that model configurations load correctly from Results tab.
+
+**Key Tests:**
+- `test_load_pls_full_model`: Load PLS with full spectrum
+- `test_wavelength_parsing_accuracy_full_model`: Validate wavelength count
+- `test_hyperparameter_loading_pls`: Verify PLS n_components loads
+- `test_hyperparameter_loading_ridge`: Verify Ridge alpha loads
+
+**Expected Behavior:**
+- All required fields populate
+- Wavelength count matches n_vars
+- Hyperparameters match original model
+- GUI controls are enabled
+
+### 2. R² Reproducibility Tests
+
+**Purpose:** Ensure Tab 7 reproduces original R² values from Results tab.
+
+**Key Tests:**
+- `test_pls_r2_match`: PLS reproduction
+- `test_ridge_r2_match`: Ridge reproduction
+- `test_pls_derivative_subset_reproducibility`: Complex scenario (CRITICAL)
+
+**Expected Behavior:**
+- R² difference < 0.001 (tolerance)
+- Same CV strategy used
+- No numerical drift
+
+**Why This Matters:**
+R² reproducibility is the most critical validation. If refined models don't reproduce original R², users cannot trust Tab 7 for model development.
+
+### 3. Wavelength Parsing Tests
+
+**Purpose:** Test wavelength specification parsing for different formats.
+
+**Key Tests:**
+- `test_parse_individual_wavelengths`: "1500, 1520, 1540"
+- `test_parse_wavelength_ranges`: "1500-1540"
+- `test_parse_mixed_format`: "1500, 1520-1540, 1600"
+
+**Expected Behavior:**
+- Correct parsing of all formats
+- Proper error handling for invalid input
+- Fast execution (< 100ms)
+
+### 4. Preprocessing Path Tests
+
+**Purpose:** Validate both preprocessing strategies work correctly.
+
+**Key Tests:**
+- `test_derivative_subset_path`: Full-spectrum preprocessing
+- `test_raw_subset_path`: Subset-first preprocessing
+
+**Expected Behavior:**
+- Correct preprocessing path selected based on method + subset
+- Shapes are correct after preprocessing
+- Results match search.py behavior
+
+**Technical Details:**
+
+Two preprocessing paths exist:
+
+**Path A (Derivative + Subset):**
+1. Preprocess full spectrum
+2. Subset after preprocessing
+3. Preserves derivative context
+
+**Path B (Raw/SNV + Subset or Full Spectrum):**
+1. Subset first (if applicable)
+2. Preprocess subset
+3. More efficient
+
+### 5. Hyperparameter Application Tests
+
+**Purpose:** Verify hyperparameters are correctly applied to models.
+
+**Key Tests:**
+- `test_pls_n_components`: PLS components
+- `test_ridge_alpha`: Ridge regularization
+- `test_randomforest_n_estimators`: RF estimators
+
+**Expected Behavior:**
+- Models instantiate with correct parameters
+- Parameters match loaded configuration
+- Models train successfully
+
+### 6. Edge Case Tests
+
+**Purpose:** Test error handling and boundary conditions.
+
+**Key Tests:**
+- `test_empty_wavelength_spec`: Empty wavelength field
+- `test_invalid_wavelength_spec`: Invalid input
+- `test_subset_model_missing_all_vars`: Missing wavelength list
+
+**Expected Behavior:**
+- Clear error messages
+- No crashes
+- GUI remains responsive
+
+---
+
+## Understanding Test Results
+
+### Passing Tests
+
+```
+tests/test_tab7_model_development.py::TestTab7Reproducibility::test_pls_r2_match PASSED [100%]
+```
+
+**Meaning:** Test passed all assertions. Functionality works as expected.
+
+### Failing Tests
+
+```
+tests/test_tab7_model_development.py::TestTab7Reproducibility::test_pls_r2_match FAILED [100%]
+AssertionError: R² mismatch: original=0.850000, reproduced=0.820000, diff=0.030000
+```
+
+**Meaning:** Test failed an assertion. R² difference (0.03) exceeds tolerance (0.001).
+
+**Action:** Investigate why R² is not reproducing correctly. Check:
+1. Same CV strategy (shuffle=False)
+2. Same preprocessing applied
+3. Same hyperparameters
+4. Same data used
+
+### Skipped Tests
+
+```
+tests/test_tab7_model_development.py::test_quick_start_data SKIPPED [100%]
+Reason: Quick start data not available
+```
+
+**Meaning:** Test was skipped because prerequisites weren't met (e.g., example data not found).
+
+**Action:** Install example data or run tests with synthetic data instead.
+
+### Test Warnings
+
+```
+tests/test_tab7_model_development.py::test_pls_n_components PASSED [100%]
+UserWarning: n_components exceeds maximum
+```
+
+**Meaning:** Test passed but generated a warning. May indicate a non-critical issue.
+
+**Action:** Review warning. May be expected behavior or may need attention.
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+#### Issue: "Quick start data not available"
+
+**Symptom:** Tests using `quick_start_data` fixture are skipped.
+
+**Solution:**
+```bash
+# Ensure example data exists
+ls example/
+# Should contain: reference.csv, Spectrum*.asd files
+
+# If missing, contact maintainers for example dataset
+```
+
+#### Issue: "R² mismatch exceeds tolerance"
+
+**Symptom:** Reproducibility tests fail with R² differences > 0.001.
+
+**Solution:**
+1. Check if `shuffle=False` in KFold (CV strategy must match)
+2. Verify same preprocessing pipeline
+3. Verify same hyperparameters
+4. Check for data filtering differences (validation set, excluded samples)
+
+#### Issue: "GUI tests fail with tkinter errors"
+
+**Symptom:** Tests involving GUI creation fail.
+
+**Solution:**
+```bash
+# Ensure tkinter is installed
+python -m tkinter
+
+# If not working, reinstall Python with tkinter support
+# Or run only non-GUI tests:
+pytest tests/tab7_test_utils.py -v
+```
+
+#### Issue: "ModuleNotFoundError: No module named 'spectral_predict'"
+
+**Symptom:** Import errors when running tests.
+
+**Solution:**
+```bash
+# Ensure src/ is in path (tests handle this automatically)
+# Or install package in development mode:
+pip install -e .
+```
+
+#### Issue: "Tests are very slow"
+
+**Symptom:** Tests take > 10 minutes to run.
+
+**Solution:**
+```bash
+# Run only fast tests (skip integration and performance)
+pytest tests/test_tab7_model_development.py -v
+
+# Or run with specific markers (if implemented)
+pytest -m "not slow" tests/test_tab7*.py -v
+```
+
+---
+
+## Test Data
+
+### Synthetic Data
+
+Tests use `create_minimal_synthetic_data()` to generate test data:
+
+```python
+X, y = create_minimal_synthetic_data(
+    n_samples=30,      # Sample count
+    n_wavelengths=100, # Wavelength count
+    seed=42            # Reproducibility
+)
+```
+
+**Characteristics:**
+- Realistic spectral structure
+- Correlated with target variable
+- Fast generation (< 1 second)
+- Reproducible (fixed seed)
+
+### Example Data (Quick Start)
+
+If available, tests also use real example data:
+
+```
+example/
+├── reference.csv         # Target values
+├── Spectrum00001.asd     # Spectral file 1
+├── Spectrum00002.asd     # Spectral file 2
+└── ...
+```
+
+**Characteristics:**
+- Real spectral data
+- ~10 samples
+- Full wavelength range (350-2500 nm)
+- Used for integration tests
+
+---
+
+## Performance Expectations
+
+### Loading Performance
+
+| Operation | Expected Time | Test |
+|-----------|--------------|------|
+| Model config loading | < 100 ms | `test_model_loading_speed_from_results` |
+| Wavelength parsing (50) | < 100 ms | `test_wavelength_parsing_speed_small_list` |
+| Wavelength parsing (500) | < 500 ms | `test_wavelength_parsing_speed_large_list` |
+
+### Execution Performance
+
+| Dataset Size | Expected Time | Test |
+|--------------|---------------|------|
+| 10 samples, 100 wavelengths | < 5 s | `test_execution_time_small_dataset` |
+| 30 samples, 200 wavelengths | < 10 s | `test_execution_time_medium_dataset` |
+| 50 samples, 500 wavelengths | < 30 s | `test_execution_time_large_dataset` |
+
+### Memory Usage
+
+| Dataset Size | Expected Memory | Test |
+|--------------|-----------------|------|
+| 30 samples, 200 wavelengths | < 100 MB | `test_memory_usage_small_dataset` |
+| 100 samples, 1000 wavelengths | < 500 MB | `test_memory_usage_large_dataset` |
+
+**Note:** Times measured on standard development machine (quad-core, 16GB RAM).
+
+---
+
+## Contributing New Tests
+
+### Test Template
+
+```python
+def test_new_functionality():
+    """Test description: what are we testing and why?"""
+    # Arrange: Set up test data and conditions
+    X, y = create_minimal_synthetic_data()
+
+    # Act: Execute the functionality being tested
+    result = function_under_test(X, y)
+
+    # Assert: Verify expected behavior
+    assert result is not None, "Result should not be None"
+    assert len(result) > 0, "Result should not be empty"
+
+    # Additional assertions as needed
+    print(f"Test passed: {result}")
+```
+
+### Guidelines
+
+1. **Clear Test Names:** Use descriptive names that explain what is being tested
+2. **Single Responsibility:** Each test should test one specific aspect
+3. **Fast Execution:** Keep tests fast (< 5 seconds each)
+4. **Reproducible:** Use fixed seeds for random operations
+5. **Good Error Messages:** Assertions should have descriptive messages
+6. **Documentation:** Include docstrings explaining the test purpose
+
+### Adding Performance Benchmarks
+
+```python
+def test_performance_new_feature():
+    """Benchmark performance of new feature."""
+    import time
+
+    # Setup
+    data = setup_test_data()
+
+    # Benchmark
+    start_time = time.time()
+    result = new_feature(data)
+    elapsed = time.time() - start_time
+
+    # Report
+    print(f"\nNew feature execution time: {elapsed:.2f} s")
+
+    # Assert performance threshold
+    assert elapsed < 10.0, f"Should complete in < 10s, got {elapsed:.1f}s"
+```
+
+---
+
+## Manual Testing
+
+In addition to automated tests, perform manual testing using:
+
+**`TAB7_MANUAL_TEST_PROTOCOL.md`**
+
+This comprehensive manual testing checklist covers:
+- All user workflows
+- GUI interactions
+- Visual validation
+- Edge cases not easily automated
+
+**When to Use:**
+- Before major releases
+- After significant GUI changes
+- When automated tests don't cover visual aspects
+- For exploratory testing
+
+---
+
+## Continuous Integration
+
+### Running Tests in CI
+
+```yaml
+# Example GitHub Actions workflow
+name: Tab 7 Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+      - name: Run tests
+        run: |
+          pytest tests/test_tab7*.py -v --cov
+```
+
+---
+
+## Test Maintenance
+
+### When to Update Tests
+
+Update tests when:
+1. **New features added:** Write tests for new functionality
+2. **Bugs fixed:** Add regression tests to prevent recurrence
+3. **API changes:** Update tests to match new API
+4. **Performance improvements:** Update benchmarks
+5. **Requirements change:** Adjust thresholds and expectations
+
+### Test Review Checklist
+
+- [ ] All tests pass on clean install
+- [ ] Tests are independent (order doesn't matter)
+- [ ] Tests clean up after themselves (no temp files left)
+- [ ] Performance tests have reasonable thresholds
+- [ ] Error messages are clear and actionable
+- [ ] Documentation is up to date
+
+---
+
+## Contact and Support
+
+**Questions or Issues?**
+- Check troubleshooting section above
+- Review test output for error messages
+- Consult source code comments
+- Contact development team
+
+**Found a Bug?**
+1. Run relevant tests to reproduce
+2. Document steps to reproduce
+3. Note expected vs. actual behavior
+4. Create bug report with test output
+
+---
+
+## Appendix: Quick Reference
+
+### Common pytest Options
+
+```bash
+# Verbose output
+pytest -v
+
+# Show print statements
+pytest -s
+
+# Stop on first failure
+pytest -x
+
+# Run last failed tests only
+pytest --lf
+
+# Run only tests matching pattern
+pytest -k "test_pls"
+
+# Show slowest 5 tests
+pytest --durations=5
+
+# Generate HTML report
+pytest --html=report.html
+
+# Parallel execution (requires pytest-xdist)
+pytest -n 4
+```
+
+### Test Fixtures Available
+
+- `synthetic_data`: Minimal synthetic dataset
+- `quick_start_data`: Real example data (if available)
+- `minimal_analysis_results`: Pre-computed analysis results
+- `quick_start_workflow_data`: Workflow test data
+- `full_dataset_workflow_data`: Large workflow test data
+
+### Common Assertions
+
+```python
+# Equality
+assert value == expected
+
+# Numerical comparison with tolerance
+assert abs(value - expected) < tolerance
+
+# Collection membership
+assert item in collection
+
+# Type checking
+assert isinstance(obj, ExpectedType)
+
+# Exception handling
+with pytest.raises(ExpectedError):
+    function_that_should_raise()
+```
+
+---
+
+**End of Testing Documentation**
+
+*For questions or suggestions, contact the development team.*

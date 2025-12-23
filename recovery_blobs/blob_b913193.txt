@@ -1,0 +1,129 @@
+# Region Model Wavelength Loading Diagnostic
+
+## Issue
+Region-based models in Results tab show subset tags like:
+```
+top5regions_1650-1700,1625-1675,1525-1575,1675-1725,1500-1550nm
+```
+
+But Model Development loads:
+```
+175 wavelengths (1500.0 to 1724.0 nm)
+```
+
+This should be loading ONLY the wavelengths from those 5 specific regions, not all 175.
+
+## Diagnostic Steps
+
+### Step 1: Check Console Output
+When you double-click a region model in Results tab, check the console for these messages:
+
+**Good path (wavelengths loaded correctly):**
+```
+DEBUG: Model has all_vars, parsing complete wavelength list
+DEBUG: all_vars raw value: 1500.0, 1502.0, 1504.0, ... (showing actual wavelengths)
+DEBUG: Parsed XXX wavelengths from all_vars
+```
+
+**Bad path (fallback to full spectrum):**
+```
+WARNING: Could not parse all_vars: <error message>
+DEBUG: Full model - using all XXX wavelengths
+```
+OR
+```
+WARNING: Subset model but no top_vars, using all wavelengths
+```
+
+### Step 2: Check Results CSV
+Open the most recent results CSV file in `results/` folder and find the row for that Ridge model.
+
+Check these columns:
+1. **SubsetTag**: Should show "top5regions_..."
+2. **all_vars**: Should contain comma-separated wavelength values
+3. **n_vars**: Should match the number of wavelengths in all_vars
+
+Example of what it SHOULD look like:
+```
+SubsetTag: top5regions_1650-1700,...
+all_vars: 1650.0, 1652.0, 1654.0, ..., 1700.0, 1625.0, 1627.0, ..., 1675.0, ...
+n_vars: 125 (or similar, depending on resolution)
+```
+
+### Step 3: Manual Test
+If the CSV shows correct all_vars but GUI loads wrong wavelengths, there's a parsing bug.
+
+Create a test file to verify:
+```python
+import pandas as pd
+
+# Load the results
+df = pd.read_csv('results/YOUR_RESULTS_FILE.csv')
+
+# Find the region model
+region_row = df[df['SubsetTag'].str.contains('top5regions', na=False)].iloc[0]
+
+print(f"SubsetTag: {region_row['SubsetTag']}")
+print(f"n_vars: {region_row['n_vars']}")
+print(f"all_vars first 200 chars: {str(region_row['all_vars'])[:200]}")
+print(f"all_vars type: {type(region_row['all_vars'])}")
+
+# Try parsing
+all_vars_str = str(region_row['all_vars']).strip()
+wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+print(f"Parsed {len(wavelengths)} wavelengths")
+print(f"Range: {wavelengths[0]:.1f} to {wavelengths[-1]:.1f} nm")
+```
+
+## Possible Root Causes
+
+### Cause 1: all_vars is NaN/empty
+Julia backend didn't store wavelengths correctly.
+- **Fix**: Check Julia search.jl lines 920-933
+
+### Cause 2: all_vars contains indices instead of wavelengths
+Julia stored [1, 2, 3, ...] instead of [1500.0, 1502.0, ...]
+- **Fix**: Check Julia line 923: `wavelengths[var_selection_indices]`
+
+### Cause 3: GUI parsing fails silently
+Python code catches exception and falls back to full spectrum.
+- **Fix**: Add strict validation (don't allow fallback for region models)
+
+### Cause 4: Preprocessing changes number of features
+Derivative preprocessing reduces features, but wavelength mapping is wrong.
+- **Issue**: Derivative with window=17 trims 8 features from each end
+- **176 features** becomes **160 features** after 2nd derivative
+- But GUI might still try to use all 176 wavelengths
+
+## Expected Behavior
+
+**For a region model with preprocessing="deriv_snv", Deriv=2, Window=17:**
+
+1. Julia runs analysis on FULL spectrum, applies SNV+2nd derivative
+2. Identifies top 5 regions from preprocessed data
+3. Stores the ORIGINAL wavelength values (before preprocessing) for those regions
+4. GUI loads those wavelengths, applies SAME preprocessing, matches Julia exactly
+
+## Critical Questions
+
+1. **What does n_vars=175 mean?**
+   - Are there really 175 wavelengths in those 5 regions?
+   - Or is this the FULL spectrum count?
+
+2. **What does all_vars contain?**
+   - Actual wavelengths: "1650.0, 1652.0, ..."
+   - Or indices: "1, 2, 3, ..."
+   - Or nothing: "N/A"
+
+3. **Why does preprocessing show "deriv_snv"?**
+   - Did you select "deriv_snv (advanced)" option?
+   - Or should it be "snv_deriv" (SNV+SG2)?
+
+## Next Steps
+
+Please provide:
+1. **Console output** from when you load that Ridge model
+2. **CSV row** for that model (SubsetTag, all_vars, n_vars columns)
+3. **What preprocessing you selected** when running the analysis
+
+This will help identify exactly where the bug is.

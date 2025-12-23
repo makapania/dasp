@@ -1,0 +1,185 @@
+# Quick Integration Guide - Phase 2 Tab 7 UI
+
+**Time Required:** 5 minutes
+**Difficulty:** Easy (copy-paste)
+
+---
+
+## Step-by-Step Integration
+
+### 1. Backup Current File (Optional)
+```bash
+cp spectral_predict_gui_optimized.py spectral_predict_gui_optimized.py.backup
+```
+
+### 2. Open Both Files
+
+**File 1:** `spectral_predict_gui_optimized.py` (your main file)
+**File 2:** `PHASE2_TAB7_UI_IMPLEMENTATION.py` (new implementation)
+
+### 3. Replace Main Method (Lines 1313-1387)
+
+In `spectral_predict_gui_optimized.py`:
+
+**DELETE:** Lines 1313-1387 (the current stub implementation)
+
+**PASTE:** The `_create_tab7_model_development()` method from `PHASE2_TAB7_UI_IMPLEMENTATION.py`
+- Starts at line 16
+- Ends around line 360
+
+### 4. Add Helper Methods (After Line 1387)
+
+In `spectral_predict_gui_optimized.py`, after the new tab method you just pasted:
+
+**PASTE:** All 8 helper methods from `PHASE2_TAB7_UI_IMPLEMENTATION.py`
+- `_tab7_create_hyperparam_widgets` (line ~370)
+- `_tab7_update_hyperparameters` (line ~470)
+- `_tab7_update_wavelength_count` (line ~480)
+- `_tab7_apply_wl_preset` (line ~540)
+- `_tab7_custom_range_dialog` (line ~580)
+- `_tab7_reset_to_fresh` (line ~650)
+- `_tab7_run_model` (line ~710)
+- `_tab7_save_model` (line ~750)
+
+**TIP:** Copy from the comment "# Helper Methods" onwards (around line 365)
+
+### 5. Save File
+
+Save `spectral_predict_gui_optimized.py`
+
+### 6. Test Launch
+
+```bash
+python spectral_predict_gui_optimized.py
+```
+
+### 7. Visual Verification
+
+You should see:
+1. Tab 7 with "🔬 Model Development" label
+2. Clean 2-column layout
+3. All dropdowns and controls
+4. Three empty plot frames
+5. Status bar at bottom
+
+### 8. Functional Tests
+
+Quick tests:
+1. Change model type → hyperparameters update
+2. Click "NIR" preset → "1000-2500" appears
+3. Type wavelengths → count updates
+4. Click "Reset" → parameters clear
+5. Click "Run Model" → Phase 4 message appears
+
+---
+
+## Troubleshooting
+
+### Error: NameError for 'self.colors'
+**Solution:** You're using the right file - colors are defined in `_configure_style()`
+
+### Error: Module import issues
+**Solution:** Make sure you're running from the correct directory with all dependencies
+
+### UI looks wrong/cramped
+**Solution:** Make sure window is maximized or large enough (GUI uses 'zoomed' state)
+
+### Widgets not responding
+**Solution:** Check that helper methods were pasted correctly (need all 8)
+
+### Can't find line numbers
+**Solution:** In VS Code: Ctrl+G (go to line), or View → Appearance → Line Numbers
+
+---
+
+## Verification Checklist
+
+After integration, verify these features work:
+
+### Basic Display
+- [ ] Tab 7 appears in notebook
+- [ ] Can switch to Tab 7 without errors
+- [ ] All sections visible (header, params, results, plots)
+- [ ] Scrollbar present and functional
+
+### Model Type Switching
+- [ ] Select "Ridge" → shows alpha parameter
+- [ ] Select "RandomForest" → shows n_estimators, max_depth, max_features
+- [ ] Select "NeuralBoosted" → shows 3 parameters
+- [ ] Help text updates for each model
+
+### Wavelength Controls
+- [ ] Type "400" → count shows "Wavelengths: 1"
+- [ ] Type "400-700" → count shows "Wavelengths: 301"
+- [ ] Click "NIR" → inserts "1000-2500"
+- [ ] Click "Custom Range" → dialog opens
+
+### Other Controls
+- [ ] Window size radios work (7, 11, 17, 19)
+- [ ] CV folds spinbox works (3-10)
+- [ ] All dropdowns work (task type, backend, preprocessing)
+- [ ] Reset button prompts confirmation
+
+### Placeholders
+- [ ] Run button shows Phase 4 message
+- [ ] Save button disabled
+- [ ] Results text shows placeholder
+- [ ] Plot frames show placeholder text
+
+---
+
+## Common Issues & Fixes
+
+### Issue: Indentation errors
+**Fix:** Python requires consistent indentation. Make sure all pasted code uses spaces (not tabs) and aligns with surrounding code.
+
+### Issue: Method not found
+**Fix:** Make sure helper methods are inside the class (indented under `class SpectralPredictApp:`)
+
+### Issue: Missing self parameter
+**Fix:** All methods should have `self` as first parameter: `def method_name(self, ...)`
+
+### Issue: StringVar not updating
+**Fix:** Make sure you're using `.get()` to read and `.set()` to write StringVar values
+
+---
+
+## Need Help?
+
+If you encounter issues:
+
+1. **Check Python console** for error messages
+2. **Compare line numbers** with original file
+3. **Verify indentation** matches surrounding code
+4. **Test incrementally** - paste main method first, test, then add helpers
+5. **Use backup** if needed to revert changes
+
+---
+
+## What's Next?
+
+After successful integration:
+
+1. **Phase 3:** Add model loading from Results tab
+2. **Phase 4:** Implement execution engine with CV
+3. **Phase 5:** Add model saving functionality
+
+Each phase builds on this UI foundation!
+
+---
+
+## Success Confirmation
+
+✅ **Integration is successful if:**
+- No errors when launching GUI
+- Tab 7 displays with all controls
+- Model type switching updates hyperparameters
+- Wavelength presets work
+- Status label updates with actions
+- Run button shows Phase 4 message
+
+🎉 **Congratulations!** You've successfully integrated Phase 2!
+
+---
+
+**Questions?** Check `PHASE2_IMPLEMENTATION_SUMMARY.md` for detailed documentation.

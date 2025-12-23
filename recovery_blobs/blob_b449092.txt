@@ -1,0 +1,1612 @@
+"""
+Spectral Predict - REDESIGNED GUI v2 with Sidebar Navigation
+Purple/Magenta "Lush Nexus" Theme - Better text visibility and space usage
+
+Features:
+- Left sidebar navigation (like dashboard reference)
+- Purple/magenta color scheme
+- High contrast text (all visible)
+- Grid layout using full width
+- All content visible without scrolling
+"""
+
+import sys
+import os
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading
+from datetime import datetime
+import numpy as np
+import pandas as pd
+
+# Check for matplotlib
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+# Add src to path
+src_path = Path(__file__).parent / "src"
+sys.path.insert(0, str(src_path))
+
+# Import spectral_predict modules
+try:
+    from spectral_predict.preprocess import SavgolDerivative
+    HAS_DERIVATIVES = True
+except ImportError:
+    HAS_DERIVATIVES = False
+    SavgolDerivative = None
+
+
+class SpectralNexusApp:
+    """Main application with sidebar navigation."""
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Spectral Nexus - Next Generation Analysis")
+
+        # Set window size
+        try:
+            self.root.state('zoomed')
+        except:
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            window_width = int(screen_width * 0.95)
+            window_height = int(screen_height * 0.95)
+            self.root.geometry(f"{window_width}x{window_height}")
+
+        # Configure color scheme
+        self._configure_colors()
+
+        # Data variables
+        self.X = None
+        self.y = None
+        self.ref = None
+
+        # GUI variables
+        self.spectral_data_path = tk.StringVar()
+        self.detected_type = None
+        self.reference_file = tk.StringVar()
+        self.spectral_file_column = tk.StringVar()
+        self.id_column = tk.StringVar()
+        self.target_column = tk.StringVar()
+        self.wavelength_min = tk.StringVar(value="")
+        self.wavelength_max = tk.StringVar(value="")
+
+        # Analysis variables
+        self.output_dir = tk.StringVar(value="outputs")
+        self.folds = tk.IntVar(value=5)
+        self.lambda_penalty = tk.DoubleVar(value=0.15)
+        self.max_n_components = tk.IntVar(value=24)
+        self.max_iter = tk.IntVar(value=500)
+        self.show_progress = tk.BooleanVar(value=True)
+
+        # Model selection
+        self.use_pls = tk.BooleanVar(value=True)
+        self.use_randomforest = tk.BooleanVar(value=True)
+        self.use_mlp = tk.BooleanVar(value=True)
+        self.use_neuralboosted = tk.BooleanVar(value=True)
+
+        # Variable selection variables
+        self.variable_selection_method = tk.StringVar(value='importance')
+        self.apply_uve_prefilter = tk.BooleanVar(value=False)
+        self.uve_cutoff_multiplier = tk.DoubleVar(value=1.0)
+        self.uve_n_components = tk.StringVar(value="")  # Empty = None
+        self.spa_n_random_starts = tk.IntVar(value=10)
+        self.ipls_n_intervals = tk.IntVar(value=20)
+
+        # Subset selection variables
+        self.enable_variable_subsets = tk.BooleanVar(value=True)
+        self.variable_counts = tk.StringVar(value="10, 20, 50")  # Comma-separated
+        self.enable_region_subsets = tk.BooleanVar(value=True)
+        self.n_top_regions = tk.IntVar(value=5)
+
+        # Progress tracking
+        self.progress_monitor = None
+        self.analysis_thread = None
+
+        # Results storage
+        self.results = None
+
+        # Plotting
+        self.plot_frames = {}
+        self.plot_canvases = {}
+
+        # Current view
+        self.current_view = "import"
+
+        self._create_ui()
+
+    def _configure_colors(self):
+        """Configure purple/magenta lush color scheme."""
+        self.colors = {
+            # Backgrounds - rich purples
+            'sidebar': '#1A0033',          # Deep purple-black
+            'sidebar_hover': '#2D1B4E',    # Purple on hover
+            'main_bg': '#0F0A1F',          # Very dark purple
+            'card_bg': '#1C1535',          # Dark purple card
+            'input_bg': '#2A1F47',         # Input background
+
+            # Accents - vibrant
+            'accent_pink': '#FF00FF',      # Hot magenta
+            'accent_purple': '#B794F6',    # Soft purple
+            'accent_cyan': '#00F5FF',      # Electric cyan
+            'accent_gold': '#FFD700',      # Gold
+
+            # Text - high contrast
+            'text_white': '#FFFFFF',       # Pure white
+            'text_light': '#E0E0E0',       # Light gray
+            'text_dim': '#A0A0A0',         # Dimmed gray
+            'text_purple': '#D4BBFF',      # Light purple
+
+            # Status
+            'success': '#00FF88',          # Bright green
+            'warning': '#FFB800',          # Amber
+            'error': '#FF4466',            # Red
+            'info': '#64FFDA',             # Cyan
+
+            # Borders
+            'border': '#4A3A6A',           # Purple border
+            'glow': '#FF00FF',             # Magenta glow
+        }
+
+        self.root.configure(bg=self.colors['main_bg'])
+
+    def _create_ui(self):
+        """Create sidebar + main content area."""
+        # Main container
+        main_container = tk.Frame(self.root, bg=self.colors['main_bg'])
+        main_container.pack(fill='both', expand=True)
+
+        # === LEFT SIDEBAR ===
+        self.sidebar = tk.Frame(main_container,
+            bg=self.colors['sidebar'],
+            width=240)
+        self.sidebar.pack(side='left', fill='y')
+        self.sidebar.pack_propagate(False)
+
+        # Logo/Title
+        logo_frame = tk.Frame(self.sidebar, bg=self.colors['sidebar'])
+        logo_frame.pack(fill='x', pady=(30, 40))
+
+        logo_text = tk.Label(logo_frame,
+            text="Spectral\nNexus",
+            font=('Segoe UI', 22, 'bold'),
+            bg=self.colors['sidebar'],
+            fg=self.colors['accent_pink'],
+            justify='center')
+        logo_text.pack()
+
+        # Navigation buttons
+        self.nav_buttons = {}
+
+        nav_items = [
+            ("📁", "IMPORT", "import"),
+            ("⚙️", "CONFIG", "config"),
+            ("📊", "PROGRESS", "progress")
+        ]
+
+        for icon, label, view_id in nav_items:
+            btn = self._create_nav_button(icon, label, view_id)
+            self.nav_buttons[view_id] = btn
+
+        # Highlight first button
+        self._highlight_nav_button("import")
+
+        # Bottom section
+        bottom_frame = tk.Frame(self.sidebar, bg=self.colors['sidebar'])
+        bottom_frame.pack(side='bottom', fill='x', pady=30)
+
+        help_label = tk.Label(bottom_frame,
+            text="SPECTRAL PREDICT\nv2.0",
+            font=('Segoe UI', 8),
+            bg=self.colors['sidebar'],
+            fg=self.colors['text_dim'],
+            justify='center')
+        help_label.pack()
+
+        # === RIGHT CONTENT AREA ===
+        self.content_area = tk.Frame(main_container, bg=self.colors['main_bg'])
+        self.content_area.pack(side='right', fill='both', expand=True)
+
+        # Create different views (only show one at a time)
+        self.views = {}
+        self._create_import_view()
+        self._create_config_view()
+        self._create_progress_view()
+
+        # Show initial view
+        self._show_view("import")
+
+    def _create_nav_button(self, icon, label, view_id):
+        """Create a sidebar navigation button."""
+        btn_frame = tk.Frame(self.sidebar, bg=self.colors['sidebar'])
+        btn_frame.pack(fill='x', pady=2)
+
+        btn = tk.Button(btn_frame,
+            text=f"{icon}  {label}",
+            font=('Segoe UI', 11, 'bold'),
+            bg=self.colors['sidebar'],
+            fg=self.colors['text_light'],
+            activebackground=self.colors['sidebar_hover'],
+            activeforeground=self.colors['accent_pink'],
+            relief='flat',
+            anchor='w',
+            padx=30,
+            pady=15,
+            cursor='hand2',
+            command=lambda: self._switch_view(view_id))
+        btn.pack(fill='x')
+
+        # Hover effects
+        btn.bind('<Enter>', lambda e: btn.config(
+            bg=self.colors['sidebar_hover'],
+            fg=self.colors['accent_pink']) if view_id != self.current_view else None)
+        btn.bind('<Leave>', lambda e: btn.config(
+            bg=self.colors['sidebar'],
+            fg=self.colors['text_light']) if view_id != self.current_view else None)
+
+        return btn
+
+    def _highlight_nav_button(self, view_id):
+        """Highlight the active navigation button."""
+        for vid, btn in self.nav_buttons.items():
+            if vid == view_id:
+                btn.config(bg=self.colors['sidebar_hover'], fg=self.colors['accent_pink'])
+            else:
+                btn.config(bg=self.colors['sidebar'], fg=self.colors['text_light'])
+
+    def _switch_view(self, view_id):
+        """Switch between different views."""
+        self.current_view = view_id
+        self._highlight_nav_button(view_id)
+        self._show_view(view_id)
+
+    def _show_view(self, view_id):
+        """Show specific view, hide others."""
+        for vid, view_frame in self.views.items():
+            if vid == view_id:
+                view_frame.pack(fill='both', expand=True)
+            else:
+                view_frame.pack_forget()
+
+    def _create_import_view(self):
+        """Create the Import & Preview view."""
+        view = tk.Frame(self.content_area, bg=self.colors['main_bg'])
+        self.views["import"] = view
+
+        # Scrollable canvas
+        canvas = tk.Canvas(view, bg=self.colors['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(view, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=self.colors['main_bg'])
+
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === HEADER ===
+        header = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        header.pack(fill='x', padx=40, pady=(30, 20))
+
+        title = tk.Label(header,
+            text="Import & Preview",
+            font=('Segoe UI', 32, 'bold'),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_white'])
+        title.pack(anchor='w')
+
+        subtitle = tk.Label(header,
+            text="Load spectral data and visualize transformations",
+            font=('Segoe UI', 13),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_dim'])
+        subtitle.pack(anchor='w', pady=(8, 0))
+
+        # === GRID LAYOUT FOR CARDS ===
+        grid_container = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        grid_container.pack(fill='both', expand=True, padx=40, pady=20)
+
+        # Configure grid - 2 columns
+        grid_container.columnconfigure(0, weight=1)
+        grid_container.columnconfigure(1, weight=1)
+
+        # ROW 1: Input Files (left) + Column Config (right)
+        input_card = self._create_card(grid_container, "📁 Input Files")
+        input_card.grid(row=0, column=0, sticky='nsew', padx=(0, 15), pady=(0, 20))
+
+        config_card = self._create_card(grid_container, "🔧 Column Configuration")
+        config_card.grid(row=0, column=1, sticky='nsew', padx=(15, 0), pady=(0, 20))
+
+        # ROW 2: Wavelength Range (full width)
+        wl_card = self._create_card(grid_container, "🌈 Wavelength Range")
+        wl_card.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(0, 20))
+
+        # === POPULATE INPUT CARD ===
+        self._add_file_input(input_card, "Spectral File Directory", self.spectral_data_path,
+            self._browse_spectral_data, 0)
+
+        # Status
+        status_frame = tk.Frame(input_card, bg=self.colors['card_bg'])
+        status_frame.grid(row=1, column=0, columnspan=2, sticky='w', padx=20, pady=(5, 15))
+
+        self.detection_icon = tk.Label(status_frame,
+            text="⚡",
+            font=('Segoe UI', 14),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim'])
+        self.detection_icon.pack(side='left', padx=(0, 10))
+
+        self.detection_status = tk.Label(status_frame,
+            text="No data loaded",
+            font=('Segoe UI', 11),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim'])
+        self.detection_status.pack(side='left')
+
+        self._add_file_input(input_card, "Reference CSV", self.reference_file,
+            self._browse_reference_file, 2)
+
+        # === POPULATE CONFIG CARD ===
+        self._add_dropdown(config_card, "Spectral File Column", self.spectral_file_column, 0)
+        self.spectral_file_combo = self.last_combo
+
+        self._add_dropdown(config_card, "Specimen ID Column", self.id_column, 1)
+        self.id_combo = self.last_combo
+
+        self._add_dropdown(config_card, "Target Variable Column", self.target_column, 2)
+        self.target_combo = self.last_combo
+
+        # Auto-detect button
+        auto_btn = tk.Button(config_card,
+            text="🔍 Auto-Detect Columns",
+            command=self._auto_detect_columns,
+            bg=self.colors['accent_purple'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 11, 'bold'),
+            relief='flat',
+            pady=12,
+            cursor='hand2')
+        auto_btn.grid(row=3, column=0, columnspan=2, pady=(15, 20))
+
+        # === POPULATE WAVELENGTH CARD ===
+        wl_inner = tk.Frame(wl_card, bg=self.colors['card_bg'])
+        wl_inner.grid(row=0, column=0, padx=20, pady=20)
+
+        tk.Label(wl_inner,
+            text="Select Range (nm):",
+            font=('Segoe UI', 12, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).pack(side='left', padx=(0, 20))
+
+        min_entry = tk.Entry(wl_inner,
+            textvariable=self.wavelength_min,
+            font=('Segoe UI', 13),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=12,
+            justify='center')
+        min_entry.pack(side='left', ipady=8, padx=5)
+
+        tk.Label(wl_inner,
+            text="to",
+            font=('Segoe UI', 12, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).pack(side='left', padx=15)
+
+        max_entry = tk.Entry(wl_inner,
+            textvariable=self.wavelength_max,
+            font=('Segoe UI', 13),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=12,
+            justify='center')
+        max_entry.pack(side='left', ipady=8, padx=5)
+
+        tk.Label(wl_inner,
+            text="(auto-fills after load)",
+            font=('Segoe UI', 10),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).pack(side='left', padx=20)
+
+        # === LOAD BUTTON ===
+        btn_frame = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        btn_frame.pack(fill='x', padx=40, pady=(10, 20))
+
+        load_btn = tk.Button(btn_frame,
+            text="📊 Load Data & Generate Plots",
+            command=self._load_and_plot_data,
+            bg=self.colors['accent_pink'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 15, 'bold'),
+            relief='flat',
+            pady=18,
+            cursor='hand2')
+        load_btn.pack(fill='x')
+
+        load_btn.bind('<Enter>', lambda e: load_btn.config(bg=self.colors['glow']))
+        load_btn.bind('<Leave>', lambda e: load_btn.config(bg=self.colors['accent_pink']))
+
+        self.tab1_status = tk.Label(btn_frame,
+            text="Ready to load spectral data",
+            font=('Segoe UI', 11),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_dim'])
+        self.tab1_status.pack(pady=(12, 0))
+
+        # === PLOTS ===
+        plot_header = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        plot_header.pack(fill='x', padx=40, pady=(30, 15))
+
+        tk.Label(plot_header,
+            text="Spectral Visualizations",
+            font=('Segoe UI', 24, 'bold'),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_white']).pack(anchor='w')
+
+        # Plot area
+        self.plot_container = tk.Frame(scroll_frame, bg=self.colors['card_bg'])
+        self.plot_container.pack(fill='both', expand=True, padx=40, pady=(0, 40))
+
+        placeholder = tk.Label(self.plot_container,
+            text="🌌\n\nLoad data to see spectral plots",
+            font=('Segoe UI', 16),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim'],
+            justify='center')
+        placeholder.pack(expand=True, pady=100)
+
+    def _create_config_view(self):
+        """Create configuration view."""
+        view = tk.Frame(self.content_area, bg=self.colors['main_bg'])
+        self.views["config"] = view
+
+        # Scrollable canvas
+        canvas = tk.Canvas(view, bg=self.colors['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(view, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=self.colors['main_bg'])
+
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === HEADER ===
+        header = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        header.pack(fill='x', padx=40, pady=(30, 20))
+
+        title = tk.Label(header,
+            text="Analysis Configuration",
+            font=('Segoe UI', 32, 'bold'),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_white'])
+        title.pack(anchor='w')
+
+        subtitle = tk.Label(header,
+            text="Configure variable selection, models, and analysis parameters",
+            font=('Segoe UI', 13),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_dim'])
+        subtitle.pack(anchor='w', pady=(8, 0))
+
+        # === GRID LAYOUT FOR CARDS ===
+        grid_container = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        grid_container.pack(fill='both', expand=True, padx=40, pady=20)
+
+        # Configure grid - 2 columns
+        grid_container.columnconfigure(0, weight=1)
+        grid_container.columnconfigure(1, weight=1)
+
+        # ROW 1: Variable Selection Method (left) + Method Parameters (right)
+        var_sel_card = self._create_card(grid_container, "🎯 Variable Selection Method")
+        var_sel_card.grid(row=0, column=0, sticky='nsew', padx=(0, 15), pady=(0, 20))
+
+        method_params_card = self._create_card(grid_container, "⚙️ Method Parameters")
+        method_params_card.grid(row=0, column=1, sticky='nsew', padx=(15, 0), pady=(0, 20))
+
+        # ROW 2: Subset Selection (left) + Model Selection (right)
+        subset_card = self._create_card(grid_container, "📊 Subset Selection")
+        subset_card.grid(row=1, column=0, sticky='nsew', padx=(0, 15), pady=(0, 20))
+
+        model_card = self._create_card(grid_container, "🤖 Model Selection")
+        model_card.grid(row=1, column=1, sticky='nsew', padx=(15, 0), pady=(0, 20))
+
+        # ROW 3: General Parameters (full width)
+        general_card = self._create_card(grid_container, "🔧 General Parameters")
+        general_card.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=(0, 20))
+
+        # === POPULATE VARIABLE SELECTION CARD ===
+        self._populate_var_selection_card(var_sel_card)
+
+        # === POPULATE METHOD PARAMETERS CARD ===
+        self._populate_method_params_card(method_params_card)
+
+        # === POPULATE SUBSET SELECTION CARD ===
+        self._populate_subset_card(subset_card)
+
+        # === POPULATE MODEL SELECTION CARD ===
+        self._populate_model_card(model_card)
+
+        # === POPULATE GENERAL PARAMETERS CARD ===
+        self._populate_general_params_card(general_card)
+
+        # === RUN BUTTON ===
+        btn_frame = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        btn_frame.pack(fill='x', padx=40, pady=(10, 40))
+
+        run_btn = tk.Button(btn_frame,
+            text="🚀 Run Analysis",
+            command=self._run_analysis,
+            bg=self.colors['accent_pink'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 15, 'bold'),
+            relief='flat',
+            pady=18,
+            cursor='hand2')
+        run_btn.pack(fill='x')
+
+        run_btn.bind('<Enter>', lambda e: run_btn.config(bg=self.colors['glow']))
+        run_btn.bind('<Leave>', lambda e: run_btn.config(bg=self.colors['accent_pink']))
+
+        self.config_status = tk.Label(btn_frame,
+            text="Configure settings and run analysis",
+            font=('Segoe UI', 11),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_dim'])
+        self.config_status.pack(pady=(12, 0))
+
+    def _populate_var_selection_card(self, card):
+        """Populate variable selection method card."""
+        row = 1
+
+        # Method options
+        methods = [
+            ('importance', 'Feature Importance', 'Default: Uses model-specific importance scores'),
+            ('spa', 'SPA', 'Successive Projections (collinearity-aware)'),
+            ('uve', 'UVE', 'Uninformative Variable Elimination (noise filtering)'),
+            ('uve_spa', 'UVE-SPA Hybrid', 'Combines noise filtering + collinearity reduction'),
+            ('ipls', 'iPLS', 'Interval PLS (region-based analysis)')
+        ]
+
+        for value, label, description in methods:
+            rb = tk.Radiobutton(card,
+                text=label,
+                variable=self.variable_selection_method,
+                value=value,
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_white'],
+                activebackground=self.colors['card_bg'],
+                activeforeground=self.colors['accent_pink'],
+                selectcolor=self.colors['input_bg'],
+                font=('Segoe UI', 11, 'bold'),
+                cursor='hand2')
+            rb.grid(row=row, column=0, sticky='w', padx=20, pady=(8, 2))
+
+            desc_label = tk.Label(card,
+                text=description,
+                font=('Segoe UI', 9),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_dim'])
+            desc_label.grid(row=row+1, column=0, sticky='w', padx=45, pady=(0, 8))
+
+            row += 2
+
+        # UVE Prefilter checkbox
+        uve_prefilter_cb = tk.Checkbutton(card,
+            text="Apply UVE Pre-filter",
+            variable=self.apply_uve_prefilter,
+            bg=self.colors['card_bg'],
+            fg=self.colors['accent_cyan'],
+            activebackground=self.colors['card_bg'],
+            activeforeground=self.colors['accent_pink'],
+            selectcolor=self.colors['input_bg'],
+            font=('Segoe UI', 11, 'bold'),
+            cursor='hand2')
+        uve_prefilter_cb.grid(row=row, column=0, sticky='w', padx=20, pady=(15, 5))
+
+        uve_desc = tk.Label(card,
+            text="Pre-filter noisy variables before main selection",
+            font=('Segoe UI', 9),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim'])
+        uve_desc.grid(row=row+1, column=0, sticky='w', padx=45, pady=(0, 20))
+
+    def _populate_method_params_card(self, card):
+        """Populate method-specific parameters card."""
+        row = 1
+
+        # UVE Cutoff Multiplier
+        tk.Label(card,
+            text="UVE Cutoff Multiplier (0.7-1.5):",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row, column=0, sticky='w', padx=20, pady=(10, 5))
+
+        uve_cutoff_entry = tk.Entry(card,
+            textvariable=self.uve_cutoff_multiplier,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=15,
+            justify='center')
+        uve_cutoff_entry.grid(row=row+1, column=0, sticky='w', padx=20, pady=(0, 5), ipady=8)
+
+        tk.Label(card,
+            text="Higher = more aggressive noise filtering",
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=row+2, column=0, sticky='w', padx=20, pady=(0, 15))
+
+        row += 3
+
+        # UVE n_components
+        tk.Label(card,
+            text="UVE PLS Components (optional):",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row, column=0, sticky='w', padx=20, pady=(10, 5))
+
+        uve_comp_entry = tk.Entry(card,
+            textvariable=self.uve_n_components,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=15,
+            justify='center')
+        uve_comp_entry.grid(row=row+1, column=0, sticky='w', padx=20, pady=(0, 5), ipady=8)
+
+        tk.Label(card,
+            text="Leave empty for auto-determination",
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=row+2, column=0, sticky='w', padx=20, pady=(0, 15))
+
+        row += 3
+
+        # SPA Random Starts
+        tk.Label(card,
+            text="SPA Random Starts:",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row, column=0, sticky='w', padx=20, pady=(10, 5))
+
+        spa_starts_entry = tk.Entry(card,
+            textvariable=self.spa_n_random_starts,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=15,
+            justify='center')
+        spa_starts_entry.grid(row=row+1, column=0, sticky='w', padx=20, pady=(0, 5), ipady=8)
+
+        tk.Label(card,
+            text="More starts = better selection, slower",
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=row+2, column=0, sticky='w', padx=20, pady=(0, 15))
+
+        row += 3
+
+        # iPLS Intervals
+        tk.Label(card,
+            text="iPLS Number of Intervals:",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row, column=0, sticky='w', padx=20, pady=(10, 5))
+
+        ipls_intervals_entry = tk.Entry(card,
+            textvariable=self.ipls_n_intervals,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=15,
+            justify='center')
+        ipls_intervals_entry.grid(row=row+1, column=0, sticky='w', padx=20, pady=(0, 5), ipady=8)
+
+        tk.Label(card,
+            text="Divide spectrum into N intervals",
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=row+2, column=0, sticky='w', padx=20, pady=(0, 20))
+
+    def _populate_subset_card(self, card):
+        """Populate subset selection card."""
+        row = 1
+
+        # Enable variable subsets
+        var_subset_cb = tk.Checkbutton(card,
+            text="Enable Variable Subsets",
+            variable=self.enable_variable_subsets,
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white'],
+            activebackground=self.colors['card_bg'],
+            activeforeground=self.colors['accent_pink'],
+            selectcolor=self.colors['input_bg'],
+            font=('Segoe UI', 11, 'bold'),
+            cursor='hand2')
+        var_subset_cb.grid(row=row, column=0, sticky='w', padx=20, pady=(10, 10))
+
+        # Variable counts
+        tk.Label(card,
+            text="Variable Counts (comma-separated):",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row+1, column=0, sticky='w', padx=20, pady=(5, 5))
+
+        var_counts_entry = tk.Entry(card,
+            textvariable=self.variable_counts,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat')
+        var_counts_entry.grid(row=row+2, column=0, sticky='ew', padx=20, pady=(0, 5), ipady=8)
+
+        tk.Label(card,
+            text="Example: 10, 20, 50, 100",
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=row+3, column=0, sticky='w', padx=20, pady=(0, 20))
+
+        row += 4
+
+        # Enable region subsets
+        region_subset_cb = tk.Checkbutton(card,
+            text="Enable Region Subsets",
+            variable=self.enable_region_subsets,
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white'],
+            activebackground=self.colors['card_bg'],
+            activeforeground=self.colors['accent_pink'],
+            selectcolor=self.colors['input_bg'],
+            font=('Segoe UI', 11, 'bold'),
+            cursor='hand2')
+        region_subset_cb.grid(row=row, column=0, sticky='w', padx=20, pady=(10, 10))
+
+        # Number of top regions
+        tk.Label(card,
+            text="Number of Top Regions:",
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row+1, column=0, sticky='w', padx=20, pady=(5, 5))
+
+        n_regions_entry = tk.Entry(card,
+            textvariable=self.n_top_regions,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            width=15,
+            justify='center')
+        n_regions_entry.grid(row=row+2, column=0, sticky='w', padx=20, pady=(0, 5), ipady=8)
+
+        tk.Label(card,
+            text="Typical: 5, 10, 15, or 20",
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=row+3, column=0, sticky='w', padx=20, pady=(0, 20))
+
+    def _populate_model_card(self, card):
+        """Populate model selection card."""
+        row = 1
+
+        models = [
+            (self.use_pls, 'PLS Regression', 'Partial Least Squares'),
+            (self.use_randomforest, 'Random Forest', 'Ensemble tree-based model'),
+            (self.use_mlp, 'MLP', 'Multi-Layer Perceptron neural network'),
+            (self.use_neuralboosted, 'Neural Boosted', 'Advanced ensemble method')
+        ]
+
+        for var, label, description in models:
+            cb = tk.Checkbutton(card,
+                text=label,
+                variable=var,
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_white'],
+                activebackground=self.colors['card_bg'],
+                activeforeground=self.colors['accent_pink'],
+                selectcolor=self.colors['input_bg'],
+                font=('Segoe UI', 11, 'bold'),
+                cursor='hand2')
+            cb.grid(row=row, column=0, sticky='w', padx=20, pady=(8, 2))
+
+            desc_label = tk.Label(card,
+                text=description,
+                font=('Segoe UI', 9),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_dim'])
+            desc_label.grid(row=row+1, column=0, sticky='w', padx=45, pady=(0, 8))
+
+            row += 2
+
+        # Select All / Deselect All buttons
+        btn_frame = tk.Frame(card, bg=self.colors['card_bg'])
+        btn_frame.grid(row=row, column=0, sticky='w', padx=20, pady=(10, 20))
+
+        select_all_btn = tk.Button(btn_frame,
+            text="Select All",
+            command=self._select_all_models,
+            bg=self.colors['border'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 9, 'bold'),
+            relief='flat',
+            padx=15,
+            pady=5,
+            cursor='hand2')
+        select_all_btn.pack(side='left', padx=(0, 10))
+
+        deselect_all_btn = tk.Button(btn_frame,
+            text="Deselect All",
+            command=self._deselect_all_models,
+            bg=self.colors['border'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 9, 'bold'),
+            relief='flat',
+            padx=15,
+            pady=5,
+            cursor='hand2')
+        deselect_all_btn.pack(side='left')
+
+    def _populate_general_params_card(self, card):
+        """Populate general parameters card."""
+        # Create a grid layout inside the card
+        inner_frame = tk.Frame(card, bg=self.colors['card_bg'])
+        inner_frame.grid(row=1, column=0, sticky='ew', padx=20, pady=20)
+        inner_frame.columnconfigure(0, weight=1)
+        inner_frame.columnconfigure(1, weight=1)
+        inner_frame.columnconfigure(2, weight=1)
+
+        col = 0
+        # Folds
+        self._add_param_field(inner_frame, "CV Folds:", self.folds,
+            "Number of cross-validation folds", col, 0)
+
+        col += 1
+        # Lambda penalty
+        self._add_param_field(inner_frame, "Lambda Penalty:", self.lambda_penalty,
+            "Complexity penalty weight", col, 0)
+
+        col += 1
+        # Max PLS components
+        self._add_param_field(inner_frame, "Max PLS Components:", self.max_n_components,
+            "Maximum PLS components to test", col, 0)
+
+        # Second row
+        col = 0
+        # Max iterations
+        self._add_param_field(inner_frame, "Max MLP Iterations:", self.max_iter,
+            "Maximum iterations for MLP", col, 1)
+
+        col += 1
+        # Output directory
+        self._add_param_field(inner_frame, "Output Directory:", self.output_dir,
+            "Where to save results", col, 1)
+
+    def _add_param_field(self, parent, label_text, var, description, col, row_offset):
+        """Add a parameter field to the grid."""
+        base_row = row_offset * 4
+
+        tk.Label(parent,
+            text=label_text,
+            font=('Segoe UI', 10, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=base_row, column=col, sticky='w', padx=15, pady=(10, 5))
+
+        entry = tk.Entry(parent,
+            textvariable=var,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat',
+            justify='center')
+        entry.grid(row=base_row+1, column=col, sticky='ew', padx=15, pady=(0, 5), ipady=8)
+
+        tk.Label(parent,
+            text=description,
+            font=('Segoe UI', 8),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim']).grid(
+                row=base_row+2, column=col, sticky='w', padx=15, pady=(0, 15))
+
+    def _select_all_models(self):
+        """Select all models."""
+        self.use_pls.set(True)
+        self.use_randomforest.set(True)
+        self.use_mlp.set(True)
+        self.use_neuralboosted.set(True)
+
+    def _deselect_all_models(self):
+        """Deselect all models."""
+        self.use_pls.set(False)
+        self.use_randomforest.set(False)
+        self.use_mlp.set(False)
+        self.use_neuralboosted.set(False)
+
+    def _run_analysis(self):
+        """Run the analysis."""
+        # Validate inputs
+        if self.X is None or self.y is None:
+            messagebox.showwarning("No Data", "Please load data in the Import tab first")
+            return
+
+        # Get selected models
+        models_to_test = []
+        if self.use_pls.get():
+            models_to_test.append('PLS')
+        if self.use_randomforest.get():
+            models_to_test.append('RandomForest')
+        if self.use_mlp.get():
+            models_to_test.append('MLP')
+        if self.use_neuralboosted.get():
+            models_to_test.append('NeuralBoosted')
+
+        if not models_to_test:
+            messagebox.showwarning("No Models", "Please select at least one model to test")
+            return
+
+        # Parse variable counts
+        try:
+            var_counts_str = self.variable_counts.get().strip()
+            if var_counts_str and self.enable_variable_subsets.get():
+                variable_counts = [int(x.strip()) for x in var_counts_str.split(',')]
+            else:
+                variable_counts = None
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Variable counts must be comma-separated integers")
+            return
+
+        # Parse UVE n_components
+        uve_n_comp = None
+        if self.uve_n_components.get().strip():
+            try:
+                uve_n_comp = int(self.uve_n_components.get())
+            except ValueError:
+                messagebox.showerror("Invalid Input", "UVE n_components must be an integer")
+                return
+
+        # Determine task type
+        task_type = 'regression'  # TODO: Add classification detection
+
+        # Run in thread
+        self.config_status.config(text="Starting analysis...", fg=self.colors['info'])
+        self.root.update()
+
+        def run_thread():
+            try:
+                from spectral_predict.search import run_search
+
+                results = run_search(
+                    self.X, self.y, task_type,
+                    folds=self.folds.get(),
+                    lambda_penalty=self.lambda_penalty.get(),
+                    max_n_components=self.max_n_components.get(),
+                    max_iter=self.max_iter.get(),
+                    models_to_test=models_to_test,
+                    enable_variable_subsets=self.enable_variable_subsets.get(),
+                    variable_counts=variable_counts,
+                    enable_region_subsets=self.enable_region_subsets.get(),
+                    n_top_regions=self.n_top_regions.get(),
+                    variable_selection_method=self.variable_selection_method.get(),
+                    apply_uve_prefilter=self.apply_uve_prefilter.get(),
+                    uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
+                    uve_n_components=uve_n_comp,
+                    spa_n_random_starts=self.spa_n_random_starts.get(),
+                    ipls_n_intervals=self.ipls_n_intervals.get()
+                )
+
+                # Save results
+                output_dir = Path(self.output_dir.get())
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_file = output_dir / f"results_{timestamp}.csv"
+                results.to_csv(output_file, index=False)
+
+                # Store results for display
+                self.results = results
+
+                # Update status
+                self.root.after(0, lambda: self.config_status.config(
+                    text=f"✓ Analysis complete! Results saved to {output_file}",
+                    fg=self.colors['success']))
+
+                # Switch to progress view to show results
+                self.root.after(0, lambda: self._switch_view("progress"))
+                self.root.after(0, lambda: self._display_results(results))
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.root.after(0, lambda: messagebox.showerror("Analysis Error", f"Failed to run analysis:\n{str(e)}"))
+                self.root.after(0, lambda: self.config_status.config(
+                    text="✗ Analysis failed",
+                    fg=self.colors['error']))
+
+        thread = threading.Thread(target=run_thread, daemon=True)
+        thread.start()
+
+    def _create_progress_view(self):
+        """Create progress view."""
+        view = tk.Frame(self.content_area, bg=self.colors['main_bg'])
+        self.views["progress"] = view
+
+        # Scrollable canvas
+        canvas = tk.Canvas(view, bg=self.colors['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(view, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=self.colors['main_bg'])
+
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === HEADER ===
+        header = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        header.pack(fill='x', padx=40, pady=(30, 20))
+
+        title = tk.Label(header,
+            text="Analysis Results",
+            font=('Segoe UI', 32, 'bold'),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_white'])
+        title.pack(anchor='w')
+
+        subtitle = tk.Label(header,
+            text="View and explore model performance results",
+            font=('Segoe UI', 13),
+            bg=self.colors['main_bg'],
+            fg=self.colors['text_dim'])
+        subtitle.pack(anchor='w', pady=(8, 0))
+
+        # Results container
+        self.results_container = tk.Frame(scroll_frame, bg=self.colors['main_bg'])
+        self.results_container.pack(fill='both', expand=True, padx=40, pady=20)
+
+        # Placeholder
+        placeholder = tk.Label(self.results_container,
+            text="📊\n\nRun analysis to see results",
+            font=('Segoe UI', 16),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_dim'],
+            justify='center')
+        placeholder.pack(expand=True, pady=100)
+
+    def _display_results(self, results):
+        """Display analysis results."""
+        # Clear container
+        for widget in self.results_container.winfo_children():
+            widget.destroy()
+
+        # === SUMMARY CARD ===
+        summary_card = self._create_card(self.results_container, "📈 Best Model Summary")
+        summary_card.pack(fill='x', pady=(0, 20))
+
+        # Get best model
+        if len(results) > 0:
+            best = results.iloc[0]
+
+            summary_frame = tk.Frame(summary_card, bg=self.colors['card_bg'])
+            summary_frame.grid(row=1, column=0, sticky='ew', padx=20, pady=20)
+            summary_frame.columnconfigure(0, weight=1)
+            summary_frame.columnconfigure(1, weight=1)
+            summary_frame.columnconfigure(2, weight=1)
+
+            # Model name
+            tk.Label(summary_frame,
+                text="Best Model:",
+                font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_dim']).grid(row=0, column=0, sticky='w', padx=20, pady=5)
+
+            tk.Label(summary_frame,
+                text=f"{best['Model']}",
+                font=('Segoe UI', 18, 'bold'),
+                bg=self.colors['card_bg'],
+                fg=self.colors['accent_pink']).grid(row=1, column=0, sticky='w', padx=20, pady=5)
+
+            # Preprocessing
+            tk.Label(summary_frame,
+                text="Preprocessing:",
+                font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_dim']).grid(row=0, column=1, sticky='w', padx=20, pady=5)
+
+            tk.Label(summary_frame,
+                text=f"{best.get('Preprocessing', 'N/A')}",
+                font=('Segoe UI', 14),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_white']).grid(row=1, column=1, sticky='w', padx=20, pady=5)
+
+            # Performance metrics
+            if 'RMSECV' in best:
+                metric_label = "RMSECV:"
+                metric_value = f"{best['RMSECV']:.4f}"
+                metric2_label = "R²CV:"
+                metric2_value = f"{best.get('R2CV', 0):.4f}"
+            elif 'AccuracyCV' in best:
+                metric_label = "Accuracy:"
+                metric_value = f"{best['AccuracyCV']:.4f}"
+                metric2_label = "AUC:"
+                metric2_value = f"{best.get('AUCCV', 0):.4f}"
+            else:
+                metric_label = "Score:"
+                metric_value = "N/A"
+                metric2_label = ""
+                metric2_value = ""
+
+            tk.Label(summary_frame,
+                text=metric_label,
+                font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_dim']).grid(row=0, column=2, sticky='w', padx=20, pady=5)
+
+            tk.Label(summary_frame,
+                text=metric_value,
+                font=('Segoe UI', 18, 'bold'),
+                bg=self.colors['card_bg'],
+                fg=self.colors['success']).grid(row=1, column=2, sticky='w', padx=20, pady=5)
+
+            # Additional info
+            info_frame = tk.Frame(summary_card, bg=self.colors['card_bg'])
+            info_frame.grid(row=2, column=0, sticky='ew', padx=20, pady=(0, 20))
+
+            info_text = f"Variables: {best.get('Variables', 'N/A')} | "
+            info_text += f"Subset: {best.get('Subset', 'Full')} | "
+            info_text += f"Selection Method: {best.get('SelectionMethod', 'N/A')}"
+
+            tk.Label(info_frame,
+                text=info_text,
+                font=('Segoe UI', 10),
+                bg=self.colors['card_bg'],
+                fg=self.colors['text_dim']).pack(anchor='w')
+
+        # === RESULTS TABLE ===
+        table_card = self._create_card(self.results_container, "📋 All Results")
+        table_card.pack(fill='both', expand=True, pady=(0, 20))
+
+        # Create treeview for results
+        tree_frame = tk.Frame(table_card, bg=self.colors['card_bg'])
+        tree_frame.grid(row=1, column=0, sticky='nsew', padx=20, pady=20)
+
+        # Scrollbars
+        tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical')
+        tree_scroll_x = ttk.Scrollbar(tree_frame, orient='horizontal')
+
+        # Define columns
+        display_cols = ['Rank', 'Model', 'Preprocessing', 'Subset', 'Variables']
+
+        if 'RMSECV' in results.columns:
+            display_cols.extend(['RMSECV', 'R2CV'])
+        elif 'AccuracyCV' in results.columns:
+            display_cols.extend(['AccuracyCV', 'AUCCV'])
+
+        if 'SelectionMethod' in results.columns:
+            display_cols.append('SelectionMethod')
+
+        # Create treeview
+        tree = ttk.Treeview(tree_frame,
+            columns=display_cols,
+            show='headings',
+            yscrollcommand=tree_scroll_y.set,
+            xscrollcommand=tree_scroll_x.set,
+            height=15)
+
+        tree_scroll_y.config(command=tree.yview)
+        tree_scroll_x.config(command=tree.xview)
+
+        # Column headings
+        for col in display_cols:
+            tree.heading(col, text=col)
+            if col in ['RMSECV', 'R2CV', 'AccuracyCV', 'AUCCV']:
+                tree.column(col, width=100, anchor='center')
+            elif col == 'Rank':
+                tree.column(col, width=50, anchor='center')
+            elif col == 'Variables':
+                tree.column(col, width=80, anchor='center')
+            else:
+                tree.column(col, width=120, anchor='w')
+
+        # Add data
+        for idx, row in results.head(50).iterrows():  # Show top 50
+            values = []
+            for col in display_cols:
+                if col == 'Rank':
+                    values.append(idx + 1)
+                elif col in row:
+                    val = row[col]
+                    if isinstance(val, float):
+                        values.append(f"{val:.4f}")
+                    else:
+                        values.append(str(val))
+                else:
+                    values.append('N/A')
+            tree.insert('', 'end', values=values)
+
+        # Pack scrollbars and tree
+        tree_scroll_y.pack(side='right', fill='y')
+        tree_scroll_x.pack(side='bottom', fill='x')
+        tree.pack(side='left', fill='both', expand=True)
+
+        # Export button
+        export_frame = tk.Frame(self.results_container, bg=self.colors['main_bg'])
+        export_frame.pack(fill='x', pady=(10, 20))
+
+        export_btn = tk.Button(export_frame,
+            text="📁 View Full Results CSV",
+            command=lambda: self._open_results_folder(),
+            bg=self.colors['border'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 11, 'bold'),
+            relief='flat',
+            pady=12,
+            cursor='hand2')
+        export_btn.pack()
+
+    def _open_results_folder(self):
+        """Open results folder in file explorer."""
+        import subprocess
+        import os
+        output_dir = Path(self.output_dir.get())
+        if output_dir.exists():
+            if os.name == 'nt':  # Windows
+                subprocess.run(['explorer', str(output_dir)])
+            elif os.name == 'posix':  # Mac/Linux
+                subprocess.run(['open' if sys.platform == 'darwin' else 'xdg-open', str(output_dir)])
+        else:
+            messagebox.showwarning("Not Found", f"Output directory does not exist: {output_dir}")
+
+    def _create_card(self, parent, title):
+        """Create a card container."""
+        # Outer frame for border
+        outer = tk.Frame(parent,
+            bg=self.colors['border'],
+            highlightthickness=0)
+
+        # Inner card
+        card = tk.Frame(outer,
+            bg=self.colors['card_bg'],
+            highlightthickness=0)
+        card.pack(fill='both', expand=True, padx=2, pady=2)
+
+        # Title
+        title_label = tk.Label(card,
+            text=title,
+            font=('Segoe UI', 15, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['accent_cyan'])
+        title_label.grid(row=0, column=0, columnspan=2, sticky='w', padx=20, pady=(20, 15))
+
+        # Configure grid
+        card.columnconfigure(0, weight=1)
+
+        return card
+
+    def _add_file_input(self, card, label_text, var, command, row_offset):
+        """Add file input field to card."""
+        # Get next available row
+        row = len(card.grid_slaves()) + row_offset
+
+        # Label
+        tk.Label(card,
+            text=label_text,
+            font=('Segoe UI', 11, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row, column=0, columnspan=2, sticky='w', padx=20, pady=(10, 5))
+
+        # Entry + Button frame
+        frame = tk.Frame(card, bg=self.colors['card_bg'])
+        frame.grid(row=row+1, column=0, columnspan=2, sticky='ew', padx=20, pady=(0, 15))
+        frame.columnconfigure(0, weight=1)
+
+        entry = tk.Entry(frame,
+            textvariable=var,
+            font=('Segoe UI', 11),
+            bg=self.colors['input_bg'],
+            fg=self.colors['text_white'],
+            insertbackground=self.colors['accent_cyan'],
+            relief='flat')
+        entry.pack(side='left', fill='x', expand=True, ipady=10, padx=(0, 10))
+
+        btn = tk.Button(frame,
+            text="Browse...",
+            command=command,
+            bg=self.colors['border'],
+            fg=self.colors['text_white'],
+            font=('Segoe UI', 10, 'bold'),
+            relief='flat',
+            padx=20,
+            pady=8,
+            cursor='hand2')
+        btn.pack(side='right')
+
+        btn.bind('<Enter>', lambda e: btn.config(bg=self.colors['accent_cyan']))
+        btn.bind('<Leave>', lambda e: btn.config(bg=self.colors['border']))
+
+    def _add_dropdown(self, card, label_text, var, index):
+        """Add dropdown to card."""
+        row = index * 2
+
+        tk.Label(card,
+            text=label_text,
+            font=('Segoe UI', 11, 'bold'),
+            bg=self.colors['card_bg'],
+            fg=self.colors['text_white']).grid(
+                row=row, column=0, columnspan=2, sticky='w', padx=20, pady=(10, 5))
+
+        # Custom styled combobox
+        combo_frame = tk.Frame(card, bg=self.colors['input_bg'])
+        combo_frame.grid(row=row+1, column=0, columnspan=2, sticky='ew', padx=20, pady=(0, 15))
+
+        combo = ttk.Combobox(combo_frame,
+            textvariable=var,
+            font=('Segoe UI', 11),
+            state='readonly')
+        combo.pack(fill='x', ipady=8, padx=2, pady=2)
+
+        self.last_combo = combo
+
+    # === ORIGINAL FUNCTIONALITY ===
+
+    def _browse_spectral_data(self):
+        """Browse for spectral data."""
+        directory = filedialog.askdirectory(title="Select Spectral Data Directory")
+        if not directory:
+            return
+
+        self.spectral_data_path.set(directory)
+        path = Path(directory)
+
+        # Check for ASD
+        asd_files = list(path.glob("*.asd"))
+        if asd_files:
+            self.detected_type = "asd"
+            self.detection_icon.config(text="✓", fg=self.colors['success'])
+            self.detection_status.config(
+                text=f"Detected {len(asd_files)} ASD files",
+                fg=self.colors['success'])
+
+            csv_files = list(path.glob("*.csv"))
+            if len(csv_files) == 1:
+                self.reference_file.set(str(csv_files[0]))
+                self._auto_detect_columns()
+            return
+
+        # Check for CSV
+        csv_files = list(path.glob("*.csv"))
+        if csv_files:
+            if len(csv_files) == 1:
+                self.spectral_data_path.set(str(csv_files[0]))
+                self.detected_type = "csv"
+                self.detection_icon.config(text="✓", fg=self.colors['success'])
+                self.detection_status.config(
+                    text="Detected CSV spectra file",
+                    fg=self.colors['success'])
+            else:
+                self.detected_type = "csv"
+                self.detection_icon.config(text="⚠", fg=self.colors['warning'])
+                self.detection_status.config(
+                    text=f"Found {len(csv_files)} CSV files - select manually",
+                    fg=self.colors['warning'])
+            return
+
+        # Not found
+        self.detected_type = None
+        self.detection_icon.config(text="✗", fg=self.colors['error'])
+        self.detection_status.config(
+            text="No supported files found",
+            fg=self.colors['error'])
+
+    def _browse_reference_file(self):
+        """Browse for reference CSV."""
+        filename = filedialog.askopenfilename(
+            title="Select Reference CSV",
+            filetypes=[("CSV files", "*.csv")])
+        if filename:
+            self.reference_file.set(filename)
+            self._auto_detect_columns()
+
+    def _auto_detect_columns(self):
+        """Auto-detect columns."""
+        if not self.reference_file.get():
+            return
+
+        try:
+            df = pd.read_csv(self.reference_file.get(), nrows=5)
+            columns = list(df.columns)
+
+            self.spectral_file_combo['values'] = columns
+            self.id_combo['values'] = columns
+            self.target_combo['values'] = columns
+
+            if len(columns) >= 3:
+                self.spectral_file_column.set(columns[0])
+                self.id_column.set(columns[1])
+                self.target_column.set(columns[2])
+
+            self.tab1_status.config(
+                text=f"✓ Detected {len(columns)} columns",
+                fg=self.colors['success'])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read file:\n{e}")
+
+    def _load_and_plot_data(self):
+        """Load and plot data."""
+        try:
+            from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy, read_asd_dir
+
+            self.tab1_status.config(text="Loading data...", fg=self.colors['info'])
+            self.root.update()
+
+            if not self.spectral_data_path.get() or not self.detected_type:
+                messagebox.showwarning("Missing Input", "Please select spectral data")
+                return
+
+            # Load spectral
+            if self.detected_type == "asd":
+                X = read_asd_dir(self.spectral_data_path.get())
+            elif self.detected_type == "csv":
+                X = read_csv_spectra(self.spectral_data_path.get())
+            else:
+                messagebox.showerror("Error", "Unsupported format")
+                return
+
+            if not self.reference_file.get():
+                messagebox.showwarning("Missing Input", "Please select reference CSV")
+                return
+
+            ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+            X_aligned, y_aligned = align_xy(X, ref, self.spectral_file_column.get(), self.target_column.get())
+
+            self.X = X_aligned
+            self.y = y_aligned
+            self.ref = ref
+
+            # Wavelength range
+            wavelengths = self.X.columns.astype(float)
+            self.wavelength_min.set(str(int(wavelengths.min())))
+            self.wavelength_max.set(str(int(wavelengths.max())))
+
+            # Filter
+            wl_min = self.wavelength_min.get().strip()
+            wl_max = self.wavelength_max.get().strip()
+            if wl_min or wl_max:
+                wavelengths = self.X.columns.astype(float)
+                if wl_min:
+                    self.X = self.X.loc[:, wavelengths >= float(wl_min)]
+                if wl_max:
+                    wavelengths = self.X.columns.astype(float)
+                    self.X = self.X.loc[:, wavelengths <= float(wl_max)]
+
+            self._generate_plots()
+
+            self.tab1_status.config(
+                text=f"✓ Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths",
+                fg=self.colors['success'])
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Failed to load:\n{e}")
+            self.tab1_status.config(text="✗ Error", fg=self.colors['error'])
+
+    def _generate_plots(self):
+        """Generate plots."""
+        if not HAS_MATPLOTLIB:
+            messagebox.showwarning("Matplotlib Required", "Install matplotlib for plots")
+            return
+
+        # Clear container
+        for widget in self.plot_container.winfo_children():
+            widget.destroy()
+
+        # Create notebook for plots
+        notebook = ttk.Notebook(self.plot_container)
+        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+
+        plt.style.use('dark_background')
+
+        # Raw
+        self._create_plot_tab(notebook, "Raw Spectra", self.X.values, "Reflectance", '#FF00FF')
+
+        # Derivatives
+        if HAS_DERIVATIVES:
+            deriv1 = SavgolDerivative(deriv=1, window=7)
+            X_deriv1 = deriv1.transform(self.X.values)
+            self._create_plot_tab(notebook, "1st Derivative", X_deriv1, "First Derivative", '#B794F6')
+
+            deriv2 = SavgolDerivative(deriv=2, window=7)
+            X_deriv2 = deriv2.transform(self.X.values)
+            self._create_plot_tab(notebook, "2nd Derivative", X_deriv2, "Second Derivative", '#00F5FF')
+
+    def _create_plot_tab(self, notebook, title, data, ylabel, color):
+        """Create plot tab."""
+        frame = tk.Frame(notebook, bg=self.colors['card_bg'])
+        notebook.add(frame, text=f"  {title}  ")
+
+        fig = Figure(figsize=(16, 6), facecolor=self.colors['card_bg'])
+        ax = fig.add_subplot(111, facecolor=self.colors['main_bg'])
+
+        wavelengths = self.X.columns.values
+        n_samples = len(data)
+
+        if n_samples <= 50:
+            alpha = 0.5
+            indices = range(n_samples)
+        else:
+            alpha = 0.7
+            indices = np.random.choice(n_samples, size=50, replace=False)
+
+        for i in indices:
+            ax.plot(wavelengths, data[i, :], alpha=alpha, color=color, linewidth=1.5)
+
+        ax.set_xlabel('Wavelength (nm)', fontsize=14, color='white', fontweight='bold')
+        ax.set_ylabel(ylabel, fontsize=14, color='white', fontweight='bold')
+        ax.set_title(f'{title} (n={n_samples})', fontsize=18, fontweight='bold',
+                    color='white', pad=15)
+
+        ax.grid(True, alpha=0.15, color='#666666', linestyle='--')
+        ax.tick_params(colors='white', which='both', labelsize=11)
+
+        for spine in ax.spines.values():
+            spine.set_edgecolor(self.colors['border'])
+            spine.set_linewidth(2)
+
+        if "Derivative" in title:
+            ax.axhline(y=0, color='white', linestyle='--', linewidth=1, alpha=0.3)
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+
+def main():
+    """Main entry point."""
+    root = tk.Tk()
+    app = SpectralNexusApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

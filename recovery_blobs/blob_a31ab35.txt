@@ -1,0 +1,434 @@
+# DASP Codebase - Complete File Reference
+
+## Summary
+
+| Aspect | Details |
+|--------|---------|
+| **Total Python Code** | ~6,400 lines |
+| **Total Julia Code** | 5,307 lines (production) + 2,894 (tests) |
+| **Main Bottleneck** | search.py - nested loops |
+| **Julia Integration** | Complete Phase 1 + Python bridge |
+| **Expected Speedup** | 2-5x with Julia, 4-8x with parallelization |
+
+---
+
+## Core Python Implementation
+
+### src/spectral_predict/ - Main Package (6,400 lines)
+
+**Critical Performance Files:**
+
+1. **search.py** (36 KB, 819 lines)
+   - `/home/user/dasp/src/spectral_predict/search.py`
+   - PRIMARY BOTTLENECK
+   - Main function: `run_search()` (lines 20-450)
+   - Contains nested loops for model search
+
+2. **variable_selection.py** (28 KB, 400+ lines)
+   - `/home/user/dasp/src/spectral_predict/variable_selection.py`
+   - SECONDARY BOTTLENECK
+   - Functions: `uve_selection()`, `spa_selection()`, `ipls_selection()`
+   - Estimated impact: 5-20 minutes per analysis
+
+3. **neural_boosted.py** (15 KB, 400+ lines)
+   - `/home/user/dasp/src/spectral_predict/neural_boosted.py`
+   - TERTIARY BOTTLENECK
+   - Class: `NeuralBoostedRegressor`
+   - Sequential training, 10-30 seconds per fold
+
+**Core Data Processing:**
+
+4. **models.py** (13 KB)
+   - `/home/user/dasp/src/spectral_predict/models.py`
+   - Model definitions and grid configurations
+   - Function: `get_model_grids()` - defines all model parameters
+   - Delegates to scikit-learn, joblib (already parallelized)
+
+5. **preprocess.py** (4 KB)
+   - `/home/user/dasp/src/spectral_predict/preprocess.py`
+   - SNV transform and Savitzky-Golay derivatives
+   - Functions: `SavgolDerivative`, `build_preprocessing_pipeline()`
+   - Fast: 0.1-0.2 seconds per call
+
+6. **regions.py** (8 KB)
+   - `/home/user/dasp/src/spectral_predict/regions.py`
+   - Spectral region analysis
+   - Function: `create_region_subsets()`
+   - Computed once per preprocessing method
+
+7. **scoring.py** (6 KB)
+   - `/home/user/dasp/src/spectral_predict/scoring.py`
+   - Ranking and composite scoring
+   - 90% performance + 10% complexity weight
+
+8. **io.py** (16 KB)
+   - `/home/user/dasp/src/spectral_predict/io.py`
+   - File I/O for ASD, CSV, SPC formats
+   - Functions: `read_asd_dir()`, `read_csv_spectra()`, `align_xy()`
+   - NOT a bottleneck (done once at start)
+
+**Supporting Modules:**
+
+9. **diagnostics.py** (7 KB)
+   - `/home/user/dasp/src/spectral_predict/diagnostics.py`
+   - Residual and leverage analysis
+   - Functions: `compute_residuals()`, `compute_leverage()`
+
+10. **outlier_detection.py** (19 KB)
+    - `/home/user/dasp/src/spectral_predict/outlier_detection.py`
+    - Multiple outlier detection algorithms
+    - NOT in main search loop
+
+11. **progress_monitor.py** (16 KB)
+    - `/home/user/dasp/src/spectral_predict/progress_monitor.py`
+    - Progress tracking and visualization
+    - UI only, not computational
+
+12. **interactive.py** (13 KB)
+    - `/home/user/dasp/src/spectral_predict/interactive.py`
+    - Interactive analysis tools
+    - UI only
+
+13. **model_io.py** (16 KB)
+    - `/home/user/dasp/src/spectral_predict/model_io.py`
+    - Model persistence (save/load)
+    - NOT in main search loop
+
+14. **cli.py** (8 KB)
+    - `/home/user/dasp/src/spectral_predict/cli.py`
+    - Command-line interface
+    - Entry point: `main()`
+
+15. **readers/asd_reader.py**
+    - Binary ASD file parser
+    - Called from `io.py`
+
+16. **readers/spc_reader.py**
+    - SPC spectral format reader
+    - Optional format support
+
+17. **readers/csv_reader.py**
+    - CSV file parser
+    - Most common format
+
+---
+
+## GUI Entry Points
+
+### Python GUIs (Tkinter)
+
+1. **spectral_predict_gui.py** (39 KB)
+   - `/home/user/dasp/spectral_predict_gui.py`
+   - Original GUI with 3-tab design
+   - Entry point: `SpectralPredictApp` class
+   - Tab 1: Import & Preview
+   - Tab 2: Analysis Configuration
+   - Tab 3: Analysis Progress
+
+2. **spectral_predict_gui_optimized.py** (240 KB)
+   - `/home/user/dasp/spectral_predict_gui_optimized.py`
+   - Optimized version with additional features
+   - Entry point: `SpectralPredictGUI` class
+   - Same 3-tab design + Custom Model Development tab
+   - Better performance monitoring
+
+3. **spectral_predict_gui_redesign.py** (28 KB)
+   - `/home/user/dasp/spectral_predict_gui_redesign.py`
+   - Experimental redesign
+   - Not primary entry point
+
+### Julia Bridge
+
+4. **spectral_predict_julia_bridge.py** (880 lines)
+   - `/home/user/dasp/spectral_predict_julia_bridge.py`
+   - Python-Julia communication layer
+   - Main function: `run_search_julia()`
+   - Handles: data marshalling, subprocess management, progress tracking
+   - Can be called from GUI instead of Python `run_search()`
+
+---
+
+## Julia Implementation
+
+### julia_port/SpectralPredict/src/ - Core Implementation (5,307 lines)
+
+All files use Julia 1.9+ syntax
+
+1. **SpectralPredict.jl** (3.6 KB)
+   - `/home/user/dasp/julia_port/SpectralPredict/src/SpectralPredict.jl`
+   - Main module (exports all functions)
+   - Entry point for Julia code
+
+2. **preprocessing.jl** (403 lines)
+   - SNV transform, Savitzky-Golay derivatives
+   - Direct equivalent to Python `preprocess.py`
+   - Type-stable, optimized for JIT compilation
+
+3. **models.jl** (994 lines)
+   - 6 ML models (PLS, Ridge, Lasso, ElasticNet, RandomForest, MLP)
+   - Wrappers around MLJ.jl
+   - Direct equivalent to Python `models.py`
+   - NOTE: NeuralBoosted not yet implemented
+
+4. **cv.jl** (812 lines)
+   - K-fold and stratified k-fold cross-validation
+   - Direct equivalent to Python CV in `search.py`
+   - Supports parallel CV via Threads
+
+5. **regions.jl** (403 lines)
+   - Spectral region analysis
+   - Direct equivalent to Python `regions.py`
+
+6. **scoring.jl** (350 lines)
+   - Ranking and composite scoring
+   - Direct equivalent to Python `scoring.py`
+
+7. **search.jl** (819 lines)
+   - Main search loop orchestration
+   - Function: `run_search()`
+   - Direct equivalent to Python `search.py`
+
+8. **io.jl** (787 lines)
+   - CSV file I/O
+   - Functions: `load_spectral_data()`, `save_results()`
+   - Direct equivalent to Python `io.py`
+
+9. **cli.jl** (280 lines)
+   - Command-line interface
+   - Entry point: `main()`
+   - Direct equivalent to Python `cli.py`
+
+### julia_port/SpectralPredict/test/ - Test Suites (2,894 lines)
+
+1. **test_preprocessing.jl** (294 lines)
+   - Tests for preprocessing module
+
+2. **test_models.jl** (470 lines)
+   - Tests for all 6 ML models
+
+3. **test_cv.jl** (323 lines)
+   - Tests for cross-validation functions
+
+4. **test_regions.jl** (296 lines)
+   - Tests for region analysis
+
+5. **test_search.jl** (540 lines)
+   - Tests for main search loop
+
+6. **test_io.jl** (265 lines)
+   - Tests for CSV I/O
+
+### julia_port/SpectralPredict/examples/ - Working Examples
+
+1. **basic_analysis.jl**
+   - Simple end-to-end workflow
+
+2. **models_example.jl**
+   - Demonstrates each model type
+
+3. **cv_usage_examples.jl**
+   - Cross-validation examples
+
+4. **regions_example.jl**
+   - Region analysis examples
+
+5. **run_search_example.jl**
+   - Full comprehensive search
+
+6. **io_example.jl**
+   - Data loading examples
+
+7. **preprocessing_examples.jl**
+   - Preprocessing pipeline examples
+
+### julia_port/SpectralPredict/docs/ - Documentation
+
+1. **MODELS_MODULE.md**
+   - Detailed model documentation
+
+2. **CV_MODULE_GUIDE.md**
+   - Cross-validation guide
+
+3. **SEARCH_MODULE_README.md**
+   - Main search function documentation
+
+4. **regions_module.md**
+   - Region analysis documentation
+
+### julia_port/SpectralPredict/ - Configuration
+
+1. **Project.toml**
+   - Julia package dependencies
+   - Lists: MLJ, MultivariateStats, GLMNet, DecisionTree, Flux, etc.
+
+2. **Manifest.toml**
+   - Exact dependency versions
+   - Generated by `] instantiate`
+
+---
+
+## Testing & Benchmarking
+
+### Python Tests
+
+1. **test_gui.py**
+   - `/home/user/dasp/test_gui.py`
+   - GUI functionality tests
+
+2. **test_all_implementations.py**
+   - `/home/user/dasp/test_all_implementations.py`
+   - Comprehensive implementation tests
+
+3. **test_optimizations.py**
+   - `/home/user/dasp/test_optimizations.py`
+   - Performance optimization tests
+
+4. **test_phase2_features.py**
+   - `/home/user/dasp/test_phase2_features.py`
+   - Phase 2 feature tests
+
+5. **test_outlier_detection.py**
+   - `/home/user/dasp/test_outlier_detection.py`
+   - Outlier detection tests
+
+6. **test_neural_boosted_simple.py**
+   - `/home/user/dasp/test_neural_boosted_simple.py`
+   - NeuralBoosted tests
+
+### Performance Benchmarking
+
+1. **benchmark_baseline.py**
+   - `/home/user/dasp/benchmark_baseline.py`
+   - Establishes baseline for optimization comparison
+   - Uses: 100 samples, 500 features, minimal configuration
+   - Estimates: ~30-60 seconds with minimal config
+
+2. **verify_r2_fix.py**
+   - `/home/user/dasp/verify_r2_fix.py`
+   - Validates R² calculation fixes
+
+---
+
+## Documentation
+
+### Main Documentation
+
+1. **ARCHITECTURE_ANALYSIS.md** (NEW)
+   - `/home/user/dasp/ARCHITECTURE_ANALYSIS.md`
+   - Comprehensive architecture overview
+   - Performance analysis and bottleneck identification
+   - Optimization recommendations
+
+2. **PERFORMANCE_BOTTLENECK_REFERENCE.md** (NEW)
+   - `/home/user/dasp/PERFORMANCE_BOTTLENECK_REFERENCE.md`
+   - Quick reference for performance bottlenecks
+   - Key files and optimization strategies
+   - Code templates for parallelization
+
+3. **FILES_AND_LOCATIONS.md** (NEW - this file)
+   - `/home/user/dasp/FILES_AND_LOCATIONS.md`
+   - Complete file reference
+   - Locations and purposes
+
+### Project Documentation
+
+4. **documentation/JULIA_PORT_GUIDE.md**
+   - `/home/user/dasp/documentation/JULIA_PORT_GUIDE.md`
+   - Old Julia port guide (superseded by Phase 1 completion)
+
+5. **documentation/DOCUMENTATION_INDEX.md**
+   - `/home/user/dasp/documentation/DOCUMENTATION_INDEX.md`
+   - Index of all documentation
+
+6. **julia_port/JULIA_PORT_COMPLETE.md**
+   - `/home/user/dasp/julia_port/JULIA_PORT_COMPLETE.md`
+   - Comprehensive handoff document for Julia Phase 1
+
+7. **julia_port/README.md**
+   - `/home/user/dasp/julia_port/README.md`
+   - Julia port quick start guide
+
+8. **julia_port/SETUP_GUIDE.md**
+   - `/home/user/dasp/julia_port/SETUP_GUIDE.md`
+   - Detailed Julia installation guide
+
+---
+
+## Dependency Files
+
+1. **pyproject.toml**
+   - `/home/user/dasp/pyproject.toml`
+   - Python package configuration
+   - Core deps: numpy, scipy, pandas, scikit-learn, matplotlib
+
+2. **julia_port/SpectralPredict/Project.toml**
+   - `/home/user/dasp/julia_port/SpectralPredict/Project.toml`
+   - Julia package dependencies
+   - Core deps: MLJ, MultivariateStats, GLMNet, DecisionTree, Flux
+
+---
+
+## Backup & Legacy Files
+
+1. **spectral_predict_gui_BACKUP_20251029_190030.py** (39 KB)
+   - `/home/user/dasp/spectral_predict_gui_BACKUP_20251029_190030.py`
+   - Backup from Oct 29, 2025
+
+2. **spectral_predict_gui_backup.py** (42 KB)
+   - `/home/user/dasp/spectral_predict_gui_backup.py`
+   - Previous backup
+
+3. **spectral_predict_gui_old.py** (47 KB)
+   - `/home/user/dasp/spectral_predict_gui_old.py`
+   - Older version
+
+4. **spectral_predict_gui_redesign.py** (28 KB)
+   - `/home/user/dasp/spectral_predict_gui_redesign.py`
+   - Experimental redesign attempt
+
+These are not recommended for active use; use `spectral_predict_gui_optimized.py` instead.
+
+---
+
+## Optimization Path Summary
+
+### Start Here
+- **Primary target:** `/home/user/dasp/src/spectral_predict/search.py` (nested loops)
+- **Secondary target:** `/home/user/dasp/src/spectral_predict/variable_selection.py` (algorithms)
+
+### Quick Wins (1-2 weeks, 2-4x speedup)
+1. Parallelize model grid in `search.py`
+2. Cache preprocessing in `search.py`
+3. Reduce variable subset counts
+
+### Medium Effort (2-3 weeks, additional 1.5x speedup)
+1. Complete Julia phase 1 (implement NeuralBoosted in `/home/user/dasp/julia_port/SpectralPredict/src/models.jl`)
+2. Test Julia bridge (`/home/user/dasp/spectral_predict_julia_bridge.py`)
+3. Switch GUI to use Julia backend
+
+### Advanced (4-8 weeks, 2-10x speedup)
+1. GPU acceleration (CUDA.jl in Julia)
+2. Distributed computing
+3. Full Julia migration
+
+---
+
+## Key Statistics
+
+| Metric | Value |
+|--------|-------|
+| Python Source Code | ~6,400 lines |
+| Julia Source Code | 5,307 lines |
+| Test Code (Python) | ~3,000 lines |
+| Test Code (Julia) | 2,894 lines |
+| Documentation | 6,000+ lines |
+| Total Deliverables | ~15,000+ lines |
+| Primary Bottleneck | `search.py` |
+| Julia Integration | Complete Phase 1 |
+| Models Implemented (Python) | 6 (including NeuralBoosted) |
+| Models Implemented (Julia) | 6 (excluding NeuralBoosted) |
+| Typical Runtime | 2-8 hours (comprehensive search) |
+| Expected Speedup (Parallelization) | 4-8x |
+| Expected Speedup (Julia) | 2-3x |
+| Combined Potential | 8-24x |
+

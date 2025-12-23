@@ -1,0 +1,33 @@
+"""
+Variable selection methods for spectral analysis.
+
+This module provides advanced variable/wavelength selection algorithms
+to complement the existing feature importance-based methods.
+
+Methods:
+    - SPA: Successive Projections Algorithm (collinearity-aware selection)
+    - UVE: Uninformative Variable Elimination (noise-based filtering)
+    - UVE-SPA: Hybrid combining both approaches
+    - iPLS: Interval Partial Least Squares (region-based selection)
+
+References:
+    Xiaobo et al. (2010). "Variables selection methods in near-infrared
+    spectroscopy." Analytica Chimica Acta 667: 14-32.
+"""
+
+from .spa import SuccessiveProjectionsAlgorithm
+from .uve import UninformativeVariableElimination
+from .hybrid import UVE_SPA
+from .ipls import IntervalPLS
+from .integration import select_variables_by_method, apply_uve_prefilter
+
+__all__ = [
+    'SuccessiveProjectionsAlgorithm',
+    'UninformativeVariableElimination',
+    'UVE_SPA',
+    'IntervalPLS',
+    'select_variables_by_method',
+    'apply_uve_prefilter',
+]
+
+__version__ = '1.0.0'

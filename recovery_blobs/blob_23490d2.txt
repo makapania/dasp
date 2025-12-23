@@ -1,0 +1,473 @@
+# Manual Testing Guide for Model Loading Engine
+
+## Prerequisites
+
+1. Ensure you have run an analysis that generates results with the `all_vars` field
+2. Have the GUI running with data loaded
+3. Have results displayed in the Results tab (Tab 5)
+
+## Test Scenarios
+
+### Test 1: Load PLS Model with top50 Subset
+
+**Steps:**
+1. Run analysis with:
+   - Models: PLS
+   - Subsets: top50
+   - Preprocessing: snv, sg1
+2. Navigate to Results tab
+3. Double-click on Rank 1 result
+
+**Expected Output (Console):**
+```
+================================================================================
+USER ACTION: Double-clicked Rank 1 in Results tab
+================================================================================
+  Model: PLS
+  Performance: [R² value]
+  Variables: 50
+  Loading into Custom Model Development tab...
+
+================================================================================
+LOADING MODEL INTO CUSTOM MODEL DEVELOPMENT TAB
+================================================================================
+
+[STEP 1/7] Validating data availability...
+✓ Data validation passed: X, y, and wavelengths are available
+  - X shape: [shape]
+  - y length: [length]
+  - Available wavelengths: [count]
+
+[STEP 2/7] Building configuration information display...
+✓ Configuration text built: PLS, 50 wavelengths
+
+[STEP 3/7] Loading wavelengths with strict validation...
+⚠️  CRITICAL SECTION: FAIL LOUD validation - no silent fallbacks!
+  Subset model detected: 'top50' with 50 variables
+  Parsing 'all_vars' field...
+  ✓ Parsed 50 wavelengths from 'all_vars'
+  ✓ Validation passed: All 50 wavelengths are valid
+✓ Wavelength loading complete: 50 wavelengths validated
+
+[STEP 4/7] Formatting wavelengths for display...
+✓ Formatted 50 wavelengths ([n] characters)
+✓ Wavelength widget updated: [n] characters inserted
+
+[STEP 5/7] Loading hyperparameters...
+✓ Loaded [n] hyperparameters
+
+[STEP 6/7] Populating GUI controls...
+  ✓ Model info display updated
+  ✓ Model type: PLS
+  ✓ Task type: regression (auto-detected)
+  ✓ Preprocessing: snv_sg1
+  ✓ Window size: 17
+  ✓ CV folds: 5 (ensures same CV strategy as Results)
+
+[STEP 7/7] Finalizing...
+✓ Mode label updated: Loaded from Results (Rank 1)
+✓ Run button enabled
+
+================================================================================
+✅ MODEL LOADING COMPLETE: PLS (Rank 1)
+   - 50 wavelengths loaded and validated
+   - Preprocessing: snv_sg1
+   - Ready for refinement
+================================================================================
+
+✅ Successfully loaded and switched to Custom Model Development tab
+================================================================================
+```
+
+**Expected GUI State:**
+- Tab switches to "Custom Model Development" (Tab 6)
+- Model info box shows configuration with Rank 1
+- Wavelength text box shows 50 wavelengths (comma-separated)
+- Model type dropdown: PLS
+- Preprocessing dropdown: snv_sg1
+- Window size: 17 (or from config)
+- CV folds: 5 (or from config)
+- Run button: ENABLED (green)
+- Mode label: "Mode: Loaded from Results (Rank 1)" in green
+
+**Verify:**
+- [ ] All 50 wavelengths are shown (not all 2151)
+- [ ] Wavelength count label shows "Wavelengths: 50 selected"
+- [ ] No errors in console
+- [ ] Run button is clickable
+
+---
+
+### Test 2: Load RandomForest with Region Subset
+
+**Steps:**
+1. Run analysis with:
+   - Models: RandomForest
+   - Subsets: region subset (e.g., 1920-2020 nm)
+   - Preprocessing: raw
+2. Navigate to Results tab
+3. Double-click on a RandomForest result
+
+**Expected Output (Console):**
+Similar to Test 1, but with:
+- Model type: RandomForest
+- Hyperparameters section shows n_estimators, max_depth, max_features
+- Subset detected: 'region' or similar
+
+**Expected GUI State:**
+- Model type dropdown: RandomForest
+- Preprocessing dropdown: raw
+- Hyperparameters loaded (if displayed)
+- Wavelength count matches region size (e.g., 51 for 1920-2020 nm @ 2nm intervals)
+
+**Verify:**
+- [ ] Wavelengths are ONLY from the specified region
+- [ ] Count matches expected region size
+- [ ] RandomForest hyperparameters loaded
+- [ ] No fallback to full spectrum
+
+---
+
+### Test 3: Load Full Spectrum Model
+
+**Steps:**
+1. Run analysis with:
+   - Models: Ridge
+   - Subsets: full
+   - Preprocessing: snv
+2. Navigate to Results tab
+3. Double-click on Ridge full spectrum result
+
+**Expected Output (Console):**
+```
+[STEP 3/7] Loading wavelengths with strict validation...
+⚠️  CRITICAL SECTION: FAIL LOUD validation - no silent fallbacks!
+  Full model detected - using all [n] wavelengths
+✓ Wavelength loading complete: [n] wavelengths validated
+```
+
+**Expected GUI State:**
+- Wavelength text box shows: "[first 10], ..., [last 10]\n\n# Total: [n] wavelengths selected\n# Range: [min] nm to [max] nm"
+- Model type: Ridge
+- All wavelengths included
+
+**Verify:**
+- [ ] Wavelength count matches full dataset
+- [ ] Condensed display format used (for large counts)
+- [ ] Alpha parameter loaded for Ridge
+
+---
+
+### Test 4: Load NeuralBoosted Model
+
+**Steps:**
+1. Run analysis with:
+   - Models: NeuralBoosted
+   - Any subset
+   - Preprocessing: snv_sg2
+2. Navigate to Results tab
+3. Double-click on NeuralBoosted result
+
+**Expected Output (Console):**
+```
+[STEP 5/7] Loading hyperparameters...
+✓ Loaded 4 hyperparameters
+  (n_estimators, learning_rate, hidden_layer_size, activation)
+```
+
+**Expected GUI State:**
+- Model type: NeuralBoosted
+- Preprocessing: snv_sg2
+- All NeuralBoosted hyperparameters loaded
+
+**Verify:**
+- [ ] All 4 hyperparameters shown in info box
+- [ ] Preprocessing correctly converted from backend naming
+
+---
+
+### Test 5: Error Case - Missing all_vars Field (Simulated)
+
+**Note:** This test requires modifying results DataFrame temporarily or using old results.
+
+**Expected Behavior:**
+- Error dialog appears:
+  ```
+  Model Loading Failed - Data Validation Error
+
+  CRITICAL ERROR: Missing 'all_vars' field for subset model!
+    Model: [name] (Rank [rank])
+    Subset: [tag]
+    Expected variables: [n]
+
+  The 'all_vars' field is REQUIRED for subset models to identify
+  the exact wavelengths used. Without it, loading this model
+  would cause R² discrepancies.
+
+  SOLUTION: Re-run the analysis to generate complete results.
+  ```
+
+- Console shows:
+  ```
+  ❌ VALIDATION ERROR:
+  [same message as above]
+  [stack trace]
+  ```
+
+**Verify:**
+- [ ] Error dialog is clear and actionable
+- [ ] Console shows full details
+- [ ] GUI doesn't crash
+- [ ] Tab doesn't switch
+- [ ] Can try loading another model
+
+---
+
+### Test 6: Error Case - Wavelength Count Mismatch (Simulated)
+
+**Note:** This would require corrupted results data.
+
+**Expected Behavior:**
+- Error dialog appears:
+  ```
+  Model Loading Failed - Data Validation Error
+
+  CRITICAL ERROR: Wavelength count mismatch!
+    Model: [name] (Rank [rank])
+    Expected: [n] wavelengths (from n_vars field)
+    Parsed: [m] wavelengths (from all_vars field)
+    Subset: [tag]
+
+  This indicates a data integrity issue in the results table.
+  The 'all_vars' field does not match the 'n_vars' count.
+
+  SOLUTION: Re-run the analysis to generate consistent results.
+  ```
+
+**Verify:**
+- [ ] Error shows both expected and parsed counts
+- [ ] Message identifies data integrity issue
+- [ ] Provides actionable solution
+
+---
+
+### Test 7: Load Multiple Models in Sequence
+
+**Steps:**
+1. Double-click Rank 1 (e.g., PLS)
+2. Verify loading
+3. Click back to Results tab
+4. Double-click Rank 2 (e.g., Ridge)
+5. Verify loading
+6. Repeat for Ranks 3-5
+
+**Expected Behavior:**
+- Each model loads successfully
+- Previous model data is completely replaced
+- No residual data from previous loads
+- Mode label updates with current rank each time
+
+**Verify:**
+- [ ] Each model loads independently
+- [ ] No data mixing between models
+- [ ] Console logging clear for each load
+- [ ] Memory doesn't grow excessively
+
+---
+
+### Test 8: Load Classification Model
+
+**Steps:**
+1. Use classification dataset (binary or multi-class)
+2. Run analysis with any model
+3. Double-click result
+
+**Expected Output (Console):**
+```
+[STEP 2/7] Building configuration information display...
+✓ Classification model: Accuracy=[value]
+
+[STEP 6/7] Populating GUI controls...
+  ✓ Task type: classification (auto-detected)
+```
+
+**Expected GUI State:**
+- Task type radio button: Classification
+- Model info shows Accuracy (not R², RMSE)
+- ROC AUC shown if available
+
+**Verify:**
+- [ ] Task type auto-detected correctly
+- [ ] Accuracy metric displayed
+- [ ] ROC AUC displayed if available
+- [ ] No RMSE or R² shown
+
+---
+
+### Test 9: Load with Various Preprocessing Methods
+
+**Test each preprocessing method:**
+- raw → raw
+- snv → snv
+- deriv (order=1) → sg1
+- deriv (order=2) → sg2
+- snv_deriv (order=1) → snv_sg1
+- snv_deriv (order=2) → snv_sg2
+- deriv_snv → deriv_snv
+- msc → msc
+- msc_deriv (order=1) → msc_sg1
+- msc_deriv (order=2) → msc_sg2
+- deriv_msc → deriv_msc
+
+**Expected Behavior:**
+- Each backend naming converts to correct GUI naming
+- Preprocessing dropdown shows correct value
+- Window size loaded correctly
+- Console shows: "✓ Preprocessing: [gui_name]"
+
+**Verify:**
+- [ ] All preprocessing methods convert correctly
+- [ ] No "Unknown preprocessing" warnings
+- [ ] Window size matches config
+
+---
+
+## Performance Testing
+
+### Test P1: Large Subset (500+ wavelengths)
+
+**Steps:**
+1. Create subset with 500 wavelengths
+2. Run analysis
+3. Time the double-click to load completion
+
+**Expected:**
+- Load time < 1 second
+- GUI remains responsive
+- No freezing
+
+**Verify:**
+- [ ] Load completes quickly
+- [ ] No GUI freeze
+- [ ] Wavelengths formatted correctly
+
+---
+
+### Test P2: Full Spectrum (2000+ wavelengths)
+
+**Steps:**
+1. Load full spectrum model
+2. Time the double-click to load completion
+
+**Expected:**
+- Load time < 2 seconds
+- Condensed wavelength display
+- GUI remains responsive
+
+**Verify:**
+- [ ] Load time acceptable
+- [ ] Condensed format used
+- [ ] No performance issues
+
+---
+
+## Regression Testing
+
+### Test R1: Verify No Impact on Other Features
+
+**Steps:**
+1. Load model into Tab 6
+2. Test other tabs:
+   - Data Import (Tab 1)
+   - Data Quality Check (Tab 2)
+   - Analysis Config (Tab 3)
+   - Progress (Tab 4)
+   - Results (Tab 5)
+   - Model Prediction (Tab 7)
+
+**Verify:**
+- [ ] All tabs still functional
+- [ ] No unexpected errors
+- [ ] Data integrity maintained
+
+---
+
+### Test R2: Verify Run Refined Model Still Works
+
+**Steps:**
+1. Load model from Results
+2. Adjust a parameter (e.g., change preprocessing)
+3. Click "Run Refined Model"
+4. Verify execution completes
+
+**Verify:**
+- [ ] Model runs with loaded configuration
+- [ ] Results display correctly
+- [ ] No errors from loading process
+
+---
+
+## Edge Cases
+
+### Test E1: Load with No Data
+
+**Steps:**
+1. Start fresh GUI (no data loaded)
+2. Load old results file (if possible)
+3. Try to double-click result
+
+**Expected:**
+- Error: "Data validation failed! Required data (X, y, wavelengths) is not available."
+- No crash
+
+**Verify:**
+- [ ] Clear error message
+- [ ] No crash
+- [ ] Can load data and retry
+
+---
+
+### Test E2: Load with Different Dataset
+
+**Steps:**
+1. Run analysis with Dataset A
+2. Load different Dataset B
+3. Try to load results from Dataset A
+
+**Expected:**
+- For subset models: May get "Invalid wavelengths" error if wavelengths don't match
+- For full models: May get warning if count doesn't match
+- Clear error message in either case
+
+**Verify:**
+- [ ] Detects dataset mismatch
+- [ ] Error message is clear
+- [ ] Suggests solution
+
+---
+
+## Acceptance Criteria
+
+All tests pass when:
+- [ ] No silent fallbacks to all wavelengths for subset models
+- [ ] All errors have clear, actionable messages
+- [ ] Console logging is comprehensive
+- [ ] GUI remains stable and responsive
+- [ ] All model types load correctly
+- [ ] All preprocessing methods convert correctly
+- [ ] Performance is acceptable (< 2 seconds)
+- [ ] No memory leaks in repeated loads
+- [ ] Error cases are handled gracefully
+
+---
+
+## Reporting Issues
+
+If any test fails, report:
+1. Test number and name
+2. Steps to reproduce
+3. Expected behavior
+4. Actual behavior
+5. Console output (full log)
+6. Screenshot of error dialog (if applicable)
+7. Dataset characteristics (size, type, etc.)

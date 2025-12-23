@@ -1,0 +1,373 @@
+"""
+Successive Projections Algorithm (SPA) for variable selection.
+
+Based on:
+    Araújo et al. (2001). "The successive projections algorithm for variable
+    selection in spectroscopic multicomponent analysis."
+    Chemometrics and Intelligent Laboratory Systems, 57: 65-73.
+
+    Xiaobo et al. (2010). Section 4.3.1, pages 21-22.
+
+The SPA selects wavelengths with minimal collinearity by using orthogonal
+projections in vector space. This addresses a key limitation of importance-based
+methods which can select highly correlated variables.
+"""
+
+import numpy as np
+from sklearn.base import BaseEstimator
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import cross_val_predict
+import warnings
+
+
+class SuccessiveProjectionsAlgorithm(BaseEstimator):
+    """
+    Successive Projections Algorithm for wavelength selection.
+
+    SPA selects variables by iteratively projecting candidate wavelengths onto
+    the orthogonal subspace of previously selected wavelengths, choosing those
+    with maximum projection magnitude. This minimizes collinearity.
+
+    Parameters
+    ----------
+    n_vars : int
+        Number of variables to select
+
+    initial_wavelengths : list of int, optional (default=None)
+        Specific starting wavelength indices to try. If None, tries
+        multiple random starts.
+
+    n_random_starts : int, optional (default=10)
+        Number of random starting wavelengths to try if initial_wavelengths
+        is None.
+
+    validation_method : str, optional (default='loo')
+        Method to evaluate quality of selected variables:
+        - 'loo': Leave-one-out cross-validation
+        - 'none': No validation (uses first random start only)
+
+    verbose : bool, optional (default=False)
+        Whether to print progress information
+
+    Attributes
+    ----------
+    selected_variables_ : ndarray of shape (n_vars,)
+        Indices of selected variables
+
+    projection_norms_ : ndarray of shape (n_vars,)
+        Projection norm at each selection step
+
+    initial_wavelength_ : int
+        Starting wavelength that gave best result
+
+    rmsecv_ : float
+        Root mean squared error of cross-validation (if validation used)
+    """
+
+    def __init__(self, n_vars, initial_wavelengths=None, n_random_starts=10,
+                 validation_method='loo', verbose=False):
+        self.n_vars = n_vars
+        self.initial_wavelengths = initial_wavelengths
+        self.n_random_starts = n_random_starts
+        self.validation_method = validation_method
+        self.verbose = verbose
+
+    def _project_orthogonal(self, x, reference):
+        """
+        Project vector x onto orthogonal subspace of reference vector.
+
+        Parameters
+        ----------
+        x : ndarray
+            Vector to project
+        reference : ndarray
+            Reference vector
+
+        Returns
+        -------
+        projection : ndarray
+            Orthogonal projection of x
+        """
+        # P*x = x - (x^T * ref) * ref / (ref^T * ref)
+        numerator = np.dot(x.T, reference)
+        denominator = np.dot(reference.T, reference)
+
+        if denominator == 0:
+            return x
+
+        projection = x - (numerator / denominator) * reference
+        return projection
+
+    def _run_spa_from_start(self, X, initial_idx):
+        """
+        Run SPA algorithm from a specific starting wavelength.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Spectra data
+        initial_idx : int
+            Index of starting wavelength
+
+        Returns
+        -------
+        selected : ndarray
+            Indices of selected variables
+        norms : ndarray
+            Projection norms at each step
+        """
+        n_samples, n_features = X.shape
+
+        # Initialize
+        selected = [initial_idx]
+        norms = [np.linalg.norm(X[:, initial_idx])]
+
+        # Create working copy of X
+        X_work = X.copy()
+
+        # Iteratively select variables
+        for iteration in range(self.n_vars - 1):
+            # Set of candidate wavelengths (not yet selected)
+            candidates = [j for j in range(n_features) if j not in selected]
+
+            if len(candidates) == 0:
+                break
+
+            # Reference is the last selected wavelength
+            reference = X_work[:, selected[-1]]
+
+            # Project all candidates onto orthogonal subspace
+            max_norm = -1
+            best_candidate = None
+
+            for candidate_idx in candidates:
+                # Project candidate onto orthogonal subspace of reference
+                projection = self._project_orthogonal(
+                    X_work[:, candidate_idx],
+                    reference
+                )
+
+                # Calculate projection norm
+                norm = np.linalg.norm(projection)
+
+                if norm > max_norm:
+                    max_norm = norm
+                    best_candidate = candidate_idx
+
+            # Select wavelength with maximum projection
+            selected.append(best_candidate)
+            norms.append(max_norm)
+
+            # Update working matrix: project all candidates
+            for j in candidates:
+                X_work[:, j] = self._project_orthogonal(
+                    X_work[:, j],
+                    reference
+                )
+
+        return np.array(selected), np.array(norms)
+
+    def _evaluate_selection(self, X, y, selected_vars):
+        """
+        Evaluate quality of selected variables using cross-validation.
+
+        Parameters
+        ----------
+        X : ndarray
+            Full spectra
+        y : ndarray
+            Target values
+        selected_vars : ndarray
+            Indices of selected variables
+
+        Returns
+        -------
+        rmsecv : float
+            Root mean squared error of cross-validation
+        """
+        X_subset = X[:, selected_vars]
+
+        try:
+            # Use MLR for evaluation (fast and simple)
+            model = LinearRegression()
+
+            # Leave-one-out cross-validation
+            y_pred = cross_val_predict(model, X_subset, y, cv=len(y))
+
+            rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+            return rmsecv
+
+        except Exception as e:
+            warnings.warn(f"Cross-validation failed: {e}. Returning inf.")
+            return np.inf
+
+    def fit(self, X, y=None):
+        """
+        Select variables using SPA.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Spectra data
+        y : ndarray of shape (n_samples,), optional
+            Target values (required if validation_method != 'none')
+
+        Returns
+        -------
+        self : object
+            Fitted estimator
+        """
+        X = np.asarray(X)
+        n_samples, n_features = X.shape
+
+        # Validation
+        if self.n_vars < 1:
+            raise ValueError(f"n_vars must be >= 1, got {self.n_vars}")
+        if self.n_vars >= n_features:
+            raise ValueError(
+                f"n_vars ({self.n_vars}) must be < n_features ({n_features})"
+            )
+
+        # Determine starting wavelengths to try
+        if self.initial_wavelengths is not None:
+            start_wavelengths = self.initial_wavelengths
+        else:
+            # Generate random starting wavelengths
+            np.random.seed(42)  # For reproducibility
+            start_wavelengths = np.random.choice(
+                n_features,
+                size=min(self.n_random_starts, n_features),
+                replace=False
+            )
+
+        # Try each starting wavelength
+        best_rmsecv = np.inf
+        best_selection = None
+        best_norms = None
+        best_start = None
+
+        for i, start_idx in enumerate(start_wavelengths):
+            if self.verbose:
+                print(f"SPA: Trying start wavelength {i+1}/{len(start_wavelengths)}: "
+                      f"index={start_idx}")
+
+            # Run SPA from this starting point
+            selected, norms = self._run_spa_from_start(X, start_idx)
+
+            # Evaluate selection (if validation requested)
+            if self.validation_method == 'loo' and y is not None:
+                rmsecv = self._evaluate_selection(X, y, selected)
+
+                if self.verbose:
+                    print(f"  RMSECV = {rmsecv:.6f}")
+
+                if rmsecv < best_rmsecv:
+                    best_rmsecv = rmsecv
+                    best_selection = selected
+                    best_norms = norms
+                    best_start = start_idx
+
+            elif self.validation_method == 'none':
+                # No validation - just use first start
+                best_selection = selected
+                best_norms = norms
+                best_start = start_idx
+                best_rmsecv = None
+                break
+
+        # Store results
+        self.selected_variables_ = best_selection
+        self.projection_norms_ = best_norms
+        self.initial_wavelength_ = best_start
+        self.rmsecv_ = best_rmsecv
+
+        if self.verbose:
+            print(f"\nBest selection from wavelength {best_start}")
+            if best_rmsecv is not None:
+                print(f"RMSECV = {best_rmsecv:.6f}")
+
+        return self
+
+    def transform(self, X):
+        """
+        Select the chosen variables from X.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Spectra data
+
+        Returns
+        -------
+        X_selected : ndarray of shape (n_samples, n_vars)
+            Selected variables
+        """
+        if not hasattr(self, 'selected_variables_'):
+            raise RuntimeError("Must call fit() before transform()")
+
+        return X[:, self.selected_variables_]
+
+    def fit_transform(self, X, y=None):
+        """
+        Fit and transform in one step.
+
+        Parameters
+        ----------
+        X : ndarray
+            Spectra data
+        y : ndarray, optional
+            Target values
+
+        Returns
+        -------
+        X_selected : ndarray
+            Selected variables
+        """
+        self.fit(X, y)
+        return self.transform(X)
+
+    def get_collinearity_measure(self, X):
+        """
+        Calculate collinearity measure for selected variables.
+
+        Uses Variance Inflation Factor (VIF) as collinearity metric.
+        Lower VIF indicates less collinearity.
+
+        Parameters
+        ----------
+        X : ndarray
+            Full spectra matrix
+
+        Returns
+        -------
+        mean_vif : float
+            Mean VIF across selected variables
+        """
+        if not hasattr(self, 'selected_variables_'):
+            raise RuntimeError("Must call fit() before get_collinearity_measure()")
+
+        X_selected = X[:, self.selected_variables_]
+
+        # Calculate correlation matrix
+        try:
+            corr_matrix = np.corrcoef(X_selected.T)
+
+            # Calculate VIF for each variable
+            vifs = []
+            for i in range(len(self.selected_variables_)):
+                # VIF = 1 / (1 - R²)
+                # R² from regressing variable i on all others
+                other_indices = [j for j in range(len(self.selected_variables_)) if j != i]
+
+                if len(other_indices) > 0:
+                    # Simple approximation: use correlation
+                    r_squared = np.sum(corr_matrix[i, other_indices]**2) / len(other_indices)
+                    vif = 1.0 / (1.0 - min(r_squared, 0.999))  # Avoid division by zero
+                    vifs.append(vif)
+
+            return np.mean(vifs) if vifs else 1.0
+
+        except Exception:
+            return np.nan

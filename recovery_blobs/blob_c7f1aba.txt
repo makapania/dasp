@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"C:\\Users\\sponheim\\AppData\\Local\\Programs\\Julia-1.12.1\\bin\\julia.exe\" --project=julia_port/SpectralPredict -e \"using SpectralPredict; println(\"\"SpectralPredict loaded successfully\"\"); include(\"\"julia_port/SpectralPredict/src/models.jl\"\"); println(\"\"Models.jl loaded\"\")\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

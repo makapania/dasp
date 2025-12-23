@@ -1,0 +1,503 @@
+"""
+Visualization functions for variable selection diagnostics.
+
+Provides plotting functions to understand what each selection method is doing
+and to compare different strategies.
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+
+
+def plot_uve_stability(uve_obj, wavelengths=None, figsize=(12, 6), save_path=None):
+    """
+    Plot UVE stability scores with cutoff threshold.
+
+    Parameters
+    ----------
+    uve_obj : UninformativeVariableElimination
+        Fitted UVE object
+    wavelengths : array-like, optional
+        Wavelength values for x-axis. If None, uses feature indices.
+    figsize : tuple, optional (default=(12, 6))
+        Figure size
+    save_path : str, optional
+        If provided, saves plot to this path
+
+    Returns
+    -------
+    fig, ax : matplotlib Figure and Axes
+    """
+    if not hasattr(uve_obj, 'stability_scores_'):
+        raise RuntimeError("UVE object must be fitted first")
+
+    diagnostics = uve_obj.get_stability_diagnostics()
+
+    stability = diagnostics['original_stability']
+    cutoff = diagnostics['cutoff']
+    mask = diagnostics['informative_mask']
+
+    # X-axis values
+    if wavelengths is None:
+        x_vals = np.arange(len(stability))
+        x_label = 'Feature Index'
+    else:
+        x_vals = wavelengths
+        x_label = 'Wavelength (nm)'
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot stability scores
+    ax.plot(x_vals, stability, 'o-', markersize=3, linewidth=1,
+           color='steelblue', alpha=0.6, label='Stability Score')
+
+    # Highlight informative variables
+    ax.scatter(x_vals[mask], stability[mask], c='green', s=20,
+              alpha=0.7, label=f'Informative ({np.sum(mask)})', zorder=3)
+    ax.scatter(x_vals[~mask], stability[~mask], c='red', s=20,
+              alpha=0.7, label=f'Eliminated ({np.sum(~mask)})', zorder=3)
+
+    # Cutoff threshold lines
+    ax.axhline(cutoff, color='darkred', linestyle='--', linewidth=2,
+              label=f'Cutoff (+{cutoff:.4f})')
+    ax.axhline(-cutoff, color='darkred', linestyle='--', linewidth=2,
+              label=f'Cutoff (-{cutoff:.4f})')
+    ax.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+
+    # Labels and formatting
+    ax.set_xlabel(x_label, fontsize=12)
+    ax.set_ylabel('Stability Score (mean/std)', fontsize=12)
+    ax.set_title('UVE: Stability Analysis\n'
+                f'Retained: {diagnostics["n_retained"]} | '
+                f'Eliminated: {diagnostics["n_eliminated"]}',
+                fontsize=14, fontweight='bold')
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    return fig, ax
+
+
+def plot_ipls_intervals(ipls_obj, wavelengths=None, figsize=(14, 8), save_path=None):
+    """
+    Plot iPLS interval comparison (like Figure 8 in Xiaobo et al. 2010).
+
+    Parameters
+    ----------
+    ipls_obj : IntervalPLS
+        Fitted iPLS object
+    wavelengths : array-like, optional
+        Wavelength values. If None, uses feature indices.
+    figsize : tuple, optional (default=(14, 8))
+        Figure size
+    save_path : str, optional
+        If provided, saves plot to this path
+
+    Returns
+    -------
+    fig, axes : matplotlib Figure and Axes
+    """
+    if not hasattr(ipls_obj, 'interval_results_'):
+        raise RuntimeError("iPLS object must be fitted first")
+
+    plot_data = ipls_obj.get_visualization_data()
+
+    # Create figure with two subplots
+    fig = plt.figure(figsize=figsize)
+    gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.3)
+
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1])
+
+    # Get interval boundaries for bar chart
+    interval_indices = plot_data['interval_indices']
+    rmsecv_values = np.array(plot_data['rmsecv_values'])
+    n_components = plot_data['n_components']
+    full_rmsecv = plot_data['full_spectrum_rmsecv']
+
+    # Determine x-axis (use wavelengths if available)
+    if wavelengths is not None and 'center_wavelengths' in plot_data:
+        x_centers = plot_data['center_wavelengths']
+        x_label = 'Wavelength (nm)'
+
+        # Get interval widths for bars
+        intervals_wl = []
+        for res in ipls_obj.interval_results_:
+            start_wl = wavelengths[res['start_idx']]
+            end_wl = wavelengths[res['end_idx'] - 1]
+            intervals_wl.append((start_wl, end_wl))
+
+        bar_widths = [end - start for start, end in intervals_wl]
+    else:
+        x_centers = plot_data['interval_centers']
+        x_label = 'Feature Index'
+
+        # Calculate bar widths from indices
+        bar_widths = []
+        for res in ipls_obj.interval_results_:
+            width = res['end_idx'] - res['start_idx']
+            bar_widths.append(width * 0.9)  # Slight gap between bars
+
+    # === TOP PLOT: RMSECV bars ===
+    colors = ['green' if rmse < full_rmsecv else 'steelblue'
+             for rmse in rmsecv_values]
+
+    bars = ax1.bar(x_centers, rmsecv_values, width=bar_widths, color=colors,
+                  alpha=0.7, edgecolor='black', linewidth=0.5)
+
+    # Full spectrum reference line
+    ax1.axhline(full_rmsecv, color='darkred', linestyle='--', linewidth=2,
+               label=f'Full Spectrum (RMSECV={full_rmsecv:.4f})')
+
+    # Highlight best interval
+    best_idx = ipls_obj.best_interval_idx_
+    best_center = x_centers[best_idx]
+    best_rmse = rmsecv_values[best_idx]
+    ax1.scatter([best_center], [best_rmse], color='gold', s=200,
+               marker='*', edgecolor='black', linewidth=2,
+               label=f'Best Interval #{best_idx}', zorder=10)
+
+    # Labels
+    ax1.set_ylabel('RMSECV', fontsize=12, fontweight='bold')
+    ax1.set_title(f'iPLS: Interval Performance Comparison\n'
+                 f'{len(interval_indices)} intervals | '
+                 f'Best: Interval #{best_idx} (RMSECV={best_rmse:.4f})',
+                 fontsize=14, fontweight='bold')
+    ax1.legend(loc='best', fontsize=10)
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    # === BOTTOM PLOT: Optimal components ===
+    ax2.bar(x_centers, n_components, width=bar_widths, color='coral',
+           alpha=0.6, edgecolor='black', linewidth=0.5)
+
+    ax2.set_xlabel(x_label, fontsize=12, fontweight='bold')
+    ax2.set_ylabel('# Components', fontsize=10)
+    ax2.set_title('Optimal PLS Components per Interval', fontsize=11)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.set_ylim(bottom=0)
+
+    # Add interval numbers as text labels (for bottom plot)
+    for i, (x, n_comp) in enumerate(zip(x_centers, n_components)):
+        ax2.text(x, n_comp + 0.2, str(n_comp), ha='center', va='bottom',
+                fontsize=8, fontweight='bold')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    return fig, (ax1, ax2)
+
+
+def plot_spa_collinearity(spa_obj, wavelengths=None, figsize=(12, 6), save_path=None):
+    """
+    Plot SPA projection norms showing orthogonality.
+
+    Parameters
+    ----------
+    spa_obj : SuccessiveProjectionsAlgorithm
+        Fitted SPA object
+    wavelengths : array-like, optional
+        Full wavelength array for displaying selected positions
+    figsize : tuple, optional (default=(12, 6))
+        Figure size
+    save_path : str, optional
+        If provided, saves plot to this path
+
+    Returns
+    -------
+    fig, ax : matplotlib Figure and Axes
+    """
+    if not hasattr(spa_obj, 'selected_variables_'):
+        raise RuntimeError("SPA object must be fitted first")
+
+    selected_vars = spa_obj.selected_variables_
+    projection_norms = spa_obj.projection_norms_
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot projection norms vs selection order
+    selection_order = np.arange(len(projection_norms))
+
+    ax.plot(selection_order, projection_norms, 'o-', markersize=8,
+           linewidth=2, color='steelblue', label='Projection Norm')
+
+    # Highlight starting wavelength
+    ax.scatter([0], [projection_norms[0]], color='red', s=200,
+              marker='*', edgecolor='black', linewidth=2,
+              label=f'Start: {selected_vars[0]}', zorder=10)
+
+    # Labels
+    ax.set_xlabel('Selection Order', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Projection Norm', fontsize=12, fontweight='bold')
+    ax.set_title(f'SPA: Orthogonal Projection Magnitudes\n'
+                f'Selected {len(selected_vars)} wavelengths with minimal collinearity',
+                fontsize=14, fontweight='bold')
+
+    # Add selected wavelength indices as text
+    for i, (order, norm, var_idx) in enumerate(zip(selection_order, projection_norms, selected_vars)):
+        if i % max(1, len(selected_vars) // 10) == 0:  # Label every ~10th to avoid crowding
+            label = f'{var_idx}'
+            if wavelengths is not None:
+                label = f'{wavelengths[var_idx]:.0f}nm'
+            ax.text(order, norm, label, fontsize=8, ha='center', va='bottom')
+
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    return fig, ax
+
+
+def plot_hybrid_summary(hybrid_obj, wavelengths=None, figsize=(14, 10), save_path=None):
+    """
+    Plot UVE-SPA hybrid selection summary.
+
+    Shows both stages: UVE filtering and SPA selection.
+
+    Parameters
+    ----------
+    hybrid_obj : UVE_SPA
+        Fitted hybrid object
+    wavelengths : array-like, optional
+        Wavelength values
+    figsize : tuple, optional (default=(14, 10))
+        Figure size
+    save_path : str, optional
+        If provided, saves plot to this path
+
+    Returns
+    -------
+    fig, axes : matplotlib Figure and Axes array
+    """
+    if not hasattr(hybrid_obj, 'selected_variables_'):
+        raise RuntimeError("Hybrid object must be fitted first")
+
+    summary = hybrid_obj.get_selection_summary()
+    diagnostics = hybrid_obj.get_diagnostics()
+
+    # Create subplots
+    fig = plt.figure(figsize=figsize)
+    gs = GridSpec(3, 2, hspace=0.4, wspace=0.3)
+
+    ax1 = fig.add_subplot(gs[0, :])  # Summary bar chart
+    ax2 = fig.add_subplot(gs[1, :])  # UVE stability plot
+    ax3 = fig.add_subplot(gs[2, 0])  # Selection funnel
+    ax4 = fig.add_subplot(gs[2, 1])  # Final selection highlights
+
+    # === PLOT 1: Summary bar chart ===
+    stages = ['Initial', 'After UVE', 'Final (SPA)']
+    counts = [
+        summary['initial_n_features'],
+        summary['uve_retained'],
+        summary['final_n_features']
+    ]
+    colors_bar = ['lightgray', 'steelblue', 'green']
+
+    bars = ax1.bar(stages, counts, color=colors_bar, alpha=0.7,
+                  edgecolor='black', linewidth=2)
+
+    # Add value labels on bars
+    for bar, count in zip(bars, counts):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{int(count)}\nvars',
+                ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    ax1.set_ylabel('Number of Variables', fontsize=12, fontweight='bold')
+    ax1.set_title('UVE-SPA Hybrid: Variable Reduction Summary\n'
+                 f'Total Reduction: {summary["total_reduction_pct"]:.1f}%',
+                 fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    # === PLOT 2: UVE stability (simplified) ===
+    uve_diag = diagnostics['uve_diagnostics']
+    stability = uve_diag['original_stability']
+    cutoff = uve_diag['cutoff']
+    mask = uve_diag['informative_mask']
+
+    x_vals = wavelengths if wavelengths is not None else np.arange(len(stability))
+
+    ax2.plot(x_vals, stability, '-', linewidth=1, color='steelblue', alpha=0.5)
+    ax2.scatter(x_vals[mask], stability[mask], c='green', s=10, alpha=0.7, label='Retained by UVE')
+    ax2.scatter(x_vals[~mask], stability[~mask], c='red', s=10, alpha=0.7, label='Eliminated by UVE')
+    ax2.axhline(cutoff, color='darkred', linestyle='--', label=f'Cutoff (±{cutoff:.4f})')
+    ax2.axhline(-cutoff, color='darkred', linestyle='--')
+    ax2.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+
+    ax2.set_xlabel('Wavelength (nm)' if wavelengths is not None else 'Feature Index', fontsize=10)
+    ax2.set_ylabel('Stability Score', fontsize=10)
+    ax2.set_title('Stage 1: UVE Filtering', fontsize=12, fontweight='bold')
+    ax2.legend(loc='best', fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    # === PLOT 3: Selection funnel ===
+    # Sankey-like diagram showing flow
+    from matplotlib.patches import Rectangle, FancyBboxPatch
+
+    y_positions = [0.7, 0.4, 0.1]
+    box_width = 0.6
+    box_heights = [0.15, 0.15, 0.15]
+
+    # Initial
+    rect1 = FancyBboxPatch((0.2, y_positions[0]-box_heights[0]/2), box_width, box_heights[0],
+                          boxstyle="round,pad=0.01", facecolor='lightgray',
+                          edgecolor='black', linewidth=2)
+    ax3.add_patch(rect1)
+    ax3.text(0.5, y_positions[0], f"{summary['initial_n_features']}\nvariables",
+            ha='center', va='center', fontsize=11, fontweight='bold')
+
+    # After UVE
+    rect2 = FancyBboxPatch((0.2, y_positions[1]-box_heights[1]/2), box_width, box_heights[1],
+                          boxstyle="round,pad=0.01", facecolor='steelblue',
+                          edgecolor='black', linewidth=2)
+    ax3.add_patch(rect2)
+    ax3.text(0.5, y_positions[1], f"{summary['uve_retained']}\nvariables",
+            ha='center', va='center', fontsize=11, fontweight='bold', color='white')
+
+    # Final
+    rect3 = FancyBboxPatch((0.2, y_positions[2]-box_heights[2]/2), box_width, box_heights[2],
+                          boxstyle="round,pad=0.01", facecolor='green',
+                          edgecolor='black', linewidth=2)
+    ax3.add_patch(rect3)
+    ax3.text(0.5, y_positions[2], f"{summary['final_n_features']}\nvariables",
+            ha='center', va='center', fontsize=11, fontweight='bold', color='white')
+
+    # Arrows
+    ax3.annotate('', xy=(0.5, y_positions[1]+box_heights[1]/2+0.02),
+                xytext=(0.5, y_positions[0]-box_heights[0]/2-0.02),
+                arrowprops=dict(arrowstyle='->', lw=2, color='black'))
+    ax3.text(0.85, (y_positions[0]+y_positions[1])/2, 'UVE\nFilter',
+            ha='left', va='center', fontsize=9, style='italic')
+
+    ax3.annotate('', xy=(0.5, y_positions[2]+box_heights[2]/2+0.02),
+                xytext=(0.5, y_positions[1]-box_heights[1]/2-0.02),
+                arrowprops=dict(arrowstyle='->', lw=2, color='black'))
+    ax3.text(0.85, (y_positions[1]+y_positions[2])/2, 'SPA\nSelect',
+            ha='left', va='center', fontsize=9, style='italic')
+
+    ax3.set_xlim(0, 1)
+    ax3.set_ylim(0, 1)
+    ax3.axis('off')
+    ax3.set_title('Selection Flow', fontsize=12, fontweight='bold')
+
+    # === PLOT 4: Final selected variables ===
+    all_vars = np.arange(summary['initial_n_features'])
+    x_vals_all = wavelengths if wavelengths is not None else all_vars
+
+    # Show all variables as gray background
+    ax4.scatter(x_vals_all, np.ones(len(all_vars)) * 0.5, c='lightgray',
+               s=5, alpha=0.3, label='All variables')
+
+    # UVE retained (green)
+    uve_retained_vars = hybrid_obj.uve_filtered_indices_
+    ax4.scatter(x_vals_all[uve_retained_vars], np.ones(len(uve_retained_vars)) * 0.6,
+               c='steelblue', s=20, alpha=0.7, label='UVE retained')
+
+    # Final selected (gold stars)
+    final_selected = hybrid_obj.selected_variables_
+    ax4.scatter(x_vals_all[final_selected], np.ones(len(final_selected)) * 0.7,
+               c='gold', s=50, marker='*', edgecolor='black', linewidth=0.5,
+               label='Final selected', zorder=10)
+
+    ax4.set_xlabel('Wavelength (nm)' if wavelengths is not None else 'Feature Index', fontsize=10)
+    ax4.set_ylim(0.4, 0.8)
+    ax4.set_yticks([])
+    ax4.set_title('Final Selected Variables', fontsize=12, fontweight='bold')
+    ax4.legend(loc='upper right', fontsize=9)
+    ax4.grid(True, alpha=0.3, axis='x')
+
+    # Overall title
+    fig.suptitle('UVE-SPA Hybrid Variable Selection Analysis',
+                fontsize=16, fontweight='bold', y=0.995)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    return fig, (ax1, ax2, ax3, ax4)
+
+
+def compare_methods(results_dict, wavelengths=None, figsize=(14, 6), save_path=None):
+    """
+    Compare multiple variable selection methods side-by-side.
+
+    Parameters
+    ----------
+    results_dict : dict
+        Dictionary mapping method names to fitted selector objects.
+        Example: {'SPA': spa_obj, 'UVE-SPA': hybrid_obj, 'iPLS': ipls_obj}
+    wavelengths : array-like, optional
+        Wavelength values
+    figsize : tuple, optional (default=(14, 6))
+        Figure size
+    save_path : str, optional
+        If provided, saves plot to this path
+
+    Returns
+    -------
+    fig, ax : matplotlib Figure and Axes
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    method_names = []
+    n_selected_list = []
+    colors = []
+
+    color_map = {
+        'SPA': 'steelblue',
+        'UVE': 'coral',
+        'UVE-SPA': 'green',
+        'iPLS': 'purple',
+        'Importance': 'gray',
+    }
+
+    for method_name, selector_obj in results_dict.items():
+        method_names.append(method_name)
+
+        # Get number of selected variables
+        if hasattr(selector_obj, 'selected_variables_'):
+            n_selected = len(selector_obj.selected_variables_)
+        elif hasattr(selector_obj, 'informative_mask_'):
+            n_selected = np.sum(selector_obj.informative_mask_)
+        else:
+            n_selected = 0
+
+        n_selected_list.append(n_selected)
+        colors.append(color_map.get(method_name, 'lightblue'))
+
+    # Create bar chart
+    bars = ax.bar(method_names, n_selected_list, color=colors, alpha=0.7,
+                 edgecolor='black', linewidth=2)
+
+    # Add value labels
+    for bar, count in zip(bars, n_selected_list):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{int(count)}',
+               ha='center', va='bottom', fontsize=12, fontweight='bold')
+
+    ax.set_ylabel('Number of Selected Variables', fontsize=12, fontweight='bold')
+    ax.set_title('Comparison of Variable Selection Methods',
+                fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    plt.xticks(rotation=15, ha='right')
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    return fig, ax

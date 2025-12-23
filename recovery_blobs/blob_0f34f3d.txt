@@ -1,0 +1,695 @@
+# Tab 7 Model Development - Manual Testing Protocol
+
+**Purpose:** Comprehensive manual testing checklist for Tab 7 (Custom Model Development) functionality.
+
+**Version:** 1.0
+**Date:** 2025-11-07
+**Tester:** ___________________
+**Test Date:** ___________________
+
+---
+
+## Prerequisites
+
+Before starting testing, ensure:
+
+- [ ] Spectral Predict GUI is installed and running
+- [ ] Example data is available at `example/` directory
+- [ ] Python environment has all dependencies installed
+- [ ] You have write permissions to save test results
+
+---
+
+## Test Suite 1: Loading Models from Results Tab
+
+### Test 1.1: Load PLS Model (Full Spectrum)
+
+**Objective:** Verify that a PLS model with full spectrum loads correctly into Tab 7.
+
+**Steps:**
+1. Load quick_start data (Import & Preview tab)
+   - Select `example/` directory for ASD files
+   - Select `example/reference.csv` for reference
+   - Click "Load Data"
+2. Configure analysis (Analysis Configuration tab)
+   - Select models: PLS only
+   - Preprocessing: raw only
+   - Subset methods: full only
+   - Set n_folds: 3
+3. Run analysis and wait for completion
+4. Go to Results tab
+5. Find top-ranked PLS result (should have highest R²)
+6. **Double-click** the PLS result row
+
+**Expected Results:**
+- [ ] Tab 7 (Custom Model Development) opens automatically
+- [ ] Mode label shows: "Mode: Loaded from Results (Rank X)"
+- [ ] Configuration text displays:
+  - [ ] Model name: "PLS"
+  - [ ] Rank number
+  - [ ] Preprocessing method: "raw"
+  - [ ] Performance metrics (R², RMSE)
+  - [ ] Wavelength count (should equal total available wavelengths)
+- [ ] Wavelength specification field is populated with wavelength list
+- [ ] Model type dropdown shows "PLS"
+- [ ] n_components spinbox has a value > 0
+- [ ] Window size dropdown has a value
+- [ ] CV folds spinbox shows 3 (matches analysis)
+- [ ] "Run Model" button is enabled
+
+**Verification:**
+- [ ] Count wavelengths in specification field (should match "n_vars" from Results)
+- [ ] Note original R² value: ___________________
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 1.2: Load Ridge Model with Alpha
+
+**Objective:** Verify Ridge model hyperparameters load correctly.
+
+**Steps:**
+1. In Results tab, find a Ridge model result
+2. Note the Alpha value: ___________________
+3. Double-click the Ridge result row
+
+**Expected Results:**
+- [ ] Tab 7 opens with Ridge configuration
+- [ ] Mode label shows: "Mode: Loaded from Results (Rank X)"
+- [ ] Configuration text displays Alpha value
+- [ ] Model type dropdown shows "Ridge"
+- [ ] Alpha value is visible in configuration info
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 1.3: Load Model with Derivative Preprocessing
+
+**Objective:** Verify derivative preprocessing settings load correctly.
+
+**Steps:**
+1. Run analysis with preprocessing: sg1, sg2
+2. In Results tab, find a result with "Deriv1" or "Deriv2" preprocessing
+3. Double-click the result
+
+**Expected Results:**
+- [ ] Tab 7 opens with derivative configuration
+- [ ] Preprocessing dropdown shows correct derivative option (sg1 or sg2)
+- [ ] Window size is populated
+- [ ] Configuration text shows preprocessing method
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 1.4: Load Subset Model (Wavelength Selection)
+
+**Objective:** Verify wavelength subset models load with correct wavelength list.
+
+**Steps:**
+1. Run analysis with subset methods: top, subset_sizes: [50]
+2. In Results tab, find a result with SubsetTag = "top50"
+3. Note the n_vars value (should be 50): ___________________
+4. Double-click the subset result
+
+**Expected Results:**
+- [ ] Tab 7 opens with subset configuration
+- [ ] Wavelength specification contains exactly 50 wavelengths
+- [ ] Configuration text shows "Wavelengths: 50 of XXX used"
+- [ ] Subset tag is displayed in configuration
+- [ ] Wavelengths are non-contiguous (not just first 50)
+
+**Verification:**
+- [ ] Manually count wavelengths in specification field
+- [ ] Wavelength count = _________ (should equal 50)
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 2: R² Reproducibility
+
+### Test 2.1: Reproduce PLS Result (Full Spectrum)
+
+**Objective:** Verify that re-running a PLS model in Tab 7 reproduces the original R².
+
+**Steps:**
+1. Load a PLS result into Tab 7 (use Test 1.1)
+2. Note original R² from Results tab: ___________________
+3. In Tab 7, click "Run Model" **WITHOUT** changing any parameters
+4. Wait for execution to complete
+5. Note refined R² from Tab 7: ___________________
+6. Calculate difference: |original - refined| = ___________________
+
+**Expected Results:**
+- [ ] Execution completes without errors
+- [ ] Refined R² is displayed in results text
+- [ ] R² difference < 0.001 (tolerance threshold)
+- [ ] Configuration text updates with "Refined" status
+- [ ] Diagnostic plots are generated
+
+**Pass/Fail:** _______ | **R² Difference:** _________ | **Notes:** _________________________________
+
+---
+
+### Test 2.2: Reproduce Ridge Result
+
+**Objective:** Verify Ridge model R² reproduction.
+
+**Steps:**
+1. Load a Ridge result into Tab 7
+2. Note original R²: ___________________
+3. Note Alpha value: ___________________
+4. Click "Run Model" without changes
+5. Note refined R²: ___________________
+6. Calculate difference: ___________________
+
+**Expected Results:**
+- [ ] R² difference < 0.001
+- [ ] Alpha value unchanged
+- [ ] Execution completes successfully
+
+**Pass/Fail:** _______ | **R² Difference:** _________ | **Notes:** _________________________________
+
+---
+
+### Test 2.3: Reproduce Derivative + Subset Result (CRITICAL)
+
+**Objective:** Verify R² reproduction for most complex case (derivative preprocessing + wavelength subset).
+
+**Steps:**
+1. Run analysis with:
+   - Models: PLS
+   - Preprocessing: sg1
+   - Subset methods: top
+   - Subset sizes: [50]
+2. Find result with "Deriv1" preprocessing AND "top50" subset
+3. Note original R² (should be highest for this config): ___________________
+4. Double-click to load into Tab 7
+5. Verify wavelength count: _________ (should be 50)
+6. Click "Run Model" without changes
+7. Note refined R²: ___________________
+8. Calculate difference: ___________________
+
+**Expected Results:**
+- [ ] Wavelength specification contains exactly 50 wavelengths
+- [ ] Preprocessing is "sg1" (first derivative)
+- [ ] R² difference < 0.001
+- [ ] Console shows: "DEBUG: Derivative + subset detected. Using full-spectrum preprocessing"
+- [ ] No errors during execution
+
+**This is the CRITICAL test case - R² mismatch here indicates preprocessing bug!**
+
+**Pass/Fail:** _______ | **R² Difference:** _________ | **Notes:** _________________________________
+
+---
+
+## Test Suite 3: Wavelength Specification Parsing
+
+### Test 3.1: Individual Wavelengths
+
+**Objective:** Test parsing of comma-separated individual wavelengths.
+
+**Steps:**
+1. Load any model into Tab 7
+2. Clear wavelength specification field
+3. Enter: `1920, 1930, 1940, 1950, 1960`
+4. Check wavelength count display (should show "5 wavelengths selected")
+5. Click "Run Model"
+
+**Expected Results:**
+- [ ] Wavelength count updates to 5
+- [ ] Model runs successfully
+- [ ] No parsing errors
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 3.2: Wavelength Ranges
+
+**Objective:** Test parsing of wavelength ranges.
+
+**Steps:**
+1. Clear wavelength specification
+2. Enter: `1920-1940`
+3. Check wavelength count (should show >2 wavelengths, depending on resolution)
+4. Note wavelength count: _________
+5. Click "Run Model"
+
+**Expected Results:**
+- [ ] Wavelength count shows range size (e.g., 21 for 1nm resolution)
+- [ ] All wavelengths in range are selected
+- [ ] Model runs successfully
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 3.3: Mixed Format
+
+**Objective:** Test parsing of mixed individual + range format.
+
+**Steps:**
+1. Clear wavelength specification
+2. Enter: `1500, 1920-1940, 2450`
+3. Check wavelength count
+4. Click "Run Model"
+
+**Expected Results:**
+- [ ] Parser handles mixed format correctly
+- [ ] Count includes: 1 (1500) + range (1920-1940) + 1 (2450)
+- [ ] Model runs successfully
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 3.4: Invalid Wavelength Specification
+
+**Objective:** Test error handling for invalid specifications.
+
+**Steps:**
+1. Clear wavelength specification
+2. Enter: `invalid, abc, 9999`
+3. Click "Run Model"
+
+**Expected Results:**
+- [ ] Error message is displayed
+- [ ] Message clearly explains the issue
+- [ ] Model does not run
+- [ ] GUI remains responsive
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 4: Hyperparameter Modification
+
+### Test 4.1: Modify PLS n_components
+
+**Objective:** Test that changing n_components affects model.
+
+**Steps:**
+1. Load a PLS result into Tab 7
+2. Note original n_components: _________
+3. Note original R²: ___________________
+4. Change n_components to a different value (e.g., +5)
+5. New n_components: _________
+6. Click "Run Model"
+7. Note new R²: ___________________
+
+**Expected Results:**
+- [ ] Model runs with new n_components
+- [ ] R² changes (may increase or decrease)
+- [ ] No errors
+- [ ] Configuration text updates to show "Refined"
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 4.2: Modify Ridge Alpha
+
+**Objective:** Test that changing alpha affects Ridge model.
+
+**Steps:**
+1. Load a Ridge result
+2. Note original alpha: _________
+3. Note original R²: ___________________
+4. Modify alpha in configuration (if exposed as editable)
+   - *Note: Alpha may not be directly editable in current GUI*
+5. Click "Run Model"
+
+**Expected Results:**
+- [ ] If alpha is editable: Model runs with new alpha, R² changes
+- [ ] If alpha is not editable: Note this limitation for future enhancement
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 4.3: Change Preprocessing Method
+
+**Objective:** Test that changing preprocessing method works.
+
+**Steps:**
+1. Load a model with "raw" preprocessing
+2. Note original R²: ___________________
+3. Change preprocessing dropdown to "sg1" (first derivative)
+4. Click "Run Model"
+5. Note new R²: ___________________
+
+**Expected Results:**
+- [ ] Model runs with new preprocessing
+- [ ] R² changes (derivatives often improve performance)
+- [ ] No errors
+- [ ] Configuration text shows new preprocessing method
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 4.4: Modify Wavelength Selection
+
+**Objective:** Test that modifying wavelength selection affects model.
+
+**Steps:**
+1. Load a full-spectrum model
+2. Note original wavelength count: _________
+3. Note original R²: ___________________
+4. Modify wavelength specification to select only first 50 wavelengths
+5. Check new wavelength count: _________
+6. Click "Run Model"
+7. Note new R²: ___________________
+
+**Expected Results:**
+- [ ] Wavelength count updates correctly
+- [ ] Model runs with subset
+- [ ] R² changes (may decrease with fewer wavelengths)
+- [ ] No errors
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 5: Diagnostic Plots
+
+### Test 5.1: Prediction Plot Generation (Regression)
+
+**Objective:** Verify prediction plot is generated for regression models.
+
+**Steps:**
+1. Load a PLS regression model
+2. Click "Run Model"
+3. Wait for completion
+4. Check diagnostic plots area
+
+**Expected Results:**
+- [ ] Prediction plot appears (Predicted vs. Actual)
+- [ ] Plot shows data points
+- [ ] 1:1 line is drawn
+- [ ] Axes are labeled
+- [ ] R² value is displayed on plot
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 5.2: Residual Plots (Regression)
+
+**Objective:** Verify residual diagnostic plots are generated.
+
+**Steps:**
+1. Run a regression model in Tab 7
+2. Check for residual plots after completion
+
+**Expected Results:**
+- [ ] Residual diagnostic panel appears
+- [ ] Three residual plots visible:
+  - [ ] Residuals vs. Predicted
+  - [ ] Residuals vs. Fitted
+  - [ ] Q-Q plot (normal distribution check)
+- [ ] All plots render correctly
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 5.3: Classification Plots
+
+**Objective:** Test diagnostic plots for classification models.
+
+**Steps:**
+1. Load classification data (binary target)
+2. Run a classification model (e.g., PLS-DA)
+3. Check diagnostic plots
+
+**Expected Results:**
+- [ ] Confusion matrix is displayed
+- [ ] ROC curve is shown (if binary classification)
+- [ ] Classification metrics are displayed
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 6: Model Saving
+
+### Test 6.1: Save Refined Model
+
+**Objective:** Test saving a refined model to .dasp file.
+
+**Steps:**
+1. Load and refine a model in Tab 7
+2. Click "Save Model" button
+3. Choose save location (use temp directory)
+4. Enter filename: `test_model.dasp`
+5. Click Save
+
+**Expected Results:**
+- [ ] File save dialog appears
+- [ ] File is created at specified location
+- [ ] Success message is displayed
+- [ ] File size > 0 bytes
+- [ ] File extension is .dasp
+
+**Verification:**
+- [ ] Navigate to save location
+- [ ] Confirm file exists: `test_model.dasp`
+- [ ] File size: _________ KB
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 6.2: Load Saved Model (Tab 7 - Model Prediction)
+
+**Objective:** Verify saved model can be loaded and used for predictions.
+
+**Steps:**
+1. Go to Tab 7 (Model Prediction - the OTHER Tab 7)
+2. Click "Load Model File(s)"
+3. Select the saved `test_model.dasp` file
+4. Check loaded models display
+
+**Expected Results:**
+- [ ] Model loads successfully
+- [ ] Model information is displayed:
+  - [ ] Model name
+  - [ ] Preprocessing method
+  - [ ] R² value
+  - [ ] RMSE value
+  - [ ] Number of variables
+- [ ] No errors
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 7: Edge Cases and Error Handling
+
+### Test 7.1: Load Model with Missing all_vars (Subset Model)
+
+**Objective:** Test error handling when subset model is missing wavelength list.
+
+**Steps:**
+1. This requires manually corrupting a results file or using old results
+2. If not possible to reproduce, **SKIP** this test
+3. Attempt to load a subset model without all_vars field
+
+**Expected Results:**
+- [ ] Clear error message is displayed
+- [ ] Error explains that all_vars is missing
+- [ ] Suggests solution: "Re-run the analysis"
+- [ ] GUI remains stable (no crash)
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 7.2: Empty Wavelength Specification
+
+**Objective:** Test handling of empty wavelength field.
+
+**Steps:**
+1. Load a model into Tab 7
+2. Clear wavelength specification completely (delete all text)
+3. Click "Run Model"
+
+**Expected Results:**
+- [ ] Error message is displayed
+- [ ] Message states: "No valid wavelengths selected"
+- [ ] Model does not run
+- [ ] No crash
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 7.3: Wavelength Count Mismatch
+
+**Objective:** Test validation of wavelength count vs. specification.
+
+**Steps:**
+1. Load a subset model (e.g., n_vars = 50)
+2. Manually edit wavelength specification to remove some wavelengths
+3. New count should not match original n_vars
+4. Click "Run Model"
+
+**Expected Results:**
+- [ ] Model runs with updated wavelength selection
+- [ ] Wavelength count updates to reflect actual selection
+- [ ] No unexpected errors
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 7.4: Invalid Hyperparameters
+
+**Objective:** Test handling of invalid hyperparameter values.
+
+**Steps:**
+1. Load a PLS model
+2. Try to set n_components to 0 or negative value
+3. Click "Run Model"
+
+**Expected Results:**
+- [ ] GUI prevents entering invalid value (spinbox minimum), OR
+- [ ] Error message is displayed when running
+- [ ] Model does not run with invalid parameters
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 8: Cross-Tab Integration
+
+### Test 8.1: Data Consistency Across Tabs
+
+**Objective:** Verify that data loaded in Import tab is available in Tab 7.
+
+**Steps:**
+1. Load data in Import & Preview tab
+2. Note sample count: _________
+3. Note wavelength count: _________
+4. Run analysis
+5. Load result into Tab 7
+6. Check that Tab 7 uses same data
+
+**Expected Results:**
+- [ ] Sample count matches across tabs
+- [ ] Wavelength count matches
+- [ ] No data loading errors
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 8.2: Validation Set Exclusion
+
+**Objective:** Verify that validation set samples are excluded in Tab 7 (if validation enabled).
+
+**Steps:**
+1. In Data Quality Check tab, enable validation set (e.g., 20%)
+2. Note validation indices
+3. Run analysis
+4. Load result into Tab 7
+5. Run model in Tab 7
+
+**Expected Results:**
+- [ ] Tab 7 uses only calibration samples (same as Results tab)
+- [ ] Validation samples are excluded from CV
+- [ ] R² matches original (since both use same calibration set)
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Test Suite 9: Performance
+
+### Test 9.1: Load Time
+
+**Objective:** Verify Tab 7 loads quickly when double-clicking result.
+
+**Steps:**
+1. Double-click any result in Results tab
+2. Measure time until Tab 7 is fully populated
+
+**Expected Results:**
+- [ ] Tab 7 opens in < 1 second
+- [ ] All fields are populated without delay
+
+**Measured Time:** _________ seconds
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+### Test 9.2: Execution Time (Quick Start Data)
+
+**Objective:** Benchmark execution time with quick_start data (~10 samples).
+
+**Steps:**
+1. Load quick_start data
+2. Load a PLS model into Tab 7
+3. Click "Run Model"
+4. Measure time from click to completion
+
+**Expected Results:**
+- [ ] Execution completes in < 30 seconds
+
+**Measured Time:** _________ seconds
+
+**Pass/Fail:** _______ | **Notes:** _________________________________
+
+---
+
+## Summary
+
+**Total Tests:** 35
+**Passed:** _______
+**Failed:** _______
+**Skipped:** _______
+
+### Critical Issues Found:
+
+1. _______________________________________________________________
+2. _______________________________________________________________
+3. _______________________________________________________________
+
+### Non-Critical Issues Found:
+
+1. _______________________________________________________________
+2. _______________________________________________________________
+3. _______________________________________________________________
+
+### Recommendations:
+
+1. _______________________________________________________________
+2. _______________________________________________________________
+3. _______________________________________________________________
+
+---
+
+**Testing Completed By:** ___________________
+**Date:** ___________________
+**Signature:** ___________________
+
+---
+
+## Notes Section
+
+Use this space for additional observations, screenshots, or detailed error messages:
+
+_______________________________________________________________
+_______________________________________________________________
+_______________________________________________________________
+_______________________________________________________________
+_______________________________________________________________
+_______________________________________________________________
+_______________________________________________________________
+_______________________________________________________________
