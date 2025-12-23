@@ -358,22 +358,25 @@ def vcpa_iriv(
     cv_folds: int = 5,
     binary_matrix_samples: int = 100,
     importance_threshold: float = 0.5,
+    model_type: str | None = None,
     random_state: int | None = None
 ) -> Dict:
     """
     Variable Combination Population Analysis - Iteratively Retains
     Informative Variables (VCPA-IRIV).
 
-    VCPA-IRIV is an advanced iterative method that combines binary matrix
-    sampling with variable importance analysis. It's particularly effective
-    for NS-PFCE calibration transfer enhancement.
+    True VCPA-IRIV algorithm based on Yun et al. (2014). Uses statistical
+    include/exclude comparison with Mann-Whitney U test to classify variables
+    into four categories: strongly informative, weakly informative,
+    uninformative, and interfering.
 
-    Algorithm (simplified):
+    Algorithm:
     1. Generate binary matrix (BM) for variable combinations
-    2. For each combination, build PLS model and evaluate
-    3. Compute variable importance scores based on model performance
-    4. Remove uninformative variables (IRIV step)
-    5. Repeat until convergence or max iterations
+    2. For each variable, compare RMSECV when included vs excluded
+    3. Apply Mann-Whitney U test to determine significance
+    4. Classify variables into 4 categories based on test results
+    5. Remove uninformative and interfering variables
+    6. Repeat until convergence or max iterations
 
     Parameters
     ----------
@@ -382,17 +385,23 @@ def vcpa_iriv(
     y : np.ndarray, shape (n_samples,)
         Target values (required).
     n_outer_iterations : int, default=10
-        Number of IRIV outer iterations (variable elimination rounds).
+        Maximum number of IRIV outer iterations (variable elimination rounds).
     n_inner_iterations : int, default=50
-        Number of BM sampling iterations per outer iteration.
+        Number of BM sampling iterations per outer iteration (deprecated,
+        binary_matrix_samples is used instead).
     pls_components : int, default=5
-        Number of PLS components for model building.
+        Number of PLS components for model building (used when model_type is PLS).
     cv_folds : int, default=5
         Cross-validation folds.
     binary_matrix_samples : int, default=100
         Number of binary combinations to generate per iteration.
     importance_threshold : float, default=0.5
-        Threshold for removing low-importance variables (0-1).
+        Deprecated. Statistical test (p < 0.05) is used instead.
+    model_type : str, optional
+        Model type to use for variable evaluation. Options:
+        - None or 'PLS': Use PLS regression (default, recommended for spectroscopy)
+        - 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost': Use LightGBM
+          (faster tree-based evaluation for tree model final models)
     random_state : int, optional
         Random seed for reproducibility.
 
@@ -401,7 +410,7 @@ def vcpa_iriv(
     result : dict
         Dictionary containing:
         - 'selected_indices': np.ndarray, final selected wavelength indices
-        - 'importance_scores': np.ndarray, final importance scores
+        - 'variable_categories': dict, classification of each variable
         - 'convergence_history': list, RMSECV at each outer iteration
         - 'n_vars_history': list, number of variables at each iteration
         - 'final_rmsecv': float, cross-validation error with selected vars
@@ -413,27 +422,30 @@ def vcpa_iriv(
     >>> X = np.random.randn(100, 200)
     >>> y = X[:, [30, 80, 150]].sum(axis=1) + 0.1 * np.random.randn(100)
     >>>
-    >>> result = vcpa_iriv(X, y, n_outer_iterations=5, n_inner_iterations=30)
+    >>> # Default: PLS-based selection
+    >>> result = vcpa_iriv(X, y, n_outer_iterations=5)
     >>> print(f"Selected {len(result['selected_indices'])} wavelengths")
-    >>> print(f"Final RMSECV: {result['final_rmsecv']:.4f}")
-    >>> # Check if true informative vars (30, 80, 150) were selected
-    >>> print(f"Key vars in selection: {np.isin([30, 80, 150], result['selected_indices'])}")
+    >>>
+    >>> # For tree-based final models: LightGBM-based selection
+    >>> result = vcpa_iriv(X, y, model_type='RandomForest')
 
     References
     ----------
-    .. [1] Yun, Y. H., et al. (2015). An efficient method of wavelength
-           interval selection based on random frog for multivariate spectral
-           calibration. Spectrochimica Acta Part A, 148, 375-381.
+    .. [1] Yun, Y. H., et al. (2014). A strategy that iteratively retains
+           informative variables for selecting optimal variable subset in
+           multivariate calibration. Analytica Chimica Acta, 807, 36-43.
 
     Notes
     -----
-    - VCPA-IRIV is the most sophisticated method in this module
-    - Computationally expensive (many PLS models built)
-    - Often finds very compact, informative variable sets
-    - Well-suited for high-dimensional data (p >> n)
-    - Requires careful parameter tuning for best results
-    - Used in NS-PFCE for optimal calibration transfer
+    - Uses Mann-Whitney U test for statistical significance (p < 0.05)
+    - Variables classified as: strong, weak, uninformative, interfering
+    - Strongly/weakly informative variables are retained
+    - Uninformative/interfering variables are removed each iteration
+    - PLS is recommended for spectroscopy (handles collinearity)
+    - Tree-based option useful when final model is RF/XGBoost/LightGBM
     """
+    from scipy.stats import mannwhitneyu
+
     if random_state is not None:
         np.random.seed(random_state)
 
@@ -443,142 +455,218 @@ def vcpa_iriv(
     if X.shape[0] != y.shape[0]:
         raise ValueError("X and y must have same number of samples")
 
+    # Determine which model to use for evaluation
+    TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
+    use_tree_model = model_type in TREE_MODELS if model_type else False
+
     # Initialize: all variables are candidates
     active_indices = np.arange(n_wavelengths)
     convergence_history = []
     n_vars_history = []
+    variable_categories = {}  # Track final category of each variable
 
-    # Outer loop: Iterative variable removal (IRIV)
+    # Helper function to compute RMSECV
+    def compute_rmsecv(X_subset: np.ndarray, y: np.ndarray) -> float:
+        """Compute cross-validated RMSECV for a variable subset."""
+        try:
+            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+            cv_errors = []
+
+            if use_tree_model:
+                # Use LightGBM for tree-based models (faster than RF/XGBoost for CV)
+                from lightgbm import LGBMRegressor
+                model = LGBMRegressor(
+                    n_estimators=50,
+                    max_depth=5,
+                    verbosity=-1,
+                    random_state=random_state
+                )
+            else:
+                # Use PLS (default, recommended for spectroscopy)
+                n_comp = min(pls_components, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+                if n_comp < 1:
+                    return np.inf
+                model = PLSRegression(n_components=n_comp)
+
+            for train_idx, val_idx in kf.split(X_subset):
+                X_train, X_val = X_subset[train_idx], X_subset[val_idx]
+                y_train, y_val = y[train_idx], y[val_idx]
+
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_val)
+                mse = np.mean((y_val - y_pred.ravel()) ** 2)
+                cv_errors.append(mse)
+
+            return np.sqrt(np.mean(cv_errors))
+        except Exception:
+            return np.inf
+
+    # Outer loop: Iterative variable classification and removal
     for outer_iter in range(n_outer_iterations):
         n_active = len(active_indices)
         n_vars_history.append(n_active)
 
-        if n_active <= pls_components:
-            print(f"  VCPA-IRIV: Stopped at iteration {outer_iter} (too few variables)")
+        # Minimum variables: pls_components+1 for PLS, 3 for tree models
+        min_vars = pls_components + 1 if not use_tree_model else 3
+        if n_active <= min_vars:
+            print(f"  VCPA-IRIV: Stopped at iteration {outer_iter} (too few variables: {n_active})")
             break
 
-        # Initialize importance scores for active variables
-        importance_scores = np.zeros(n_active)
-        performance_with_var = []
+        # Adaptive number of binary matrix rows based on variable count
+        if n_active >= 500:
+            n_rows = 200
+        elif n_active >= 100:
+            n_rows = 150
+        elif n_active >= 50:
+            n_rows = 100
+        else:
+            n_rows = max(50, n_active * 2)
 
-        # Track iteration success/failure for debugging
-        successful_iterations = 0
-        failed_iterations = 0
-        skipped_iterations = 0
+        # Override with user parameter if specified
+        n_rows = max(n_rows, binary_matrix_samples)
 
-        # Inner loop: Binary matrix sampling (VCPA)
-        for inner_iter in range(n_inner_iterations):
-            # Generate binary vector (random subset of variables)
-            # Probability of including each variable decreases over iterations
-            # to encourage exploration early, exploitation later
-            # Cap at 0.9 to ensure randomness (was 1.1 at iter 0, making ALL vars selected)
-            inclusion_prob = min(0.9, 0.9 * (1 - outer_iter / n_outer_iterations) + 0.2)
+        # Generate binary matrix: each row is a random subset of variables
+        # ~50% inclusion probability ensures each variable is included/excluded enough times
+        binary_matrix = np.random.rand(n_rows, n_active) < 0.5
 
-            binary_vector = np.random.rand(n_active) < inclusion_prob
-            n_selected = np.sum(binary_vector)
+        # Ensure each row has enough variables for PLS
+        for i in range(n_rows):
+            while np.sum(binary_matrix[i]) <= pls_components:
+                # Add random variables until we have enough
+                zero_indices = np.where(~binary_matrix[i])[0]
+                if len(zero_indices) == 0:
+                    break
+                add_idx = np.random.choice(zero_indices)
+                binary_matrix[i, add_idx] = True
 
-            # Need at least pls_components+1 variables
-            if n_selected <= pls_components:
-                skipped_iterations += 1
+        # Collect RMSECV for include/exclude scenarios
+        rmsecv_include = [[] for _ in range(n_active)]  # Errors when var is included
+        rmsecv_exclude = [[] for _ in range(n_active)]  # Errors when var is excluded
+
+        successful_samples = 0
+        for row_idx, row in enumerate(binary_matrix):
+            selected_local = np.where(row)[0]
+            if len(selected_local) <= pls_components:
                 continue
 
-            selected_vars = active_indices[binary_vector]
+            selected_vars = active_indices[selected_local]
             X_subset = X[:, selected_vars]
+            rmsecv = compute_rmsecv(X_subset, y)
 
-            # Build PLS model and evaluate
-            try:
-                pls = PLSRegression(n_components=min(pls_components, n_selected-1))
-
-                # Cross-validation
-                kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-                cv_errors = []
-
-                for train_idx, val_idx in kf.split(X_subset):
-                    X_train, X_val = X_subset[train_idx], X_subset[val_idx]
-                    y_train, y_val = y[train_idx], y[val_idx]
-
-                    pls.fit(X_train, y_train)
-                    y_pred = pls.predict(X_val)
-                    mse = np.mean((y_val - y_pred.ravel()) ** 2)
-                    cv_errors.append(mse)
-
-                rmsecv = np.sqrt(np.mean(cv_errors))
-
-                # If this combination performed well, increase importance of included vars
-                if rmsecv < np.inf:
-                    # Lower RMSECV = higher importance
-                    weight = 1.0 / (rmsecv + 1e-10)
-                    importance_scores[binary_vector] += weight
-                    successful_iterations += 1
-
-            except Exception as e:
-                failed_iterations += 1
-                if failed_iterations <= 3:  # Only print first 3 failures
-                    print(f"    VCPA inner iteration failed: {str(e)[:60]}")
+            if np.isinf(rmsecv):
                 continue
 
-        # Report iteration status for this outer iteration
-        if successful_iterations == 0:
-            print(f"  WARNING: VCPA outer iter {outer_iter}: ALL {n_inner_iterations} iterations failed/skipped!")
-            print(f"    (skipped={skipped_iterations}, failed={failed_iterations})")
-        elif failed_iterations > 0 or skipped_iterations > 0:
-            print(f"  VCPA outer iter {outer_iter}: {successful_iterations} succeeded, {skipped_iterations} skipped, {failed_iterations} failed")
+            successful_samples += 1
 
-        # Normalize importance scores
-        if importance_scores.sum() > 0:
-            importance_scores = importance_scores / importance_scores.sum()
+            # Record RMSECV for each variable based on whether it was included
+            for i in range(n_active):
+                if row[i]:
+                    rmsecv_include[i].append(rmsecv)
+                else:
+                    rmsecv_exclude[i].append(rmsecv)
 
-        # Compute median RMSECV for this outer iteration (approximate)
-        current_rmsecv = 1.0 / (importance_scores.mean() + 1e-10) if importance_scores.mean() > 0 else np.inf
+        if successful_samples < 10:
+            print(f"  VCPA-IRIV iter {outer_iter}: Too few successful samples ({successful_samples})")
+            continue
+
+        # Statistical classification of each variable
+        categories = ['unknown'] * n_active
+        keep_mask = np.ones(n_active, dtype=bool)
+        n_strong = n_weak = n_uninformative = n_interfering = 0
+
+        for i in range(n_active):
+            inc = rmsecv_include[i]
+            exc = rmsecv_exclude[i]
+
+            # Need enough samples for statistical test
+            if len(inc) < 5 or len(exc) < 5:
+                categories[i] = 'weak'  # Not enough data, assume weakly informative
+                continue
+
+            # Mann-Whitney U test: compare RMSECV distributions
+            # H0: distributions are the same
+            # H1: distributions are different
+            try:
+                stat, p = mannwhitneyu(exc, inc, alternative='two-sided')
+                h = 1 if p < 0.05 else 0
+            except Exception:
+                h = 0
+                p = 1.0
+
+            # DMEAN = mean(exclude) - mean(include)
+            # POSITIVE DMEAN means RMSECV is higher when excluded
+            # → including the variable IMPROVES performance (lower RMSECV)
+            # NEGATIVE DMEAN means RMSECV is lower when excluded
+            # → including the variable WORSENS performance
+            dmean = np.mean(exc) - np.mean(inc)
+
+            if h == 1 and dmean > 0:
+                # Significant improvement when included → strongly informative
+                categories[i] = 'strong'
+                n_strong += 1
+            elif h == 0 and dmean > 0:
+                # Non-significant improvement when included → weakly informative
+                categories[i] = 'weak'
+                n_weak += 1
+            elif h == 0 and dmean <= 0:
+                # No significant effect or slight harm → uninformative
+                categories[i] = 'uninformative'
+                keep_mask[i] = False
+                n_uninformative += 1
+            else:  # h == 1 and dmean < 0
+                # Significant worsening when included → interfering
+                categories[i] = 'interfering'
+                keep_mask[i] = False
+                n_interfering += 1
+
+        # Store categories for current active variables
+        for i, var_idx in enumerate(active_indices):
+            variable_categories[var_idx] = categories[i]
+
+        # Compute current iteration's RMSECV (using all active variables)
+        current_rmsecv = compute_rmsecv(X[:, active_indices], y)
         convergence_history.append(current_rmsecv)
 
-        # IRIV step: Remove variables below importance threshold
-        threshold_value = importance_threshold * importance_scores.max()
-        keep_mask = importance_scores >= threshold_value
+        # Report iteration results
+        n_removed = n_uninformative + n_interfering
+        print(f"  VCPA-IRIV iter {outer_iter}: {n_strong} strong, {n_weak} weak, "
+              f"{n_uninformative} uninformative, {n_interfering} interfering "
+              f"(removing {n_removed}, RMSECV={current_rmsecv:.4f})")
 
+        # Remove uninformative and interfering variables
         if np.sum(keep_mask) <= pls_components:
-            # Don't remove more variables
-            print(f"  VCPA-IRIV: Stopped removal at iteration {outer_iter} (threshold too high)")
+            print(f"  VCPA-IRIV: Would remove too many variables, stopping")
             break
 
-        active_indices = active_indices[keep_mask]
-        importance_scores = importance_scores[keep_mask]  # Keep scores in sync with indices
-
-        # Check convergence: if no variables removed, stop
-        if np.sum(keep_mask) == n_active:
+        if n_removed == 0:
             print(f"  VCPA-IRIV: Converged at iteration {outer_iter} (no variables removed)")
             break
 
+        active_indices = active_indices[keep_mask]
+
     # Final evaluation with selected variables
-    X_final = X[:, active_indices]
+    selected_indices = active_indices
+    final_rmsecv = compute_rmsecv(X[:, selected_indices], y)
 
-    try:
-        pls_final = PLSRegression(n_components=min(pls_components, len(active_indices)-1))
-
-        kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-        cv_errors = []
-
-        for train_idx, val_idx in kf.split(X_final):
-            X_train, X_val = X_final[train_idx], X_final[val_idx]
-            y_train, y_val = y[train_idx], y[val_idx]
-
-            pls_final.fit(X_train, y_train)
-            y_pred = pls_final.predict(X_val)
-            mse = np.mean((y_val - y_pred.ravel()) ** 2)
-            cv_errors.append(mse)
-
-        final_rmsecv = np.sqrt(np.mean(cv_errors))
-
-    except Exception as e:
-        final_rmsecv = np.inf
+    # Compute importance scores based on final categories
+    importance_scores = np.zeros(len(selected_indices))
+    for i, var_idx in enumerate(selected_indices):
+        cat = variable_categories.get(var_idx, 'unknown')
+        if cat == 'strong':
+            importance_scores[i] = 1.0
+        elif cat == 'weak':
+            importance_scores[i] = 0.5
+        else:
+            importance_scores[i] = 0.25
 
     result = {
-        'selected_indices': active_indices,
-        'importance_scores': importance_scores if len(importance_scores) == len(active_indices) else np.ones(len(active_indices)),
+        'selected_indices': selected_indices,
+        'importance_scores': importance_scores,
+        'variable_categories': variable_categories,
         'convergence_history': convergence_history,
         'n_vars_history': n_vars_history,
         'final_rmsecv': final_rmsecv,
-        'n_selected': len(active_indices)
+        'n_selected': len(selected_indices)
     }
 
     return result

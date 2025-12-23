@@ -96,6 +96,77 @@ def _apply_edge_mask(importances: np.ndarray, preprocess_cfg: dict) -> np.ndarra
     return masked
 
 
+def _get_edge_zone_size(preprocess_cfg: dict) -> int:
+    """Get the size of edge zone to exclude for derivative preprocessing.
+
+    For Savitzky-Golay derivatives with window W, the first and last W//2
+    wavelengths are unreliable due to boundary effects. This function
+    returns the edge zone size based on preprocessing configuration.
+
+    Parameters
+    ----------
+    preprocess_cfg : dict
+        Preprocessing configuration containing 'deriv' and 'window' keys
+
+    Returns
+    -------
+    int
+        Number of wavelengths to exclude on each edge (0 if no derivative)
+    """
+    deriv = preprocess_cfg.get("deriv")
+    window = preprocess_cfg.get("window")
+
+    # No edge masking needed if no derivative or window specified
+    if not deriv or not window:
+        return 0
+
+    return window // 2
+
+
+def _apply_edge_mask_to_data(
+    X: np.ndarray,
+    wavelengths: np.ndarray,
+    preprocess_cfg: dict
+) -> tuple:
+    """Remove edge wavelengths affected by Savitzky-Golay derivatives.
+
+    For derivative preprocessing, the first and last edge_zone wavelengths
+    are unreliable. This function removes them from both data and wavelength
+    arrays to ensure consistent model training across all search methods.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Preprocessed spectral data with shape (n_samples, n_features)
+    wavelengths : np.ndarray
+        Wavelength values with shape (n_features,)
+    preprocess_cfg : dict
+        Preprocessing configuration containing 'deriv' and 'window' keys
+
+    Returns
+    -------
+    tuple of (X_masked, wavelengths_masked, edge_zone)
+        X_masked : np.ndarray with edge columns removed
+        wavelengths_masked : np.ndarray with edge wavelengths removed
+        edge_zone : int, the edge zone size applied
+    """
+    edge_zone = _get_edge_zone_size(preprocess_cfg)
+
+    if edge_zone == 0:
+        return X, wavelengths, 0
+
+    # Safety check: ensure we keep at least some wavelengths
+    if 2 * edge_zone >= X.shape[1]:
+        print(f"  Warning: Edge zone ({edge_zone} per side) would remove all {X.shape[1]} wavelengths. Skipping edge masking.")
+        return X, wavelengths, 0
+
+    # Remove edge wavelengths from both data and wavelength array
+    X_masked = X[:, edge_zone:-edge_zone]
+    wavelengths_masked = wavelengths[edge_zone:-edge_zone]
+
+    return X_masked, wavelengths_masked, edge_zone
+
+
 def _supports_sample_weight(model):
     """Check if model.fit() accepts sample_weight parameter.
 
@@ -591,7 +662,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 y.values,  # Convert Series to numpy
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
-                cv_folds=ga_preprocess_cv_folds,
+                cv_folds=folds,  # Use same CV folds as main search
+                n_components=safe_max_components,  # Match grid search components
                 task_type=task_type,
                 random_state=random_state,
                 verbose=1,
@@ -610,7 +682,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 y.values,  # Convert Series to numpy
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
-                cv_folds=ga_preprocess_cv_folds,
+                cv_folds=folds,  # Use same CV folds as main search
+                n_components=safe_max_components,  # Match grid search components
                 task_type=task_type,
                 random_state=random_state,
                 verbose=1,
@@ -630,7 +703,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 y.values,  # Convert Series to numpy
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
-                cv_folds=ga_preprocess_cv_folds,
+                cv_folds=folds,  # Use same CV folds as main search
+                n_components=safe_max_components,  # Match grid search components
                 task_type=task_type,
                 random_state=random_state,
                 verbose=1,
@@ -649,7 +723,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 y.values,  # Convert Series to numpy
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
-                cv_folds=ga_preprocess_cv_folds,
+                cv_folds=folds,  # Use same CV folds as main search
+                n_components=safe_max_components,  # Match grid search components
                 task_type=task_type,
                 random_state=random_state,
                 verbose=1,
@@ -1115,6 +1190,29 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             wavelengths_for_models = wavelengths
 
         # End of wavelength filtering block
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # EDGE MASKING FOR DERIVATIVE PREPROCESSING
+        # Savitzky-Golay derivatives create boundary artifacts at spectrum edges.
+        # Edge zone = window // 2 on each side (unreliable due to SG interpolation).
+        # This matches NSGA-II behavior for consistent R2 values across methods.
+        # ═══════════════════════════════════════════════════════════════════════════
+        edge_zone_applied = 0
+        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+            X_for_models, wavelengths_for_models, edge_zone_applied = _apply_edge_mask_to_data(
+                X_for_models, wavelengths_for_models, preprocess_cfg
+            )
+            if edge_zone_applied > 0:
+                prep_name = preprocess_cfg.get("name", "unknown")
+                deriv_info = f"_d{preprocess_cfg['deriv']}" if preprocess_cfg["deriv"] else ""
+                print(f"\n{'='*70}")
+                print(f"EDGE MASKING (after {prep_name}{deriv_info} preprocessing)")
+                print(f"{'='*70}")
+                print(f"  Derivative window: {preprocess_cfg['window']}")
+                print(f"  Edge zone: {edge_zone_applied} wavelengths on each side")
+                print(f"  Wavelengths after masking: {len(wavelengths_for_models)}")
+                print(f"  Range: {wavelengths_for_models[0]:.1f} - {wavelengths_for_models[-1]:.1f} nm")
+                print(f"{'='*70}\n")
 
         # ═══════════════════════════════════════════════════════════════════════════
         # REGION SUBSET COMPUTATION (after wavelength filtering)
@@ -1724,7 +1822,13 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                         random_state=42, progress_callback=None,
                         enable_variable_subsets=True, variable_counts=None,
                         enable_region_subsets=False, n_top_regions=5,
-                        variable_selection_methods=None):
+                        variable_selection_methods=None,
+                        # Baseline and smoothing parameters (same as run_grid_search)
+                        baseline_method=None,
+                        baseline_params=None,
+                        smoothing=False,
+                        smoothing_window=17,
+                        smoothing_polyorder=2):
     """
     Run Bayesian hyperparameter optimization using Optuna.
 
@@ -2084,6 +2188,24 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     prep_pipeline = Pipeline(prep_pipe_steps)
                     X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
 
+            # ═══════════════════════════════════════════════════════════════════════════
+            # EDGE MASKING FOR DERIVATIVE PREPROCESSING
+            # Savitzky-Golay derivatives create boundary artifacts at spectrum edges.
+            # Edge zone = window // 2 on each side (unreliable due to SG interpolation).
+            # This matches NSGA-II and grid search behavior for consistent R2 values.
+            # ═══════════════════════════════════════════════════════════════════════════
+            wavelengths_for_model = wavelengths
+            n_features_for_model = n_features
+            if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+                X_preprocessed, wavelengths_for_model, edge_zone_applied = _apply_edge_mask_to_data(
+                    X_preprocessed, wavelengths, preprocess_cfg
+                )
+                if edge_zone_applied > 0:
+                    n_features_for_model = X_preprocessed.shape[1]
+                    print(f"  Edge masking: {edge_zone_applied} wavelengths removed per side")
+                    print(f"  Wavelengths after masking: {n_features_for_model}")
+                    print(f"  Range: {wavelengths_for_model[0]:.1f} - {wavelengths_for_model[-1]:.1f} nm")
+
             # Update progress callback
             if progress_callback:
                 progress_callback({
@@ -2102,19 +2224,19 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 study_name=f"{model_name}_{preprocess_cfg['name']}_deriv{preprocess_cfg['deriv']}"
             )
 
-            # Create objective function (pass preprocessed data)
+            # Create objective function (pass preprocessed + edge-masked data)
             objective_fn = create_objective_function(
                 model_name=model_name,
-                X=X_preprocessed,  # CRITICAL FIX: Use preprocessed data instead of X_np
+                X=X_preprocessed,  # Preprocessed + edge-masked data
                 y=y_np,
-                wavelengths=wavelengths,
+                wavelengths=wavelengths_for_model,  # Edge-masked wavelengths
                 preprocess_cfg=preprocess_cfg,
                 cv_splitter=cv_splitter,
                 task_type=task_type,
                 is_binary_classification=is_binary_classification,
                 run_single_config_fn=_run_single_config,  # Use existing infrastructure
                 tier=tier,
-                n_features=n_features,
+                n_features=n_features_for_model,  # Edge-masked feature count
                 max_n_components=max_n_components,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts,
@@ -2167,8 +2289,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     model_name=model_name,
                     preprocess_cfg=preprocess_cfg,
                     task_type=task_type,
-                    wavelengths=wavelengths,
-                    n_vars=n_features,
+                    wavelengths=wavelengths_for_model,  # Edge-masked wavelengths
+                    n_vars=n_features_for_model,  # Edge-masked feature count
                     excluded_count=excluded_count,
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,

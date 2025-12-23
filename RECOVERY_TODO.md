@@ -151,61 +151,117 @@
 
 ### Bayesian Optimization - BROKEN (2025-12-22)
 
-**STATUS: MADE WORSE BY FIXES** - All attempted fixes have degraded Bayesian performance. Consider reverting commits: c6a9dd1, ca3d50b, 6d9938f.
+**STATUS: ROOT CAUSE IDENTIFIED** - Double edge masking in uncommitted changes.
 
-**Models Explored (based on tier setting):**
-- quick: PLS, Ridge, ElasticNet
-- standard: PLS, Ridge, Lasso, ElasticNet, RandomForest, LightGBM
-- comprehensive: PLS, Ridge, ElasticNet, RandomForest, LightGBM, XGBoost, CatBoost, NeuralBoosted
-- experimental: All 11 models (adds SVR, MLP)
+---
 
-**Preprocessing Explored:** raw, snv, deriv1, deriv2 (window sizes 7, 11, 15, 21)
+## 🚨 NEW ANALYSIS (2025-12-22 Evening) - ROOT CAUSE FOUND
 
-**Variable Selection Explored:** importance, spa, uve, cars (after fix 6d9938f)
+### Symptoms
+- R2 dropped from 0.97 to 0.91 after recent uncommitted changes
+- CARS subsets may not be appearing in results
 
-**Fixes Attempted (none resolved the core issues):**
+### ROOT CAUSE: DOUBLE EDGE MASKING
 
-1. **SubsetTag key mismatch** (commit c6a9dd1)
-   - Changed `'subset_tag'` to `'SubsetTag'` in `bayesian_utils.py:571`
-   - Issue: Results were showing "full" even for subsets
-   - Result: Tags display correctly but R2 still wrong
+There are TWO types of edge masking being applied in Bayesian:
 
-2. **Added missing variable selection methods** (commit ca3d50b)
-   - Added `'cars-aware'` support (was only checking `== 'cars'`)
-   - Added `'vcpa-iriv'` support with importance score mapping
-   - Issue: CARS subsets weren't appearing in results
-   - Result: Methods run but results still incorrect
+1. **`_apply_edge_mask_to_data()`** in `run_bayesian_search()` (lines 2191-2207)
+   - REMOVES columns from X (makes array smaller)
+   - Added in uncommitted changes to search.py
 
-3. **Expanded default variable selection** (commit 6d9938f)
-   - Changed default from `['importance']` to `['importance', 'spa', 'uve', 'cars']`
-   - Issue: Bayesian should auto-explore multiple methods
-   - Result: More methods tested but R2 still doesn't match Grid Search
+2. **`_apply_edge_mask()`** in `_run_single_config()` (line 2852)
+   - ZEROS OUT importance values at edges (doesn't change array size)
+   - This was already there before
 
-4. **Added missing parameters to run_bayesian_search()**
-   - Added: `baseline_method`, `baseline_params`, `smoothing`, `smoothing_window`, `smoothing_polyorder`
-   - Issue: NameError on missing parameters
-   - Result: No longer crashes but results still wrong
+**What happens when both are applied:**
+1. X goes from 2000 → 1986 columns (edges physically removed by step 1)
+2. Then importances[0:7] and importances[-7:] get zeroed (step 2)
+3. But those are NOW VALID wavelengths (not the original edges!)
+4. Result: 14 valid wavelengths have their importances incorrectly zeroed
+5. Variable selection picks wrong wavelengths → R2 drops
 
-**Remaining Problems:**
-- [ ] R2 from Bayesian Results tab does NOT match Model Development tab
-- [ ] R2 from Bayesian is significantly worse than Grid Search for same data
-- [ ] full_vars values inconsistent (saw 2121 vs 2131 - 100 wavelength difference)
-- [ ] Variable selection methods may not be running correctly
-- [ ] Possible issues with how Optuna trials are being converted to DASP format
+### FIX REQUIRED
 
-**Files Modified:**
-- `src/spectral_predict/bayesian_utils.py` - Lines 203, 215, 370-423, 571
-- `src/spectral_predict/search.py` - run_bayesian_search parameter additions
+Remove the column-removal edge masking from `run_bayesian_search()`:
+
+**DELETE lines ~2191-2207 in search.py:**
+```python
+wavelengths_for_model = wavelengths
+n_features_for_model = n_features
+if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+    X_preprocessed, wavelengths_for_model, edge_zone_applied = _apply_edge_mask_to_data(...)
+    if edge_zone_applied > 0:
+        n_features_for_model = X_preprocessed.shape[1]
+        print(f"  Edge masking: {edge_zone_applied} wavelengths removed per side")
+        print(f"  Wavelengths after masking: {n_features_for_model}")
+        print(f"  Range: {wavelengths_for_model[0]:.1f} - {wavelengths_for_model[-1]:.1f} nm")
+```
+
+**REVERT** `wavelengths_for_model` → `wavelengths` and `n_features_for_model` → `n_features` in:
+- Lines ~2228-2254 (create_objective_function call)
+- Lines ~2289-2290 (convert_optuna_result_to_dasp_format call)
+
+### Why This Works
+- `_apply_edge_mask()` inside `_run_single_config()` already handles edge masking for importances
+- It zeros out edge values without changing array size
+- No double masking occurs
+- This matches how Grid Search handles it (Grid Search does NOT remove columns)
+
+### Additional Investigation Needed
+- Check why CARS subsets are not appearing (could be a separate issue)
+- Verify the variable selection methods are all running without exceptions
+
+---
+
+## Previous Fixes (for reference only)
+
+**Commits that were investigated (but NOT the root cause):**
+1. c6a9dd1 - SubsetTag key mismatch (harmless fix)
+2. ca3d50b - Added cars-aware and vcpa-iriv support (harmless addition)
+3. 6d9938f - Expanded default variable selection (changed behavior but not root cause)
+
+**The actual problem is UNCOMMITTED changes to search.py that add _apply_edge_mask_to_data() to run_bayesian_search().**
+
+**Files with uncommitted changes:**
+- `src/spectral_predict/search.py` - Lines 2191-2207, 2228-2254, 2289-2290
+- `src/spectral_predict/bayesian_utils.py` - Lines 203, 215, 370-423
 
 ### NSGA-II - BROKEN (2025-12-22)
 
-**STATUS: DOES NOT WORK** - Gives much worse results than Grid Search.
+**STATUS: DOES NOT WORK** - Gives much worse RMSE than Grid Search for regression.
 
-Possible issues:
-- Pareto front knee point selection may not pick optimal model
-- Multi-objective tradeoffs sacrifice accuracy for other objectives
-- Hyperparameter search space not well-tuned
-- Population/generation settings insufficient for convergence
+**ROOT CAUSES IDENTIFIED:**
+
+1. **CRITICAL: Data Leakage in Preprocessing** (`nsga2_search.py` lines 636-644)
+   - Grid/Bayesian: Applies preprocessing **per-fold inside CV** (correct)
+   - NSGA2: Applies preprocessing **globally before CV** (wrong - data leakage)
+   - Test folds "see" training data statistics via preprocessing fit
+   - This causes optimistic fitness during optimization, then worse real-world performance
+
+2. **HIGH: Different Model Hyperparameters** (`_build_model()` vs `get_model()`)
+   - Ridge alpha: Grid uses 1.0, NSGA2 searches 0.01-1000 (may pick extremes)
+   - XGBoost max_depth: Grid uses 6, NSGA2 uses 3-7
+   - XGBoost subsample: Grid uses 0.8, NSGA2 only has 1.0 or 0.8
+   - LightGBM min_child_samples: Grid uses 5, NSGA2 doesn't tune it
+
+3. **MEDIUM: Learning Rate Formula** (line 269)
+   - Changed from 3.0^(gene/14) to 30.0^(gene/14) in commit 649ee9c
+   - New formula is mathematically correct (0.01-0.3 range)
+   - But comment claiming gene=7 gives 0.1 is wrong (actually 0.055)
+
+4. **LOW: Edge Masking Constraint** (lines 577-597)
+   - Edge masking reduces wavelength count after selection
+   - Solutions penalized when n_selected < min_wavelengths after masking
+   - GA doesn't know to compensate for edge wavelength loss
+
+**FIX OPTIONS:**
+
+- **Quick fix:** Align `_build_model()` defaults with `get_model()` (Ridge alpha=1.0, etc.)
+- **Proper fix:** Refactor `_compute_prediction_error()` to use sklearn Pipeline with per-fold preprocessing
+
+**FILES:** `src/spectral_predict/nsga2_search.py`
+
+**See:** `.claude/plans/crystalline-herding-lovelace.md` for detailed investigation notes
 
 ### Test Suite (Low Priority)
 - [ ] Integrate pytest tests from `backup_2025-12-20/tests/`

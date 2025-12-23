@@ -846,6 +846,7 @@ def run_nsga2_search(
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     models: Optional[List[str]] = None,
+    controller=None,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -879,6 +880,8 @@ def run_nsga2_search(
         Callback function(dict) for progress updates
     models : list of str, optional
         Model types to consider. If None, uses all available.
+    controller : SearchController, optional
+        Controller for cancellation. If provided and cancelled, optimization stops early.
 
     Returns
     -------
@@ -940,16 +943,24 @@ def run_nsga2_search(
     history = []
 
     class ProgressCallback:
-        def __init__(self, total_gen, callback, verbose):
+        def __init__(self, total_gen, callback, verbose, ctrl):
             self.total_gen = total_gen
             self.callback = callback
             self.verbose = verbose
+            self.ctrl = ctrl
             self.gen = 0
             self.best_error = None
             self.n_pareto = 0
+            self.cancelled = False
 
         def __call__(self, algorithm):
             self.gen += 1
+
+            # Check for cancellation
+            if self.ctrl and not self.ctrl.check_and_wait():
+                self.cancelled = True
+                algorithm.termination.force_termination = True
+                return
 
             # Get current Pareto front
             if algorithm.pop is not None and len(algorithm.pop) > 0:
@@ -976,7 +987,7 @@ def run_nsga2_search(
                     'message': msg,
                 })
 
-    callback = ProgressCallback(n_generations, progress_callback, verbose)
+    callback = ProgressCallback(n_generations, progress_callback, verbose, controller)
 
     # Run optimization
     with warnings.catch_warnings():
@@ -989,6 +1000,22 @@ def run_nsga2_search(
             callback=callback,
             verbose=False,
         )
+
+    # Check if cancelled
+    if callback.cancelled:
+        if verbose >= 1:
+            print("NSGA-II optimization cancelled by user")
+        return {
+            'pareto_front': np.array([]),
+            'pareto_solutions': np.array([]),
+            'knee_idx': -1,
+            'knee_solution': None,
+            'n_evaluations': problem._eval_count,
+            'history': history,
+            'model_types': models,
+            'label_encoder': problem.label_encoder,
+            'cancelled': True,
+        }
 
     # Extract results
     pareto_front = res.F  # Objective values
@@ -1006,6 +1033,7 @@ def run_nsga2_search(
             'history': history,
             'model_types': models,
             'label_encoder': problem.label_encoder,
+            'cancelled': False,
         }
 
     # Find knee point
@@ -1040,6 +1068,7 @@ def run_nsga2_search(
         'history': history,
         'model_types': models,
         'label_encoder': problem.label_encoder,
+        'cancelled': False,
     }
 
 

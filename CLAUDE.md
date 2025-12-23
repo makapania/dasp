@@ -3,6 +3,37 @@
 > **IMPORTANT FOR AI AGENTS**: Do NOT read files in `archive/` unless explicitly instructed.
 > Archived docs contain obsolete information that will cause incorrect responses.
 
+---
+
+## CURRENT MODE: Feature Recovery (2025-12-20)
+
+We are recovering functionality after a reset. Follow this process:
+
+### Recovery Process
+1. **User provides a feature** they want to restore/implement
+2. **Check `recovery_blobs/`** for relevant code (use INDEX.txt to find relevant blobs)
+3. **Implement the fix** based on user's requirements + blob reference code
+4. **Test and verify** the implementation works
+5. **Move on** to the next feature only when current one is complete
+
+### Recovery Resources
+- `recovery_blobs/INDEX.txt` - Summary of all recovered blobs
+- `recovery_blobs/blob_*.txt` - Actual recovered code/docs
+- `backup_2025-12-20/` - December 16-20 work (new modules, tests, scripts)
+- `RECOVERY_TODO.md` - Checklist of features to restore
+
+### Priority Order
+1. **User-specified features first** - Whatever the user asks for
+2. **December 16-20 work second** - Only after user features are done
+
+### Important Notes
+- Work on ONE feature at a time
+- Do not jump ahead to other features
+- Always check blobs before implementing from scratch
+- Commit working code before moving to next feature
+
+---
+
 ## Project Overview
 
 Spectral Predict automates spectral modeling: load spectra, test preprocessing × model combinations with cross-validation, get ranked results.

@@ -13293,10 +13293,113 @@ class SpectralPredictApp:
             List of tuples: [(fitted_pipeline, model_name, metadata), ...]
         """
         from spectral_predict.models import get_model
-        from spectral_predict.preprocess import SavgolDerivative
+        from spectral_predict.preprocess import SavgolDerivative, SNV, SavgolSmooth
+        from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import StandardScaler
         import ast
+        import re
+
+        # GA preprocessing suffixes
+        GA_SUFFIXES = ('_pls', '_neural_svm', '_tree', '_neuralboosted')
+
+        def parse_ga_preprocess_name(name):
+            """
+            Parse a GA preprocessing name to extract configuration.
+
+            Examples:
+              'deriv1_w7_pls' -> {'type': 'deriv1', 'window': 7, 'baseline': None, 'smooth': None}
+              'snv_deriv2_w15_polynomial_tree' -> {'type': 'snv_deriv2', 'window': 15, 'baseline': 'polynomial', 'smooth': None}
+              'deriv2_w9_smooth11_neural_svm' -> {'type': 'deriv2', 'window': 9, 'baseline': None, 'smooth': 11}
+            """
+            # Remove GA suffix
+            base_name = name
+            for suffix in GA_SUFFIXES:
+                if name.endswith(suffix):
+                    base_name = name[:-len(suffix)]
+                    break
+
+            # Parse components
+            config = {'type': None, 'window': 15, 'baseline': None, 'smooth': None}
+
+            # Extract window size (w followed by number)
+            window_match = re.search(r'_w(\d+)', base_name)
+            if window_match:
+                config['window'] = int(window_match.group(1))
+                base_name = base_name.replace(window_match.group(0), '')
+
+            # Extract smoothing (smooth followed by number)
+            smooth_match = re.search(r'_smooth(\d+)', base_name)
+            if smooth_match:
+                config['smooth'] = int(smooth_match.group(1))
+                base_name = base_name.replace(smooth_match.group(0), '')
+
+            # Extract baseline method
+            for bl in ['polynomial', 'als', 'airpls']:
+                if f'_{bl}' in base_name:
+                    config['baseline'] = bl
+                    base_name = base_name.replace(f'_{bl}', '')
+                    break
+
+            # What remains is the preprocessing type
+            config['type'] = base_name.strip('_')
+
+            return config
+
+        def build_ga_transform(config):
+            """Build a transform function from GA preprocessing config."""
+            def transform(X):
+                import numpy as np
+                X_out = np.asarray(X, dtype=np.float64)
+
+                # Apply smoothing first (if enabled)
+                if config['smooth']:
+                    smoother = SavgolSmooth(window_length=config['smooth'], polyorder=2)
+                    X_out = smoother.fit_transform(X_out)
+
+                # Apply baseline correction
+                if config['baseline'] == 'polynomial':
+                    baseline = BaselinePolynomial(degree=2)
+                    X_out = baseline.fit_transform(X_out)
+                elif config['baseline'] == 'als':
+                    baseline = BaselineALS(lambda_=1e6, p=0.01, niter=10)
+                    X_out = baseline.fit_transform(X_out)
+                elif config['baseline'] == 'airpls':
+                    baseline = BaselineAirPLS(lam=1e6, max_iter=15)
+                    X_out = baseline.fit_transform(X_out)
+
+                # Apply main preprocessing
+                pt = config['type']
+                w = config['window']
+
+                if pt == 'raw':
+                    pass
+                elif pt == 'snv':
+                    X_out = SNV().fit_transform(X_out)
+                elif pt == 'deriv1':
+                    X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+                elif pt == 'deriv2':
+                    X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+                elif pt == 'deriv3':
+                    X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
+                elif pt == 'deriv4':
+                    X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+                elif pt == 'snv_deriv1':
+                    X_out = SNV().fit_transform(X_out)
+                    X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+                elif pt == 'snv_deriv2':
+                    X_out = SNV().fit_transform(X_out)
+                    X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+                elif pt == 'deriv1_snv':
+                    X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+                    X_out = SNV().fit_transform(X_out)
+                elif pt == 'deriv2_snv':
+                    X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+                    X_out = SNV().fit_transform(X_out)
+
+                return X_out
+
+            return transform
 
         reconstructed_models = []
 
@@ -13321,9 +13424,19 @@ class SpectralPredictApp:
 
                 # Create preprocessing pipeline
                 steps = []
+                ga_transform = None  # For GA preprocessing
 
-                # Add derivative/SNV preprocessing if applicable
-                if preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
+                # Check for GA preprocessing (has suffix like _pls, _tree, etc.)
+                is_ga_preprocess = any(preprocess.endswith(suffix) for suffix in GA_SUFFIXES)
+
+                if is_ga_preprocess:
+                    # Parse GA preprocessing name and build transform
+                    ga_config = parse_ga_preprocess_name(preprocess)
+                    ga_transform = build_ga_transform(ga_config)
+                    self._log_progress(f"    [GA] Reconstructed preprocessing: {ga_config['type']} w={ga_config['window']}")
+
+                # Add derivative/SNV preprocessing if applicable (non-GA)
+                elif preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
                     if preprocess == 'snv':
                         # SNV only - no derivative
                         pass  # Will add scaler below
@@ -13366,8 +13479,31 @@ class SpectralPredictApp:
                 else:
                     pipeline = model
 
-                # Fit on training data
-                pipeline.fit(X_train, y_train)
+                # Apply GA preprocessing to training data if needed
+                if ga_transform is not None:
+                    # Preprocess the training data
+                    X_train_preprocessed = ga_transform(X_train.values if hasattr(X_train, 'values') else X_train)
+                    # Fit on preprocessed data
+                    pipeline.fit(X_train_preprocessed, y_train)
+
+                    # Wrap pipeline in a class that applies preprocessing during predict
+                    class GAPreprocessWrapper:
+                        def __init__(self, pipeline, transform):
+                            self.pipeline = pipeline
+                            self.transform = transform
+
+                        def predict(self, X):
+                            X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+                            return self.pipeline.predict(X_preproc)
+
+                        def fit(self, X, y):
+                            X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+                            return self.pipeline.fit(X_preproc, y)
+
+                    pipeline = GAPreprocessWrapper(pipeline, ga_transform)
+                else:
+                    # Fit on training data (standard path)
+                    pipeline.fit(X_train, y_train)
 
                 # Store metadata (including wavelength information for transparency)
                 metadata = {
@@ -13379,7 +13515,8 @@ class SpectralPredictApp:
                     'wavelengths': X_train.columns.tolist(),
                     'n_vars': X_train.shape[1],
                     'use_full_spectrum_preprocessing': True,
-                    'full_wavelengths': X_train.columns.tolist()
+                    'full_wavelengths': X_train.columns.tolist(),
+                    'ga_preprocessing': ga_transform is not None
                 }
 
                 reconstructed_models.append((pipeline, model_name, metadata))
@@ -20418,8 +20555,8 @@ F1 Score:  {f1:.4f}
                 print(f"  X_preprocessed[0,:5] (first spectrum, first 5 values): {X_full_preprocessed[0,:5]}")
 
                 # 3. Find indices of selected wavelengths in the data
-                # NOTE: Savitzky-Golay with mode='interp' (default) does NOT reduce features
-                # It pads edges to preserve shape, so wavelengths remain unchanged
+                # NOTE: Edge masking is already applied by search functions (Grid/Bayesian/NSGA-II)
+                # The wavelengths in all_vars are already edge-masked, so we don't apply it again
                 original_wavelengths = X_base_df.columns.astype(float).values
                 print(f"DEBUG: Original wavelengths: {len(original_wavelengths)}, Preprocessed shape: {X_full_preprocessed.shape[1]}")
 
