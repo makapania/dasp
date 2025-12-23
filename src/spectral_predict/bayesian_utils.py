@@ -210,8 +210,9 @@ def create_objective_function(
         variable_counts = [10, 20, 50, 100, 250, 500, 1000]
 
     # Set default variable selection methods if not provided
+    # Bayesian should automatically explore multiple methods to find the best
     if variable_selection_methods is None:
-        variable_selection_methods = ['importance']  # Default to feature importance
+        variable_selection_methods = ['importance', 'spa', 'uve', 'cars']
 
     # Compute regional subsets if enabled (ONCE, before trials start)
     region_subsets = []
