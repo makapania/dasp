@@ -200,6 +200,7 @@ def create_objective_function(
     from .model_registry import supports_subset_analysis
     from .models import get_feature_importances
     from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
+    from .wavelength_selection import vcpa_iriv
 
     # Calculate n_classes for classification tasks
     n_classes = len(np.unique(y)) if task_type == 'classification' else 2
@@ -367,21 +368,57 @@ def create_objective_function(
                                     cv_folds=folds,
                                     random_state=random_state
                                 )
-                            elif varsel_method == 'cars':
+                            elif varsel_method in ('cars', 'cars-aware'):
                                 # CARS: Competitive Adaptive Reweighted Sampling
+                                # cars-aware: Use model-appropriate fitness (LightGBM for tree models)
                                 folds = filtered_kwargs.get('folds', 5)
                                 random_state = 42  # Use fixed random state
                                 uve_n_components = 5  # Use default
+                                model_type_for_cars = model_name if varsel_method == 'cars-aware' else None
+                                if model_type_for_cars:
+                                    print(f"    -> Running Model-Aware CARS for {model_name}")
                                 importances = cars_selection(
                                     X, y,
                                     n_iterations=50,
                                     pls_components=uve_n_components,
                                     cv_folds=folds,
                                     monte_carlo_samples=80,
+                                    random_state=random_state,
+                                    model_type=model_type_for_cars
+                                )
+                            elif varsel_method == 'vcpa-iriv':
+                                # VCPA-IRIV: Variable Combination Population Analysis
+                                folds = filtered_kwargs.get('folds', 5)
+                                random_state = 42  # Use fixed random state
+                                uve_n_components = 5  # Use default
+                                print(f"    -> Running VCPA-IRIV (n_outer=10, n_inner=50)")
+                                result = vcpa_iriv(
+                                    X, y,
+                                    n_outer_iterations=10,
+                                    n_inner_iterations=50,
+                                    pls_components=uve_n_components,
+                                    cv_folds=folds,
                                     random_state=random_state
                                 )
+                                # Extract importance scores from result dict
+                                importances = result.get('importance_scores', result.get('importances', None))
+
+                                # VCPA returns importance_scores for ACTIVE indices only
+                                # We need to create full-length importance array using selected_indices
+                                selected = result.get('selected_indices', [])
+                                if importances is not None and len(importances) == len(selected):
+                                    # Map importance scores back to full wavelength array
+                                    full_importances = np.zeros(X.shape[1])
+                                    for idx, imp in zip(selected, importances):
+                                        if idx < len(full_importances):
+                                            full_importances[idx] = imp
+                                    importances = full_importances
+                                elif importances is None:
+                                    logging.warning("VCPA-IRIV returned no importance scores, skipping")
+                                    continue
                             else:
-                                # Skip unknown methods
+                                # Warn about unsupported methods
+                                logging.warning(f"Variable selection method '{varsel_method}' not supported in Bayesian optimization - skipping")
                                 continue
 
                             # Test each variable count
