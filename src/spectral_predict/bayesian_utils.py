@@ -568,7 +568,7 @@ def convert_optuna_result_to_dasp_format(
         # Convert each configuration result to DASP format
         for config_result in trial_results:
             # Extract subset information
-            subset_tag = config_result.get('subset_tag', 'full')
+            subset_tag = config_result.get('SubsetTag', 'full')
             config_n_vars = config_result.get('n_vars', n_vars)
 
             # Build base result dictionary
