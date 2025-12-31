@@ -18505,10 +18505,16 @@ Performance (Classification):
             self.refine_wl_spec.delete('1.0', 'end')
             self.refine_wl_spec.insert('1.0', "# ERROR: Data not loaded\n# Please load data in Data Upload tab first")
 
-        # Set window size
+        # Set window size - use custom field for non-standard window sizes
         window = config.get('Window', 17)
-        if not pd.isna(window) and window in [7, 11, 17, 19]:
-            self.refine_window.set(int(window))
+        if not pd.isna(window):
+            window = int(window)
+            if window in [7, 11, 17, 19]:
+                self.refine_window.set(window)
+                self.refine_window_custom.set("")
+            else:
+                # Window from Bayesian (e.g., 31) not in radio buttons - use custom field
+                self.refine_window_custom.set(str(window))
 
         # Set task type FIRST (auto-detect from data) - CRITICAL FIX for PLS-DA loading
         # This must happen before model validation so we validate against the correct task type
@@ -18572,6 +18578,24 @@ Performance (Classification):
             gui_preprocess = 'deriv_snv'
         elif preprocess in ['raw', 'snv']:
             gui_preprocess = preprocess
+        elif '_w' in preprocess:
+            # NSGA-style: deriv1_w17, snv_deriv2_w25, deriv1_snv_w17, etc.
+            if 'snv_deriv' in preprocess:
+                # SNV then derivative
+                if 'deriv1' in preprocess:
+                    gui_preprocess = 'snv_sg1'
+                else:
+                    gui_preprocess = 'snv_sg2'
+            elif 'deriv' in preprocess and 'snv' in preprocess:
+                # Derivative then SNV (e.g., deriv1_snv_w17)
+                gui_preprocess = 'deriv_snv'
+            elif 'deriv1' in preprocess:
+                gui_preprocess = 'sg1'
+            elif 'deriv2' in preprocess:
+                gui_preprocess = 'sg2'
+            else:
+                # deriv3, deriv4 have no GUI equivalent - fallback to sg2
+                gui_preprocess = 'sg2'
         else:
             gui_preprocess = 'raw'  # Fallback
 

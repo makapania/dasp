@@ -2224,6 +2224,19 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 study_name=f"{model_name}_{preprocess_cfg['name']}_deriv{preprocess_cfg['deriv']}"
             )
 
+            # Seed PLS trials to ensure all n_components are tested (matches grid search behavior)
+            # This guarantees the optimal n_components is found, then TPE explores other params
+            if model_name in ['PLS', 'PLS-DA']:
+                for nc in range(2, max_n_components + 1):
+                    study.enqueue_trial({
+                        'n_components': nc,
+                        'max_iter': 500,
+                        'tol': 1e-6
+                    })
+                # CRITICAL: Set n_startup_trials=0 so seed trials run first
+                # Otherwise TPE does 10 random trials before using the seeds
+                study.sampler._n_startup_trials = 0
+
             # Create objective function (pass preprocessed + edge-masked data)
             objective_fn = create_objective_function(
                 model_name=model_name,

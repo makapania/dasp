@@ -28,7 +28,10 @@
       "Bash(grep:*)",
       "WebFetch(domain:www.mathworks.com)",
       "Bash(git show:*)",
-      "Bash(if exist backup_2025-12-20nsga2_search.py type backup_2025-12-20nsga2_search.py)"
+      "Bash(if exist backup_2025-12-20nsga2_search.py type backup_2025-12-20nsga2_search.py)",
+      "Bash(git fetch:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "ask": []
