@@ -6,14 +6,14 @@
 
 ---
 
-## 🚨 TOP PRIORITY: BAYESIAN BROKEN BY RECENT FIXES (2025-12-22)
+## 🚨 TOP PRIORITY: BAYESIAN PLS UNDERPERFORMS (2025-12-30)
 
-**CRITICAL ISSUE:** Recent commits broke Bayesian - now gives much worse models.
+**STATUS: PLS-specific issue, not general Bayesian problem**
 
-- **BEFORE fixes:** Bayesian was achieving R2 = 0.97
-- **AFTER fixes:** Bayesian now achieves R2 = 0.91 (significantly worse)
-- Commits that broke it: c6a9dd1, ca3d50b, 6d9938f
-- **ACTION NEEDED:** Revert these commits to restore Bayesian performance
+- **Bayesian Ridge:** R² > 0.97 (BETTER than grid search) ✓
+- **Bayesian PLS:** R² 0.90-0.95 (worse than grid search ~0.96) ✗
+- **Root cause:** Unknown - not the "best of 29" approach (Ridge uses same approach and works)
+- **See:** "Bayesian Optimization - PLS-SPECIFIC ISSUE" section below for details
 
 **Secondary issue:** R2 concordance between Results tab and Model Development tab (separate problem, lower priority)
 
@@ -149,9 +149,30 @@
   - Wavelength order corruption: `_format_wavelengths_as_spec()` sorts wavelengths, `_parse_wavelength_spec()` reorders to X_original order
   - Variable order matters for many models but may not be preserved correctly
 
-### Bayesian Optimization - BROKEN (2025-12-22)
+### Bayesian Optimization - PLS-SPECIFIC ISSUE (2025-12-30)
 
-**STATUS: ROOT CAUSE IDENTIFIED** - Double edge masking in uncommitted changes.
+**STATUS: PLS UNDERPERFORMS, RIDGE WORKS GREAT**
+
+**Observed behavior:**
+- **Bayesian Ridge: R² > 0.97** (BETTER than grid search) ✓
+- **Bayesian PLS: R² 0.90-0.95** (WORSE than grid search which gets ~0.96) ✗
+
+**Key insight:** The issue is PLS-SPECIFIC, not a general problem with the optimization structure. Ridge uses the same "best of 29" approach and works great.
+
+**Previous analysis (may be wrong):**
+- Thought "best of 29 subsets" return caused noisy TPE learning
+- Thought matching spectral-predict's "1 eval per trial" would fix it
+- BUT if that were true, Ridge should also underperform (it doesn't)
+
+**Outstanding questions:**
+1. Why does PLS specifically underperform?
+2. Is there something in PLS model building or evaluation that's different?
+3. Is VIP-based importance for PLS causing issues vs simple coefficients for Ridge?
+4. Does n_components constraint behave differently with variable subsets?
+
+**Plan file:** `.claude/plans/memoized-wondering-cosmos.md` contains detailed analysis
+
+**Previous fix (2025-12-22):** Double edge masking was fixed (commit d22a528).
 
 ---
 
