@@ -103,7 +103,7 @@ def get_bayesian_search_space(
 # Individual Model Search Spaces
 # ============================================================================
 
-def _get_pls_space(trial: optuna.Trial, max_n_components: int = 8) -> Dict:
+def _get_pls_space(trial: optuna.Trial, max_n_components: int = 12) -> Dict:
     """PLS/PLS-DA search space."""
     # Ensure valid range: n_components must be at least 1 and at most max_n_components
     # Typically max_n_components is constrained by min(n_samples, n_features)
@@ -114,9 +114,8 @@ def _get_pls_space(trial: optuna.Trial, max_n_components: int = 8) -> Dict:
     if max_components == 1:
         n_components = 1
     else:
-        # Suggest in range [min_components, max_components], preferring at least 2
-        lower_bound = min(2, max_components)
-        n_components = trial.suggest_int('n_components', lower_bound, max_components)
+        # Suggest in range [1, max_components] to allow full exploration
+        n_components = trial.suggest_int('n_components', 1, max_components)
 
     return {
         'n_components': n_components,

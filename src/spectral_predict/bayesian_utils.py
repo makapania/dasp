@@ -273,7 +273,8 @@ def create_objective_function(
                 model, model_name, params,
                 preprocess_cfg, cv_splitter, task_type,
                 is_binary_classification,
-                skip_preprocessing=True,  # Already preprocessed
+                skip_preprocessing=False,  # Keep imbalance handling
+                skip_spectral_preprocessing=True,  # Already preprocessed
                 subset_tag="full",
                 **filtered_kwargs
             )
@@ -436,7 +437,8 @@ def create_objective_function(
                                     subset_model, model_name, params,
                                     preprocess_cfg, cv_splitter, task_type,
                                     is_binary_classification,
-                                    skip_preprocessing=True,  # Already preprocessed
+                                    skip_preprocessing=False,  # Keep imbalance handling
+                                    skip_spectral_preprocessing=True,  # Already preprocessed
                                     subset_indices=top_indices,
                                     subset_tag=f"top{n_top}_{varsel_method}",
                                     **filtered_kwargs
@@ -474,7 +476,8 @@ def create_objective_function(
                         region_model, model_name, params,
                         preprocess_cfg, cv_splitter, task_type,
                         is_binary_classification,
-                        skip_preprocessing=True,
+                        skip_preprocessing=False,  # Keep imbalance handling
+                        skip_spectral_preprocessing=True,  # Already preprocessed
                         subset_indices=region_indices,
                         subset_tag=region_tag,
                         **filtered_kwargs

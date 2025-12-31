@@ -1817,7 +1817,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
 def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_methods=None,
                         n_trials=50, folds=5, excluded_count=0, validation_count=0,
-                        total_samples_original=None, max_n_components=8, tier='standard',
+                        total_samples_original=None, max_n_components=12, tier='standard',
                         imbalance_method=None, imbalance_params=None,
                         random_state=42, progress_callback=None,
                         enable_variable_subsets=True, variable_counts=None,
@@ -2188,23 +2188,9 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     prep_pipeline = Pipeline(prep_pipe_steps)
                     X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
 
-            # ═══════════════════════════════════════════════════════════════════════════
-            # EDGE MASKING FOR DERIVATIVE PREPROCESSING
-            # Savitzky-Golay derivatives create boundary artifacts at spectrum edges.
-            # Edge zone = window // 2 on each side (unreliable due to SG interpolation).
-            # This matches NSGA-II and grid search behavior for consistent R2 values.
-            # ═══════════════════════════════════════════════════════════════════════════
+            # Edge masking will be handled in _run_single_config() to avoid double masking
             wavelengths_for_model = wavelengths
             n_features_for_model = n_features
-            if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
-                X_preprocessed, wavelengths_for_model, edge_zone_applied = _apply_edge_mask_to_data(
-                    X_preprocessed, wavelengths, preprocess_cfg
-                )
-                if edge_zone_applied > 0:
-                    n_features_for_model = X_preprocessed.shape[1]
-                    print(f"  Edge masking: {edge_zone_applied} wavelengths removed per side")
-                    print(f"  Wavelengths after masking: {n_features_for_model}")
-                    print(f"  Range: {wavelengths_for_model[0]:.1f} - {wavelengths_for_model[-1]:.1f} nm")
 
             # Update progress callback
             if progress_callback:
@@ -2223,19 +2209,6 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 random_state=random_state,
                 study_name=f"{model_name}_{preprocess_cfg['name']}_deriv{preprocess_cfg['deriv']}"
             )
-
-            # Seed PLS trials to ensure all n_components are tested (matches grid search behavior)
-            # This guarantees the optimal n_components is found, then TPE explores other params
-            if model_name in ['PLS', 'PLS-DA']:
-                for nc in range(2, max_n_components + 1):
-                    study.enqueue_trial({
-                        'n_components': nc,
-                        'max_iter': 500,
-                        'tol': 1e-6
-                    })
-                # CRITICAL: Set n_startup_trials=0 so seed trials run first
-                # Otherwise TPE does 10 random trials before using the seeds
-                study.sampler._n_startup_trials = 0
 
             # Create objective function (pass preprocessed + edge-masked data)
             objective_fn = create_objective_function(
