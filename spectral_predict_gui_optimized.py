@@ -18618,6 +18618,8 @@ Performance (Classification):
                 try:
                     self.refine_wl_spec.delete('1.0', 'end')
                     self.refine_wl_spec.insert('1.0', wl_spec)
+                    # Update count display while flag is True (prevents clearing wavelength order)
+                    self._update_wavelength_count()
                 finally:
                     self._programmatic_wavelength_update = False
 
@@ -18839,8 +18841,8 @@ Performance (Classification):
         else:
             print(f"DEBUG: No 'Params' field in config for {model_name}")
 
-        # Update the wavelength count display
-        self._update_wavelength_count()
+        # Note: _update_wavelength_count() is now called inside the protected block
+        # (lines 18621-18622) to preserve wavelength order from Results tab
 
     def _plot_refined_predictions(self):
         """Plot reference vs predicted - handles both regression and classification."""
