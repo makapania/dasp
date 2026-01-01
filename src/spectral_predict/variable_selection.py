@@ -956,6 +956,11 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
                 lgb_model.fit(X_subset, y)
                 feature_imp = lgb_model.feature_importances_
 
+                # Add minimum floor to prevent complete elimination of variables
+                # Tree models have sparse feature importances (many zeros) which
+                # breaks probability sampling in subsequent iterations
+                feature_imp = np.maximum(feature_imp, 1e-6)
+
                 # Update weights based on feature importances
                 weights[selected_vars] = feature_imp / (feature_imp.sum() + 1e-10)
 
