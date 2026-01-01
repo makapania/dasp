@@ -15,7 +15,46 @@
 - **Root cause:** Unknown - not the "best of 29" approach (Ridge uses same approach and works)
 - **See:** "Bayesian Optimization - PLS-SPECIFIC ISSUE" section below for details
 
-**Secondary issue:** R2 concordance between Results tab and Model Development tab (separate problem, lower priority)
+**Secondary issue:** R2 concordance between Results tab and Model Development tab - **FIX IN PROGRESS (2025-12-31)** - See "R² Mismatch Fix" section below
+
+---
+
+## 🔧 R² MISMATCH FIX (2025-12-31) - IMPLEMENTED, NEEDS TESTING
+
+**Problem:** When double-clicking a model in Results tab to load into Model Development, R² doesn't match for ElasticNet, RandomForest, LightGBM (but PLS/Ridge work fine).
+
+**Root Cause:** The format→text_widget→parse round-trip destroys wavelength order:
+1. `_format_wavelengths_as_spec()` with `preserve_order=True` correctly lists wavelengths individually
+2. BUT `_parse_wavelength_spec()` was NOT using the stored `_original_wavelength_order`
+3. Float type mismatch (Python floats vs numpy floats) caused set membership checks to fail
+4. Result: wavelengths reconstructed in ascending order instead of importance order
+
+**Fix Applied (commits 89fe683, 9212f02):**
+
+1. **Bypass the fragile parse** (`_run_refined_model_thread` lines 20022-20045):
+   - If stored wavelength order exists AND text widget unchanged → use stored order directly
+   - Only parse if user manually edited the wavelength spec
+
+2. **Fix float comparison** (`_parse_wavelength_spec` lines 21826-21840):
+   - Convert all wavelengths to Python floats before set comparison
+   - Ensures consistent behavior between numpy and Python float types
+
+3. **Explicit type conversion** (`_load_model_for_refinement` lines 18548, 18569):
+   - Store wavelengths as Python floats with debug type output
+
+**Expected Console Output After Fix:**
+```
+DEBUG: Using stored wavelength order directly (bypassing parse)
+DEBUG: This ensures exact wavelength order match with Results tab
+...
+> Perfect match - wavelengths AND ORDER are identical
+```
+
+**Status:**
+- [x] Code committed and pushed
+- [ ] **NEEDS TESTING** - Restart app, run search with variable selection, double-click LightGBM/ElasticNet result, verify R² matches (±0.001)
+
+**Plan File:** `.claude/plans/sequential-purring-prism.md`
 
 ---
 
@@ -145,9 +184,7 @@
   - Example: window=15 → edge_zone=7 → first/last 7 wavelengths excluded
   - **Note**: Model Development Tab does NOT apply edge masking - it uses the wavelengths from `all_vars` which are already edge-masked by the search functions
 - [x] **Bug fix: Removed erroneous double edge masking** - Edge masking was incorrectly added to Model Development tab (lines 20557-20577), causing wavelengths to be masked twice. This caused small R2 mismatches (0.001-0.01) for ElasticNet. Fixed by removing the Model Development edge masking block.
-- [ ] **ORIGINAL PROBLEM NOT RESOLVED** - The investigation that led to edge masking changes was prompted by R2 mismatch between Results tab and Model Development tab. The root cause of this mismatch was NOT fully diagnosed. Potential remaining issues:
-  - Wavelength order corruption: `_format_wavelengths_as_spec()` sorts wavelengths, `_parse_wavelength_spec()` reorders to X_original order
-  - Variable order matters for many models but may not be preserved correctly
+- [x] **ORIGINAL PROBLEM ADDRESSED (2025-12-31)** - R2 mismatch between Results tab and Model Development tab was caused by wavelength order corruption during format→parse round-trip. **FIX APPLIED** - see "R² MISMATCH FIX" section above. Commits 89fe683, 9212f02. **NEEDS TESTING.**
 
 ### Bayesian Optimization - PLS-SPECIFIC ISSUE (2025-12-30)
 
