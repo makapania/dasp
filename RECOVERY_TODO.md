@@ -263,42 +263,74 @@ if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
 - `src/spectral_predict/search.py` - Lines 2191-2207, 2228-2254, 2289-2290
 - `src/spectral_predict/bayesian_utils.py` - Lines 203, 215, 370-423
 
-### NSGA-II - BROKEN (2025-12-22)
+### NSGA-II - BROKEN (ROOT CAUSE FOUND 2026-01-01)
 
 **STATUS: DOES NOT WORK** - Gives much worse RMSE than Grid Search for regression.
 
-**ROOT CAUSES IDENTIFIED:**
+**ROOT CAUSE: Missing Hyperparameters in `_build_model()`**
 
-1. **CRITICAL: Data Leakage in Preprocessing** (`nsga2_search.py` lines 636-644)
-   - Grid/Bayesian: Applies preprocessing **per-fold inside CV** (correct)
-   - NSGA2: Applies preprocessing **globally before CV** (wrong - data leakage)
-   - Test folds "see" training data statistics via preprocessing fit
-   - This causes optimistic fitness during optimization, then worse real-world performance
+The previous "data leakage" diagnosis was **WRONG**. The real issue is NSGA-II's `_build_model()` function is missing critical hyperparameters that Grid Search uses.
 
-2. **HIGH: Different Model Hyperparameters** (`_build_model()` vs `get_model()`)
-   - Ridge alpha: Grid uses 1.0, NSGA2 searches 0.01-1000 (may pick extremes)
-   - XGBoost max_depth: Grid uses 6, NSGA2 uses 3-7
-   - XGBoost subsample: Grid uses 0.8, NSGA2 only has 1.0 or 0.8
-   - LightGBM min_child_samples: Grid uses 5, NSGA2 doesn't tune it
+**CONCRETE DIFFERENCES FOUND:**
 
-3. **MEDIUM: Learning Rate Formula** (line 269)
-   - Changed from 3.0^(gene/14) to 30.0^(gene/14) in commit 649ee9c
-   - New formula is mathematically correct (0.01-0.3 range)
-   - But comment claiming gene=7 gives 0.1 is wrong (actually 0.055)
+#### LightGBM - MISSING 5 CRITICAL PARAMETERS
+```python
+# Grid Search (models.py line 186-201) uses:
+LGBMRegressor(
+    min_child_samples=5,      # MISSING in NSGA-II
+    subsample=0.8,            # MISSING in NSGA-II
+    bagging_freq=1,           # MISSING in NSGA-II
+    colsample_bytree=0.8,     # MISSING in NSGA-II
+    reg_alpha=0.1,            # MISSING in NSGA-II
+    reg_lambda=1.0,           # NSGA-II uses 0.1 (wrong)
+)
 
-4. **LOW: Edge Masking Constraint** (lines 577-597)
-   - Edge masking reduces wavelength count after selection
-   - Solutions penalized when n_selected < min_wavelengths after masking
-   - GA doesn't know to compensate for edge wavelength loss
+# NSGA-II (nsga2_search.py line 357-360) uses:
+LGBMRegressor(
+    # Missing all regularization parameters!
+    reg_lambda=0.1,  # Wrong default (should be 1.0)
+)
+```
+
+#### XGBoost - DIFFERENT DEFAULTS
+- Grid: `max_depth=6` (fixed) vs NSGA-II: `3-7` (varies by gene)
+- Grid: `subsample=0.8` (fixed) vs NSGA-II: `1.0 or 0.8` (varies)
+- Grid: `colsample_bytree=0.8` vs NSGA-II: varies
+
+#### RandomForest
+- Grid: `n_jobs=-1` (all cores)
+- NSGA-II: `n_jobs=1` (intentional for GA parallelism, acceptable)
+
+**WHY THIS CAUSES POOR RESULTS:**
+Missing regularization parameters (subsample, colsample_bytree, min_child_samples) cause overfitting. NSGA-II explores hyperparameter regions that Grid Search's proven defaults avoid.
 
 **FIX OPTIONS:**
 
-- **Quick fix:** Align `_build_model()` defaults with `get_model()` (Ridge alpha=1.0, etc.)
-- **Proper fix:** Refactor `_compute_prediction_error()` to use sklearn Pipeline with per-fold preprocessing
+1. **Quick Fix** - Add missing parameters to `_build_model()` to match Grid Search defaults
+2. **Better Fix** - Replace `_build_model()` with calls to `get_model()` from models.py
+3. **Best Fix** - Constrain gene search space around proven defaults
 
-**FILES:** `src/spectral_predict/nsga2_search.py`
+**RECOMMENDED: Option 1 (Quick Fix)**
 
-**See:** `.claude/plans/crystalline-herding-lovelace.md` for detailed investigation notes
+Add these to LightGBM in `_build_model()` (line 357-360):
+```python
+LGBMRegressor(
+    n_estimators=n_estimators,
+    learning_rate=learning_rate,
+    num_leaves=num_leaves,
+    min_child_samples=5,       # ADD
+    subsample=0.8,             # ADD
+    bagging_freq=1,            # ADD
+    colsample_bytree=0.8,      # ADD
+    reg_alpha=0.1,             # ADD
+    reg_lambda=reg_lambda,     # Keep gene-controlled
+    random_state=random_state,
+    n_jobs=1,
+    verbose=-1
+)
+```
+
+**FILES:** `src/spectral_predict/nsga2_search.py` - `_build_model()` function (lines 289-430)
 
 ### Test Suite (Low Priority)
 - [ ] Integrate pytest tests from `backup_2025-12-20/tests/`
