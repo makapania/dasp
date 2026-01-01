@@ -1160,6 +1160,7 @@ class SpectralPredictApp:
         self.model_loaded_from_results = False  # Track if model was loaded from Results tab
         self.refine_hyperparams_modified = False  # Track if user modified hyperparams after loading
         self._original_wavelength_order = None  # Preserve importance order from variable selection
+        self._programmatic_wavelength_update = False  # Flag to distinguish programmatic vs manual text widget updates
 
         # Refined/saved model storage (for model persistence)
         self.refined_model = None  # Fitted model from Model Development tab
@@ -18612,8 +18613,13 @@ Performance (Classification):
 
                 # Ensure widget is in normal state before editing
                 self.refine_wl_spec.config(state='normal')
-                self.refine_wl_spec.delete('1.0', 'end')
-                self.refine_wl_spec.insert('1.0', wl_spec)
+                # Set flag to prevent clearing wavelength order during programmatic update
+                self._programmatic_wavelength_update = True
+                try:
+                    self.refine_wl_spec.delete('1.0', 'end')
+                    self.refine_wl_spec.insert('1.0', wl_spec)
+                finally:
+                    self._programmatic_wavelength_update = False
 
                 # Verify insertion
                 content = self.refine_wl_spec.get('1.0', 'end-1c')
@@ -22249,8 +22255,9 @@ Configuration:
     def _update_wavelength_count(self, event=None):
         """Update wavelength count display in real-time."""
         try:
-            # Clear stored wavelength order on manual edit (user override)
-            if self._original_wavelength_order is not None:
+            # Clear stored wavelength order on MANUAL edit only (not programmatic updates)
+            # This preserves wavelength order when loading from Results tab
+            if self._original_wavelength_order is not None and not self._programmatic_wavelength_update:
                 print("DEBUG: Manual edit detected - clearing stored wavelength order")
                 self._original_wavelength_order = None
 
