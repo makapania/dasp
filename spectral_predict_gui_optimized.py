@@ -17708,7 +17708,7 @@ class SpectralPredictApp:
 
         # Set all wavelengths
         wavelengths = list(self.X_original.columns.astype(float).values)
-        wl_spec = self._format_wavelengths_as_spec(wavelengths)
+        wl_spec = self._format_wavelengths_as_spec(wavelengths, available_wavelengths=wavelengths)
 
         self.refine_wl_spec.config(state='normal')
         self.refine_wl_spec.delete('1.0', 'end')
@@ -18544,10 +18544,10 @@ Performance (Classification):
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
                         # Don't sort - preserve importance order from search results
                         # Sorting destroys feature order which affects PLS R² reproducibility
-                        # Store original order for later use
-                        self._original_wavelength_order = model_wavelengths.copy()
+                        # Store original order for later use (as Python floats for consistent comparison)
+                        self._original_wavelength_order = [float(wl) for wl in model_wavelengths]
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
-                        print(f"DEBUG: Stored original wavelength order: {self._original_wavelength_order[:5]}...")
+                        print(f"DEBUG: Stored original wavelength order (type={type(self._original_wavelength_order[0]).__name__}): {self._original_wavelength_order[:5]}...")
                     except Exception as e:
                         print(f"WARNING: Could not parse all_vars: {e}")
                         model_wavelengths = None
@@ -18565,14 +18565,14 @@ Performance (Classification):
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
                         # Don't sort - preserve importance order from search results
                         # Sorting destroys feature order which affects PLS R² reproducibility
-                        # Store original order for later use
-                        self._original_wavelength_order = model_wavelengths.copy()
+                        # Store original order for later use (as Python floats for consistent comparison)
+                        self._original_wavelength_order = [float(wl) for wl in model_wavelengths]
                         expected_n_vars = config.get('n_vars', len(model_wavelengths))
                         if len(model_wavelengths) < expected_n_vars:
                             print(f"[!]  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
                             print(f"[!]  This WILL cause different R² when running refined model!")
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
-                        print(f"DEBUG: Stored original wavelength order: {self._original_wavelength_order[:5]}...")
+                        print(f"DEBUG: Stored original wavelength order (type={type(self._original_wavelength_order[0]).__name__}): {self._original_wavelength_order[:5]}...")
                     except Exception as e:
                         print(f"WARNING: Could not parse top_vars: {e}")
                         model_wavelengths = None
@@ -18594,7 +18594,12 @@ Performance (Classification):
                 print(f"DEBUG: Model is {'subset' if is_subset else 'full spectrum'}")
 
                 # Format the wavelengths (preserve order for subsets, compress for full spectrum)
-                wl_spec = self._format_wavelengths_as_spec(model_wavelengths, preserve_order=is_subset)
+                # CRITICAL: Pass available_wavelengths to prevent spurious range expansion
+                wl_spec = self._format_wavelengths_as_spec(
+                    model_wavelengths,
+                    available_wavelengths=all_wavelengths,
+                    preserve_order=is_subset
+                )
                 print(f"DEBUG: Formatted {len(model_wavelengths)} wavelengths into {len(wl_spec)} character spec")
 
                 # FALLBACK: If formatter returns empty, use simple range
@@ -20008,7 +20013,40 @@ F1 Score:  {f1:.4f}
             # Parse wavelength specification
             available_wl = self.X_original.columns.astype(float).values
             wl_spec_text = self.refine_wl_spec.get('1.0', 'end')
-            selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+
+            print(f"\nDEBUG: WAVELENGTH PARSING START")
+            print(f"DEBUG: Wavelength spec text (first 200 chars): {wl_spec_text[:200]}")
+            print(f"DEBUG: Available wavelengths: {len(available_wl)} total")
+            print(f"DEBUG: Stored _original_wavelength_order: {self._original_wavelength_order[:10] if self._original_wavelength_order else None}...")
+
+            # CRITICAL FIX: Use stored wavelength order if available (from double-click load)
+            # This bypasses the fragile format→parse round-trip that was causing R² mismatches
+            if self._original_wavelength_order is not None and len(self._original_wavelength_order) > 0:
+                # Check if user manually modified the wavelength spec
+                wl_spec_text_clean = wl_spec_text.strip()
+                expected_spec = self._format_wavelengths_as_spec(
+                    self._original_wavelength_order,
+                    preserve_order=True
+                )
+
+                if wl_spec_text_clean == expected_spec.strip():
+                    # User hasn't modified - use stored order directly
+                    print(f"DEBUG: Using stored wavelength order directly (bypassing parse)")
+                    print(f"DEBUG: This ensures exact wavelength order match with Results tab")
+                    selected_wl = [float(wl) for wl in self._original_wavelength_order]
+                else:
+                    # User modified the spec - parse as usual
+                    print(f"DEBUG: User modified wavelength spec - parsing as usual")
+                    selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+                    self._original_wavelength_order = None  # Clear since manual edit
+            else:
+                # No stored order - parse as usual
+                print(f"DEBUG: No stored wavelength order - parsing spec text")
+                selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+
+            print(f"DEBUG: Parsed wavelengths: {len(selected_wl)} total")
+            print(f"DEBUG: First 10 parsed: {selected_wl[:10]}")
+            print(f"DEBUG: WAVELENGTH PARSING END\n")
 
             if not selected_wl:
                 raise ValueError("No valid wavelengths selected. Please check your wavelength specification.")
@@ -21632,19 +21670,23 @@ Configuration:
         # Using after(50) allows the window to fully appear before starting work
         dialog.after(50, generate_preview)
 
-    def _format_wavelengths_as_spec(self, wavelengths, preserve_order=False):
+    def _format_wavelengths_as_spec(self, wavelengths, available_wavelengths=None, preserve_order=False):
         """
         Format a list of wavelengths into a compact specification string.
         Groups consecutive wavelengths into ranges.
 
         Args:
-            wavelengths: List of wavelength values
+            wavelengths: List of wavelength values to format
+            available_wavelengths: Complete list of available wavelengths in the dataset (for gap detection).
+                                  If None, assumes all wavelengths are contiguous.
             preserve_order: If True, list wavelengths individually in given order (for variable selection).
                           If False, compress into ranges sorted by wavelength (for full spectrum).
 
-        Example: [1500, 1501, 1502, 1505, 1506, 1510]
-                 -> "1500.0-1502.0, 1505.0-1506.0, 1510.0" (preserve_order=False)
-                 -> "1500.0, 1501.0, 1502.0, 1505.0, 1506.0, 1510.0" (preserve_order=True)
+        Example: [1500, 1502, 1504] with available=[1500,1501,1502,1503,1504,1505]
+                 -> "1500.0, 1502.0, 1504.0" (gaps at 1501, 1503 prevent range compression)
+
+                 [1500, 1501, 1502] with available=[1500,1501,1502,1503,1504,1505]
+                 -> "1500.0-1502.0" (no gaps, can compress)
         """
         # Enhanced validation
         if wavelengths is None:
@@ -21680,30 +21722,45 @@ Configuration:
             return ", ".join(f"{wl:.1f}" for wl in unique_wls)
 
         # Otherwise, compress into ranges (full spectrum)
+        print(f"DEBUG: Compressing wavelengths into ranges (preserve_order=False)")
         wavelengths = sorted(list(set(wavelengths)))  # Remove duplicates and sort
+        wavelength_set = set(wavelengths)
+        available_set = set(available_wavelengths) if available_wavelengths is not None else wavelength_set
+        print(f"DEBUG: Selected wavelengths: {len(wavelength_set)}, Available: {len(available_set)}")
 
-        # Group consecutive wavelengths (within 1.5 nm)
+        # Group consecutive wavelengths, checking for gaps
         ranges = []
-        start = wavelengths[0]
-        end = wavelengths[0]
+        i = 0
+        while i < len(wavelengths):
+            start = wavelengths[i]
+            end = start
+            j = i + 1
 
-        for i in range(1, len(wavelengths)):
-            if wavelengths[i] - end <= 1.5:  # Consecutive
-                end = wavelengths[i]
-            else:
-                # Save the range
-                if abs(end - start) < 0.1:  # Single wavelength
-                    ranges.append(f"{start:.1f}")
-                else:  # Range
-                    ranges.append(f"{start:.1f}-{end:.1f}")
-                start = wavelengths[i]
-                end = wavelengths[i]
+            # Try to extend the range
+            while j < len(wavelengths) and wavelengths[j] - end <= 1.5:
+                candidate_end = wavelengths[j]
 
-        # Don't forget the last range
-        if abs(end - start) < 0.1:
-            ranges.append(f"{start:.1f}")
-        else:
-            ranges.append(f"{start:.1f}-{end:.1f}")
+                # Find intermediate wavelengths in available set between current end and candidate
+                intermediates = [w for w in available_set if end < w < candidate_end]
+
+                # Check if ALL intermediates are present in our selected wavelengths
+                all_present = all(w in wavelength_set for w in intermediates)
+
+                if all_present:
+                    # No gaps - can extend range
+                    end = candidate_end
+                    j += 1
+                else:
+                    # Gap detected - stop extending range
+                    print(f"DEBUG: Gap detected between {end:.1f} and {candidate_end:.1f}, stopping range")
+                    break
+
+            # Add the range (or single wavelength)
+            if abs(end - start) < 0.1:  # Single wavelength
+                ranges.append(f"{start:.1f}")
+            else:  # Range
+                ranges.append(f"{start:.1f}-{end:.1f}")
+            i = j
 
         return ", ".join(ranges)
 
@@ -21766,16 +21823,21 @@ Configuration:
         # Remove duplicates while preserving order
         # Priority: Use stored order from variable selection if available
         # DO NOT sort - sorting changes feature order and breaks R² reproducibility!
-        selected_set = set(selected)
+        # CRITICAL: Convert to consistent float type to avoid numpy/Python float comparison issues
+        selected_set = set(float(wl) for wl in selected)
 
         # If we have stored order from variable selection, use it
         if self._original_wavelength_order is not None:
             print(f"DEBUG: Using stored wavelength order from variable selection (n={len(self._original_wavelength_order)})")
-            selected = [wl for wl in self._original_wavelength_order if wl in selected_set]
+            # Convert stored order to Python floats for consistent comparison
+            original_floats = [float(wl) for wl in self._original_wavelength_order]
+            selected = [wl for wl in original_floats if wl in selected_set]
+            print(f"DEBUG: After filtering, {len(selected)} wavelengths remain")
         else:
             # Otherwise, preserve order from available_wavelengths (training data order)
             print(f"DEBUG: Using available_wavelengths order")
-            selected = [wl for wl in available_wavelengths if wl in selected_set]
+            available_floats = [float(wl) for wl in available_wavelengths]
+            selected = [wl for wl in available_floats if wl in selected_set]
 
         return selected
 
@@ -22231,7 +22293,7 @@ Configuration:
             # No wavelengths in this range - preset not applied
             return
 
-        wl_spec = self._format_wavelengths_as_spec(list(selected))
+        wl_spec = self._format_wavelengths_as_spec(list(selected), available_wavelengths=wavelengths)
         self.refine_wl_spec.delete('1.0', 'end')
         self.refine_wl_spec.insert('1.0', wl_spec)
         self._update_wavelength_count()
@@ -22270,7 +22332,7 @@ Configuration:
                                           f"No wavelengths found in range {start}-{end} nm")
                     return
 
-                wl_spec = self._format_wavelengths_as_spec(selected)
+                wl_spec = self._format_wavelengths_as_spec(selected, available_wavelengths=wavelengths)
                 self.refine_wl_spec.delete('1.0', 'end')
                 self.refine_wl_spec.insert('1.0', wl_spec)
                 self._update_wavelength_count()
@@ -23591,7 +23653,11 @@ Configuration:
 
                         # Format wavelengths if available and not too many
                         if wavelengths is not None:
-                            wl_spec = self._format_wavelengths_as_spec(wavelengths)
+                            # Use X_original to get available wavelengths if possible
+                            available_wl = None
+                            if self.X_original is not None:
+                                available_wl = self.X_original.columns.astype(float).values
+                            wl_spec = self._format_wavelengths_as_spec(wavelengths, available_wavelengths=available_wl)
                             if wl_spec and len(wl_spec) < 500:  # Only show if reasonable length
                                 stats_text += f"  - Wavelengths: {wl_spec}\n"
 
