@@ -1156,6 +1156,11 @@ class SpectralPredictApp:
         self.results_sort_column = None  # Current column being sorted
         self.results_sort_reverse = False  # Sort direction (False = ascending, True = descending)
 
+        # Model Development tracking (for hyperparameter override logic)
+        self.model_loaded_from_results = False  # Track if model was loaded from Results tab
+        self.refine_hyperparams_modified = False  # Track if user modified hyperparams after loading
+        self._original_wavelength_order = None  # Preserve importance order from variable selection
+
         # Refined/saved model storage (for model persistence)
         self.refined_model = None  # Fitted model from Model Development tab
         self.refined_preprocessor = None  # Fitted preprocessing pipeline
@@ -1957,6 +1962,9 @@ class SpectralPredictApp:
         self.refine_neuralboosted_early_stopping = tk.BooleanVar(value=False)  # Early stopping
         self.refine_neuralboosted_max_iter = tk.IntVar(value=100)  # Max iterations per weak learner
         self.refine_neuralboosted_tol = tk.StringVar(value="1e-4")  # Convergence tolerance
+
+        # Bind trace callbacks to all hyperparameter widgets for modification tracking
+        self._bind_hyperparam_traces()
 
         # Variable selection methods (multiple selection enabled)
         self.varsel_importance = tk.BooleanVar(value=True)  # Default enabled
@@ -8809,6 +8817,114 @@ class SpectralPredictApp:
                 self.refine_model_type.set('PLS-DA')
             else:
                 self.refine_model_type.set('PLS')
+
+    def _on_hyperparam_modified(self, *args):
+        """
+        Called when user modifies any hyperparameter widget in Model Development tab.
+        Sets flag to indicate UI override should be applied (user made manual changes).
+        """
+        self.refine_hyperparams_modified = True
+
+    def _bind_hyperparam_traces(self):
+        """
+        Bind trace callbacks to all hyperparameter widgets to detect user modifications.
+        This allows tracking whether user changed params after loading from Results tab.
+        """
+        # PLS hyperparameters
+        self.refine_pls_n_components.trace_add('write', self._on_hyperparam_modified)
+        self.refine_pls_max_iter.trace_add('write', self._on_hyperparam_modified)
+        self.refine_pls_tol.trace_add('write', self._on_hyperparam_modified)
+
+        # Ridge hyperparameters
+        self.refine_ridge_alpha.trace_add('write', self._on_hyperparam_modified)
+        self.refine_ridge_solver.trace_add('write', self._on_hyperparam_modified)
+        self.refine_ridge_tol.trace_add('write', self._on_hyperparam_modified)
+        self.refine_ridge_fit_intercept.trace_add('write', self._on_hyperparam_modified)
+
+        # Lasso hyperparameters
+        self.refine_lasso_alpha.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lasso_selection.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lasso_tol.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lasso_max_iter.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lasso_fit_intercept.trace_add('write', self._on_hyperparam_modified)
+
+        # ElasticNet hyperparameters
+        self.refine_elasticnet_alpha.trace_add('write', self._on_hyperparam_modified)
+        self.refine_elasticnet_l1_ratio.trace_add('write', self._on_hyperparam_modified)
+        self.refine_elasticnet_selection.trace_add('write', self._on_hyperparam_modified)
+        self.refine_elasticnet_tol.trace_add('write', self._on_hyperparam_modified)
+        self.refine_elasticnet_max_iter.trace_add('write', self._on_hyperparam_modified)
+        self.refine_elasticnet_fit_intercept.trace_add('write', self._on_hyperparam_modified)
+
+        # RandomForest hyperparameters
+        self.refine_rf_n_estimators.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_max_depth.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_min_samples_split.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_min_samples_leaf.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_max_features.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_bootstrap.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_max_leaf_nodes.trace_add('write', self._on_hyperparam_modified)
+        self.refine_rf_min_impurity_decrease.trace_add('write', self._on_hyperparam_modified)
+
+        # XGBoost hyperparameters
+        self.refine_xgb_n_estimators.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_learning_rate.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_max_depth.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_subsample.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_colsample_bytree.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_reg_alpha.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_reg_lambda.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_min_child_weight.trace_add('write', self._on_hyperparam_modified)
+        self.refine_xgb_gamma.trace_add('write', self._on_hyperparam_modified)
+
+        # LightGBM hyperparameters
+        self.refine_lgbm_n_estimators.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_learning_rate.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_num_leaves.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_max_depth.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_min_child_samples.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_subsample.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_colsample_bytree.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_reg_alpha.trace_add('write', self._on_hyperparam_modified)
+        self.refine_lgbm_reg_lambda.trace_add('write', self._on_hyperparam_modified)
+
+        # CatBoost hyperparameters
+        self.refine_catboost_iterations.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_learning_rate.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_depth.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_l2_leaf_reg.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_border_count.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_bagging_temperature.trace_add('write', self._on_hyperparam_modified)
+
+        # MLP hyperparameters
+        self.refine_mlp_hidden_layer_sizes.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_activation.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_alpha.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_batch_size.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_solver.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_learning_rate_init.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_learning_rate.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_momentum.trace_add('write', self._on_hyperparam_modified)
+        self.refine_mlp_max_iter.trace_add('write', self._on_hyperparam_modified)
+
+        # NeuralBoosted hyperparameters
+        self.refine_neuralboosted_n_estimators.trace_add('write', self._on_hyperparam_modified)
+        self.refine_neuralboosted_learning_rate.trace_add('write', self._on_hyperparam_modified)
+        self.refine_neuralboosted_hidden_layer_size.trace_add('write', self._on_hyperparam_modified)
+        self.refine_neuralboosted_activation.trace_add('write', self._on_hyperparam_modified)
+        self.refine_neuralboosted_early_stopping.trace_add('write', self._on_hyperparam_modified)
+        self.refine_neuralboosted_max_iter.trace_add('write', self._on_hyperparam_modified)
+        self.refine_neuralboosted_tol.trace_add('write', self._on_hyperparam_modified)
+
+        # SVR hyperparameters (if they exist)
+        if hasattr(self, 'refine_svr_C'):
+            self.refine_svr_C.trace_add('write', self._on_hyperparam_modified)
+        if hasattr(self, 'refine_svr_epsilon'):
+            self.refine_svr_epsilon.trace_add('write', self._on_hyperparam_modified)
+        if hasattr(self, 'refine_svr_kernel'):
+            self.refine_svr_kernel.trace_add('write', self._on_hyperparam_modified)
+        if hasattr(self, 'refine_svr_gamma'):
+            self.refine_svr_gamma.trace_add('write', self._on_hyperparam_modified)
 
     def _on_model_checkbox_changed(self, *args):
         """Switch to Custom tier when user manually changes a model checkbox."""
@@ -18428,7 +18544,10 @@ Performance (Classification):
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
                         # Don't sort - preserve importance order from search results
                         # Sorting destroys feature order which affects PLS R² reproducibility
+                        # Store original order for later use
+                        self._original_wavelength_order = model_wavelengths.copy()
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
+                        print(f"DEBUG: Stored original wavelength order: {self._original_wavelength_order[:5]}...")
                     except Exception as e:
                         print(f"WARNING: Could not parse all_vars: {e}")
                         model_wavelengths = None
@@ -18446,11 +18565,14 @@ Performance (Classification):
                         model_wavelengths = [float(w) for w in wavelength_strings if w]
                         # Don't sort - preserve importance order from search results
                         # Sorting destroys feature order which affects PLS R² reproducibility
+                        # Store original order for later use
+                        self._original_wavelength_order = model_wavelengths.copy()
                         expected_n_vars = config.get('n_vars', len(model_wavelengths))
                         if len(model_wavelengths) < expected_n_vars:
                             print(f"[!]  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
                             print(f"[!]  This WILL cause different R² when running refined model!")
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
+                        print(f"DEBUG: Stored original wavelength order: {self._original_wavelength_order[:5]}...")
                     except Exception as e:
                         print(f"WARNING: Could not parse top_vars: {e}")
                         model_wavelengths = None
@@ -18460,13 +18582,19 @@ Performance (Classification):
                     if subset_tag == 'full' or subset_tag == 'N/A':
                         print(f"DEBUG: Full model - using all {len(all_wavelengths)} wavelengths")
                         model_wavelengths = list(all_wavelengths)
+                        self._original_wavelength_order = None  # Clear for full spectrum
                     else:
                         # Fallback: use all wavelengths
                         print(f"WARNING: Subset model but no top_vars, using all wavelengths")
                         model_wavelengths = list(all_wavelengths)
+                        self._original_wavelength_order = None  # Clear for fallback
 
-                # Format the wavelengths (ranges for consecutive, individual otherwise)
-                wl_spec = self._format_wavelengths_as_spec(model_wavelengths)
+                # Detect if this is a subset (variable selection) vs full spectrum
+                is_subset = (subset_tag not in ['full', 'N/A', ''])
+                print(f"DEBUG: Model is {'subset' if is_subset else 'full spectrum'}")
+
+                # Format the wavelengths (preserve order for subsets, compress for full spectrum)
+                wl_spec = self._format_wavelengths_as_spec(model_wavelengths, preserve_order=is_subset)
                 print(f"DEBUG: Formatted {len(model_wavelengths)} wavelengths into {len(wl_spec)} character spec")
 
                 # FALLBACK: If formatter returns empty, use simple range
@@ -18681,6 +18809,12 @@ Performance (Classification):
 
                         # Populate the UI widgets with saved parameters
                         self._populate_refine_hyperparams(model_name, params_dict)
+
+                        # Set flags AFTER population completes
+                        # This ensures trace callbacks that fired during population are ignored
+                        self.model_loaded_from_results = True
+                        self.refine_hyperparams_modified = False
+                        print(f"DEBUG: Model loaded from Results - hyperparams populated, modification tracking active")
                     else:
                         print(f"DEBUG: Params is not a dict: {type(params_dict)}")
                 else:
@@ -20357,43 +20491,117 @@ F1 Score:  {f1:.4f}
                 except Exception as e:
                     print(f"WARNING: Failed to apply saved parameters {params_from_search}: {e}")
 
-            # Apply hyperparameters from UI widgets (overrides loaded params if present)
-            # This allows users to adjust hyperparameters in the GUI after loading from Results tab
+            # Apply hyperparameters from UI widgets (conditionally)
+            # Decision logic:
+            #   - If model loaded from Results AND user didn't modify params -> use search params (skip UI override)
+            #   - Otherwise (manual config OR user modified params) -> apply UI params
             try:
-                ui_params = self._collect_refine_hyperparams(model_name)
+                # Check if we should skip UI override
+                skip_ui_override = (self.model_loaded_from_results and
+                                   not self.refine_hyperparams_modified)
 
-                if ui_params:
+                if skip_ui_override:
                     print(f"\n{'='*80}")
-                    print(f"HYPERPARAMETERS FROM UI (Model Development Tab)")
+                    print(f"USING ORIGINAL SEARCH PARAMETERS (No User Modifications)")
                     print(f"{'='*80}")
-                    print(f"Applying {len(ui_params)} hyperparameters from UI widgets:")
-                    for key in sorted(ui_params.keys()):
-                        print(f"  {key}: {ui_params[key]}")
-                    print(f"\nNote: UI values override loaded parameters from Results tab")
-                    print(f"{'='*80}\n")
-
-                    model.set_params(**ui_params)
-                    print(f"DEBUG: Successfully applied {len(ui_params)} UI hyperparameters to {model_name} model")
-
-                    # Final parameter verification
-                    final_params = model.get_params()
-                    print(f"\n{'='*80}")
-                    print(f"FINAL {model_name} PARAMETERS (After UI Application)")
-                    print(f"{'='*80}")
-                    for key in sorted(final_params.keys()):
-                        # Highlight parameters that came from UI
-                        if key in ui_params:
-                            print(f"  {key}: {final_params[key]} <- from UI")
-                        else:
-                            print(f"  {key}: {final_params[key]}")
+                    print(f"Model was loaded from Results tab and user made no changes.")
+                    print(f"UI override SKIPPED to preserve exact R² reproducibility.")
                     print(f"{'='*80}\n")
                 else:
-                    print(f"DEBUG: No UI hyperparameters collected for {model_name} (using defaults or loaded params)")
+                    # Apply UI parameters (either manual config or user made modifications)
+                    ui_params = self._collect_refine_hyperparams(model_name)
+
+                    if ui_params:
+                        if self.model_loaded_from_results and self.refine_hyperparams_modified:
+                            print(f"\n{'='*80}")
+                            print(f"APPLYING MODIFIED HYPERPARAMETERS FROM UI")
+                            print(f"{'='*80}")
+                            print(f"Model was loaded from Results, but user modified parameters.")
+                            print(f"Applying {len(ui_params)} hyperparameters from UI widgets:")
+                        else:
+                            print(f"\n{'='*80}")
+                            print(f"HYPERPARAMETERS FROM UI (Manual Configuration)")
+                            print(f"{'='*80}")
+                            print(f"Applying {len(ui_params)} hyperparameters from UI widgets:")
+
+                        for key in sorted(ui_params.keys()):
+                            print(f"  {key}: {ui_params[key]}")
+                        print(f"{'='*80}\n")
+
+                        model.set_params(**ui_params)
+                        print(f"DEBUG: Successfully applied {len(ui_params)} UI hyperparameters to {model_name} model")
+
+                        # Final parameter verification
+                        final_params = model.get_params()
+                        print(f"\n{'='*80}")
+                        print(f"FINAL {model_name} PARAMETERS (After UI Application)")
+                        print(f"{'='*80}")
+                        for key in sorted(final_params.keys()):
+                            # Highlight parameters that came from UI
+                            if key in ui_params:
+                                print(f"  {key}: {final_params[key]} <- from UI")
+                            else:
+                                print(f"  {key}: {final_params[key]}")
+                        print(f"{'='*80}\n")
+                    else:
+                        print(f"DEBUG: No UI hyperparameters collected for {model_name} (using defaults or loaded params)")
 
             except Exception as e:
                 print(f"WARNING: Failed to apply UI hyperparameters: {e}")
                 import traceback
                 traceback.print_exc()
+
+            # Final validation: Verify parameters match search params when loaded from Results
+            if params_from_search and self.model_loaded_from_results and not self.refine_hyperparams_modified:
+                try:
+                    final_params = model.get_params()
+                    # Define critical parameters per model type that affect R² reproducibility
+                    critical_params_map = {
+                        'PLS': ['n_components', 'max_iter', 'tol'],
+                        'PLS-DA': ['n_components', 'max_iter', 'tol'],
+                        'Ridge': ['alpha', 'solver', 'tol'],
+                        'Lasso': ['alpha', 'selection', 'tol', 'max_iter'],
+                        'ElasticNet': ['alpha', 'l1_ratio', 'selection', 'tol', 'max_iter'],
+                        'RandomForest': ['n_estimators', 'max_depth', 'min_samples_split', 'min_samples_leaf', 'max_features'],
+                        'XGBoost': ['n_estimators', 'learning_rate', 'max_depth', 'subsample', 'colsample_bytree'],
+                        'LightGBM': ['n_estimators', 'learning_rate', 'num_leaves', 'max_depth'],
+                        'CatBoost': ['iterations', 'learning_rate', 'depth'],
+                        'MLP': ['hidden_layer_sizes', 'alpha', 'learning_rate_init', 'max_iter'],
+                        'NeuralBoosted': ['n_estimators', 'learning_rate', 'hidden_layer_sizes', 'max_iter'],
+                        'SVR': ['C', 'epsilon', 'kernel', 'gamma'],
+                        'SVM': ['C', 'kernel', 'gamma']
+                    }
+
+                    critical_params = critical_params_map.get(model_name, [])
+                    mismatches = []
+
+                    for param in critical_params:
+                        if param in params_from_search:
+                            expected = params_from_search[param]
+                            actual = final_params.get(param)
+
+                            # Handle numeric comparisons with tolerance for floats
+                            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+                                if abs(expected - actual) > 1e-10:
+                                    mismatches.append(f"{param}: expected={expected}, actual={actual}")
+                            elif expected != actual:
+                                mismatches.append(f"{param}: expected={expected}, actual={actual}")
+
+                    if mismatches:
+                        print(f"\n{'='*80}")
+                        print(f"[!] WARNING: PARAMETER MISMATCHES DETECTED")
+                        print(f"{'='*80}")
+                        print(f"Model: {model_name}")
+                        print(f"The following critical parameters don't match the search results:")
+                        for m in mismatches:
+                            print(f"  - {m}")
+                        print(f"This may cause R² to differ from Results tab!")
+                        print(f"{'='*80}\n")
+                    else:
+                        print(f"\nDEBUG: Parameter validation PASSED - all critical params match search results")
+
+                except Exception as e:
+                    print(f"WARNING: Failed to validate final parameters: {e}")
 
             # Build preprocessing pipeline and prepare data
             from spectral_predict.preprocess import build_preprocessing_pipeline
@@ -21424,13 +21632,19 @@ Configuration:
         # Using after(50) allows the window to fully appear before starting work
         dialog.after(50, generate_preview)
 
-    def _format_wavelengths_as_spec(self, wavelengths):
+    def _format_wavelengths_as_spec(self, wavelengths, preserve_order=False):
         """
         Format a list of wavelengths into a compact specification string.
         Groups consecutive wavelengths into ranges.
 
+        Args:
+            wavelengths: List of wavelength values
+            preserve_order: If True, list wavelengths individually in given order (for variable selection).
+                          If False, compress into ranges sorted by wavelength (for full spectrum).
+
         Example: [1500, 1501, 1502, 1505, 1506, 1510]
-                 -> "1500.0-1502.0, 1505.0-1506.0, 1510.0"
+                 -> "1500.0-1502.0, 1505.0-1506.0, 1510.0" (preserve_order=False)
+                 -> "1500.0, 1501.0, 1502.0, 1505.0, 1506.0, 1510.0" (preserve_order=True)
         """
         # Enhanced validation
         if wavelengths is None:
@@ -21453,6 +21667,19 @@ Configuration:
             print("WARNING: _format_wavelengths_as_spec received empty list")
             return ""
 
+        # If preserving order (variable selection), list individually
+        if preserve_order:
+            print(f"DEBUG: Preserving wavelength order (n={len(wavelengths)})")
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_wls = []
+            for wl in wavelengths:
+                if wl not in seen:
+                    seen.add(wl)
+                    unique_wls.append(wl)
+            return ", ".join(f"{wl:.1f}" for wl in unique_wls)
+
+        # Otherwise, compress into ranges (full spectrum)
         wavelengths = sorted(list(set(wavelengths)))  # Remove duplicates and sort
 
         # Group consecutive wavelengths (within 1.5 nm)
@@ -21536,11 +21763,20 @@ Configuration:
                     # Invalid wavelength, skip
                     continue
 
-        # Remove duplicates while preserving order from available_wavelengths
-        # This matches the order used during search/training (stored in all_vars)
+        # Remove duplicates while preserving order
+        # Priority: Use stored order from variable selection if available
         # DO NOT sort - sorting changes feature order and breaks R² reproducibility!
         selected_set = set(selected)
-        selected = [wl for wl in available_wavelengths if wl in selected_set]
+
+        # If we have stored order from variable selection, use it
+        if self._original_wavelength_order is not None:
+            print(f"DEBUG: Using stored wavelength order from variable selection (n={len(self._original_wavelength_order)})")
+            selected = [wl for wl in self._original_wavelength_order if wl in selected_set]
+        else:
+            # Otherwise, preserve order from available_wavelengths (training data order)
+            print(f"DEBUG: Using available_wavelengths order")
+            selected = [wl for wl in available_wavelengths if wl in selected_set]
+
         return selected
 
     def _parse_range_specification(self, spec_string, param_name="parameter", is_float=False):
@@ -21951,6 +22187,11 @@ Configuration:
     def _update_wavelength_count(self, event=None):
         """Update wavelength count display in real-time."""
         try:
+            # Clear stored wavelength order on manual edit (user override)
+            if self._original_wavelength_order is not None:
+                print("DEBUG: Manual edit detected - clearing stored wavelength order")
+                self._original_wavelength_order = None
+
             if self.X_original is None:
                 self.refine_wl_count_label.config(text="Wavelengths: Data not loaded")
                 return
