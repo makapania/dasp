@@ -41,13 +41,38 @@ from pymoo.termination import get_termination
 
 # V1 imports - use local modules
 from .preprocess import SNV, SavgolDerivative
-from .models import get_feature_importances
+from .models import HAS_CATBOOST
 
-# All model libraries are required dependencies
-from lightgbm import LGBMRegressor, LGBMClassifier
-from xgboost import XGBRegressor, XGBClassifier
-from catboost import CatBoostRegressor, CatBoostClassifier
-from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
+# Optional imports for tree-based models (V1 imports these unconditionally but we handle gracefully)
+try:
+    from lightgbm import LGBMRegressor, LGBMClassifier
+    HAS_LIGHTGBM = True
+except ImportError:
+    HAS_LIGHTGBM = False
+    LGBMRegressor = None
+    LGBMClassifier = None
+
+try:
+    from xgboost import XGBRegressor, XGBClassifier
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
+    XGBRegressor = None
+    XGBClassifier = None
+
+try:
+    from catboost import CatBoostRegressor, CatBoostClassifier
+except ImportError:
+    CatBoostRegressor = None
+    CatBoostClassifier = None
+
+try:
+    from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
+    HAS_NEURAL_BOOSTED = True
+except ImportError:
+    HAS_NEURAL_BOOSTED = False
+    NeuralBoostedRegressor = None
+    NeuralBoostedClassifier = None
 
 
 
@@ -131,9 +156,8 @@ class SeededWavelengthSampling(Sampling):
 
     def _do(self, problem, n_samples, **kwargs):
         """Generate initial population with seeded all-wavelengths solutions."""
-        # Variable structure: [preproc_idx, window_idx, model_idx, model_param, lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-        #                      subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene, wl_0, wl_1, ..., wl_n]
-        n_vars = 13 + self.n_wavelengths
+        # Variable structure: [preproc_idx, window_idx, model_idx, model_param, wl_0, wl_1, ..., wl_n]
+        n_vars = 4 + self.n_wavelengths
 
         # Initialize with random values
         X = np.random.randint(
@@ -149,38 +173,20 @@ class SeededWavelengthSampling(Sampling):
         for i in range(n_seeded):
             model_idx = i % len(self.model_types)
             # Use raw preprocessing (idx=0) and default window (idx=6 = window 17)
-            X[i, 0] = 0   # raw preprocessing
-            X[i, 1] = 6   # default window
+            X[i, 0] = 0  # raw preprocessing
+            X[i, 1] = 6  # default window
             X[i, 2] = model_idx  # cycle through model types
-            X[i, 3] = 7   # middle model_param value (good default)
-            X[i, 4] = 7   # middle lr_gene (0.1 learning rate)
-            X[i, 5] = 7   # middle reg_alpha_gene
-            X[i, 6] = 7   # middle reg_lambda_gene
-            X[i, 7] = 7   # middle l1_gene (0.5 l1_ratio)
-            X[i, 8] = 7   # middle subsample (0.75)
-            X[i, 9] = 7   # middle colsample (0.75)
-            X[i, 10] = 7  # middle min_samples (~15)
-            X[i, 11] = 0  # gamma = 0 (no penalty)
-            X[i, 12] = 7  # middle max_features (0.3)
-            X[i, 13:] = 1  # ALL wavelengths selected
+            X[i, 3] = 7  # middle model_param value (good default)
+            X[i, 4:] = 1  # ALL wavelengths selected
 
         # Also add some solutions with SNV preprocessing + all wavelengths
         for i in range(n_seeded, min(n_seeded * 2, n_samples // 2)):
             model_idx = (i - n_seeded) % len(self.model_types)
-            X[i, 0] = 1   # SNV preprocessing
-            X[i, 1] = 6   # default window
+            X[i, 0] = 1  # SNV preprocessing
+            X[i, 1] = 6  # default window
             X[i, 2] = model_idx
             X[i, 3] = 7
-            X[i, 4] = 7   # middle lr_gene
-            X[i, 5] = 7   # middle reg_alpha_gene
-            X[i, 6] = 7   # middle reg_lambda_gene
-            X[i, 7] = 7   # middle l1_gene
-            X[i, 8] = 7   # middle subsample
-            X[i, 9] = 7   # middle colsample
-            X[i, 10] = 7  # middle min_samples
-            X[i, 11] = 0  # gamma = 0
-            X[i, 12] = 7  # middle max_features
-            X[i, 13:] = 1  # ALL wavelengths selected
+            X[i, 4:] = 1  # ALL wavelengths selected
 
         return X
 
@@ -244,106 +250,7 @@ def _get_preprocessing_transform(preproc_idx: int, window_idx: int):
     return None
 
 
-
-
-def _decode_hyperparameter_genes(
-    lr_gene: int,
-    reg_alpha_gene: int,
-    reg_lambda_gene: int,
-    l1_gene: int,
-    subsample_gene: int = 7,
-    colsample_gene: int = 7,
-    min_samples_gene: int = 7,
-    gamma_gene: int = 0,
-    max_features_gene: int = 7,
-) -> Dict[str, float]:
-    """
-    Decode hyperparameter genes to actual values.
-
-    Parameters
-    ----------
-    lr_gene : int (0-14)
-        Learning rate gene
-    reg_alpha_gene : int (0-14)
-        L1 regularization gene
-    reg_lambda_gene : int (0-14)
-        L2 regularization gene
-    l1_gene : int (0-14)
-        ElasticNet l1_ratio gene
-    subsample_gene : int (0-14)
-        Subsample ratio gene for tree models
-    colsample_gene : int (0-14)
-        Column sample ratio gene for tree models
-    min_samples_gene : int (0-14)
-        Minimum samples gene for tree models
-    gamma_gene : int (0-14)
-        Gamma/penalty gene for XGBoost, CatBoost, SVR
-    max_features_gene : int (0-14)
-        Max features gene for RandomForest
-
-    Returns
-    -------
-    params : dict
-        Decoded hyperparameters with keys:
-        - learning_rate: float, range 0.01 to 0.3 (log scale)
-        - reg_alpha: float, range 1e-8 to 10.0 (log scale)
-        - reg_lambda: float, range 1e-8 to 10.0 (log scale)
-        - l1_ratio: float, range 0.1 to 0.9 (linear scale)
-        - subsample: float, range 0.5 to 1.0 (linear scale)
-        - colsample_bytree: float, range 0.5 to 1.0 (linear scale)
-        - min_samples: int, range 1 to 30 (linear scale)
-        - gamma: float, range 0 to 5 (linear scale)
-        - max_features: float, range 0.1 to 0.5 (linear scale)
-    """
-    # Learning rate: log scale 0.01 to 0.3
-    # Formula: lr = 0.01 * (30.0 ** (gene / 14))
-    # gene=0 -> 0.01, gene=7 -> 0.1, gene=14 -> 0.3
-    lr = 0.01 * (30.0 ** (lr_gene / 14.0))
-
-    # Regularization: log scale 1e-8 to 10.0
-    # Formula: reg = 10 ** ((gene/14) * 8 - 8)
-    # gene=0 -> 1e-8, gene=7 -> 1e-4, gene=14 -> 10.0
-    reg_alpha = 10 ** (reg_alpha_gene / 14.0 * 8 - 8)
-    reg_lambda = 10 ** (reg_lambda_gene / 14.0 * 8 - 8)
-
-    # l1_ratio: linear scale 0.1 to 0.9
-    # Formula: l1_ratio = 0.1 + (gene / 14) * 0.8
-    # gene=0 -> 0.1, gene=7 -> 0.5, gene=14 -> 0.9
-    l1_ratio = 0.1 + (l1_gene / 14.0) * 0.8
-
-    # subsample: linear scale 0.5 to 1.0
-    # gene=0 -> 0.5, gene=7 -> 0.75, gene=14 -> 1.0
-    subsample = 0.5 + (subsample_gene / 14.0) * 0.5
-
-    # colsample_bytree: linear scale 0.5 to 1.0
-    # gene=0 -> 0.5, gene=7 -> 0.75, gene=14 -> 1.0
-    colsample = 0.5 + (colsample_gene / 14.0) * 0.5
-
-    # min_samples: linear scale 1 to 30
-    # gene=0 -> 1, gene=7 -> 15, gene=14 -> 30
-    min_samples = 1 + int((min_samples_gene / 14.0) * 29)
-
-    # gamma: linear scale 0 to 5
-    # gene=0 -> 0, gene=7 -> 2.5, gene=14 -> 5
-    gamma = (gamma_gene / 14.0) * 5.0
-
-    # max_features: linear scale 0.1 to 0.5
-    # gene=0 -> 0.1, gene=7 -> 0.3, gene=14 -> 0.5
-    max_features = 0.1 + (max_features_gene / 14.0) * 0.4
-
-    return {
-        'learning_rate': lr,
-        'reg_alpha': reg_alpha,
-        'reg_lambda': reg_lambda,
-        'l1_ratio': l1_ratio,
-        'subsample': subsample,
-        'colsample_bytree': colsample,
-        'min_samples': min_samples,
-        'gamma': gamma,
-        'max_features': max_features,
-    }
-
-def _build_model(model_type: str, model_param: int, task_type: str, random_state: int, hyperparams: Optional[Dict[str, float]] = None):
+def _build_model(model_type: str, model_param: int, task_type: str, random_state: int):
     """
     Build a model instance based on type and parameter encoding.
 
@@ -365,7 +272,7 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
     """
     if model_type == 'PLS':
         n_components = model_param + 1  # 1-15
-        return PLSRegression(n_components=n_components, scale=False)
+        return PLSRegression(n_components=n_components)
 
     elif model_type == 'Ridge':
         # Exponential alpha scale: 1e-4 to 1e3
@@ -384,10 +291,9 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
                                       random_state=random_state, max_iter=1000)
 
     elif model_type == 'ElasticNet':
-        # alpha from 0.01 to 100
+        # alpha from 0.01 to 100, l1_ratio from 0.2 to 0.8
         alpha = 10 ** (model_param / 3 - 2)
-        # Use independent l1_ratio from hyperparams (fixes BUG 6)
-        l1_ratio = hyperparams.get('l1_ratio', 0.5) if hyperparams else 0.5
+        l1_ratio = 0.2 + (model_param % 5) * 0.15  # 0.2 to 0.8
         if task_type == 'regression':
             return ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=random_state, max_iter=10000)
         else:
@@ -398,188 +304,83 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
     elif model_type == 'RandomForest':
         n_estimators = 50 + model_param * 15  # 50-260
         max_depth = None if model_param < 5 else 10 + model_param * 3  # None or 25-67
-        # Use new hyperparameter genes for regularization
-        max_features = hyperparams.get('max_features', 0.3) if hyperparams else 'sqrt'
-        min_samples = hyperparams.get('min_samples', 5) if hyperparams else 5
-        min_samples_leaf = max(1, min_samples // 5)  # Scale down for leaf param
         if task_type == 'regression':
-            return RandomForestRegressor(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                max_features=max_features,
-                min_samples_split=2,
-                min_samples_leaf=min_samples_leaf,
-                bootstrap=True,
-                random_state=random_state,
-                n_jobs=1
-            )
+            return RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth,
+                                         random_state=random_state, n_jobs=1)
         else:
-            return RandomForestClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                max_features=max_features,
-                min_samples_split=2,
-                min_samples_leaf=min_samples_leaf,
-                bootstrap=True,
-                random_state=random_state,
-                n_jobs=1
-            )
+            return RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth,
+                                          random_state=random_state, n_jobs=1)
 
     elif model_type == 'LightGBM':
+        if not HAS_LIGHTGBM:
+            return None
         n_estimators = 50 + model_param * 10  # 50-190
-        # Use hyperparams for all regularization parameters
-        learning_rate = hyperparams.get('learning_rate', 0.1) if hyperparams else 0.1
-        reg_lambda = hyperparams.get('reg_lambda', 1.0) if hyperparams else 1.0
-        subsample = hyperparams.get('subsample', 0.8) if hyperparams else 0.8
-        colsample = hyperparams.get('colsample_bytree', 0.8) if hyperparams else 0.8
-        min_child_samples = hyperparams.get('min_samples', 5) if hyperparams else 5
+        learning_rate = 0.05 if model_param < 7 else 0.1
         num_leaves = 15 if task_type == 'classification' else 31
         if task_type == 'regression':
-            return LGBMRegressor(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                num_leaves=num_leaves,
-                min_child_samples=min_child_samples,
-                subsample=subsample,
-                subsample_freq=1,  # Required when subsample < 1
-                colsample_bytree=colsample,
-                reg_alpha=0.1,  # Fixed at Grid Search default
-                reg_lambda=reg_lambda,
-                random_state=random_state,
-                n_jobs=1,
-                verbose=-1
-            )
+            return LGBMRegressor(n_estimators=n_estimators, learning_rate=learning_rate,
+                                 num_leaves=num_leaves, reg_lambda=0.1,
+                                 random_state=random_state, n_jobs=1, verbose=-1)
         else:
-            return LGBMClassifier(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                num_leaves=num_leaves,
-                min_child_samples=min_child_samples,
-                subsample=subsample,
-                subsample_freq=1,
-                colsample_bytree=colsample,
-                reg_alpha=0.1,
-                reg_lambda=reg_lambda,
-                random_state=random_state,
-                n_jobs=1,
-                verbose=-1
-            )
+            return LGBMClassifier(n_estimators=n_estimators, learning_rate=learning_rate,
+                                  num_leaves=num_leaves, reg_lambda=0.1,
+                                  random_state=random_state, n_jobs=1, verbose=-1)
 
     elif model_type == 'XGBoost':
+        if not HAS_XGBOOST:
+            return None
         n_estimators = 50 + model_param * 10  # 50-190
         max_depth = 3 + (model_param % 5)  # 3-7
-        # Use hyperparams for all regularization parameters
-        learning_rate = hyperparams.get('learning_rate', 0.1) if hyperparams else 0.1
-        reg_alpha = hyperparams.get('reg_alpha', 0.1) if hyperparams else 0.1
-        reg_lambda = hyperparams.get('reg_lambda', 1.0) if hyperparams else 1.0
-        subsample = hyperparams.get('subsample', 0.8) if hyperparams else 0.8
-        colsample = hyperparams.get('colsample_bytree', 0.8) if hyperparams else 0.8
-        gamma = hyperparams.get('gamma', 0) if hyperparams else 0
-        min_child_weight = max(1, hyperparams.get('min_samples', 5) // 3) if hyperparams else 1
+        subsample = 1.0 if model_param < 7 else 0.8
+        colsample = 1.0 if model_param < 7 else 0.8
         if task_type == 'regression':
-            return XGBRegressor(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                max_depth=max_depth,
-                reg_alpha=reg_alpha,
-                reg_lambda=reg_lambda,
-                subsample=subsample,
-                colsample_bytree=colsample,
-                gamma=gamma,
-                min_child_weight=min_child_weight,
-                tree_method='hist',  # Fixed at Grid Search default
-                random_state=random_state,
-                n_jobs=1,
-                verbosity=0
-            )
+            return XGBRegressor(n_estimators=n_estimators, learning_rate=0.1,
+                                max_depth=max_depth, reg_lambda=0.1,
+                                subsample=subsample, colsample_bytree=colsample,
+                                random_state=random_state, n_jobs=1, verbosity=0)
         else:
-            return XGBClassifier(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                max_depth=max_depth,
-                reg_alpha=reg_alpha,
-                reg_lambda=reg_lambda,
-                subsample=subsample,
-                colsample_bytree=colsample,
-                gamma=gamma,
-                min_child_weight=min_child_weight,
-                tree_method='hist',
-                random_state=random_state,
-                n_jobs=1,
-                verbosity=0,
-                use_label_encoder=False,
-                eval_metric='logloss'
-            )
+            return XGBClassifier(n_estimators=n_estimators, learning_rate=0.1,
+                                 max_depth=max_depth, reg_lambda=0.1,
+                                 subsample=subsample, colsample_bytree=colsample,
+                                 random_state=random_state, n_jobs=1, verbosity=0,
+                                 use_label_encoder=False, eval_metric='logloss')
 
     elif model_type == 'CatBoost':
+        if not HAS_CATBOOST or CatBoostRegressor is None:
+            return None
         iterations = 50 + model_param * 15  # 50-260
         depth = 4 + (model_param % 5)  # 4-8
-        # Use hyperparams for regularization
-        learning_rate = hyperparams.get('learning_rate', 0.1) if hyperparams else 0.1
-        # Reuse gamma gene for l2_leaf_reg: gamma 0-5 maps to l2_leaf_reg 1-11
-        l2_leaf_reg = 1.0 + (hyperparams.get('gamma', 0) * 2) if hyperparams else 3.0
+        learning_rate = 0.05 if model_param < 7 else 0.1
         if task_type == 'regression':
-            return CatBoostRegressor(
-                iterations=iterations,
-                depth=depth,
-                learning_rate=learning_rate,
-                l2_leaf_reg=l2_leaf_reg,
-                random_state=random_state,
-                verbose=0,
-                thread_count=1
-            )
+            return CatBoostRegressor(iterations=iterations, depth=depth, learning_rate=learning_rate,
+                                     random_state=random_state, verbose=0, thread_count=1)
         else:
-            return CatBoostClassifier(
-                iterations=iterations,
-                depth=depth,
-                learning_rate=learning_rate,
-                l2_leaf_reg=l2_leaf_reg,
-                random_state=random_state,
-                verbose=0,
-                thread_count=1
-            )
+            return CatBoostClassifier(iterations=iterations, depth=depth, learning_rate=learning_rate,
+                                      random_state=random_state, verbose=0, thread_count=1)
 
     elif model_type == 'SVR':
         kernel = 'rbf' if model_param < 10 else 'linear'
         C = 10 ** (model_param / 3 - 1)  # 0.1 to ~1000
-        # Reuse gamma gene for epsilon: gamma 0-5 maps to epsilon 0.01-0.3
-        epsilon = 0.01 + (hyperparams.get('gamma', 0) / 5.0) * 0.29 if hyperparams else 0.1
         if task_type == 'regression':
-            return SVR(kernel=kernel, C=C, gamma='scale', epsilon=epsilon, max_iter=5000)
+            return SVR(kernel=kernel, C=C)
         else:
-            return SVC(kernel=kernel, C=C, gamma='scale', random_state=random_state, probability=True, max_iter=5000)
+            return SVC(kernel=kernel, C=C, random_state=random_state, probability=True)
 
     elif model_type == 'MLP':
         layer_size = 30 + model_param * 10  # 30-170
         n_layers = 1 if model_param < 7 else 2
         hidden_layer_sizes = (layer_size,) if n_layers == 1 else (layer_size, layer_size // 2)
         alpha = 10 ** (model_param / 5 - 4)  # 1e-4 to 0.01
-        # Repurpose learning_rate gene for learning_rate_init
-        lr_init = hyperparams.get('learning_rate', 0.001) if hyperparams else 0.001
         if task_type == 'regression':
-            return MLPRegressor(
-                hidden_layer_sizes=hidden_layer_sizes,
-                alpha=alpha,
-                learning_rate_init=lr_init,
-                activation='relu',
-                solver='adam',
-                random_state=random_state,
-                max_iter=500,
-                early_stopping=True
-            )
+            return MLPRegressor(hidden_layer_sizes=hidden_layer_sizes, alpha=alpha,
+                                random_state=random_state, max_iter=500, early_stopping=True)
         else:
-            return MLPClassifier(
-                hidden_layer_sizes=hidden_layer_sizes,
-                alpha=alpha,
-                learning_rate_init=lr_init,
-                activation='relu',
-                solver='adam',
-                random_state=random_state,
-                max_iter=500,
-                early_stopping=True
-            )
+            return MLPClassifier(hidden_layer_sizes=hidden_layer_sizes, alpha=alpha,
+                                 random_state=random_state, max_iter=500, early_stopping=True)
 
     elif model_type == 'NeuralBoosted':
+        if not HAS_NEURAL_BOOSTED or NeuralBoostedRegressor is None:
+            return None
         n_estimators = 30 + model_param * 10  # 30-170
         hidden_layer_size = 3 + (model_param % 5)  # 3-7
         learning_rate = 0.05 + (model_param / 14) * 0.2  # 0.05-0.25
@@ -606,16 +407,7 @@ class SpectralOptimizationProblem(Problem):
     - Gene 1: S-G window size index (0-14)
     - Gene 2: Model type (0=PLS, 1=Ridge, ...)
     - Gene 3: Model parameter (0-14)
-    - Gene 4: Learning rate gene (0-14)
-    - Gene 5: L1 regularization gene (0-14)
-    - Gene 6: L2 regularization gene (0-14)
-    - Gene 7: ElasticNet l1_ratio gene (0-14)
-    - Gene 8: Subsample gene (0-14) -> [0.5, 1.0]
-    - Gene 9: Colsample gene (0-14) -> [0.5, 1.0]
-    - Gene 10: Min samples gene (0-14) -> [1, 30]
-    - Gene 11: Gamma gene (0-14) -> [0, 5]
-    - Gene 12: Max features gene (0-14) -> [0.1, 0.5]
-    - Gene 13-N: Binary wavelength selection (0/1)
+    - Gene 4-N: Binary wavelength selection (0/1)
 
     Objectives (all minimized):
     1. Prediction error (RMSE or 1-Accuracy)
@@ -680,26 +472,16 @@ class SpectralOptimizationProblem(Problem):
         self._eval_count = 0
 
         # Decision variables:
-        # [preproc_type, window_idx, model_type, model_param, lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-        #  subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene, wl_0, wl_1, ..., wl_n]
-        n_vars = 13 + self.n_wavelengths
+        # [preproc_type, window_idx, model_type, model_param, wl_0, wl_1, ..., wl_n]
+        n_vars = 4 + self.n_wavelengths
 
         # Variable bounds
         xl = np.zeros(n_vars)
         xu = np.array([
-            len(PREPROC_TYPES) - 1,  # 0: preproc_type
-            len(WINDOW_SIZES) - 1,   # 1: window_idx
-            len(self.model_types) - 1,  # 2: model_type
-            14,  # 3: model_param (LVs 1-15 or alpha index)
-            14,  # 4: lr_gene (0-14)
-            14,  # 5: reg_alpha_gene (0-14)
-            14,  # 6: reg_lambda_gene (0-14)
-            14,  # 7: l1_gene (0-14)
-            14,  # 8: subsample_gene (0-14) -> [0.5, 1.0]
-            14,  # 9: colsample_gene (0-14) -> [0.5, 1.0]
-            14,  # 10: min_samples_gene (0-14) -> [1, 30]
-            14,  # 11: gamma_gene (0-14) -> [0, 5]
-            14,  # 12: max_features_gene (0-14) -> [0.1, 0.5]
+            len(PREPROC_TYPES) - 1,  # preproc_type
+            len(WINDOW_SIZES) - 1,   # window_idx
+            len(self.model_types) - 1,    # model_type (use instance var)
+            14,                       # model_param (LVs 1-15 or alpha index)
         ] + [1] * self.n_wavelengths)  # wavelength selection
 
         super().__init__(
@@ -740,16 +522,7 @@ class SpectralOptimizationProblem(Problem):
             window_idx = chromosome[1]
             model_idx = chromosome[2]
             model_param = chromosome[3]
-            lr_gene = chromosome[4]
-            reg_alpha_gene = chromosome[5]
-            reg_lambda_gene = chromosome[6]
-            l1_gene = chromosome[7]
-            subsample_gene = chromosome[8]
-            colsample_gene = chromosome[9]
-            min_samples_gene = chromosome[10]
-            gamma_gene = chromosome[11]
-            max_features_gene = chromosome[12]
-            wavelength_mask = chromosome[13:].astype(bool)
+            wavelength_mask = chromosome[4:].astype(bool)
 
             # Mask out edge wavelengths for derivative preprocessing
             # Edge zone = window // 2 on each side (unreliable due to SG interpolation)
@@ -767,7 +540,7 @@ class SpectralOptimizationProblem(Problem):
 
             # If too few wavelengths, use penalty
             if n_selected < self.min_wavelengths:
-                F[i, 0] = 1e10  # Very high error (matches Bayesian)
+                F[i, 0] = 1e6  # Very high error
                 F[i, 1] = 1.0  # Normalized wavelength count
                 F[i, 2] = 1.0  # Normalized complexity
 
@@ -777,9 +550,7 @@ class SpectralOptimizationProblem(Problem):
 
             # Objective 1: Prediction error
             error = self._compute_prediction_error(
-                preproc_idx, window_idx, model_idx, model_param, wavelength_mask,
-                lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-                subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
+                preproc_idx, window_idx, model_idx, model_param, wavelength_mask
             )
             F[i, 0] = error
 
@@ -806,15 +577,6 @@ class SpectralOptimizationProblem(Problem):
         model_idx: int,
         model_param: int,
         wavelength_mask: np.ndarray,
-        lr_gene: int,
-        reg_alpha_gene: int,
-        reg_lambda_gene: int,
-        l1_gene: int,
-        subsample_gene: int = 7,
-        colsample_gene: int = 7,
-        min_samples_gene: int = 7,
-        gamma_gene: int = 0,
-        max_features_gene: int = 7,
     ) -> float:
         """Compute CV prediction error for a configuration."""
         try:
@@ -830,18 +592,12 @@ class SpectralOptimizationProblem(Problem):
 
             # Check for degenerate cases
             if X_subset.shape[1] == 0:
-                return 1e10
+                return 1e6
             if np.any(np.isnan(X_subset)) or np.any(np.isinf(X_subset)):
-                return 1e10
+                return 1e6
 
             # Build model
             model_type = self.model_types[min(model_idx, len(self.model_types) - 1)]
-
-            # Decode hyperparameter genes (including new regularization genes)
-            hyperparams = _decode_hyperparameter_genes(
-                lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-                subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
-            )
 
             # Special handling for PLS - limit components and use scale=False
             # scale=False matches get_model() in models.py for consistency with Model Development
@@ -850,10 +606,10 @@ class SpectralOptimizationProblem(Problem):
                 n_components = max(1, n_components)
                 model = PLSRegression(n_components=n_components, scale=False)
             else:
-                model = _build_model(model_type, model_param, self.task_type, self.random_state, hyperparams)
+                model = _build_model(model_type, model_param, self.task_type, self.random_state)
 
             if model is None:
-                return 1e10
+                return 1e6
 
             # Cross-validation
             if self.task_type == 'regression':
@@ -863,10 +619,11 @@ class SpectralOptimizationProblem(Problem):
                     scores = cross_val_score(
                         model, X_subset, self.y, cv=cv, scoring='neg_mean_squared_error'
                     )
-                # Use mean(sqrt(MSE)) for optimization and display consistency
-                # This matches Bayesian optimization and Model Development exactly.
-                rmse_per_fold = np.sqrt(-scores)
-                rmse = float(np.mean(rmse_per_fold))
+                # Use sqrt(mean(MSE)) for optimization - this formula works best
+                # for multi-objective Pareto trade-offs. Display RMSE is recomputed
+                # separately in convert_nsga2_to_v1_format() using mean(sqrt(MSE))
+                # to match Model Development.
+                rmse = np.sqrt(-np.mean(scores))
                 return rmse
             else:
                 cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
@@ -879,7 +636,7 @@ class SpectralOptimizationProblem(Problem):
                 return 1.0 - np.mean(scores)
 
         except Exception:
-            return 1e10  # Return high error on failure (matches Bayesian)
+            return 1e6  # Return high error on failure
 
     def _compute_complexity(
         self,
@@ -1034,7 +791,6 @@ def run_nsga2_search(
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     models: Optional[List[str]] = None,
-    controller=None,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1068,8 +824,6 @@ def run_nsga2_search(
         Callback function(dict) for progress updates
     models : list of str, optional
         Model types to consider. If None, uses all available.
-    controller : SearchController, optional
-        Controller for cancellation. If provided and cancelled, optimization stops early.
 
     Returns
     -------
@@ -1131,24 +885,16 @@ def run_nsga2_search(
     history = []
 
     class ProgressCallback:
-        def __init__(self, total_gen, callback, verbose, ctrl):
+        def __init__(self, total_gen, callback, verbose):
             self.total_gen = total_gen
             self.callback = callback
             self.verbose = verbose
-            self.ctrl = ctrl
             self.gen = 0
             self.best_error = None
             self.n_pareto = 0
-            self.cancelled = False
 
         def __call__(self, algorithm):
             self.gen += 1
-
-            # Check for cancellation
-            if self.ctrl and not self.ctrl.check_and_wait():
-                self.cancelled = True
-                algorithm.termination.force_termination = True
-                return
 
             # Get current Pareto front
             if algorithm.pop is not None and len(algorithm.pop) > 0:
@@ -1175,7 +921,7 @@ def run_nsga2_search(
                     'message': msg,
                 })
 
-    callback = ProgressCallback(n_generations, progress_callback, verbose, controller)
+    callback = ProgressCallback(n_generations, progress_callback, verbose)
 
     # Run optimization
     with warnings.catch_warnings():
@@ -1188,22 +934,6 @@ def run_nsga2_search(
             callback=callback,
             verbose=False,
         )
-
-    # Check if cancelled
-    if callback.cancelled:
-        if verbose >= 1:
-            print("NSGA-II optimization cancelled by user")
-        return {
-            'pareto_front': np.array([]),
-            'pareto_solutions': np.array([]),
-            'knee_idx': -1,
-            'knee_solution': None,
-            'n_evaluations': problem._eval_count,
-            'history': history,
-            'model_types': models,
-            'label_encoder': problem.label_encoder,
-            'cancelled': True,
-        }
 
     # Extract results
     pareto_front = res.F  # Objective values
@@ -1221,7 +951,6 @@ def run_nsga2_search(
             'history': history,
             'model_types': models,
             'label_encoder': problem.label_encoder,
-            'cancelled': False,
         }
 
     # Find knee point
@@ -1256,7 +985,6 @@ def run_nsga2_search(
         'history': history,
         'model_types': models,
         'label_encoder': problem.label_encoder,
-        'cancelled': False,
     }
 
 
@@ -1287,22 +1015,7 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
     window_idx = int(chromosome[1])
     model_idx = int(chromosome[2])
     model_param = int(chromosome[3])
-    lr_gene = int(chromosome[4])
-    reg_alpha_gene = int(chromosome[5])
-    reg_lambda_gene = int(chromosome[6])
-    l1_gene = int(chromosome[7])
-    subsample_gene = int(chromosome[8])
-    colsample_gene = int(chromosome[9])
-    min_samples_gene = int(chromosome[10])
-    gamma_gene = int(chromosome[11])
-    max_features_gene = int(chromosome[12])
-    wavelength_mask = chromosome[13:].astype(bool)
-
-    # Decode hyperparameter genes (including new regularization genes)
-    hyperparams = _decode_hyperparameter_genes(
-        lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-        subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
-    )
+    wavelength_mask = chromosome[4:].astype(bool)
 
     # Preprocessing
     preproc_type = PREPROC_TYPES[min(preproc_idx, len(PREPROC_TYPES) - 1)]
@@ -1333,65 +1046,46 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
         nsga_overrides = {'alpha': alpha, 'max_iter': 10000}
     elif model_type == 'ElasticNet':
         alpha = 10 ** (model_param / 3 - 2)
-        l1_ratio = hyperparams['l1_ratio']  # Use decoded l1_ratio
+        l1_ratio = 0.2 + (model_param % 5) * 0.15
         nsga_overrides = {'alpha': alpha, 'l1_ratio': l1_ratio, 'max_iter': 10000}
     elif model_type == 'RandomForest':
         n_estimators = 50 + model_param * 15
         max_depth = None if model_param < 5 else 10 + model_param * 3
-        nsga_overrides = {
-            'n_estimators': n_estimators,
-            'max_depth': max_depth,
-            'max_features': hyperparams['max_features'],
-            'min_samples_leaf': max(1, hyperparams['min_samples'] // 5),
-            'n_jobs': 1,
-        }
+        nsga_overrides = {'n_estimators': n_estimators, 'max_depth': max_depth, 'n_jobs': 1}
     elif model_type == 'LightGBM':
         n_estimators = 50 + model_param * 10
+        learning_rate = 0.05 if model_param < 7 else 0.1
         nsga_overrides = {
             'n_estimators': n_estimators,
-            'learning_rate': hyperparams['learning_rate'],
-            'reg_lambda': hyperparams['reg_lambda'],
-            'subsample': hyperparams['subsample'],
-            'colsample_bytree': hyperparams['colsample_bytree'],
-            'min_child_samples': hyperparams['min_samples'],
+            'learning_rate': learning_rate,
             'n_jobs': 1,
         }
     elif model_type == 'XGBoost':
         n_estimators = 50 + model_param * 10
         max_depth = 3 + (model_param % 5)
+        subsample = 1.0 if model_param < 7 else 0.8
+        colsample_bytree = 1.0 if model_param < 7 else 0.8
         nsga_overrides = {
             'n_estimators': n_estimators,
             'max_depth': max_depth,
-            'subsample': hyperparams['subsample'],
-            'colsample_bytree': hyperparams['colsample_bytree'],
-            'learning_rate': hyperparams['learning_rate'],
-            'reg_alpha': hyperparams['reg_alpha'],
-            'reg_lambda': hyperparams['reg_lambda'],
-            'gamma': hyperparams['gamma'],
-            'min_child_weight': max(1, hyperparams['min_samples'] // 3),
-            'tree_method': 'hist',
+            'subsample': subsample,
+            'colsample_bytree': colsample_bytree,
             'n_jobs': 1,
         }
     elif model_type == 'CatBoost':
         iterations = 50 + model_param * 15
         depth = 4 + (model_param % 5)
+        learning_rate = 0.05 if model_param < 7 else 0.1
         nsga_overrides = {
             'iterations': iterations,
             'depth': depth,
-            'learning_rate': hyperparams['learning_rate'],
-            'l2_leaf_reg': 1.0 + hyperparams['gamma'] * 2,  # gamma 0-5 -> l2_leaf_reg 1-11
+            'learning_rate': learning_rate,
             'thread_count': 1
         }
     elif model_type == 'SVR':
         kernel = 'rbf' if model_param < 10 else 'linear'
         C = 10 ** (model_param / 3 - 1)
-        nsga_overrides = {
-            'kernel': kernel,
-            'C': C,
-            'gamma': 'scale',
-            'epsilon': 0.01 + (hyperparams['gamma'] / 5.0) * 0.29,  # gamma 0-5 -> epsilon 0.01-0.3
-            'max_iter': 5000
-        }
+        nsga_overrides = {'kernel': kernel, 'C': C}
     elif model_type == 'MLP':
         layer_size = 30 + model_param * 10
         n_layers = 1 if model_param < 7 else 2
@@ -1400,9 +1094,6 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
         nsga_overrides = {
             'hidden_layer_sizes': hidden_layer_sizes,
             'alpha': alpha,
-            'learning_rate_init': hyperparams['learning_rate'],
-            'activation': 'relu',
-            'solver': 'adam',
             'max_iter': 500,
         }
     elif model_type == 'NeuralBoosted':
@@ -1438,14 +1129,6 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
     # Convert dict to string for storage (parseable by ast.literal_eval)
     model_params = str(params_dict)
 
-    # Apply edge masking for derivative preprocessing (same as fitness evaluation)
-    # Edge wavelengths are unreliable due to Savitzky-Golay interpolation artifacts
-    edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
-    if edge_zone > 0:
-        wavelength_mask = wavelength_mask.copy()  # Don't modify original
-        wavelength_mask[:edge_zone] = False
-        wavelength_mask[-edge_zone:] = False
-
     # Wavelengths
     selected_indices = np.where(wavelength_mask)[0].tolist()
 
@@ -1460,7 +1143,6 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
         'wavelength_mask': wavelength_mask,
         'selected_indices': selected_indices,
         'n_wavelengths': len(selected_indices),
-        'edge_zone': edge_zone,
     }
 
 
@@ -1581,22 +1263,7 @@ def _compute_solution_r2(
         window_idx = int(solution[1])
         model_idx = int(solution[2])
         model_param = int(solution[3])
-        lr_gene = int(solution[4])
-        reg_alpha_gene = int(solution[5])
-        reg_lambda_gene = int(solution[6])
-        l1_gene = int(solution[7])
-        subsample_gene = int(solution[8])
-        colsample_gene = int(solution[9])
-        min_samples_gene = int(solution[10])
-        gamma_gene = int(solution[11])
-        max_features_gene = int(solution[12])
-        wavelength_mask = solution[13:].astype(bool)
-
-        # Decode hyperparameter genes (including new regularization genes)
-        hyperparams = _decode_hyperparameter_genes(
-            lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-            subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
-        )
+        wavelength_mask = solution[4:].astype(bool)
 
         # Apply preprocessing
         transform = _get_preprocessing_transform(preproc_idx, window_idx)
@@ -1621,8 +1288,8 @@ def _compute_solution_r2(
             # scale=False matches get_model() in models.py for consistent R² between NSGA and Model Development
             model = PLSRegression(n_components=n_components, scale=False)
         else:
-            # Use _build_model for all other models with hyperparams
-            model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
+            # Use _build_model for all other models (maintains original NSGA behavior)
+            model = _build_model(model_type, model_param, task_type, random_state)
 
         # Cross-validation for R2
         cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -1686,22 +1353,7 @@ def _compute_display_rmse(
         window_idx = int(solution[1])
         model_idx = int(solution[2])
         model_param = int(solution[3])
-        lr_gene = int(solution[4])
-        reg_alpha_gene = int(solution[5])
-        reg_lambda_gene = int(solution[6])
-        l1_gene = int(solution[7])
-        subsample_gene = int(solution[8])
-        colsample_gene = int(solution[9])
-        min_samples_gene = int(solution[10])
-        gamma_gene = int(solution[11])
-        max_features_gene = int(solution[12])
-        wavelength_mask = solution[13:].astype(bool)
-
-        # Decode hyperparameter genes (including new regularization genes)
-        hyperparams = _decode_hyperparameter_genes(
-            lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
-            subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
-        )
+        wavelength_mask = solution[4:].astype(bool)
 
         # Apply preprocessing
         transform = _get_preprocessing_transform(preproc_idx, window_idx)
@@ -1725,8 +1377,8 @@ def _compute_display_rmse(
             n_components = max(1, n_components)
             model = PLSRegression(n_components=n_components, scale=False)
         else:
-            # Use _build_model for all other models with hyperparams
-            model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
+            # Use _build_model for all other models
+            model = _build_model(model_type, model_param, task_type, random_state)
 
         # Cross-validation for RMSE
         cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -1767,95 +1419,6 @@ def _indices_to_wavelength_str(indices: List[int], wavelengths: np.ndarray = Non
     else:
         # Fallback to indices if wavelengths not available
         return ','.join([str(i) for i in indices])
-
-
-def _compute_top_variables(
-    X: np.ndarray,
-    y: np.ndarray,
-    decoded: Dict[str, Any],
-    model_types: List[str],
-    task_type: str,
-    wavelengths: np.ndarray = None,
-    top_n: int = 30,
-    random_state: int = 42,
-) -> str:
-    """
-    Compute top variables by feature importance (not index order).
-
-    This matches Grid Search behavior which computes VIP scores, coefficients,
-    or feature_importances_ and ranks variables by actual importance.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Input data (n_samples, n_wavelengths)
-    y : np.ndarray
-        Target values
-    decoded : Dict
-        Decoded solution dictionary containing model info, preprocessing, wavelength_mask
-    model_types : List[str]
-        Available model types
-    task_type : str
-        'regression' or 'classification'
-    wavelengths : np.ndarray, optional
-        Array of actual wavelength values
-    top_n : int, default 30
-        Number of top variables to return
-    random_state : int, default 42
-        Random state for model training
-
-    Returns
-    -------
-    str
-        Comma-separated wavelength values ordered by importance (most important first)
-    """
-    try:
-        selected_indices = decoded.get('selected_indices', [])
-        if not selected_indices:
-            return 'N/A'
-
-        # Apply preprocessing
-        preproc_idx = decoded.get('preproc_idx', 0)
-        window_idx = decoded.get('window_idx', 6)
-        transform = _get_preprocessing_transform(preproc_idx, window_idx)
-        X_proc = transform(X) if transform else X.copy()
-
-        # Select wavelengths
-        wavelength_mask = decoded.get('wavelength_mask')
-        if wavelength_mask is not None:
-            X_subset = X_proc[:, wavelength_mask]
-        else:
-            X_subset = X_proc[:, selected_indices]
-
-        # Build and train model
-        model_type = decoded.get('model', 'PLS')
-        model_param = decoded.get('model_param', {})
-        model = _build_model(model_type, model_param, task_type, random_state)
-        if model is None:
-            # Fallback to first N indices
-            return _indices_to_wavelength_str(selected_indices[:top_n], wavelengths)
-
-        model.fit(X_subset, y)
-
-        # Get feature importances using the same function as Grid Search
-        importances = get_feature_importances(model, model_type)
-        if importances is None or len(importances) == 0:
-            # Fallback to first N indices
-            return _indices_to_wavelength_str(selected_indices[:top_n], wavelengths)
-
-        # Sort by importance descending
-        n_to_select = min(top_n, len(importances), len(selected_indices))
-        top_local_indices = np.argsort(importances, kind='stable')[-n_to_select:][::-1]
-
-        # Map back to original wavelength indices
-        top_original_indices = [selected_indices[i] for i in top_local_indices if i < len(selected_indices)]
-
-        return _indices_to_wavelength_str(top_original_indices, wavelengths)
-
-    except Exception:
-        # Fallback to first N indices on any error
-        selected_indices = decoded.get('selected_indices', [])
-        return _indices_to_wavelength_str(selected_indices[:top_n], wavelengths) if selected_indices else 'N/A'
 
 
 def convert_nsga2_to_v1_format(
@@ -1931,7 +1494,7 @@ def convert_nsga2_to_v1_format(
             'full_vars': n_wavelengths,  # Total wavelengths available
             'SubsetTag': 'nsga2',
             'Imbalance': 'none',
-            'top_vars': _compute_top_variables(X, y, decoded, model_types, task_type, wavelengths, 30, 42) if (X is not None and y is not None and decoded['selected_indices']) else (_indices_to_wavelength_str(decoded['selected_indices'][:30], wavelengths) if decoded['selected_indices'] else 'N/A'),
+            'top_vars': _indices_to_wavelength_str(decoded['selected_indices'][:30], wavelengths) if decoded['selected_indices'] else 'N/A',
             'all_vars': _indices_to_wavelength_str(decoded['selected_indices'], wavelengths) if decoded['selected_indices'] else 'N/A',
             'n_vars': decoded['n_wavelengths'],
             'Deriv': deriv_order,
