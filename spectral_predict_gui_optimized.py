@@ -1974,7 +1974,7 @@ class SpectralPredictApp:
         self.varsel_uve_spa = tk.BooleanVar(value=False)
         self.varsel_ipls = tk.BooleanVar(value=False)
         self.varsel_cars = tk.BooleanVar(value=False)
-        self.varsel_cars_model_aware = tk.BooleanVar(value=False)  # Model-aware CARS toggle
+        self.varsel_cars_tree = tk.BooleanVar(value=False)  # CARS-Tree for tree models
         self.varsel_vcpa = tk.BooleanVar(value=False)
         self.varsel_ga = tk.BooleanVar(value=False)  # Genetic Algorithm
         self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
@@ -5593,38 +5593,39 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
-        cars_row_frame = ttk.Frame(varsel_frame)
-        cars_row_frame.grid(row=6, column=0, sticky=tk.W, pady=2)
-        ttk.Checkbutton(cars_row_frame, text="CARS (Competitive Adaptive Reweighted Sampling)",
-                       variable=self.varsel_cars).pack(side=tk.LEFT)
-        ttk.Checkbutton(cars_row_frame, text="Model-Aware",
-                       variable=self.varsel_cars_model_aware).pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Label(varsel_frame, text="Fast competitive (Model-Aware: uses LightGBM for trees)",
+        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
+                       variable=self.varsel_cars).grid(row=6, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
-                       variable=self.varsel_vcpa).grid(row=7, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
+                       variable=self.varsel_cars_tree).grid(row=7, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
+        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
+                       variable=self.varsel_vcpa).grid(row=8, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+                 style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
+
         ga_row_frame = ttk.Frame(varsel_frame)
-        ga_row_frame.grid(row=8, column=0, sticky=tk.W, pady=2)
+        ga_row_frame.grid(row=9, column=0, sticky=tk.W, pady=2)
         ttk.Checkbutton(ga_row_frame, text="GA (Genetic Algorithm)",
                        variable=self.varsel_ga).pack(side=tk.LEFT)
         ttk.Checkbutton(ga_row_frame, text="Quick",
                        variable=self.ga_quick_mode).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(varsel_frame, text="Evolutionary optimization (Quick: ~10× faster)",
-                 style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
+                 style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
 
         # UVE Prefilter option
         ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
-                       variable=self.apply_uve_prefilter).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+                       variable=self.apply_uve_prefilter).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
 
         # Method parameters
-        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
+        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
 
         params_frame = ttk.Frame(varsel_frame)
-        params_frame.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=5)
+        params_frame.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # UVE parameters
         ttk.Label(params_frame, text="UVE Cutoff:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -15648,10 +15649,9 @@ class SpectralPredictApp:
             if self.varsel_ipls.get():
                 selected_varsel_methods.append('ipls')
             if self.varsel_cars.get():
-                if self.varsel_cars_model_aware.get():
-                    selected_varsel_methods.append('cars-aware')
-                else:
-                    selected_varsel_methods.append('cars')
+                selected_varsel_methods.append('cars')
+            if self.varsel_cars_tree.get():
+                selected_varsel_methods.append('cars-tree')
             if self.varsel_vcpa.get():
                 selected_varsel_methods.append('vcpa-iriv')
             if self.varsel_ga.get():
