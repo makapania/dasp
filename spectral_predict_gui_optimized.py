@@ -1387,6 +1387,7 @@ class SpectralPredictApp:
         self.n_bayesian_trials = tk.IntVar(value=50)  # Number of Bayesian optimization trials (default: 50)
         self.nsga2_population = tk.IntVar(value=50)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=100)  # NSGA-II number of generations
+        self.nsga2_selection_bias = tk.DoubleVar(value=2.0)  # 0=min-error, 1=balanced, 2=knee point
 
         # Model selection (original models)
         # Standard tier models (enabled by default)
@@ -5739,7 +5740,9 @@ class SpectralPredictApp:
         ttk.Entry(param_frame, textvariable=self.nsga2_population, width=6).grid(row=0, column=3, sticky=tk.W, padx=(0, 10))
 
         ttk.Label(param_frame, text="Gens:", style='Normal.TLabel').grid(row=0, column=4, sticky=tk.W, padx=(0, 5))
-        ttk.Entry(param_frame, textvariable=self.nsga2_generations, width=6).grid(row=0, column=5, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.nsga2_generations, width=6).grid(row=0, column=5, sticky=tk.W, padx=(0, 10))
+        ttk.Label(param_frame, text="Bias:", style='Normal.TLabel').grid(row=0, column=6, sticky=tk.W, padx=(0, 2))
+        ttk.Entry(param_frame, textvariable=self.nsga2_selection_bias, width=4).grid(row=0, column=7, sticky=tk.W)
 
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
@@ -15749,6 +15752,7 @@ class SpectralPredictApp:
                     progress_callback=self._progress_callback,
                     controller=self.search_controller,
                     models=selected_models,
+                    selection_bias=self.nsga2_selection_bias.get(),
                 )
 
                 # Convert to V1 format for results display

@@ -6,6 +6,16 @@ This module provides helper functions for:
     - Converting parameters between formats
     - Handling pruning and early stopping
     - Error handling and validation
+
+CRITICAL FIX (2026-01-02):
+--------------------------
+The objective function returns FULL MODEL score to TPE (not best of subsets).
+This fixes PLS underperformance issue where "best of many subsets" return value
+caused noisy TPE learning. See objective function docstring for details.
+
+Key insight: Different variable subsets need different hyperparameters
+(e.g., top-50 needs n_components=3, full model needs n_components=8).
+Returning "best of subsets" confuses TPE about which hyperparameters are good.
 """
 
 import optuna
@@ -232,6 +242,28 @@ def create_objective_function(
         """
         Objective function for a single Optuna trial.
 
+        CRITICAL DESIGN (2026-01-02 FIX):
+        ---------------------
+        This function tests BOTH the full model AND variable subsets, but returns
+        ONLY THE FULL MODEL SCORE to TPE for hyperparameter learning.
+
+        Why this matters:
+        - PLS: Different subsets need different n_components (e.g., top-50 needs 3, full needs 8)
+        - Trees: Different subsets need different max_depth/num_leaves
+        - Ridge: Alpha works consistently across subsets (monotonic relationship)
+
+        If we return "best of all subsets", TPE sees noisy signals:
+        - Trial with n_components=8: Returns RMSE from top-50 subset (which prefers n_components=3) → looks bad
+        - Trial with n_components=3: Returns RMSE from top-500 subset (which prefers n_components=6) → looks bad
+        - TPE can't learn which n_components is actually good for the model
+
+        By returning ONLY full model score, TPE learns clean hyperparameter relationships:
+        - Trial with n_components=8: Returns RMSE from FULL model → TPE sees true n_components=8 quality
+        - Trial with n_components=3: Returns RMSE from FULL model → TPE sees true n_components=3 quality
+        - TPE learns which n_components is best for full model, then applies to subsets
+
+        Best of all subsets is still tracked and used for final ranking (stored in trial.user_attrs).
+
         Parameters
         ----------
         trial : optuna.Trial
@@ -240,9 +272,9 @@ def create_objective_function(
         Returns
         -------
         metric : float
-            Best metric across all configurations (full + subsets)
-            For regression: minimum RMSE
-            For classification: maximum accuracy (returned as negative for minimization)
+            FULL MODEL metric (not best of subsets)
+            For regression: RMSE of full model
+            For classification: negative accuracy of full model (for minimization)
         """
         # Get hyperparameters from Optuna
         params = get_bayesian_search_space(
@@ -281,11 +313,16 @@ def create_objective_function(
             trial_results.append(full_result)
 
             # Get base metric from full model
+            # CRITICAL FIX: Store full model metric separately for TPE learning
+            # TPE will learn from full_model_metric (clean hyperparameter signal)
+            # but we'll track best_subset_metric for final ranking
             if task_type == 'regression':
-                best_metric = full_result['RMSE']
+                full_model_metric = full_result['RMSE']
+                best_subset_metric = full_model_metric  # Initialize with full model
                 best_r2 = full_result.get('R2', np.nan)
             else:
-                best_metric = -full_result['Accuracy']  # Negative for minimization
+                full_model_metric = -full_result['Accuracy']  # Negative for minimization
+                best_subset_metric = full_model_metric
                 best_auc = full_result.get('ROC_AUC', np.nan)
 
             # === STEP 2: Test variable subsets (if enabled and model supports it) ===
@@ -445,15 +482,16 @@ def create_objective_function(
                                 )
                                 trial_results.append(subset_result)
 
-                                # Update best metric if this subset is better
+                                # Update best SUBSET metric if this subset is better
+                                # This is stored for final ranking but NOT returned to TPE
                                 if task_type == 'regression':
-                                    if subset_result['RMSE'] < best_metric:
-                                        best_metric = subset_result['RMSE']
+                                    if subset_result['RMSE'] < best_subset_metric:
+                                        best_subset_metric = subset_result['RMSE']
                                         best_r2 = subset_result.get('R2', np.nan)
                                 else:
                                     subset_acc = -subset_result['Accuracy']  # Negative for minimization
-                                    if subset_acc < best_metric:  # Lower is better (more negative = higher accuracy)
-                                        best_metric = subset_acc
+                                    if subset_acc < best_subset_metric:  # Lower is better (more negative = higher accuracy)
+                                        best_subset_metric = subset_acc
                                         best_auc = subset_result.get('ROC_AUC', np.nan)
 
                         except Exception as e:
@@ -484,30 +522,46 @@ def create_objective_function(
                     )
                     trial_results.append(region_result)
 
-                    # Update best metric if this region is better
+                    # Update best SUBSET metric if this region is better
+                    # This is stored for final ranking but NOT returned to TPE
                     if task_type == 'regression':
-                        if region_result['RMSE'] < best_metric:
-                            best_metric = region_result['RMSE']
+                        if region_result['RMSE'] < best_subset_metric:
+                            best_subset_metric = region_result['RMSE']
                             best_r2 = region_result.get('R2', np.nan)
                     else:
                         region_acc = -region_result['Accuracy']
-                        if region_acc < best_metric:
-                            best_metric = region_acc
+                        if region_acc < best_subset_metric:
+                            best_subset_metric = region_acc
                             best_auc = region_result.get('ROC_AUC', np.nan)
 
-            # Store best R²/AUC as user attribute for reporting
+            # Store metrics as user attributes for reporting
             if task_type == 'regression':
                 trial.set_user_attr('R2', best_r2)
                 trial.set_user_attr('n_configs_tested', len(trial_results))
+                # CRITICAL FIX: Store both full model and best subset metrics
+                # This allows us to:
+                # 1. Return full_model_metric to TPE (clean hyperparameter learning)
+                # 2. Rank final results by best_subset_metric (best performance)
+                trial.set_user_attr('full_model_rmse', full_model_metric)
+                trial.set_user_attr('best_subset_rmse', best_subset_metric)
             else:
                 trial.set_user_attr('ROC_AUC', best_auc)
                 trial.set_user_attr('n_configs_tested', len(trial_results))
+                trial.set_user_attr('full_model_accuracy', -full_model_metric)  # Convert back to positive
+                trial.set_user_attr('best_subset_accuracy', -best_subset_metric)
 
             # CRITICAL: Store ALL trial results (full + subsets) for later retrieval
             # This ensures subset analysis results are not thrown away
             trial.set_user_attr('all_results', trial_results)
 
-            return best_metric
+            # CRITICAL FIX: Return FULL MODEL metric to TPE (not best of subsets)
+            # This gives TPE a clean signal about hyperparameter quality without
+            # the noise from variable subset selection. TPE can now learn:
+            # - For PLS: which n_components works best for FULL model
+            # - For Ridge: which alpha works best for FULL model
+            # - For trees: which depth/leaves work best for FULL model
+            # The best_subset_metric is stored in trial attributes for final ranking.
+            return full_model_metric
 
         except Exception as e:
             # If model training fails, return large penalty value

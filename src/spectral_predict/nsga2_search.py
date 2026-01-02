@@ -153,15 +153,16 @@ class SeededWavelengthSampling(Sampling):
             X[i, 1] = 6   # default window
             X[i, 2] = model_idx  # cycle through model types
             X[i, 3] = 7   # middle model_param value (good default)
-            X[i, 4] = 7   # middle lr_gene (0.1 learning rate)
-            X[i, 5] = 7   # middle reg_alpha_gene
-            X[i, 6] = 7   # middle reg_lambda_gene
-            X[i, 7] = 7   # middle l1_gene (0.5 l1_ratio)
-            X[i, 8] = 7   # middle subsample (0.75)
-            X[i, 9] = 7   # middle colsample (0.75)
-            X[i, 10] = 7  # middle min_samples (~15)
+            # Use Grid Search default hyperparameters for seeded solutions
+            X[i, 4] = 10  # lr ≈ 0.1 (0.01 * 30^(10/14) ≈ 0.105)
+            X[i, 5] = 12  # reg_alpha ≈ 0.07 (close to Grid Search 0.1)
+            X[i, 6] = 14  # reg_lambda = 1.0 (matches Grid Search exactly)
+            X[i, 7] = 7   # l1_ratio = 0.5 (middle, reasonable default)
+            X[i, 8] = 10  # subsample ≈ 0.86 (close to Grid Search 0.8)
+            X[i, 9] = 10  # colsample ≈ 0.86 (close to Grid Search 0.8)
+            X[i, 10] = 2  # min_samples ≈ 5 (1 + (2/14)*29 ≈ 5, matches Grid Search)
             X[i, 11] = 0  # gamma = 0 (no penalty)
-            X[i, 12] = 7  # middle max_features (0.3)
+            X[i, 12] = 7  # max_features = 0.3 (reasonable default)
             X[i, 13:] = 1  # ALL wavelengths selected
 
         # Also add some solutions with SNV preprocessing + all wavelengths
@@ -170,16 +171,17 @@ class SeededWavelengthSampling(Sampling):
             X[i, 0] = 1   # SNV preprocessing
             X[i, 1] = 6   # default window
             X[i, 2] = model_idx
-            X[i, 3] = 7
-            X[i, 4] = 7   # middle lr_gene
-            X[i, 5] = 7   # middle reg_alpha_gene
-            X[i, 6] = 7   # middle reg_lambda_gene
-            X[i, 7] = 7   # middle l1_gene
-            X[i, 8] = 7   # middle subsample
-            X[i, 9] = 7   # middle colsample
-            X[i, 10] = 7  # middle min_samples
-            X[i, 11] = 0  # gamma = 0
-            X[i, 12] = 7  # middle max_features
+            X[i, 3] = 7   # middle model_param value
+            # Use Grid Search default hyperparameters for seeded solutions
+            X[i, 4] = 10  # lr ≈ 0.1 (matches Grid Search)
+            X[i, 5] = 12  # reg_alpha ≈ 0.07 (close to Grid Search 0.1)
+            X[i, 6] = 14  # reg_lambda = 1.0 (matches Grid Search exactly)
+            X[i, 7] = 7   # l1_ratio = 0.5 (reasonable default)
+            X[i, 8] = 10  # subsample ≈ 0.86 (close to Grid Search 0.8)
+            X[i, 9] = 10  # colsample ≈ 0.86 (close to Grid Search 0.8)
+            X[i, 10] = 2  # min_samples ≈ 5 (matches Grid Search)
+            X[i, 11] = 0  # gamma = 0 (no penalty)
+            X[i, 12] = 7  # max_features = 0.3 (reasonable default)
             X[i, 13:] = 1  # ALL wavelengths selected
 
         return X
@@ -297,12 +299,12 @@ def _decode_hyperparameter_genes(
     """
     # Learning rate: log scale 0.01 to 0.3
     # Formula: lr = 0.01 * (30.0 ** (gene / 14))
-    # gene=0 -> 0.01, gene=7 -> 0.1, gene=14 -> 0.3
+    # gene=0 -> 0.01, gene=10 -> 0.1 (Grid Search default), gene=14 -> 0.3
     lr = 0.01 * (30.0 ** (lr_gene / 14.0))
 
-    # Regularization: log scale 1e-8 to 10.0
+    # Regularization: log scale 1e-8 to 1.0
     # Formula: reg = 10 ** ((gene/14) * 8 - 8)
-    # gene=0 -> 1e-8, gene=7 -> 1e-4, gene=14 -> 10.0
+    # gene=0 -> 1e-8, gene=7 -> 1e-4, gene=14 -> 1.0 (Grid Search default)
     reg_alpha = 10 ** (reg_alpha_gene / 14.0 * 8 - 8)
     reg_lambda = 10 ** (reg_lambda_gene / 14.0 * 8 - 8)
 
@@ -891,39 +893,40 @@ class SpectralOptimizationProblem(Problem):
         Compute normalized model complexity (0-1).
         """
         # Model complexity (0-1)
+        # Values: Fixed ordering + 50% reduction to allow tree models to compete fairly
         model_type = self.model_types[min(model_idx, len(self.model_types) - 1)]
         if model_type == 'PLS':
-            # LVs complexity: 1 LV = 0, 15 LVs = 1
-            model_complexity = model_param / 14.0
+            # PLS: 1 LV = 0, 15 LVs = 0.25 (capped, linear model shouldn't be most complex)
+            model_complexity = (model_param / 14.0) * 0.25
         elif model_type == 'Ridge':
-            # Ridge: higher alpha = simpler, lower alpha = more complex
-            model_complexity = 1.0 - model_param / 14.0
+            # Ridge: higher alpha = simpler, capped at 0.2 (linear model)
+            model_complexity = (1.0 - model_param / 14.0) * 0.2
         elif model_type in ['LightGBM', 'XGBoost']:
-            # Boosting: more estimators = more complex
-            model_complexity = 0.3 + (model_param / 14.0) * 0.5  # Base 0.3, up to 0.8
+            # Boosting: 0.15 to 0.4 (50% reduction from 0.3-0.8)
+            model_complexity = 0.15 + (model_param / 14.0) * 0.25
         elif model_type == 'Lasso':
-            # Simple linear model with L1 regularization
-            model_complexity = 0.3
+            # Simple linear model - lower than boosting
+            model_complexity = 0.075
         elif model_type == 'ElasticNet':
-            # Slightly more complex than Lasso (two regularization terms)
-            model_complexity = 0.35
+            # Slightly more complex than Lasso
+            model_complexity = 0.1
         elif model_type == 'RandomForest':
-            # Forest complexity scales with estimators
-            model_complexity = 0.4 + (model_param / 14.0) * 0.4  # Base 0.4, up to 0.8
+            # Forest: 0.2 to 0.4 (50% reduction from 0.4-0.8)
+            model_complexity = 0.2 + (model_param / 14.0) * 0.2
         elif model_type == 'CatBoost':
-            # Gradient boosting with added complexity
-            model_complexity = 0.35 + (model_param / 14.0) * 0.45  # Base 0.35, up to 0.8
+            # Gradient boosting: 0.175 to 0.4 (50% reduction from 0.35-0.8)
+            model_complexity = 0.175 + (model_param / 14.0) * 0.225
         elif model_type == 'SVR':
-            # Kernel complexity
-            model_complexity = 0.5 + (model_param / 14.0) * 0.3  # Base 0.5, up to 0.8
+            # Kernel: 0.25 to 0.4 (50% reduction from 0.5-0.8)
+            model_complexity = 0.25 + (model_param / 14.0) * 0.15
         elif model_type == 'MLP':
-            # Neural net complexity
-            model_complexity = 0.5 + (model_param / 14.0) * 0.4  # Base 0.5, up to 0.9
+            # Neural net: 0.25 to 0.45 (50% reduction from 0.5-0.9)
+            model_complexity = 0.25 + (model_param / 14.0) * 0.2
         elif model_type == 'NeuralBoosted':
-            # Ensemble neural - between NN and boosting
-            model_complexity = 0.45 + (model_param / 14.0) * 0.4  # Base 0.45, up to 0.85
+            # Ensemble neural: 0.225 to 0.425 (50% reduction from 0.45-0.85)
+            model_complexity = 0.225 + (model_param / 14.0) * 0.2
         else:
-            model_complexity = 0.5
+            model_complexity = 0.25
 
         # Preprocessing complexity (0-1)
         preproc_type = PREPROC_TYPES[min(preproc_idx, len(PREPROC_TYPES) - 1)]

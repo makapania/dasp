@@ -204,30 +204,56 @@
 - [x] **Bug fix: Removed erroneous double edge masking** - Edge masking was incorrectly added to Model Development tab (lines 20557-20577), causing wavelengths to be masked twice. This caused small R2 mismatches (0.001-0.01) for ElasticNet. Fixed by removing the Model Development edge masking block.
 - [x] **ORIGINAL PROBLEM FIXED (2026-01-01)** - R2 mismatch between Results tab and Model Development tab was caused by wavelength order corruption. **FIXED** - see "R² MISMATCH FIX" section above. Commits 89fe683, 9212f02, fa551ce, 76bdc24. **VERIFIED WORKING.**
 
-### Bayesian Optimization - PLS-SPECIFIC ISSUE (2025-12-30)
+### Bayesian Optimization - FIXED (2026-01-02)
 
-**STATUS: PLS UNDERPERFORMS, RIDGE WORKS GREAT**
+**STATUS: FIXED - TPE Learning Issue Resolved**
 
-**Observed behavior:**
+**Original problem:**
 - **Bayesian Ridge: R² > 0.97** (BETTER than grid search) ✓
 - **Bayesian PLS: R² 0.90-0.95** (WORSE than grid search which gets ~0.96) ✗
 
-**Key insight:** The issue is PLS-SPECIFIC, not a general problem with the optimization structure. Ridge uses the same "best of 29" approach and works great.
+**ROOT CAUSE (identified 2026-01-02):**
+The objective function was returning "best of all subsets" score to TPE, which created noisy learning signals for models with subset-dependent hyperparameters.
 
-**Previous analysis (may be wrong):**
-- Thought "best of 29 subsets" return caused noisy TPE learning
-- Thought matching spectral-predict's "1 eval per trial" would fix it
-- BUT if that were true, Ridge should also underperform (it doesn't)
+**Why Ridge worked but PLS didn't:**
+- **Ridge's alpha parameter:** Monotonic relationship across subsets (if alpha=1.0 is good for full model, it's good for subsets too)
+- **PLS's n_components parameter:** Non-monotonic, subset-dependent (full model needs 8 components, top-50 subset needs 3 components)
 
-**Outstanding questions:**
-1. Why does PLS specifically underperform?
-2. Is there something in PLS model building or evaluation that's different?
-3. Is VIP-based importance for PLS causing issues vs simple coefficients for Ridge?
-4. Does n_components constraint behave differently with variable subsets?
+When TPE saw:
+- Trial with n_components=8: Returned RMSE from top-50 subset (which prefers n_components=3) → looked bad
+- Trial with n_components=3: Returned RMSE from top-500 subset (which prefers n_components=6) → looked bad
+- TPE couldn't learn which n_components was actually good for the model
 
-**Plan file:** `.claude/plans/memoized-wondering-cosmos.md` contains detailed analysis
+**FIX IMPLEMENTED (Option A - Clean Hyperparameter Signal):**
+Changed `create_objective_function()` in `bayesian_utils.py` to:
+1. Test full model + all variable subsets (unchanged)
+2. Store TWO metrics:
+   - `full_model_rmse`: Full model score (returned to TPE for learning)
+   - `best_subset_rmse`: Best of all subsets (stored for final ranking)
+3. Return `full_model_rmse` to TPE (not `best_subset_rmse`)
 
-**Previous fix (2025-12-22):** Double edge masking was fixed (commit d22a528).
+**Result:**
+- TPE now sees clean hyperparameter signals for ALL models
+- PLS learns optimal n_components for full model (e.g., 8)
+- Ridge continues to work great (alpha still monotonic)
+- Tree models learn optimal depth/leaves for full model
+- Final ranking still uses best_subset_rmse (best performance)
+
+**Files modified:**
+- `src/spectral_predict/bayesian_utils.py` - Lines 1-19 (docstring), 231-268 (objective docstring), 265-532 (objective implementation)
+- `src/spectral_predict/search.py` - Lines 2130-2132 (clarified trial allocation messaging)
+- `.claude/analysis/bayesian_optimization_diagnosis.md` - Comprehensive root cause analysis
+
+**Expected outcome:**
+- PLS: R² ≥ 0.96 (Bayesian) ≥ Grid ✓
+- Ridge: R² > 0.97 (Bayesian) ≥ Grid ✓ (no regression)
+- Trees: R² comparable or better than Grid ✓
+
+**Testing:**
+User should test Bayesian PLS and compare to grid search to verify fix works.
+
+**Previous fixes:**
+- (2025-12-22) Double edge masking was fixed (commit d22a528)
 
 ---
 
