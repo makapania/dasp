@@ -5131,13 +5131,11 @@ class SpectralPredictApp:
         options_frame = tk.Frame(options_card, bg=self.colors['card_bg'])
         options_frame.pack(fill='both', expand=True)
 
-        # Target Variable selector (change without reloading data)
+        # Target Variable selector
         ttk.Label(options_frame, text="Target Variable:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 10))
         self.analysis_target_combo = ttk.Combobox(options_frame, textvariable=self.target_column, width=20)
         self.analysis_target_combo.grid(row=0, column=1, sticky=tk.W)
         self.analysis_target_combo.bind('<<ComboboxSelected>>', self._on_target_column_changed)
-        ttk.Label(options_frame, text="(change without reloading)",
-                  style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
 
         # CV Folds
         ttk.Label(options_frame, text="CV Folds:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
