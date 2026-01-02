@@ -19,6 +19,45 @@
 
 ---
 
+## ✅ CARS-TREE IMPLEMENTATION (2026-01-01) - COMPLETE
+
+**Problem:** CARS variable selection didn't work for tree models (RandomForest, XGBoost, LightGBM). The existing "Model-Aware" checkbox was confusing and `cars-aware` mode underperformed native TopN selection.
+
+**Root Cause:**
+1. **Bug:** LightGBM `feature_importances_` are sparse (many zeros). After iteration 1, probability weights became zero, causing `rng.choice()` to fail with "Fewer non-zero entries in p than size".
+2. **Design:** CARS was designed for PLS (Li et al., 2009). Tree importance is context-dependent and sparse, not suitable for original CARS algorithm.
+
+**Solution - CARS-Tree (Novel Method):**
+- Hybrid importance blending split-based (frequency) + gain-based (quality) importance
+- Enhanced LightGBM config: 100 trees, unlimited depth, regularization, subsampling
+- Produces denser importance distributions suitable for CARS reweighting
+
+**Commits:**
+- `e9b0584` - fix: Add minimum weight floor for tree model CARS (fixes crash)
+- `c865e70` - feat: Implement CARS-Tree variable selection for tree models
+- `e400eb6` - feat: Add CARS-Tree as separate GUI option
+
+**GUI Changes:**
+- Replaced confusing "Model-Aware" checkbox with two distinct options:
+  - **CARS (PLS-based)** - Best for linear models (PLS, Ridge, ElasticNet)
+  - **CARS-Tree (Hybrid Importance)** - Best for tree models (LightGBM, RF, XGBoost)
+
+**Test Results (synthetic data):**
+| Method | Variables Selected | RMSECV |
+|--------|-------------------|--------|
+| CARS-aware | 52 | 4.6738 |
+| CARS-Tree | 64 | 4.4926 |
+
+**No regression:** PLS R²=0.593185, Ridge R²=0.356646 (unchanged from baseline)
+
+**Files Modified:**
+- `src/spectral_predict/variable_selection.py` - Added `use_hybrid_importance`, `hybrid_importance_weight` params
+- `src/spectral_predict/search.py` - Added 'cars-tree' to method list and handler
+- `spectral_predict_gui_optimized.py` - Added CARS-Tree checkbox, removed Model-Aware checkbox
+- `scripts/diagnose_cars_tree.py` - Diagnostic script for testing all CARS variants
+
+---
+
 ## ✅ R² MISMATCH FIX (2026-01-01) - FIXED
 
 **Problem:** When double-clicking a model in Results tab to load into Model Development, R² doesn't match for ElasticNet, RandomForest, LightGBM (but PLS/Ridge work fine).
@@ -366,6 +405,37 @@ LGBMRegressor(
 **Option B (Staged optimization)**
 - Phase 1: Optimize preprocessing + wavelengths (small search space)
 - Phase 2: Fine-tune hyperparameters on best solutions from Phase 1
+
+### NSGA-II vs Grid Search - Real Value Proposition (2026-01-01)
+
+**Grid Search preprocessing coverage:**
+- Tests ~4-8 preprocessing combos (raw, SNV, deriv1_w11, deriv2_w11)
+- Fixed window sizes per derivative
+- Sequential: finds best preprocessing THEN does variable selection
+
+**NSGA-II (V3-style) preprocessing coverage:**
+- 10-14 preprocessing types × 15 window sizes = **150+ preprocessing combos**
+- Tests w5, w7, w9, ..., w33 for each derivative
+- Tests SNV+deriv orderings (snv_deriv1 vs deriv1_snv - different results!)
+- Simultaneous: optimizes preprocessing AND wavelengths together
+
+**Why NSGA-II should outperform Grid Search (even Option A):**
+1. **20× larger preprocessing search space** - Finds optimal window size, not fixed w11
+2. **Finds optimal derivative order** - Including deriv3, deriv4 that Grid Search skips
+3. **Simultaneous optimization** - May find preprocessing+wavelength combos that sequential search misses
+
+**Why Option B would be even better:**
+- Option A uses fixed hyperparameters from `get_model()` - same as Grid Search
+- Option B adds hyperparameter tuning in Phase 2, potentially finding better LightGBM/XGBoost configs
+- This is the only way NSGA-II can beat Grid Search on BOTH preprocessing AND hyperparameters
+
+**Why current dasp NSGA-II fails:**
+- 13-gene search space is so massive it can't even explore preprocessing space effectively
+- Tries to optimize everything at once → converges to nothing
+
+**RECOMMENDED FIX ORDER:**
+1. First: Implement Option A (V3-style, 4 genes) - proves NSGA-II works, beats Grid Search on preprocessing
+2. Later: Add Option B (staged) - adds hyperparameter tuning for additional gains
 
 ### Test Suite (Low Priority)
 - [ ] Integrate pytest tests from `backup_2025-12-20/tests/`
