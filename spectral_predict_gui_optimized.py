@@ -4035,6 +4035,7 @@ class SpectralPredictApp:
         ttk.Label(config_frame, text="Target Variable:").grid(row=cfg_row, column=0, sticky=tk.W, pady=5, padx=(0, 5))
         self.target_combo = ttk.Combobox(config_frame, textvariable=self.target_column, width=25)
         self.target_combo.grid(row=cfg_row, column=1, sticky=tk.W, padx=5)
+        self.target_combo.bind('<<ComboboxSelected>>', self._on_target_column_changed)
 
         ttk.Button(config_frame, text="🔍 Auto-Detect", command=self._auto_detect_columns,
                   style='Modern.TButton').grid(row=cfg_row, column=2, columnspan=2, sticky=tk.W, padx=20)
@@ -5130,47 +5131,55 @@ class SpectralPredictApp:
         options_frame = tk.Frame(options_card, bg=self.colors['card_bg'])
         options_frame.pack(fill='both', expand=True)
 
+        # Target Variable selector (change without reloading data)
+        ttk.Label(options_frame, text="Target Variable:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        self.analysis_target_combo = ttk.Combobox(options_frame, textvariable=self.target_column, width=20)
+        self.analysis_target_combo.grid(row=0, column=1, sticky=tk.W)
+        self.analysis_target_combo.bind('<<ComboboxSelected>>', self._on_target_column_changed)
+        ttk.Label(options_frame, text="(change without reloading)",
+                  style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=10)
+
         # CV Folds
-        ttk.Label(options_frame, text="CV Folds:").grid(row=0, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="CV Folds:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=1, column=1, sticky=tk.W)
 
         # NEW: Variable Count Penalty (0-10 scale)
         var_penalty_label = ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel')
-        var_penalty_label.grid(row=1, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        var_penalty_label.grid(row=2, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
         CreateToolTip(var_penalty_label, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
         var_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10)
-        var_penalty_spinbox.grid(row=2, column=0, sticky=tk.W, padx=(0, 10))
+        var_penalty_spinbox.grid(row=3, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(var_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
 
         # NEW: Model Complexity Penalty (0-10 scale)
         comp_penalty_label = ttk.Label(options_frame, text="Model Complexity Penalty (0-10):", style='Subheading.TLabel')
-        comp_penalty_label.grid(row=3, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        comp_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
         CreateToolTip(comp_penalty_label, text=TOOLTIP_CONTENT['ranking']['complexity_penalty'], delay=500)
         comp_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10)
-        comp_penalty_spinbox.grid(row=4, column=0, sticky=tk.W, padx=(0, 10))
+        comp_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(comp_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['complexity_penalty'], delay=500)
 
         # Info label explaining the penalty system
         ttk.Label(options_frame, text="💡 Penalties affect ranking gently at low values (exploration-friendly). 0 = rank only by performance, 5 = balanced, 10 = strongly prefer simplicity",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # === Wavelength Restriction for Analysis ===
-        ttk.Separator(options_frame, orient='horizontal').grid(row=6, column=0, columnspan=3, sticky='ew', pady=(20, 10))
+        ttk.Separator(options_frame, orient='horizontal').grid(row=7, column=0, columnspan=3, sticky='ew', pady=(20, 10))
 
         # Enable/disable checkbox
         self.wl_restrict_checkbox = ttk.Checkbutton(options_frame,
                                                      text="Restrict wavelengths for model training",
                                                      variable=self.enable_analysis_wl_restriction)
-        self.wl_restrict_checkbox.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+        self.wl_restrict_checkbox.grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
         # Help text explaining the difference from import filter
         ttk.Label(options_frame,
                  text="Further restrict wavelength range for analysis only (does not affect data import or plots)",
-                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=8, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=9, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
 
         # Wavelength range inputs
         wl_restrict_subframe = ttk.Frame(options_frame)
-        wl_restrict_subframe.grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
+        wl_restrict_subframe.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
         ttk.Label(wl_restrict_subframe, text="Analysis Range:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Entry(wl_restrict_subframe, textvariable=self.analysis_wl_min, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Label(wl_restrict_subframe, text="to").pack(side=tk.LEFT, padx=5)
@@ -8783,6 +8792,57 @@ class SpectralPredictApp:
         # Refresh tier selection to use correct model set
         self._on_tier_changed()
 
+    def _on_target_column_changed(self, event=None):
+        """Handle target column change without reloading data.
+
+        Re-extracts Y from already-loaded reference data when user changes
+        the target dropdown selection.
+        """
+        if self.X is None:
+            return  # No data loaded yet
+
+        new_target = self.target_column.get()
+        if not new_target:
+            return
+
+        # Extract Y from appropriate data source
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+            if new_target in self.combined_metadata_df.columns:
+                new_y = self.combined_metadata_df[new_target].copy()
+            else:
+                messagebox.showerror("Error", f"Column '{new_target}' not found in data")
+                return
+        elif self.ref is not None:
+            if new_target in self.ref.columns:
+                new_y = self.ref[new_target].copy()
+            else:
+                messagebox.showerror("Error", f"Column '{new_target}' not found in reference")
+                return
+        else:
+            return  # No reference data available
+
+        # Align Y with X index
+        self.y = new_y.reindex(self.X.index)
+
+        # Update task type detection and model checkboxes
+        self._on_task_type_changed()
+
+        # Update target distribution plot in Explore tab if it exists
+        if hasattr(self, 'explore_target_dist_frame'):
+            self._generate_explore_target_distribution()
+
+        print(f"> Target changed to '{new_target}' ({len(self.y)} samples)")
+
+    def _get_available_target_columns(self) -> list:
+        """Get list of columns that can be used as target variables."""
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+            return sorted(self.combined_metadata_df.columns.tolist())
+        elif self.ref is not None:
+            # Exclude spectral file column from options
+            exclude = self.spectral_file_column.get() if self.spectral_file_column.get() else ''
+            return sorted([c for c in self.ref.columns if c != exclude])
+        return []
+
     def _on_refine_model_changed(self, *args):
         """Handle model type changes in Model Development tab - show/hide appropriate hyperparameter section."""
         selected_model = self.refine_model_type.get()
@@ -10401,6 +10461,11 @@ class SpectralPredictApp:
 
             # Populate the data viewer tab
             self._populate_data_viewer()
+
+            # Populate Analysis tab target dropdown with available columns
+            if hasattr(self, 'analysis_target_combo'):
+                target_options = self._get_available_target_columns()
+                self.analysis_target_combo['values'] = target_options
 
         except Exception as e:
             import traceback
