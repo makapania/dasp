@@ -781,7 +781,8 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
 
 
 def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
-                   monte_carlo_samples=80, random_state=42, model_type=None):
+                   monte_carlo_samples=80, random_state=42, model_type=None,
+                   use_hybrid_importance=False, hybrid_importance_weight=0.5):
     """
     Competitive Adaptive Reweighted Sampling (CARS) for variable selection.
 
@@ -818,6 +819,14 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
         Model name for model-aware selection. If provided and is a tree model
         (RandomForest, XGBoost, LightGBM, CatBoost), uses LightGBM for evaluation.
         Otherwise uses PLS (default behavior).
+    use_hybrid_importance : bool, default=False
+        If True, uses hybrid importance (blend of split + gain) for tree models.
+        This is the CARS-Tree mode which produces denser importance distributions.
+        Only effective when model_type is a tree model.
+    hybrid_importance_weight : float, default=0.5
+        Weight for blending split-based and gain-based importance.
+        Final importance = weight * split_norm + (1-weight) * gain_norm.
+        Only used when use_hybrid_importance=True.
 
     Returns
     -------
@@ -886,9 +895,15 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
     use_tree_model = model_type in TREE_MODELS if model_type else False
 
+    # CARS-Tree uses hybrid importance (only valid for tree models)
+    use_hybrid = use_hybrid_importance and use_tree_model
+
     if use_tree_model:
         from lightgbm import LGBMRegressor
-        print(f"CARS: Using LightGBM-based evaluation for tree model '{model_type}'")
+        if use_hybrid:
+            print(f"CARS-Tree: Using hybrid importance (split+gain) for '{model_type}'")
+        else:
+            print(f"CARS: Using LightGBM-based evaluation for tree model '{model_type}'")
     else:
         print(f"CARS: Using PLS-based evaluation")
 
@@ -933,13 +948,29 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
 
             if use_tree_model:
                 # LightGBM-based evaluation for tree models
-                lgb_model = LGBMRegressor(
-                    n_estimators=50,
-                    max_depth=5,
-                    random_state=random_state,
-                    verbose=-1,
-                    n_jobs=1
-                )
+                # CARS-Tree uses enhanced config for more stable importance
+                if use_hybrid:
+                    lgb_model = LGBMRegressor(
+                        n_estimators=100,
+                        max_depth=-1,  # Unlimited, controlled by num_leaves
+                        num_leaves=31,
+                        min_child_samples=5,
+                        subsample=0.8,
+                        subsample_freq=1,
+                        colsample_bytree=0.8,
+                        reg_lambda=1.0,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1
+                    )
+                else:
+                    lgb_model = LGBMRegressor(
+                        n_estimators=50,
+                        max_depth=5,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1
+                    )
 
                 for train_idx, val_idx in kf.split(X_subset):
                     X_train, X_val = X_subset[train_idx], X_subset[val_idx]
@@ -954,7 +985,23 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
 
                 # Fit on full subset to get feature importances
                 lgb_model.fit(X_subset, y)
-                feature_imp = lgb_model.feature_importances_
+
+                if use_hybrid:
+                    # CARS-Tree: Compute hybrid importance (split + gain blend)
+                    # This produces denser distributions than split-only importance
+                    booster = lgb_model.booster_
+                    split_imp = booster.feature_importance(importance_type='split').astype(float)
+                    gain_imp = booster.feature_importance(importance_type='gain').astype(float)
+
+                    # Normalize each importance type to sum to 1
+                    split_norm = split_imp / (split_imp.sum() + 1e-10)
+                    gain_norm = gain_imp / (gain_imp.sum() + 1e-10)
+
+                    # Blend with configurable weight
+                    feature_imp = (hybrid_importance_weight * split_norm +
+                                   (1 - hybrid_importance_weight) * gain_norm)
+                else:
+                    feature_imp = lgb_model.feature_importances_.astype(float)
 
                 # Add minimum floor to prevent complete elimination of variables
                 # Tree models have sparse feature importances (many zeros) which

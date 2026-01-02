@@ -1,7 +1,7 @@
 """
-Diagnostic script to identify why CARS fails for tree models.
-This tests CARS directly with different model_type values.
-Also computes R² values for regression verification.
+Diagnostic script for CARS variants on tree models.
+Tests CARS, CARS-aware, and CARS-Tree with different model types.
+Computes R² values for regression verification.
 """
 import sys
 import traceback
@@ -58,14 +58,18 @@ def run_diagnostic():
     print(f"   Data shape: X={X.shape}, y={y.shape}")
     print(f"   n_samples={X.shape[0]}, n_features={X.shape[1]}")
 
-    # Test configurations
+    # Test configurations for CARS and CARS-aware
     test_configs = [
-        {"name": "PLS (default)", "model_type": None},
-        {"name": "PLS (explicit)", "model_type": "PLS"},
-        {"name": "Ridge", "model_type": "Ridge"},
-        {"name": "RandomForest", "model_type": "RandomForest"},
-        {"name": "LightGBM", "model_type": "LightGBM"},
-        {"name": "XGBoost", "model_type": "XGBoost"},
+        {"name": "PLS (default)", "model_type": None, "use_hybrid": False},
+        {"name": "PLS (explicit)", "model_type": "PLS", "use_hybrid": False},
+        {"name": "Ridge", "model_type": "Ridge", "use_hybrid": False},
+        {"name": "RandomForest (aware)", "model_type": "RandomForest", "use_hybrid": False},
+        {"name": "LightGBM (aware)", "model_type": "LightGBM", "use_hybrid": False},
+        {"name": "XGBoost (aware)", "model_type": "XGBoost", "use_hybrid": False},
+        # CARS-Tree tests (hybrid importance)
+        {"name": "LightGBM (tree)", "model_type": "LightGBM", "use_hybrid": True},
+        {"name": "RandomForest (tree)", "model_type": "RandomForest", "use_hybrid": True},
+        {"name": "XGBoost (tree)", "model_type": "XGBoost", "use_hybrid": True},
     ]
 
     results = {}
@@ -73,9 +77,11 @@ def run_diagnostic():
     for config in test_configs:
         name = config["name"]
         model_type = config["model_type"]
+        use_hybrid = config["use_hybrid"]
 
         print(f"\n{'=' * 60}")
-        print(f"2. Testing CARS with model_type='{model_type}' ({name})")
+        mode = "CARS-Tree (hybrid)" if use_hybrid else "CARS"
+        print(f"2. Testing {mode} with model_type='{model_type}' ({name})")
         print("=" * 60)
 
         try:
@@ -86,7 +92,9 @@ def run_diagnostic():
                 cv_folds=5,
                 monte_carlo_samples=80,
                 random_state=42,
-                model_type=model_type
+                model_type=model_type,
+                use_hybrid_importance=use_hybrid,
+                hybrid_importance_weight=0.5
             )
 
             n_selected = np.sum(importances > 0)

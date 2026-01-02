@@ -451,7 +451,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars', 'cars-aware', 'vcpa-iriv', 'ga']
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # Warn about unimplemented methods
@@ -1451,13 +1451,23 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         random_state=random_state
                                     )
 
-                                elif varsel_method in ('cars', 'cars-aware'):
+                                elif varsel_method in ('cars', 'cars-aware', 'cars-tree'):
                                     # CARS: Competitive Adaptive Reweighted Sampling
                                     # Monte Carlo-based method with exponential decay
                                     # cars-aware: Use model-appropriate fitness (LightGBM for tree models)
-                                    model_type_for_cars = model_name if varsel_method == 'cars-aware' else None
-                                    if model_type_for_cars:
+                                    # cars-tree: Hybrid importance (split+gain) for tree models
+                                    if varsel_method == 'cars':
+                                        model_type_for_cars = None
+                                        use_hybrid = False
+                                    elif varsel_method == 'cars-aware':
+                                        model_type_for_cars = model_name
+                                        use_hybrid = False
                                         print(f"    -> Running Model-Aware CARS for {model_name}")
+                                    else:  # cars-tree
+                                        model_type_for_cars = model_name
+                                        use_hybrid = True
+                                        print(f"    -> Running CARS-Tree (hybrid importance) for {model_name}")
+
                                     importances = cars_selection(
                                         X_transformed_varsel, y_np,
                                         n_iterations=50,
@@ -1465,7 +1475,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         cv_folds=folds,
                                         monte_carlo_samples=80,
                                         random_state=random_state,
-                                        model_type=model_type_for_cars
+                                        model_type=model_type_for_cars,
+                                        use_hybrid_importance=use_hybrid,
+                                        hybrid_importance_weight=0.5
                                     )
 
                                 elif varsel_method == 'vcpa-iriv':
