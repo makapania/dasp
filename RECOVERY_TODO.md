@@ -332,6 +332,41 @@ LGBMRegressor(
 
 **FILES:** `src/spectral_predict/nsga2_search.py` - `_build_model()` function (lines 289-430)
 
+### INVESTIGATION: spectral-predict has working NSGA-II (2026-01-01)
+
+**Reference:** `C:\Users\sponheim\git\spectral-predict\spectral_predict\core\nsga2_search.py`
+
+**KEY DIFFERENCES FOUND:**
+
+| Feature | spectral-predict (V3) | dasp (BROKEN) |
+|---------|----------------------|---------------|
+| Hyperparameter genes | **4 genes** | 13 genes |
+| Search space | Small, focused | Massive, diffuse |
+| Model building | Simple + `get_model()` | Complex `_build_model()` |
+| Initial sampling | `IntegerRandomSampling()` | `SeededWavelengthSampling` |
+| RMSE formula | `sqrt(mean(MSE))` | `mean(sqrt(MSE))` |
+| Penalty value | 1e6 | 1e10 |
+| Complexity floors | 0.15-0.25 base | 0.3-0.5 base |
+
+**ROOT CAUSE HYPOTHESIS:**
+
+1. **Search Space Explosion** - dasp has 13 hyperparameter genes (lr, reg_alpha, reg_lambda, l1, subsample, colsample, min_samples, gamma, max_features) vs V3's 4 genes. This creates a search space ~10^9 times larger, making convergence nearly impossible.
+
+2. **Over-engineering** - V3 keeps it simple: preprocessing + model_type + model_param + wavelengths. dasp tries to optimize EVERY hyperparameter simultaneously.
+
+3. **Complexity Penalty** - Higher complexity floors (0.3-0.5) in dasp may over-penalize tree models, preventing good solutions from appearing in Pareto front.
+
+**FIX RECOMMENDATION:**
+
+**Option A (Quick): Revert to V3 approach**
+- Remove genes 4-12 (hyperparameter genes)
+- Use fixed/default hyperparameters from `get_model()`
+- Reduce chromosome to: [preproc, window, model, param, wavelengths...]
+
+**Option B (Staged optimization)**
+- Phase 1: Optimize preprocessing + wavelengths (small search space)
+- Phase 2: Fine-tune hyperparameters on best solutions from Phase 1
+
 ### Test Suite (Low Priority)
 - [ ] Integrate pytest tests from `backup_2025-12-20/tests/`
 - [ ] 50+ test files for regression testing
