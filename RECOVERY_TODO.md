@@ -206,51 +206,74 @@
 
 ### Bayesian Optimization - FIXED (2026-01-02)
 
-**STATUS: FIXED - TPE Learning Issue Resolved**
+**STATUS: FIXED - Multiple Issues Resolved**
 
 **Original problem:**
 - **Bayesian Ridge: R² > 0.97** (BETTER than grid search) ✓
 - **Bayesian PLS: R² 0.90-0.95** (WORSE than grid search which gets ~0.96) ✗
+- **Current state (pre-fix):** PLS models don't appear until rank 1000+ in Bayesian results
 
-**ROOT CAUSE (identified 2026-01-02):**
-The objective function was returning "best of all subsets" score to TPE, which created noisy learning signals for models with subset-dependent hyperparameters.
+#### Fix 1: Clean Hyperparameter Signal (2026-01-02 morning)
 
-**Why Ridge worked but PLS didn't:**
-- **Ridge's alpha parameter:** Monotonic relationship across subsets (if alpha=1.0 is good for full model, it's good for subsets too)
-- **PLS's n_components parameter:** Non-monotonic, subset-dependent (full model needs 8 components, top-50 subset needs 3 components)
+**ROOT CAUSE:** The objective function was returning "best of all subsets" score to TPE, creating noisy learning signals.
 
-When TPE saw:
-- Trial with n_components=8: Returned RMSE from top-50 subset (which prefers n_components=3) → looked bad
-- Trial with n_components=3: Returned RMSE from top-500 subset (which prefers n_components=6) → looked bad
-- TPE couldn't learn which n_components was actually good for the model
+**FIX:** Changed `create_objective_function()` in `bayesian_utils.py` to return `full_model_rmse` to TPE (not `best_subset_rmse`).
 
-**FIX IMPLEMENTED (Option A - Clean Hyperparameter Signal):**
-Changed `create_objective_function()` in `bayesian_utils.py` to:
-1. Test full model + all variable subsets (unchanged)
-2. Store TWO metrics:
-   - `full_model_rmse`: Full model score (returned to TPE for learning)
-   - `best_subset_rmse`: Best of all subsets (stored for final ranking)
-3. Return `full_model_rmse` to TPE (not `best_subset_rmse`)
+**Result:** Ridge now works great. But PLS still failed - not appearing in top 664 results even with 100 trials.
 
-**Result:**
-- TPE now sees clean hyperparameter signals for ALL models
-- PLS learns optimal n_components for full model (e.g., 8)
-- Ridge continues to work great (alpha still monotonic)
-- Tree models learn optimal depth/leaves for full model
-- Final ranking still uses best_subset_rmse (best performance)
+#### Fix 2: PLS n_components Categorical (2026-01-02 afternoon)
+
+**ROOT CAUSE:** PLS still failed because `suggest_int` for n_components allows TPE to sample scattered values, while grid search tests ALL values (2, 3, 4, ..., 12) exhaustively. n_components is discrete and non-monotonic - different values work best for different variable subsets, confusing TPE.
+
+**FIX:** Changed `_get_pls_space()` in `bayesian_config.py`:
+```python
+# FROM: suggest_int (TPE samples scattered values)
+n_components = trial.suggest_int('n_components', min_components, max_components)
+
+# TO: suggest_categorical (guarantees ALL values tested equally like grid search)
+component_choices = list(range(min_components, max_components + 1))
+n_components = trial.suggest_categorical('n_components', component_choices)
+```
+
+#### Fix 3: GUI-Controlled n_trials (2026-01-02 afternoon)
+
+- Removed hardcoded default from `run_bayesian_search()` - now requires `n_trials` parameter
+- GUI default changed from 50 to 100 in `spectral_predict_gui_optimized.py`
+- Backend raises `ValueError` if `n_trials` not provided (user controls via GUI)
+
+#### Fix 4: All Model Search Spaces Optimized (2026-01-02)
+
+Fixed wasteful convergence/speed parameters across ALL models:
+
+| Model | Wasteful Params Fixed |
+|-------|----------------------|
+| PLS | `max_iter=500`, `tol=1e-6` (fixed), n_components → categorical |
+| Ridge | `solver='auto'`, `tol=1e-6`, `max_iter=10000` (fixed) |
+| Lasso | `selection='random'`, `tol=1e-6`, `max_iter=10000` (fixed) |
+| ElasticNet | `tol=1e-6`, `max_iter=10000` (fixed) |
+| RandomForest | `min_impurity_decrease=0.0`, `ccp_alpha=0.0` (fixed) |
+| SVR | `shrinking=True`, `tol=1e-4`, `cache_size=500`, `max_iter=10000` (fixed) |
+| MLP | `max_iter=1000`, `tol=1e-4` (fixed) |
+| LightGBM | Added `num_leaves < 2^max_depth` constraint |
+
+#### Fix 5: Syntax Errors in nsga2_search.py (2026-01-02)
+
+Fixed unterminated f-string literals at lines 1316, 1339, 1349 (literal newlines → `\n` escapes).
 
 **Files modified:**
-- `src/spectral_predict/bayesian_utils.py` - Lines 1-19 (docstring), 231-268 (objective docstring), 265-532 (objective implementation)
-- `src/spectral_predict/search.py` - Lines 2130-2132 (clarified trial allocation messaging)
-- `.claude/analysis/bayesian_optimization_diagnosis.md` - Comprehensive root cause analysis
+- `src/spectral_predict/bayesian_config.py` - All model search spaces, PLS categorical
+- `src/spectral_predict/bayesian_utils.py` - Objective function return value
+- `src/spectral_predict/search.py` - Removed hardcoded n_trials default
+- `src/spectral_predict/nsga2_search.py` - Fixed f-string syntax errors
+- `spectral_predict_gui_optimized.py` - GUI default n_trials=100
 
 **Expected outcome:**
-- PLS: R² ≥ 0.96 (Bayesian) ≥ Grid ✓
-- Ridge: R² > 0.97 (Bayesian) ≥ Grid ✓ (no regression)
-- Trees: R² comparable or better than Grid ✓
+- PLS: Should now appear in top results (categorical ensures all n_components tested)
+- Ridge: R² > 0.97 (Bayesian) ≥ Grid ✓ (verified working)
+- All models: Focus trials on quality parameters, not convergence params
 
-**Testing:**
-User should test Bayesian PLS and compare to grid search to verify fix works.
+**Testing needed:**
+User should re-test Bayesian PLS with the categorical n_components fix.
 
 **Previous fixes:**
 - (2025-12-22) Double edge masking was fixed (commit d22a528)

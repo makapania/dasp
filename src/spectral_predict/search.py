@@ -1828,7 +1828,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
 
 def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_methods=None,
-                        n_trials=50, folds=5, excluded_count=0, validation_count=0,
+                        n_trials=None, folds=5, excluded_count=0, validation_count=0,
                         total_samples_original=None, max_n_components=12, tier='standard',
                         imbalance_method=None, imbalance_params=None,
                         random_state=42, progress_callback=None,
@@ -1861,8 +1861,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     preprocessing_methods : list of dict, optional
         Preprocessing configurations to test
         If None, uses defaults: [{'name': 'snv', 'deriv': 2}, {'name': 'none', 'deriv': 0}]
-    n_trials : int, default=50
-        Number of Optuna trials per model (30-50 recommended)
+    n_trials : int
+        Number of Optuna trials per model (GUI default is 100)
     folds : int, default=5
         Number of CV folds
     excluded_count : int, default=0
@@ -1917,6 +1917,10 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
     # Suppress Optuna logging (use DASP progress callback instead)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # Validate n_trials - must be provided by caller (GUI controls this)
+    if n_trials is None:
+        raise ValueError("n_trials must be specified (GUI default is 100)")
 
     # Prepare data
     X_np = X.values

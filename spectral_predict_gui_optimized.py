@@ -1384,10 +1384,10 @@ class SpectralPredictApp:
 
         # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II)
         self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", or "nsga2"
-        self.n_bayesian_trials = tk.IntVar(value=50)  # Number of Bayesian optimization trials (default: 50)
+        self.n_bayesian_trials = tk.IntVar(value=100)  # Number of Bayesian optimization trials (default: 100)
         self.nsga2_population = tk.IntVar(value=50)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=100)  # NSGA-II number of generations
-        self.nsga2_selection_bias = tk.DoubleVar(value=2.0)  # 0=min-error, 1=balanced, 2=knee point
+        self.nsga2_selection_bias = tk.IntVar(value=2)  # 0=min-error, 1=balanced, 2=knee point
 
         # Model selection (original models)
         # Standard tier models (enabled by default)
@@ -1479,7 +1479,7 @@ class SpectralPredictApp:
 
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
-        self.ga_preprocess_population = tk.IntVar(value=32)
+        self.ga_preprocess_population = tk.IntVar(value=64)
         self.ga_preprocess_generations = tk.IntVar(value=50)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
 
@@ -20345,7 +20345,8 @@ F1 Score:  {f1:.4f}
                 'snv_sg2': 'snv_deriv',
                 'snv_sg3': 'snv_deriv',
                 'snv_sg4': 'snv_deriv',
-                'deriv_snv': 'deriv_snv'
+                'deriv_snv': 'deriv_snv',
+                'ga_optimized': 'ga_optimized'
             }
 
             # Helper function to determine polyorder from derivative order
@@ -20758,7 +20759,7 @@ F1 Score:  {f1:.4f}
 
             # === GA PREPROCESSING PATH ===
             # If user selected 'ga_optimized' preprocessing, execute GA variable selection
-            if preprocess_name == 'ga_optimized':
+            if preprocess == 'ga_optimized':
                 print(f"\n{'='*80}")
                 print(f"GA PREPROCESSING PATH ACTIVATED")
                 print(f"{'='*80}")

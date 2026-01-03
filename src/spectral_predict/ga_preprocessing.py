@@ -56,6 +56,10 @@ PREPROC_TYPES = [
     'deriv2_snv',    # 7
     'deriv3',        # 8
     'deriv4',        # 9
+    'snv_deriv3',    # 10
+    'snv_deriv4',    # 11
+    'deriv3_snv',    # 12
+    'deriv4_snv',    # 13
 ]
 
 # Gene 1: S-G window sizes (odd values only)
@@ -83,15 +87,55 @@ N_GENES = 6
 
 
 def random_chromosome(rng: np.random.RandomState) -> np.ndarray:
-    """Generate a random chromosome."""
+    """Generate a random chromosome with 10% smoothing probability."""
     return np.array([
         rng.randint(0, len(PREPROC_TYPES)),
         rng.randint(0, len(WINDOW_SIZES)),
         rng.randint(0, len(BASELINE_METHODS)),
         rng.randint(0, len(BASELINE_LAMBDAS)),
-        rng.randint(0, len(SMOOTHING_OPTIONS)),
+        1 if rng.random() < 0.10 else 0,  # 10% smoothing probability (was 50%)
         rng.randint(0, len(SMOOTHING_WINDOWS)),
     ], dtype=np.int32)
+
+
+def get_seed_chromosomes() -> list:
+    """
+    Return proven good preprocessing configurations as seed chromosomes.
+
+    These seeds ensure the GA population includes common, effective
+    preprocessing methods used in spectroscopy.
+    """
+    seeds = []
+
+    def make_seed(preproc: str, window: int = 17, baseline: str = 'none',
+                  smoothing: bool = False) -> np.ndarray:
+        """Helper to create a seed chromosome from named parameters."""
+        return np.array([
+            PREPROC_TYPES.index(preproc),
+            WINDOW_SIZES.index(window) if window in WINDOW_SIZES else 6,  # default idx 6 = 17
+            BASELINE_METHODS.index(baseline),
+            0,  # baseline lambda (unused for 'none')
+            1 if smoothing else 0,
+            0,  # smooth window (unused when smoothing=False)
+        ], dtype=np.int32)
+
+    # Proven good configurations from literature and practice
+    seeds.append(make_seed('raw'))                          # Baseline
+    seeds.append(make_seed('snv'))                          # Standard scatter correction
+    seeds.append(make_seed('deriv1', window=17))            # 1st derivative, common window
+    seeds.append(make_seed('deriv2', window=17))            # 2nd derivative, common window
+    seeds.append(make_seed('deriv3', window=21))            # 3rd derivative (needs larger window)
+    seeds.append(make_seed('deriv4', window=25))            # 4th derivative (needs even larger window)
+    seeds.append(make_seed('snv_deriv1', window=17))        # SNV then 1st deriv
+    seeds.append(make_seed('snv_deriv2', window=17))        # SNV then 2nd deriv
+    seeds.append(make_seed('snv_deriv3', window=21))        # SNV then 3rd deriv
+    seeds.append(make_seed('snv_deriv4', window=25))        # SNV then 4th deriv
+    seeds.append(make_seed('deriv1_snv', window=17))        # 1st deriv then SNV
+    seeds.append(make_seed('deriv2_snv', window=17))        # 2nd deriv then SNV
+    seeds.append(make_seed('deriv3_snv', window=21))        # 3rd deriv then SNV
+    seeds.append(make_seed('deriv4_snv', window=25))        # 4th deriv then SNV
+
+    return seeds
 
 
 def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]:
@@ -183,6 +227,18 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
         elif pt == 'deriv2_snv':
             X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
+        elif pt == 'snv_deriv3':
+            X_out = SNV().fit_transform(X_out)
+            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
+        elif pt == 'snv_deriv4':
+            X_out = SNV().fit_transform(X_out)
+            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+        elif pt == 'deriv3_snv':
+            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
+        elif pt == 'deriv4_snv':
+            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
 
         return X_out
 
@@ -261,6 +317,13 @@ def evaluate_fitness(
         # Get transform function
         name, transform_func = chromosome_to_transform(genes)
 
+        # Check for smoothing + derivative penalty
+        # Smoothing before derivatives is largely redundant since S-G derivatives already smooth
+        smoothing_enabled = SMOOTHING_OPTIONS[genes[4]]
+        preproc_type = PREPROC_TYPES[genes[0]]
+        is_derivative = 'deriv' in preproc_type
+        smoothing_penalty = 0.90 if (smoothing_enabled and is_derivative) else 1.0  # 10% penalty
+
         # Apply preprocessing
         if transform_func is not None:
             X_preproc = transform_func(X)
@@ -308,7 +371,7 @@ def evaluate_fitness(
                     force_col_wise=True
                 )
                 y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
-                return accuracy_score(y_class, y_pred)
+                return accuracy_score(y_class, y_pred) * smoothing_penalty
             else:
                 # Regression
                 model = LGBMRegressor(
@@ -321,7 +384,7 @@ def evaluate_fitness(
                 )
                 y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
                 rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                return -rmsecv
+                return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
         elif fitness_model == 'mlp':
             # Use MLP (Multi-Layer Perceptron) for fitness evaluation
             from sklearn.neural_network import MLPRegressor, MLPClassifier
@@ -345,7 +408,7 @@ def evaluate_fitness(
                     validation_fraction=0.1
                 )
                 y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
-                return accuracy_score(y_class, y_pred)
+                return accuracy_score(y_class, y_pred) * smoothing_penalty
             else:
                 # Regression
                 model = MLPRegressor(
@@ -357,7 +420,7 @@ def evaluate_fitness(
                 )
                 y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
                 rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                return -rmsecv
+                return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
         elif fitness_model == 'neuralboosted':
             # Use NeuralBoosted for fitness evaluation (with fallback to PLS)
             try:
@@ -376,13 +439,13 @@ def evaluate_fitness(
 
                     model = NeuralBoostedClassifier(random_state=random_state)
                     y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
-                    return accuracy_score(y_class, y_pred)
+                    return accuracy_score(y_class, y_pred) * smoothing_penalty
                 else:
                     # Regression
                     model = NeuralBoostedRegressor(random_state=random_state)
                     y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
                     rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                    return -rmsecv
+                    return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
             except ImportError:
                 # NeuralBoosted not available, fall back to PLS
                 pls = PLSRegression(n_components=n_comp, scale=False)
@@ -395,10 +458,10 @@ def evaluate_fitness(
                         le = LabelEncoder()
                         y_class = le.fit_transform(y_class)
                     y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
-                    return accuracy_score(y_class, y_pred_class)
+                    return accuracy_score(y_class, y_pred_class) * smoothing_penalty
                 else:
                     rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                    return -rmsecv
+                    return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
         else:
             # Use PLS for fitness evaluation (default)
             pls = PLSRegression(n_components=n_comp, scale=False)
@@ -413,12 +476,12 @@ def evaluate_fitness(
                     le = LabelEncoder()
                     y_class = le.fit_transform(y_class)
                 y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
-                return accuracy_score(y_class, y_pred_class)
+                return accuracy_score(y_class, y_pred_class) * smoothing_penalty
             else:
                 # Calculate RMSECV
                 rmsecv = np.sqrt(mean_squared_error(y, y_pred))
                 # Return negative RMSECV (we maximize fitness)
-                return -rmsecv
+                return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
 
     except Exception:
         # Any error = very poor fitness
@@ -494,7 +557,7 @@ def mutate(
 def optimize_preprocessing(
     X: np.ndarray,
     y: np.ndarray,
-    population_size: int = 32,
+    population_size: int = 64,
     n_generations: int = 50,
     crossover_rate: float = 0.7,
     mutation_rate: float = 0.1,
@@ -576,8 +639,22 @@ def optimize_preprocessing(
         print(f"  Population: {population_size}, Generations: {n_generations}")
         print(f"  CV folds: {cv_folds}, PLS components: {n_components}")
 
-    # Initialize population
-    population = np.array([random_chromosome(rng) for _ in range(population_size)])
+    # Initialize population with seeds + random
+    seed_chromosomes = get_seed_chromosomes()
+    n_seeds = min(len(seed_chromosomes), population_size // 4)  # Max 25% seeds
+
+    population_list = []
+    for i in range(n_seeds):
+        population_list.append(seed_chromosomes[i])
+
+    # Fill rest with random chromosomes
+    for _ in range(population_size - n_seeds):
+        population_list.append(random_chromosome(rng))
+
+    population = np.array(population_list)
+
+    if verbose >= 1:
+        print(f"  Seeds: {n_seeds} (max 25% of population)")
 
     # Evaluate initial fitness
     fitness = np.array([

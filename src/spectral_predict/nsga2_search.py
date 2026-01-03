@@ -680,6 +680,9 @@ class SpectralOptimizationProblem(Problem):
         self.cache_enabled = cache_enabled
         self._cache = {}
         self._eval_count = 0
+        # Track ALL evaluations for bias=0 (minimum error) selection
+        self._all_solutions = []    # All chromosomes evaluated
+        self._all_objectives = []   # Their objective values [error, wavelengths, complexity]
 
         # Decision variables:
         # [preproc_type, window_idx, model_type, model_param, lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
@@ -793,6 +796,10 @@ class SpectralOptimizationProblem(Problem):
             F[i, 2] = complexity
 
             self._eval_count += 1
+
+            # Track this evaluation for bias=0 selection
+            self._all_solutions.append(X[i].copy())
+            self._all_objectives.append(F[i].copy())
 
             # Cache result
             if self.cache_enabled:
@@ -952,7 +959,7 @@ class SpectralOptimizationProblem(Problem):
 # Knee Point Detection
 # =============================================================================
 
-def find_knee_point(pareto_front: np.ndarray) -> int:
+def find_knee_point(pareto_front: np.ndarray, selection_bias: float = 2.0) -> int:
     """
     Find the knee point in a Pareto front using the maximum curvature method.
 
@@ -963,12 +970,27 @@ def find_knee_point(pareto_front: np.ndarray) -> int:
     ----------
     pareto_front : ndarray, shape (n_solutions, n_objectives)
         Pareto front objective values (all minimized)
+    selection_bias : float, default 2.0
+        Selection bias parameter:
+        - 0.0: Select minimum error solution (best R²)
+        - 2.0: Select knee point (default behavior)
+        - 1.0: Weighted compromise between min-error and knee point
+        Values are clamped to [0, 2] range.
 
     Returns
     -------
     knee_idx : int
         Index of the knee point solution
     """
+    # Clamp selection_bias to [0, 2] range
+    selection_bias = np.clip(selection_bias, 0.0, 2.0)
+
+    # Handle minimum error selection (bias <= 0) - works for any size front
+    if selection_bias <= 0.0:
+        # Return solution with minimum error (first objective)
+        return int(np.argmin(pareto_front[:, 0]))
+
+    # For knee point calculation, need at least 3 solutions
     if len(pareto_front) <= 2:
         return 0
 
@@ -980,8 +1002,9 @@ def find_knee_point(pareto_front: np.ndarray) -> int:
 
     pf_norm = (pareto_front - pf_min) / pf_range
 
-    # For 2D: find maximum perpendicular distance to line from first to last
+    # Compute knee point scores (distance to line or ideal point)
     if pareto_front.shape[1] == 2:
+        # For 2D: find maximum perpendicular distance to line from first to last
         # Sort by first objective
         sort_idx = np.argsort(pf_norm[:, 0])
         pf_sorted = pf_norm[sort_idx]
@@ -1007,18 +1030,54 @@ def find_knee_point(pareto_front: np.ndarray) -> int:
             dist = np.linalg.norm(p - proj)
             distances.append(dist)
 
-        # Return original index of maximum distance point
-        max_dist_sorted_idx = np.argmax(distances)
-        return sort_idx[max_dist_sorted_idx]
+        # Convert to array and map back to original order
+        distances_array = np.array(distances)
+        knee_scores = np.zeros(len(pareto_front))
+        for i, orig_idx in enumerate(sort_idx):
+            knee_scores[orig_idx] = distances_array[i]
 
-    # For 3D+: find point closest to ideal point (utopia point)
-    # The ideal point is the minimum of each objective (impossible to achieve all at once)
-    ideal = pf_norm.min(axis=0)
+    else:
+        # For 3D+: find point closest to ideal point (utopia point)
+        # The ideal point is the minimum of each objective (impossible to achieve all at once)
+        ideal = pf_norm.min(axis=0)
 
-    # Distance to ideal point
-    distances = np.sqrt(np.sum((pf_norm - ideal) ** 2, axis=1))
+        # Distance to ideal point (invert so larger is better for knee point)
+        distances = np.sqrt(np.sum((pf_norm - ideal) ** 2, axis=1))
+        # Invert: smaller distance to ideal = larger knee score
+        knee_scores = np.max(distances) - distances
 
-    return int(np.argmin(distances))
+    # Handle full knee point selection (bias >= 2)
+    if selection_bias >= 2.0:
+        # Return original knee point logic
+        return int(np.argmax(knee_scores))
+
+    # Weighted selection (0 < bias < 2)
+    # Compute error ranks (lower error = lower rank = better)
+    error_values = pareto_front[:, 0]
+    error_ranks = np.argsort(np.argsort(error_values))  # Ranks from 0 to n-1
+
+    # Normalize both to [0, 1]
+    n = len(pareto_front)
+    error_ranks_norm = error_ranks / max(n - 1, 1)
+
+    # Normalize knee scores to [0, 1]
+    knee_min = knee_scores.min()
+    knee_max = knee_scores.max()
+    knee_range = knee_max - knee_min
+    if knee_range > 0:
+        knee_scores_norm = (knee_scores - knee_min) / knee_range
+    else:
+        knee_scores_norm = np.zeros(len(knee_scores))
+
+    # Combine: weight = bias / 2.0
+    # bias=0 -> weight=0 -> only error_ranks
+    # bias=1 -> weight=0.5 -> equal weighting
+    # bias=2 -> weight=1.0 -> only knee_scores
+    weight = selection_bias / 2.0
+    # Lower combined score is better (minimization)
+    combined = (1 - weight) * error_ranks_norm + weight * (1 - knee_scores_norm)
+
+    return int(np.argmin(combined))
 
 
 # =============================================================================
@@ -1038,6 +1097,7 @@ def run_nsga2_search(
     progress_callback: Optional[Callable] = None,
     models: Optional[List[str]] = None,
     controller=None,
+    selection_bias: float = 2.0,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1073,6 +1133,12 @@ def run_nsga2_search(
         Model types to consider. If None, uses all available.
     controller : SearchController, optional
         Controller for cancellation. If provided and cancelled, optimization stops early.
+    selection_bias : float, default 2.0
+        Selection bias for knee point selection:
+        - 0.0: Select minimum error solution (best R²)
+        - 2.0: Select knee point (default behavior)
+        - 1.0: Weighted compromise between min-error and knee point
+        Values are clamped to [0, 2] range.
 
     Returns
     -------
@@ -1227,28 +1293,65 @@ def run_nsga2_search(
             'cancelled': False,
         }
 
-    # Find knee point
-    knee_idx = find_knee_point(pareto_front)
+    # Select solution based on bias
+    if selection_bias <= 0 and len(problem._all_objectives) > 0:
+        # bias=0: Select from ALL evaluated solutions (not just Pareto front)
+        all_objectives = np.array(problem._all_objectives)
+        all_solutions = np.array(problem._all_solutions)
 
-    # Decode knee solution
-    knee_chromosome = pareto_solutions[knee_idx].astype(int)
-    knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type)
-    knee_solution['objectives'] = {
-        'error': pareto_front[knee_idx, 0],
-        'n_wavelengths': pareto_front[knee_idx, 1] * problem.n_wavelengths,
-        'complexity': pareto_front[knee_idx, 2],
-    }
+        # Find minimum error across ALL evaluations
+        best_idx = int(np.argmin(all_objectives[:, 0]))
 
-    if verbose >= 1:
-        print(f"\nOptimization complete!")
-        print(f"  Pareto front size: {len(pareto_front)}")
-        print(f"  Total evaluations: {problem._eval_count}")
-        print(f"\nKnee point solution:")
-        print(f"  Preprocessing: {knee_solution['preprocessing']}")
-        print(f"  Model: {knee_solution['model']} ({knee_solution['model_params']})")
-        print(f"  Wavelengths: {knee_solution['n_wavelengths']} selected")
-        print(f"  Error: {knee_solution['objectives']['error']:.4f}")
-        print(f"  Complexity: {knee_solution['objectives']['complexity']:.4f}")
+        # Use this solution
+        knee_chromosome = all_solutions[best_idx].astype(int)
+        knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type)
+        knee_solution['objectives'] = {
+            'error': all_objectives[best_idx, 0],
+            'n_wavelengths': all_objectives[best_idx, 1] * problem.n_wavelengths,
+            'complexity': all_objectives[best_idx, 2],
+        }
+        knee_idx = -1  # Not from Pareto front
+
+        if verbose >= 1:
+            print(f"\nOptimization complete!")
+            print(f"  Pareto front size: {len(pareto_front)}")
+            print(f"  Total evaluations: {problem._eval_count}")
+            print(f"\nMinimum error solution (from {len(all_objectives)} evaluations):")
+            print(f"  Preprocessing: {knee_solution['preprocessing']}")
+            print(f"  Model: {knee_solution['model']} ({knee_solution['model_params']})")
+            print(f"  Wavelengths: {knee_solution['n_wavelengths']} selected")
+            print(f"  Error: {knee_solution['objectives']['error']:.4f}")
+            print(f"  Complexity: {knee_solution['objectives']['complexity']:.4f}")
+    else:
+        # bias=1 or 2: Select from Pareto front
+        knee_idx = find_knee_point(pareto_front, selection_bias=selection_bias)
+
+        # Decode knee solution
+        knee_chromosome = pareto_solutions[knee_idx].astype(int)
+        knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type)
+        knee_solution['objectives'] = {
+            'error': pareto_front[knee_idx, 0],
+            'n_wavelengths': pareto_front[knee_idx, 1] * problem.n_wavelengths,
+            'complexity': pareto_front[knee_idx, 2],
+        }
+
+        if verbose >= 1:
+            print(f"\nOptimization complete!")
+            print(f"  Pareto front size: {len(pareto_front)}")
+            print(f"  Total evaluations: {problem._eval_count}")
+
+            # Determine selection method based on bias value
+            if selection_bias >= 2:
+                selection_method = "Knee point solution"
+            else:
+                selection_method = f"Weighted (bias={selection_bias:.1f}) solution"
+
+            print(f"\n{selection_method}:")
+            print(f"  Preprocessing: {knee_solution['preprocessing']}")
+            print(f"  Model: {knee_solution['model']} ({knee_solution['model_params']})")
+            print(f"  Wavelengths: {knee_solution['n_wavelengths']} selected")
+            print(f"  Error: {knee_solution['objectives']['error']:.4f}")
+            print(f"  Complexity: {knee_solution['objectives']['complexity']:.4f}")
 
     return {
         'pareto_front': pareto_front,

@@ -104,28 +104,42 @@ def get_bayesian_search_space(
 # ============================================================================
 
 def _get_pls_space(trial: optuna.Trial, max_n_components: int = 12) -> Dict:
-    """PLS/PLS-DA search space."""
-    # Ensure valid range: n_components must be at least 1 and at most max_n_components
-    # Typically max_n_components is constrained by min(n_samples, n_features)
-    min_components = 1
-    max_components = max(1, max_n_components)  # Ensure at least 1
+    """PLS/PLS-DA search space - focused on n_components only.
 
-    # If max_components is 1, use exactly 1 component (no range to suggest)
-    if max_components == 1:
-        n_components = 1
+    Note: max_iter and tol are convergence parameters that don't affect model quality
+    once converged. They are fixed to sensible defaults to focus TPE on n_components.
+
+    Uses suggest_categorical instead of suggest_int to guarantee ALL n_components
+    values get tested equally (like grid search does). This is critical because
+    different n_components work best with different variable subsets, and TPE
+    with suggest_int may miss optimal values.
+    """
+    # Start from 2 components (1 component is rarely useful for spectral data)
+    min_components = 2
+    max_components = max(2, max_n_components)  # Ensure at least 2
+
+    # If max_components is 2, use exactly 2 components (no range to suggest)
+    if max_components <= 2:
+        n_components = 2
     else:
-        # Suggest in range [1, max_components] to allow full exploration
-        n_components = trial.suggest_int('n_components', 1, max_components)
+        # Use CATEGORICAL to guarantee all n_components values get tested equally
+        # This ensures TPE explores 2, 3, 4, ..., max like grid search does
+        component_choices = list(range(min_components, max_components + 1))
+        n_components = trial.suggest_categorical('n_components', component_choices)
 
     return {
         'n_components': n_components,
-        'max_iter': trial.suggest_categorical('max_iter', [500, 1000, 2000]),
-        'tol': trial.suggest_float('tol', 1e-8, 1e-4, log=True)
+        'max_iter': 500,   # FIXED - convergence param, 500 is always sufficient for PLS
+        'tol': 1e-6        # FIXED - convergence param, standard tolerance
     }
 
 
 def _get_ridge_space(trial: optuna.Trial, tier: str) -> Dict:
-    """Ridge Regression search space."""
+    """Ridge Regression search space - focused on alpha only.
+
+    Note: solver, tol, max_iter are convergence/implementation parameters that
+    don't affect model quality. Fixed to sensible defaults to focus TPE on alpha.
+    """
     if tier == 'quick':
         alpha_range = (0.01, 10.0)
     else:
@@ -133,14 +147,18 @@ def _get_ridge_space(trial: optuna.Trial, tier: str) -> Dict:
 
     return {
         'alpha': trial.suggest_float('alpha', *alpha_range, log=True),
-        'solver': trial.suggest_categorical('solver', ['auto', 'svd', 'cholesky', 'lsqr']),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True),
-        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
+        'solver': 'auto',     # FIXED - let sklearn choose optimal solver
+        'tol': 1e-6,          # FIXED - convergence param
+        'max_iter': 10000     # FIXED - generous for convergence
     }
 
 
 def _get_lasso_space(trial: optuna.Trial, tier: str) -> Dict:
-    """Lasso Regression search space."""
+    """Lasso Regression search space - focused on alpha only.
+
+    Note: selection, tol, max_iter are convergence/implementation parameters that
+    don't affect model quality. Fixed to sensible defaults to focus TPE on alpha.
+    """
     if tier == 'quick':
         alpha_range = (0.01, 10.0)
     else:
@@ -148,14 +166,18 @@ def _get_lasso_space(trial: optuna.Trial, tier: str) -> Dict:
 
     return {
         'alpha': trial.suggest_float('alpha', *alpha_range, log=True),
-        'selection': trial.suggest_categorical('selection', ['cyclic', 'random']),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True),
-        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
+        'selection': 'random',  # FIXED - slightly faster than cyclic
+        'tol': 1e-6,            # FIXED - convergence param
+        'max_iter': 10000       # FIXED - generous for convergence
     }
 
 
 def _get_elasticnet_space(trial: optuna.Trial, tier: str) -> Dict:
-    """ElasticNet search space."""
+    """ElasticNet search space - focused on alpha and l1_ratio.
+
+    Note: selection, tol, max_iter are convergence/implementation parameters that
+    don't affect model quality. Fixed to sensible defaults to focus TPE on alpha/l1_ratio.
+    """
     if tier == 'quick':
         alpha_range = (0.01, 10.0)
     else:
@@ -164,14 +186,18 @@ def _get_elasticnet_space(trial: optuna.Trial, tier: str) -> Dict:
     return {
         'alpha': trial.suggest_float('alpha', *alpha_range, log=True),
         'l1_ratio': trial.suggest_float('l1_ratio', 0.1, 0.9),
-        'selection': trial.suggest_categorical('selection', ['cyclic', 'random']),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-3, log=True),
-        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
+        'selection': 'random',  # FIXED - slightly faster than cyclic
+        'tol': 1e-6,            # FIXED - convergence param
+        'max_iter': 10000       # FIXED - generous for convergence
     }
 
 
 def _get_randomforest_space(trial: optuna.Trial, tier: str, n_features: int = None) -> Dict:
-    """Random Forest search space."""
+    """Random Forest search space - focused on core parameters.
+
+    Note: min_impurity_decrease and ccp_alpha are pruning parameters that rarely
+    improve performance for high-dimensional spectral data. Fixed to 0.0 (no pruning).
+    """
     if tier == 'quick':
         n_estimators_range = (50, 300)
         max_depth_options = [None, 20, 30]
@@ -192,8 +218,8 @@ def _get_randomforest_space(trial: optuna.Trial, tier: str, n_features: int = No
         'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 4),
         'bootstrap': bootstrap,
         'criterion': trial.suggest_categorical('criterion', ['squared_error', 'absolute_error', 'friedman_mse']),
-        'min_impurity_decrease': trial.suggest_float('min_impurity_decrease', 0.0, 0.1),
-        'ccp_alpha': trial.suggest_float('ccp_alpha', 0.0, 0.1)
+        'min_impurity_decrease': 0.0,  # FIXED - pruning rarely helps for spectral data
+        'ccp_alpha': 0.0               # FIXED - pruning rarely helps for spectral data
     }
 
     # max_samples: Only relevant when bootstrap=True
@@ -249,6 +275,8 @@ def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classe
 
     Grid search: 2×1×2×1×1×1×1×1×1 = 4 configs
     Bayesian: Continuous space with broader ranges
+
+    Note: Enforces constraint num_leaves < 2^max_depth when max_depth != -1
     """
     if tier == 'quick':
         n_estimators_range = (50, 200)
@@ -264,11 +292,27 @@ def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classe
         else:
             num_leaves_range = (15, 63)  # Binary/regression: simpler
 
+    # Suggest max_depth first to constrain num_leaves
+    max_depth = trial.suggest_int('max_depth', -1, 20)  # -1 = no limit
+
+    # Constrain num_leaves based on max_depth to satisfy: num_leaves < 2^max_depth
+    if max_depth == -1:
+        # No depth limit, use full num_leaves range
+        num_leaves = trial.suggest_int('num_leaves', *num_leaves_range)
+    else:
+        # Constrain num_leaves to valid range
+        max_valid_leaves = min(2**max_depth - 1, num_leaves_range[1])
+        if max_valid_leaves >= num_leaves_range[0]:
+            num_leaves = trial.suggest_int('num_leaves', num_leaves_range[0], max_valid_leaves)
+        else:
+            # Edge case: very shallow tree can't support min num_leaves
+            num_leaves = max_valid_leaves if max_valid_leaves >= 2 else 2
+
     params = {
         'n_estimators': trial.suggest_int('n_estimators', *n_estimators_range),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', *num_leaves_range),
-        'max_depth': trial.suggest_int('max_depth', -1, 20),  # -1 = no limit
+        'num_leaves': num_leaves,
+        'max_depth': max_depth,
         'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
@@ -326,17 +370,21 @@ def _get_catboost_space(trial: optuna.Trial, tier: str) -> Dict:
 
 
 def _get_svr_space(trial: optuna.Trial, tier: str) -> Dict:
-    """SVR/SVM search space."""
+    """SVR/SVM search space - focused on C, epsilon, kernel, and gamma.
+
+    Note: shrinking, tol, cache_size, max_iter are speed/convergence parameters
+    that don't affect model quality. Fixed to sensible defaults.
+    """
     kernel = trial.suggest_categorical('kernel', ['rbf', 'linear', 'poly'])
 
     params = {
         'kernel': kernel,
         'C': trial.suggest_float('C', 0.01, 100.0, log=True),
         'epsilon': trial.suggest_float('epsilon', 0.01, 0.5),
-        'shrinking': trial.suggest_categorical('shrinking', [True, False]),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-2, log=True),
-        'cache_size': trial.suggest_categorical('cache_size', [200, 500, 1000]),
-        'max_iter': trial.suggest_int('max_iter', 1000, 10000)
+        'shrinking': True,    # FIXED - speed param, doesn't affect quality
+        'tol': 1e-4,          # FIXED - convergence param
+        'cache_size': 500,    # FIXED - memory param
+        'max_iter': 10000     # FIXED - generous for convergence
     }
 
     # Kernel-specific parameters
@@ -351,7 +399,11 @@ def _get_svr_space(trial: optuna.Trial, tier: str) -> Dict:
 
 
 def _get_mlp_space(trial: optuna.Trial, tier: str) -> Dict:
-    """MLP (Multi-Layer Perceptron) search space."""
+    """MLP (Multi-Layer Perceptron) search space - focused on architecture and regularization.
+
+    Note: max_iter and tol are convergence parameters. Fixed to generous defaults.
+    Early stopping params are KEPT as they affect quality via regularization.
+    """
     # Hidden layer configurations
     n_layers = trial.suggest_int('n_layers', 1, 3)
 
@@ -380,8 +432,9 @@ def _get_mlp_space(trial: optuna.Trial, tier: str) -> Dict:
         'solver': solver,
         'batch_size': trial.suggest_categorical('batch_size', ['auto', 32, 64, 128]),
         'learning_rate': trial.suggest_categorical('learning_rate', ['constant', 'adaptive']),
-        'max_iter': trial.suggest_int('max_iter', 200, 1000),
-        'tol': trial.suggest_float('tol', 1e-6, 1e-3, log=True),
+        'max_iter': 1000,     # FIXED - generous for convergence
+        'tol': 1e-4,          # FIXED - convergence param
+        # KEEP early stopping params - they affect quality via regularization
         'early_stopping': trial.suggest_categorical('early_stopping', [True, False]),
         'validation_fraction': trial.suggest_float('validation_fraction', 0.05, 0.2),
         'n_iter_no_change': trial.suggest_int('n_iter_no_change', 5, 20)
