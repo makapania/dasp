@@ -96,6 +96,28 @@ except ImportError:
     HAS_OUTLIER_DETECTION = False
     generate_outlier_report = None
 
+# Import new optimization modules
+try:
+    from spectral_predict.coupled_search import run_coupled_search
+    HAS_COUPLED_SEARCH = True
+except ImportError:
+    HAS_COUPLED_SEARCH = False
+    run_coupled_search = None
+
+try:
+    from spectral_predict.ensemble_preprocessing import StackedPreprocessingRegressor
+    HAS_ENSEMBLE_PREPROCESSING = True
+except ImportError:
+    HAS_ENSEMBLE_PREPROCESSING = False
+    StackedPreprocessingRegressor = None
+
+try:
+    from spectral_predict.learned_preprocessing import SpectralPreprocessorWithRegressor
+    HAS_LEARNED_PREPROCESSING = True
+except ImportError:
+    HAS_LEARNED_PREPROCESSING = False
+    SpectralPreprocessorWithRegressor = None
+
 # Check for CatBoost availability
 try:
     from catboost import CatBoostRegressor
@@ -1382,12 +1404,16 @@ class SpectralPredictApp:
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
-        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II)
-        self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", or "nsga2"
+        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II vs Coupled)
+        self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", "nsga2", or "coupled"
         self.n_bayesian_trials = tk.IntVar(value=100)  # Number of Bayesian optimization trials (default: 100)
         self.nsga2_population = tk.IntVar(value=50)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=100)  # NSGA-II number of generations
         self.nsga2_selection_bias = tk.IntVar(value=2)  # 0=min-error, 1=balanced, 2=knee point
+
+        # Advanced preprocessing options (for coupled optimization)
+        self.use_ensemble_preprocessing = tk.BooleanVar(value=False)  # Stacked preprocessing
+        self.use_learned_preprocessing = tk.BooleanVar(value=False)   # Deep preprocessing (requires PyTorch)
 
         # Model selection (original models)
         # Standard tier models (enabled by default)
@@ -5732,6 +5758,7 @@ class SpectralPredictApp:
         ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid").grid(row=0, column=0, sticky=tk.W, padx=5)
         ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian", variable=self.optimization_method, value="bayesian").grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=2, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🔗 Coupled (Preprocessing+Model)", variable=self.optimization_method, value="coupled").grid(row=0, column=3, sticky=tk.W, padx=5)
 
         # Parameter frame for optimization-specific settings
         param_frame = ttk.Frame(opt_frame)
@@ -5754,9 +5781,45 @@ class SpectralPredictApp:
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
                     "   Bayesian: Smart search in 30-50 trials (fast, single-objective)\n"
-                    "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)")
+                    "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)\n"
+                    "   Coupled: Joint optimization of preprocessing + model (finds optimal combinations)")
         ttk.Label(opt_frame, text=info_text,
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+
+        # === Advanced Preprocessing Options Card ===
+        adv_preproc_card_outer, adv_preproc_card = self._create_card(content_frame, title="Advanced Preprocessing",
+                                                                      subtitle="Experimental preprocessing methods")
+        adv_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        adv_preproc_frame = tk.Frame(adv_preproc_card, bg=self.colors['card_bg'])
+        adv_preproc_frame.pack(fill='both', expand=True)
+
+        # Ensemble Preprocessing checkbox
+        self.ensemble_preproc_checkbox = ttk.Checkbutton(
+            adv_preproc_frame,
+            text="Use Ensemble Preprocessing (Stacking)",
+            variable=self.use_ensemble_preprocessing
+        )
+        self.ensemble_preproc_checkbox.grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(adv_preproc_frame, text="Stacks multiple preprocessing methods (SNV, derivatives, etc.)",
+                 style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
+
+        # Learned Preprocessing checkbox (disabled if PyTorch not available)
+        self.learned_preproc_checkbox = ttk.Checkbutton(
+            adv_preproc_frame,
+            text="Deep Preprocessing (Learned - requires PyTorch)",
+            variable=self.use_learned_preprocessing,
+            state='disabled' if not HAS_LEARNED_PREPROCESSING else 'normal'
+        )
+        self.learned_preproc_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
+        pytorch_status = "Available" if HAS_LEARNED_PREPROCESSING else "Not installed - pip install torch"
+        ttk.Label(adv_preproc_frame, text=f"Neural network preprocessing layer | Status: {pytorch_status}",
+                 style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+
+        # Warning label
+        warning_text = "⚠️ These are experimental features. Full integration pending for ensemble/learned preprocessing."
+        ttk.Label(adv_preproc_frame, text=warning_text,
+                 style='Caption.TLabel', foreground='orange').grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
 
         # Create card for model selection
         models_card_outer, models_card = self._create_card(content_frame, title="Select Models",
@@ -15776,10 +15839,148 @@ class SpectralPredictApp:
             if imbalance_method:
                 self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
 
-            # Dispatch to Grid Search or Bayesian Optimization based on user selection
+            # Dispatch to Grid Search or Bayesian Optimization or NSGA-II or Coupled based on user selection
             optimization_method = self.optimization_method.get()
 
-            if optimization_method == "nsga2":
+            if optimization_method == "coupled":
+                # === COUPLED OPTIMIZATION (Preprocessing + Model Joint) ===
+                self._log_progress("\n🔗 Running Coupled Optimization (Preprocessing+Model)...")
+                self._log_progress(f"   Jointly optimizing preprocessing and model selection")
+                self._log_progress(f"   This finds optimal preprocessing-model combinations\n")
+
+                if not HAS_COUPLED_SEARCH:
+                    self._log_progress("❌ ERROR: Coupled search module not available!")
+                    self._log_progress("   Please ensure src/spectral_predict/coupled_search.py exists")
+                    messagebox.showerror("Module Missing", "Coupled search module not found!")
+                    return
+
+                # Get wavelengths for proper variable output
+                wavelengths = None
+                if hasattr(X_filtered, 'columns'):
+                    try:
+                        wavelengths = np.array([float(c) for c in X_filtered.columns])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Convert to numpy if DataFrame
+                X_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
+                y_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
+
+                # Check advanced preprocessing options
+                use_ensemble = self.use_ensemble_preprocessing.get()
+                use_learned = self.use_learned_preprocessing.get()
+
+                if use_ensemble:
+                    self._log_progress("   ⚠️ Ensemble preprocessing enabled (experimental)")
+                if use_learned:
+                    if HAS_LEARNED_PREPROCESSING:
+                        self._log_progress("   ⚠️ Learned preprocessing enabled (experimental)")
+                    else:
+                        self._log_progress("   ⚠️ Learned preprocessing requested but PyTorch not available - skipping")
+                        use_learned = False
+
+                # Run coupled search for each selected model
+                # Note: run_coupled_search optimizes ONE model at a time
+                all_results = []
+                label_encoder = None
+
+                for model_name in selected_models:
+                    self._log_progress(f"\n  Optimizing {model_name}...")
+
+                    try:
+                        # Map model names to coupled_search format
+                        model_map = {
+                            'PLS': 'pls',
+                            'Ridge': 'ridge',
+                            'Lasso': 'lasso',
+                            'ElasticNet': 'elasticnet',
+                            'RandomForest': 'rf',
+                            'XGBoost': 'xgboost',
+                            'LightGBM': 'lightgbm',
+                            'CatBoost': 'catboost',
+                            'SVR': 'svr',
+                            'SVM': 'svm',
+                            'MLP': 'mlp',
+                            'NeuralBoosted': 'neuralboosted'
+                        }
+
+                        coupled_model_name = model_map.get(model_name, model_name.lower())
+
+                        # Run coupled optimization for this model
+                        best_params, best_score, study = run_coupled_search(
+                            X=X_np,
+                            y=y_np,
+                            task_type=task_type,
+                            model_name=coupled_model_name,
+                            n_trials=self.n_bayesian_trials.get(),  # Reuse Bayesian trials setting
+                            cv_folds=self.folds.get(),
+                            random_state=42,
+                            verbose=False  # Suppress per-trial output
+                        )
+
+                        # Store result
+                        all_results.append({
+                            'model': model_name,
+                            'best_params': best_params,
+                            'best_score': best_score,
+                            'study': study
+                        })
+
+                        self._log_progress(f"    ✓ Best score: {best_score:.4f}")
+                        self._log_progress(f"    Preprocessing: {best_params.get('preprocessing', 'raw')}")
+
+                    except Exception as e:
+                        self._log_progress(f"    ✗ Error: {str(e)}")
+                        continue
+
+                # Convert results to V1 DataFrame format
+                if all_results:
+                    results_list = []
+                    for res in all_results:
+                        model = res['model']
+                        params = res['best_params']
+                        score = res['best_score']
+
+                        # Build preprocessing string
+                        preproc_parts = []
+                        if params.get('baseline_method', 'none') != 'none':
+                            preproc_parts.append(params['baseline_method'])
+                        preproc_type = params.get('preprocessing', 'raw')
+                        if preproc_type != 'raw':
+                            preproc_parts.append(preproc_type)
+                        preprocessing = '+'.join(preproc_parts) if preproc_parts else 'raw'
+
+                        # Calculate metrics (approximation - real calc needs actual predictions)
+                        if task_type == 'regression':
+                            cv_error = score  # Already RMSECV
+                            r2 = max(0, 1 - (score**2 / np.var(y_np)))  # Approximate
+                        else:
+                            cv_error = 1 - score  # Convert accuracy to error
+                            r2 = score  # Use accuracy as "R2" for classification
+
+                        results_list.append({
+                            'Model': model,
+                            'Preprocessing': preprocessing,
+                            'CV Error': cv_error,
+                            'R²': r2,
+                            'N Components': params.get('n_components', params.get('n_estimators', 'N/A')),
+                            'Best Params': str(params)
+                        })
+
+                    results_df = pd.DataFrame(results_list)
+                    results_df = results_df.sort_values('CV Error')
+                else:
+                    results_df = pd.DataFrame()
+
+                # Log completion
+                self._log_progress(f"\n> Coupled Optimization Complete!")
+                self._log_progress(f"  Tested {len(all_results)} models")
+                if len(results_df) > 0:
+                    best = results_df.iloc[0]
+                    self._log_progress(f"  Best: {best.get('Model', 'N/A')} + {best.get('Preprocessing', 'N/A')}")
+                    self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
+
+            elif optimization_method == "nsga2":
                 # === NSGA-II MULTI-OBJECTIVE OPTIMIZATION ===
                 self._log_progress("\n🧬 Running NSGA-II Multi-Objective Optimization...")
                 self._log_progress(f"   Population size: {self.nsga2_population.get()}")
