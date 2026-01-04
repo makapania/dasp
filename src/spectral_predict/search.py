@@ -6,7 +6,10 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, roc_auc_score
+from sklearn.metrics import (
+    mean_squared_error, r2_score, accuracy_score, roc_auc_score,
+    f1_score, precision_score, recall_score
+)
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import label_binarize
 from sklearn.base import clone
@@ -228,6 +231,322 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
     return False
 
 
+def _rebuild_model_from_row(row: pd.Series, task_type: str):
+    """Rebuild sklearn model from results row metadata.
+
+    This function recreates the exact model configuration used during search,
+    matching how Model Dev tab does it (ast.literal_eval + set_params).
+
+    Parameters
+    ----------
+    row : pd.Series
+        A row from the results DataFrame containing model configuration
+    task_type : str
+        'regression' or 'classification'
+
+    Returns
+    -------
+    model : sklearn estimator
+        Model instance with correct hyperparameters applied
+    """
+    import ast
+    from .models import get_model
+
+    # Get model info
+    model_name = row.get('Model', 'PLS')
+    params_str = row.get('Params', '')
+    n_lvs = row.get('LVs', None)
+
+    # Parse params using ast.literal_eval (same as Model Dev tab)
+    model_kwargs = {}
+    if params_str and isinstance(params_str, str) and params_str.strip():
+        try:
+            parsed = ast.literal_eval(params_str)
+            if isinstance(parsed, dict):
+                model_kwargs = parsed
+        except (ValueError, SyntaxError):
+            pass  # Keep empty dict if parsing fails
+
+    # Get model instance with n_components
+    n_components = int(n_lvs) if n_lvs and not pd.isna(n_lvs) and n_lvs > 0 else 10
+    # Use max_n_components high enough to not clip n_components
+    model = get_model(model_name, task_type=task_type, n_components=n_components,
+                      max_n_components=max(n_components, 20))
+
+    # Apply parameters using set_params (same as Model Dev tab)
+    if model_kwargs:
+        try:
+            model.set_params(**model_kwargs)
+        except Exception as e:
+            print(f"  [Warning] Could not apply params {model_kwargs}: {e}")
+
+    # For PLS-DA classification, wrap PLSTransformer with LogisticRegression
+    # This matches how PLS-DA is built during search (search.py:2933-2940)
+    if task_type == 'classification' and model_name == 'PLS-DA':
+        from sklearn.pipeline import Pipeline
+        from sklearn.linear_model import LogisticRegression
+        pls_lr_pipeline = Pipeline([
+            ('pls', model),
+            ('lr', LogisticRegression(max_iter=1000, random_state=42))
+        ])
+        return pls_lr_pipeline
+
+    return model
+
+
+def compute_validation_metrics_for_top_models(
+    df_results: pd.DataFrame,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    task_type: str,
+    wavelengths: np.ndarray,
+    top_n: int = 100,
+    progress_callback=None
+) -> pd.DataFrame:
+    """Compute validation metrics for top N models.
+
+    CRITICAL: This function matches Model Dev tab's behavior exactly:
+    1. Preprocess FULL spectrum first (matching search.py behavior)
+    2. THEN subset to model-specific wavelengths
+    3. Fit model on preprocessed+subset data
+    4. Calculate validation metrics
+
+    Parameters
+    ----------
+    df_results : pd.DataFrame
+        Ranked results DataFrame (must have CompositeScore column and all_vars column)
+    X_train : np.ndarray
+        Training spectral data (full spectrum, all wavelengths)
+    y_train : np.ndarray
+        Training target values
+    X_val : np.ndarray
+        Validation spectral data (full spectrum, all wavelengths)
+    y_val : np.ndarray
+        Validation target values
+    task_type : str
+        'regression' or 'classification'
+    wavelengths : np.ndarray
+        Array of wavelengths corresponding to columns in X_train and X_val
+    top_n : int
+        Number of top models to compute validation for
+    progress_callback : callable, optional
+        Progress callback function
+
+    Returns
+    -------
+    pd.DataFrame
+        Results with val_RMSE, val_R2 (or val_Accuracy) columns added
+    """
+    # Initialize columns
+    if task_type == 'regression':
+        df_results['val_RMSE'] = np.nan
+        df_results['val_R2'] = np.nan
+    else:
+        df_results['val_Accuracy'] = np.nan
+        df_results['val_ROC_AUC'] = np.nan
+        df_results['val_F1'] = np.nan
+        df_results['val_Precision'] = np.nan
+        df_results['val_Recall'] = np.nan
+
+    # Get top N indices by CompositeScore (lower is better)
+    n_to_process = min(top_n, len(df_results))
+    if 'CompositeScore' in df_results.columns:
+        top_indices = df_results.nsmallest(n_to_process, 'CompositeScore').index
+    else:
+        # Fallback to first n rows
+        top_indices = df_results.head(n_to_process).index
+
+    print(f"\n[Validation] Computing validation metrics for top {n_to_process} models...")
+
+    # Cache preprocessed data by preprocessing config to avoid redundant computation
+    preprocess_cache = {}
+
+    for i, idx in enumerate(top_indices):
+        row = df_results.loc[idx]
+
+        try:
+            # === STEP 1: Get preprocessing config ===
+            preprocess_name = row.get('Preprocess', 'raw')
+            deriv = row.get('Deriv', 0)
+            window = row.get('Window', None)
+            poly = row.get('Poly', None)
+
+            # Convert to proper types
+            deriv = int(deriv) if deriv and not pd.isna(deriv) and deriv > 0 else None
+            window = int(window) if window and not pd.isna(window) and window > 0 else None
+            poly = int(poly) if poly and not pd.isna(poly) and poly > 0 else None
+
+            # Create cache key
+            cache_key = (preprocess_name, deriv, window, poly)
+
+            # === STEP 2: Preprocess FULL spectrum (matching search.py and Model Dev) ===
+            if cache_key in preprocess_cache:
+                X_train_preprocessed, X_val_preprocessed = preprocess_cache[cache_key]
+            else:
+                # Build preprocessing pipeline
+                prep_steps = build_preprocessing_pipeline(
+                    preprocess_name,
+                    deriv=deriv,
+                    window=window,
+                    polyorder=poly
+                )
+
+                if prep_steps:
+                    prep_pipeline = Pipeline(list(prep_steps))
+                    X_train_preprocessed = prep_pipeline.fit_transform(X_train)
+                    X_val_preprocessed = prep_pipeline.transform(X_val)
+                else:
+                    X_train_preprocessed = X_train
+                    X_val_preprocessed = X_val
+
+                # Cache for reuse
+                preprocess_cache[cache_key] = (X_train_preprocessed, X_val_preprocessed)
+
+            # === STEP 3: Parse all_vars and subset to model wavelengths ===
+            all_vars_str = row.get('all_vars', 'N/A')
+
+            if all_vars_str != 'N/A' and all_vars_str and isinstance(all_vars_str, str):
+                # Parse wavelengths from all_vars (e.g., "1520.0, 1540.0, 1560.0, ...")
+                try:
+                    model_wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                except Exception as e:
+                    print(f"  [Warning] Could not parse all_vars for model {i+1}: {e}")
+                    model_wavelengths = None
+            else:
+                # Full spectrum model - use all wavelengths
+                model_wavelengths = None
+
+            # Subset AFTER preprocessing (matching Model Dev behavior)
+            if model_wavelengths is not None and len(model_wavelengths) > 0:
+                # Create mapping from wavelength to column index
+                # CRITICAL: Do NOT sort - preserve the order from all_vars
+                wl_to_idx = {float(wl): idx_wl for idx_wl, wl in enumerate(wavelengths)}
+
+                # Get column indices for model wavelengths (in order)
+                col_indices = []
+                for wl in model_wavelengths:
+                    if wl in wl_to_idx:
+                        col_indices.append(wl_to_idx[wl])
+
+                if len(col_indices) != len(model_wavelengths):
+                    print(f"  [Warning] Only found {len(col_indices)}/{len(model_wavelengths)} wavelengths for model {i+1}")
+
+                if not col_indices:
+                    print(f"  [Warning] No wavelengths found for model {i+1}, skipping")
+                    continue
+
+                # Subset the PREPROCESSED data to selected wavelengths
+                X_train_final = X_train_preprocessed[:, col_indices]
+                X_val_final = X_val_preprocessed[:, col_indices]
+            else:
+                # Full spectrum model - use all preprocessed data
+                X_train_final = X_train_preprocessed
+                X_val_final = X_val_preprocessed
+
+            # === STEP 4: Rebuild model and fit ===
+            model = _rebuild_model_from_row(row, task_type)
+
+            # Fit on training data
+            model.fit(X_train_final, y_train)
+
+            # Predict on validation data
+            y_pred = model.predict(X_val_final)
+
+            # === STEP 5: Calculate metrics ===
+            if task_type == 'regression':
+                val_rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                val_r2 = r2_score(y_val, y_pred)
+                df_results.loc[idx, 'val_RMSE'] = val_rmse
+                df_results.loc[idx, 'val_R2'] = val_r2
+            else:
+                # Accuracy
+                val_acc = accuracy_score(y_val, y_pred)
+                df_results.loc[idx, 'val_Accuracy'] = val_acc
+
+                # Determine if binary or multiclass
+                n_classes = len(np.unique(y_val))
+                average_method = 'binary' if n_classes == 2 else 'weighted'
+
+                # F1 Score
+                try:
+                    val_f1 = f1_score(y_val, y_pred, average=average_method, zero_division=0)
+                    df_results.loc[idx, 'val_F1'] = val_f1
+                except Exception as e:
+                    print(f"  [Warning] Could not compute F1 for model {i+1}: {e}")
+
+                # Precision
+                try:
+                    val_precision = precision_score(y_val, y_pred, average=average_method, zero_division=0)
+                    df_results.loc[idx, 'val_Precision'] = val_precision
+                except Exception as e:
+                    print(f"  [Warning] Could not compute Precision for model {i+1}: {e}")
+
+                # Recall
+                try:
+                    val_recall = recall_score(y_val, y_pred, average=average_method, zero_division=0)
+                    df_results.loc[idx, 'val_Recall'] = val_recall
+                except Exception as e:
+                    print(f"  [Warning] Could not compute Recall for model {i+1}: {e}")
+
+                # ROC AUC (requires predict_proba)
+                try:
+                    if hasattr(model, 'predict_proba'):
+                        y_proba = model.predict_proba(X_val_final)
+                        if n_classes == 2:
+                            # Binary classification - use probability of positive class
+                            val_roc_auc = roc_auc_score(y_val, y_proba[:, 1])
+                        else:
+                            # Multiclass - use one-vs-rest with weighted average
+                            val_roc_auc = roc_auc_score(y_val, y_proba, multi_class='ovr', average='weighted')
+                        df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
+                except Exception as e:
+                    print(f"  [Warning] Could not compute ROC AUC for model {i+1}: {e}")
+
+        except Exception as e:
+            print(f"  [Warning] Failed to compute validation for model {i+1}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+        # Progress update
+        if progress_callback and (i + 1) % 10 == 0:
+            progress_callback({
+                'stage': 'validation_metrics',
+                'message': f'Computing validation metrics ({i+1}/{n_to_process})',
+                'current': i + 1,
+                'total': n_to_process
+            })
+
+    print(f"[Validation] Completed validation metrics for {n_to_process} models")
+
+    # Reorder columns to place validation metrics after CV metrics
+    cols = list(df_results.columns)
+    if task_type == 'regression' and 'val_RMSE' in cols and 'R2' in cols:
+        # Move val_RMSE and val_R2 after R2
+        cols.remove('val_RMSE')
+        cols.remove('val_R2')
+        r2_idx = cols.index('R2')
+        cols.insert(r2_idx + 1, 'val_RMSE')
+        cols.insert(r2_idx + 2, 'val_R2')
+        df_results = df_results[cols]
+    elif task_type == 'classification' and 'ROC_AUC' in cols:
+        # Move all validation metrics after ROC_AUC
+        val_cols = ['val_Accuracy', 'val_ROC_AUC', 'val_F1', 'val_Precision', 'val_Recall']
+        # Remove all validation columns that exist
+        for col in val_cols:
+            if col in cols:
+                cols.remove(col)
+        # Insert them after ROC_AUC
+        auc_idx = cols.index('ROC_AUC')
+        for i, col in enumerate(val_cols):
+            cols.insert(auc_idx + 1 + i, col)
+        df_results = df_results[cols]
+
+    return df_results
+
+
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=0, complexity_penalty=0,
                max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
@@ -283,7 +602,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                smoothing_window=17,
                smoothing_polyorder=2,
                # Search control (pause/resume/stop)
-               controller=None):
+               controller=None,
+               # Validation metrics parameters
+               X_validation=None,
+               y_validation=None,
+               compute_validation=False,
+               validation_top_n=100):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -1823,6 +2147,31 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         print("BLAS thread settings restored to original values")
         print("="*80 + "\n")
 
+    # =========================================================================
+    # COMPUTE VALIDATION METRICS FOR TOP MODELS (if validation set provided)
+    # =========================================================================
+    if compute_validation and X_validation is not None and y_validation is not None:
+        # Convert X to numpy if it's a DataFrame
+        X_train_np = X.values if hasattr(X, 'values') else X
+        y_train_np = y.values if hasattr(y, 'values') else y
+        X_val_np = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
+        y_val_np = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+
+        # Get wavelengths for subsetting
+        wavelengths_for_validation = X.columns.astype(float).values if hasattr(X, 'columns') else np.arange(X.shape[1])
+
+        df_ranked = compute_validation_metrics_for_top_models(
+            df_ranked,
+            X_train_np,
+            y_train_np,
+            X_val_np,
+            y_val_np,
+            task_type,
+            wavelengths_for_validation,
+            top_n=validation_top_n,
+            progress_callback=progress_callback
+        )
+
     # Return results along with label_encoder (for classification with text labels)
     return df_ranked, label_encoder
 
@@ -1840,7 +2189,12 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                         baseline_params=None,
                         smoothing=False,
                         smoothing_window=17,
-                        smoothing_polyorder=2):
+                        smoothing_polyorder=2,
+                        # Validation metrics parameters
+                        X_validation=None,
+                        y_validation=None,
+                        compute_validation=False,
+                        validation_top_n=100):
     """
     Run Bayesian hyperparameter optimization using Optuna.
 
@@ -2351,6 +2705,31 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
             print(f"  Best model: {best_model['Model']} (Accuracy={best_model['Accuracy']:.4f}, ROC_AUC={best_model['ROC_AUC']:.4f})")
 
     print(f"{'='*70}\n")
+
+    # =========================================================================
+    # COMPUTE VALIDATION METRICS FOR TOP MODELS (if validation set provided)
+    # =========================================================================
+    if compute_validation and X_validation is not None and y_validation is not None:
+        # Convert X to numpy if it's a DataFrame
+        X_train_np = X.values if hasattr(X, 'values') else X
+        y_train_np = y.values if hasattr(y, 'values') else y
+        X_val_np = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
+        y_val_np = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+
+        # Get wavelengths for subsetting
+        wavelengths_for_validation = X.columns.astype(float).values if hasattr(X, 'columns') else np.arange(X.shape[1])
+
+        df_ranked = compute_validation_metrics_for_top_models(
+            df_ranked,
+            X_train_np,
+            y_train_np,
+            X_val_np,
+            y_val_np,
+            task_type,
+            wavelengths_for_validation,
+            top_n=validation_top_n,
+            progress_callback=progress_callback
+        )
 
     return df_ranked, label_encoder
 

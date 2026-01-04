@@ -6,6 +6,206 @@
 
 ---
 
+## ✅ VALIDATION METRICS IN RESULTS TABLE (2026-01-03) - COMPLETE
+
+**Feature:** Checkbox in Validation subtab to compute and display validation metrics for top N models in Results table.
+
+### Regression - WORKING
+- `val_R2` and `val_RMSE` columns added to results
+- Verified to match Predict tab exactly (tested to 4+ decimal places)
+- Uses correct preprocessing order: preprocess FULL spectrum THEN subset
+- Uses `ast.literal_eval()` + `set_params()` for model reconstruction
+- Columns appear in CSV export
+
+### Classification - COMPLETE (2026-01-03)
+- `val_Accuracy` - accuracy score
+- `val_ROC_AUC` - ROC AUC (binary or weighted multiclass, requires predict_proba)
+- `val_F1` - F1 score (binary or weighted for multiclass)
+- `val_Precision` - Precision score (binary or weighted for multiclass)
+- `val_Recall` - Recall score (binary or weighted for multiclass)
+
+**PLS-DA ISSUE - FIXED:**
+- `_rebuild_model_from_row()` now wraps PLSTransformer with LogisticRegression for PLS-DA classification
+- Matches the pipeline structure used during search (`search.py:2933-2940`)
+
+### Files
+- `src/spectral_predict/search.py`:
+  - `_rebuild_model_from_row()` (lines 231-294): Rebuilds model, PLS-DA pipeline fix at lines 283-292
+  - `compute_validation_metrics_for_top_models()` (lines 297-547): Computes all validation metrics
+  - Column initialization: lines 342-351
+  - Classification metrics calculation: lines 463-505
+  - Column reordering: lines 524-545
+- `spectral_predict_gui_optimized.py`:
+  - UI variables: lines 1402-1403
+  - Checkbox/spinbox: lines 7289-7310
+  - Checkbox text updated to generic "Show validation metrics in results table"
+
+### Implementation Details
+1. **Binary vs Multiclass Detection:** Uses `len(np.unique(y_val))` to determine averaging method
+2. **Error Handling:** Each metric wrapped in try/except for graceful failure
+3. **ROC AUC:** Checks `hasattr(model, 'predict_proba')` before computing
+4. **Column Ordering:** Validation metrics placed after CV metrics (Accuracy, ROC_AUC)
+
+### All Classification Models Support predict_proba
+- PLS-DA: ✅ (via LogisticRegression wrapper)
+- RandomForest: ✅
+- MLP: ✅
+- NeuralBoosted: ✅
+- SVM: ✅ (probability=True set explicitly)
+- XGBoost: ✅
+- LightGBM: ✅
+- CatBoost: ✅
+
+---
+
+## ✅ PLS DEFAULT FOR CLASSIFICATION FIX (2026-01-03)
+
+**Problem:** When loading classification data with task_type="auto", PLS (regression model) remained checked and tier switched to "Custom" instead of properly updating to classification models.
+
+### Fix 1: Move `_on_task_type_changed()` Outside Conditional
+**File:** `spectral_predict_gui_optimized.py` line 10541-10544
+
+Moved `_on_task_type_changed()` OUTSIDE the conditional block so it ALWAYS runs after data loads.
+
+### Fix 2: Add `_updating_from_tier` Flag Protection
+**File:** `spectral_predict_gui_optimized.py` lines 8873-8894
+
+**Root Cause:** `_on_task_type_changed()` was modifying checkboxes without the `_updating_from_tier` flag. This triggered `_on_model_checkbox_changed()` which switched tier to "Custom" BEFORE `_on_tier_changed()` could run.
+
+**Fix:** Added `self._updating_from_tier = True` before the checkbox loop and `self._updating_from_tier = False` after, matching the pattern in `_on_tier_changed()`.
+
+**Verification:** Classification tier defaults correctly exclude PLS:
+- Quick: `['PLS-DA', 'LightGBM', 'RandomForest']`
+- Standard: `['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost']`
+- Comprehensive: `['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'SVM', 'MLP', 'NeuralBoosted']`
+
+---
+
+## 🔗 THREE-TIER SPECTRAL OPTIMIZATION (2026-01-03 Session Update)
+
+**PLAN:** `C:\Users\sponheim\.claude\plans\wild-puzzling-lemon.md`
+
+**STATUS: Coupled Working, Ensemble Marginal, Learned Broken**
+
+### Overview
+Three optimization modules for spectral modeling - ADDITIVE to existing search.py, bayesian_config.py, nsga2_search.py.
+
+### Modules Status
+
+| Module | File | Status | Notes |
+|--------|------|--------|-------|
+| **Coupled Search** | `coupled_search.py` | ✅ Working | Optuna joint preprocessing+model optimization |
+| **Ensemble Preprocessing** | `ensemble_preprocessing.py` | ⚠️ Marginal | Slightly worse than Grid Search (~1-2% lower R²) |
+| **Learned Preprocessing** | `learned_preprocessing.py` | ❌ Broken | Produces terrible models - should be disabled |
+
+---
+
+### Coupled Search (2026-01-03 Updates)
+
+**What it does:**
+- Jointly optimizes preprocessing + model hyperparameters using Optuna
+- Supports ALL models: PLS, Ridge, Lasso, ElasticNet, RF, XGBoost, LightGBM, CatBoost, SVR, MLP
+- Wide hyperparameter search ranges (intentionally broader than Grid Search)
+
+**Preprocessing options:**
+- 14 types: raw, snv, deriv1-4, snv_deriv1-4, deriv1-4_snv
+- Baseline correction: ALS, polynomial, airPLS (only when NOT using derivatives)
+- Window size: 5-51 for Savitzky-Golay
+
+**Fix applied (2026-01-03):** Baseline correction now mutually exclusive with derivatives
+- **Rationale:** Derivatives inherently remove polynomial baselines; applying baseline BEFORE derivatives is redundant and can distort signal
+- **Location:** `src/spectral_predict/coupled_search.py` lines 62-91
+- **Logic:** If `'deriv' in preprocess_type`, skip baseline suggestion entirely
+
+**Model hyperparameter ranges** (intentionally wide for exploration):
+- PLS: n_components 2-20
+- Ridge: alpha 1e-4 to 100 (log scale)
+- XGBoost/LightGBM: 7-8 hyperparameters each with wide ranges
+- These ranges are correct - Grid Search values are narrower but not "better"
+
+---
+
+### Ensemble Preprocessing (2026-01-03 Updates)
+
+**What it does:**
+- Stacks 8 preprocessing methods (raw, snv, deriv1, deriv2, snv_deriv1, snv_deriv2, als, als_snv)
+- Trains same base model on each preprocessed version
+- Combines predictions using RidgeCV meta-model
+
+**Fixes applied:**
+1. **Empty params bug:** Was calling `build_model(model_name, {})` → sklearn defaults (PLS n_components=2)
+2. **Mini grid search added:** Now tunes base model hyperparameters BEFORE building ensemble
+   - Location: `spectral_predict_gui_optimized.py` lines 15993-16071
+   - Tests: PLS n_components 2-15, Ridge alpha [0.01-100], etc.
+
+**Current status:**
+- Works but slightly underperforms Grid Search (~1-2% lower R²)
+- Value proposition unclear - theoretically more robust but not proven
+- User wants to test generalization on held-out data to validate
+
+---
+
+### Learned Preprocessing (PyTorch) - BROKEN
+
+**Status:** ❌ NOT FUNCTIONAL - Should be disabled
+
+**Problems:**
+1. Replaces BOTH preprocessing AND model with neural network (ignores user's selected model)
+2. sklearn's `cross_val_score` doesn't pass `epochs` to `fit()` - minimal training
+3. Neural networks need 1000+ samples; spectral data typically has 50-500
+4. Fixed architecture not tuned for spectral data
+
+**Recommendation:** Disable the checkbox or remove feature entirely. PLS/Ridge were designed for "n << p" problems.
+
+---
+
+### GUI Changes (2026-01-03)
+
+**Files modified:** `spectral_predict_gui_optimized.py`
+
+1. **Checkbox disable logic (lines 13277-13298):**
+   - `_update_coupled_options_state()` method
+   - Disables Ensemble/Learned checkboxes when non-Coupled mode selected
+   - Trace on `optimization_method` StringVar
+
+2. **PyTorch check fix (lines 115-116):**
+   - Now imports `PYTORCH_AVAILABLE` from module
+   - `HAS_LEARNED_PREPROCESSING = PYTORCH_AVAILABLE`
+   - PyTorch installed in `.venv312` (was missing)
+
+3. **Ensemble hyperparameter tuning (lines 15993-16071):**
+   - Mini grid search before ensemble creation
+   - Tests key hyperparameters for each model type
+
+---
+
+### Known Issues / TODO for Next Agent
+
+1. **State/Thread Bug:** After running Coupled then Grid Search, "Optimizing Ridge" messages may appear. Restart fixes. Root cause unknown.
+
+2. **Deep Learning Model:** ~~Decide whether to disable~~ **DISABLED** (2026-01-03) - Checkbox disabled until debugged:
+   - **Symptom:** Produces very poor models compared to other methods
+   - **Possible cause:** sklearn's `cross_val_score` may not pass `epochs` to `fit()` correctly
+   - **TODO:** Debug why results are poor - root cause unknown
+
+3. **Ensemble value proposition:** User wants to test if ensemble actually generalizes better on held-out data (not just CV)
+
+4. **Coupled - multiple models issue:** User reported only PLS ran when PLS+Ridge selected. May be silent exception in Ridge. Needs investigation.
+
+5. **NEW (2026-01-03): Coupled R² mismatch in Model Development:**
+   - When loading Coupled result into Model Development tab, R² doesn't match
+   - Suggests preprocessing, variables, or variable order NOT preserved correctly
+   - Similar to previous R² mismatch bug (fixed for Grid Search) but specific to Coupled
+   - **Investigation needed:** Check how Coupled results are serialized and reconstructed in `_populate_from_result()`
+
+### Key Files for Context
+- `src/spectral_predict/coupled_search.py` - Joint Optuna optimization
+- `src/spectral_predict/ensemble_preprocessing.py` - Stacked preprocessing
+- `src/spectral_predict/learned_preprocessing.py` - PyTorch (broken)
+- `spectral_predict_gui_optimized.py` - GUI integration (lines 15870-16165 for Coupled mode)
+
+---
+
 ## 🚨 TOP PRIORITY: BAYESIAN PLS UNDERPERFORMS (2025-12-30)
 
 **STATUS: PLS-specific issue, not general Bayesian problem**
@@ -485,6 +685,31 @@ LGBMRegressor(
 **RECOMMENDED FIX ORDER:**
 1. First: Implement Option A (V3-style, 4 genes) - proves NSGA-II works, beats Grid Search on preprocessing
 2. Later: Add Option B (staged) - adds hyperparameter tuning for additional gains
+
+### GA Preprocessing - Empty Pipeline Bug (2026-01-02)
+
+**STATUS: OPEN**
+
+**Error:** When clicking on a model after running GA preprocessing, get error:
+```
+Error running refined model:
+This 'Pipeline' has no attribute 'fit_transform'
+
+IndexError: list index out of range
+  File "spectral_predict_gui_optimized.py", line 20894, in _run_refined_model_thread
+    X_full_preprocessed = prep_pipeline.fit_transform(X_full)
+```
+
+**Root Cause:** `prep_pipeline.steps` is empty (list index out of range when accessing `self.steps[-1][1]`). The GA preprocessing pipeline is not being reconstructed correctly when loading a model from the Results tab into Model Development.
+
+**Location:** `spectral_predict_gui_optimized.py:20894` in `_run_refined_model_thread()`
+
+**Investigation Needed:**
+- Check how GA preprocessing pipelines are serialized/stored in results
+- Check `_reconstruct_models_from_results()` for GA preprocessing handling
+- Verify the `GAPreprocessWrapper` class is properly creating pipeline steps
+
+---
 
 ### Test Suite (Low Priority)
 - [ ] Integrate pytest tests from `backup_2025-12-20/tests/`

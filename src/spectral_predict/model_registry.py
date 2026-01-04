@@ -24,9 +24,9 @@ REGRESSION_MODELS = [
 ]
 
 # Classification models (ordered by complexity/usage)
+# Note: PLS (regression) is NOT included - use PLS-DA for classification
 CLASSIFICATION_MODELS = [
     'PLS-DA',        # Partial Least Squares Discriminant Analysis
-    'PLS',           # PLS can also be used for classification
     'RandomForest',  # Ensemble of decision trees
     'MLP',           # Multi-Layer Perceptron
     'NeuralBoosted', # Custom gradient boosting with neural networks (now supports classification)

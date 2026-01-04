@@ -66,7 +66,7 @@ CLASSIFICATION_TIERS = {
 
     'experimental': {
         'description': 'All available classifiers including experimental',
-        'models': ['PLS-DA', 'PLS', 'RandomForest', 'LightGBM', 'XGBoost',
+        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost',
                    'CatBoost', 'SVM', 'MLP', 'NeuralBoosted'],
         'recommended_for': 'Exploration, method comparison, no time constraints'
     }
