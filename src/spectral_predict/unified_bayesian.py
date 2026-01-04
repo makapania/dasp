@@ -536,7 +536,6 @@ def create_unified_objective(
                             X_prep, y, 'importance', model_name, cv_folds, random_state
                         )
                         top_indices = np.argsort(importances)[-n_vars:]
-                        top_indices = np.sort(top_indices)  # Reorder to spectral order
                         subset_tag = f"top{n_vars}_importance_fallback"
                 except Exception as e:
                     logging.warning(f"Dynamic region creation failed: {e}, falling back to importance")
@@ -548,7 +547,6 @@ def create_unified_objective(
                         X_prep, y, 'importance', model_name, cv_folds, random_state
                     )
                     top_indices = np.argsort(importances)[-n_vars:]
-                    top_indices = np.sort(top_indices)  # Reorder to spectral order
                     subset_tag = f"top{n_vars}_importance_fallback"
             else:
                 # Importance-based or CARS-based selection (region_idx is ignored)
@@ -569,7 +567,6 @@ def create_unified_objective(
 
                     # Select top variables
                     top_indices = np.argsort(importances)[-n_vars:]
-                    top_indices = np.sort(top_indices)  # Reorder to spectral order
                     subset_tag = f"top{n_vars}_{subset_type}"
 
             # 4. Apply subset if selected
@@ -626,9 +623,11 @@ def create_unified_objective(
             else:
                 trial.set_user_attr('Accuracy', accuracy)
 
-            # Store selected wavelengths
+            # Store selected wavelengths (in SPECTRAL order for Model Development)
             if top_indices is not None:
-                selected_wavelengths = wavelengths[top_indices] if len(wavelengths) > max(top_indices) else []
+                # Sort indices to spectral order for storage (training already done)
+                sorted_indices = np.sort(top_indices)
+                selected_wavelengths = wavelengths[sorted_indices] if len(wavelengths) > max(sorted_indices) else []
                 trial.set_user_attr('selected_wavelengths',
                     ','.join([f"{w:.0f}" for w in selected_wavelengths[:50]]))  # First 50
                 # Store ALL wavelengths for model reconstruction (all_vars column)
