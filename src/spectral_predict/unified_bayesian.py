@@ -904,7 +904,19 @@ def convert_study_to_dataframe(
     else:
         df = df.sort_values('Accuracy', ascending=False)
 
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+
+    # Add Rank column (required for report.py and model selection)
+    df.insert(0, 'Rank', range(1, len(df) + 1))
+
+    # Add CompositeScore column (required for report.py compatibility)
+    # Lower is better for both regression (RMSE) and classification (negated accuracy)
+    if task_type == 'regression':
+        df['CompositeScore'] = df['RMSE']
+    else:
+        df['CompositeScore'] = -df['Accuracy']
+
+    return df
 
 
 if __name__ == '__main__':
