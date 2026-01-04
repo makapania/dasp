@@ -690,6 +690,23 @@ def run_unified_bayesian(
     study : optuna.Study
         Optuna study object with full optimization history
     """
+    # Normalize model name to expected case for build_model
+    model_name_map = {
+        'pls': 'PLS',
+        'ridge': 'Ridge',
+        'lasso': 'Lasso',
+        'elasticnet': 'ElasticNet',
+        'rf': 'RandomForest',
+        'randomforest': 'RandomForest',
+        'xgboost': 'XGBoost',
+        'lightgbm': 'LightGBM',
+        'catboost': 'CatBoost',
+        'svr': 'SVR',
+        'svm': 'SVM',
+        'mlp': 'MLP',
+    }
+    model_name = model_name_map.get(model_name.lower(), model_name)
+
     X = np.asarray(X)
     y = np.asarray(y)
     wavelengths = np.asarray(wavelengths)
