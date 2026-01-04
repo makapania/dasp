@@ -622,15 +622,17 @@ def create_unified_objective(
             else:
                 trial.set_user_attr('Accuracy', accuracy)
 
-            # Store selected wavelengths (in SPECTRAL order for Model Development)
+            # Store selected wavelengths in TRAINING ORDER (importance order)
+            # CRITICAL: Do NOT sort - Model Development expects wavelengths in the same
+            # order they were used during training. Grid Search also preserves training
+            # order (see search.py line 3201).
             if top_indices is not None:
-                # Sort indices to spectral order for storage (training already done)
-                sorted_indices = np.sort(top_indices)
-                selected_wavelengths = wavelengths[sorted_indices] if len(wavelengths) > max(sorted_indices) else []
-                trial.set_user_attr('selected_wavelengths',
-                    ','.join([f"{w:.0f}" for w in selected_wavelengths[:50]]))  # First 50
-                # Store ALL wavelengths for model reconstruction (all_vars column)
+                selected_wavelengths = wavelengths[top_indices] if len(wavelengths) > max(top_indices) else []
+                # Store ALL wavelengths for model reconstruction (training order)
                 trial.set_user_attr('all_wavelengths', ','.join([f"{w:.0f}" for w in selected_wavelengths]))
+                # Store first 50 for display (also training order - most important first)
+                trial.set_user_attr('selected_wavelengths',
+                    ','.join([f"{w:.0f}" for w in selected_wavelengths[:50]]))
             else:
                 # Full spectrum - store all wavelengths
                 trial.set_user_attr('all_wavelengths', ','.join([f"{w:.0f}" for w in wavelengths]))
