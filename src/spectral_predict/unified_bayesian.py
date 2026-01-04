@@ -535,6 +535,7 @@ def create_unified_objective(
                             X_prep, y, 'importance', model_name, cv_folds, random_state
                         )
                         top_indices = np.argsort(importances)[-n_vars:]
+                        top_indices = np.sort(top_indices)  # Reorder to spectral order
                         subset_tag = f"top{n_vars}_importance_fallback"
                 except Exception as e:
                     logging.warning(f"Dynamic region creation failed: {e}, falling back to importance")
@@ -546,6 +547,7 @@ def create_unified_objective(
                         X_prep, y, 'importance', model_name, cv_folds, random_state
                     )
                     top_indices = np.argsort(importances)[-n_vars:]
+                    top_indices = np.sort(top_indices)  # Reorder to spectral order
                     subset_tag = f"top{n_vars}_importance_fallback"
             else:
                 # Importance-based or CARS-based selection (region_idx is ignored)
@@ -566,6 +568,7 @@ def create_unified_objective(
 
                     # Select top variables
                     top_indices = np.argsort(importances)[-n_vars:]
+                    top_indices = np.sort(top_indices)  # Reorder to spectral order
                     subset_tag = f"top{n_vars}_{subset_type}"
 
             # 4. Apply subset if selected
@@ -610,6 +613,7 @@ def create_unified_objective(
             trial.set_user_attr('preprocessing', preprocess_config['name'])
             trial.set_user_attr('window', preprocess_config.get('window', 0))
             trial.set_user_attr('deriv', preprocess_config.get('deriv', 0))
+            trial.set_user_attr('poly', preprocess_config.get('polyorder', 0))
             trial.set_user_attr('subset_type', subset_type)
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
@@ -626,6 +630,11 @@ def create_unified_objective(
                 selected_wavelengths = wavelengths[top_indices] if len(wavelengths) > max(top_indices) else []
                 trial.set_user_attr('selected_wavelengths',
                     ','.join([f"{w:.0f}" for w in selected_wavelengths[:50]]))  # First 50
+                # Store ALL wavelengths for model reconstruction (all_vars column)
+                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.0f}" for w in selected_wavelengths]))
+            else:
+                # Full spectrum - store all wavelengths
+                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.0f}" for w in wavelengths]))
 
             return metric
 
@@ -868,6 +877,7 @@ def convert_study_to_dataframe(
             'Preprocess': trial.user_attrs.get('preprocessing', 'unknown'),
             'Deriv': trial.user_attrs.get('deriv', 0),
             'Window': trial.user_attrs.get('window', 0),
+            'Poly': trial.user_attrs.get('poly', 0),
             'Params': trial.user_attrs.get('model_params', '{}'),
             'n_vars': trial.user_attrs.get('n_vars', n_features),
             'full_vars': n_features,
@@ -883,9 +893,11 @@ def convert_study_to_dataframe(
             row['R2'] = trial.user_attrs.get('R2', np.nan)
         else:
             row['Accuracy'] = trial.user_attrs.get('Accuracy', -trial.value if trial.value else np.nan)
+            row['ROC_AUC'] = np.nan  # Placeholder for report.py compatibility
 
         # Add wavelength info
         row['top_vars'] = trial.user_attrs.get('selected_wavelengths', 'N/A')
+        row['all_vars'] = trial.user_attrs.get('all_wavelengths', 'N/A')
 
         # Extract LVs for PLS
         if model_name.lower() in ('pls', 'pls-da'):
