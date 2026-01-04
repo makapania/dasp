@@ -105,6 +105,13 @@ except ImportError:
     run_coupled_search = None
 
 try:
+    from spectral_predict.unified_bayesian import run_unified_bayesian
+    HAS_UNIFIED_BAYESIAN = True
+except ImportError:
+    HAS_UNIFIED_BAYESIAN = False
+    run_unified_bayesian = None
+
+try:
     from spectral_predict.ensemble_preprocessing import StackedPreprocessingRegressor
     HAS_ENSEMBLE_PREPROCESSING = True
 except ImportError:
@@ -1406,9 +1413,10 @@ class SpectralPredictApp:
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
-        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II vs Coupled)
-        self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", "nsga2", or "coupled"
+        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II vs Coupled vs Unified)
+        self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", "nsga2", "coupled", or "unified"
         self.n_bayesian_trials = tk.IntVar(value=100)  # Number of Bayesian optimization trials (default: 100)
+        self.n_unified_trials = tk.IntVar(value=300)   # Number of Unified Bayesian trials (default: 300)
         self.nsga2_population = tk.IntVar(value=50)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=100)  # NSGA-II number of generations
         self.nsga2_selection_bias = tk.IntVar(value=2)  # 0=min-error, 1=balanced, 2=knee point
@@ -5759,8 +5767,9 @@ class SpectralPredictApp:
 
         ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid").grid(row=0, column=0, sticky=tk.W, padx=5)
         ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian", variable=self.optimization_method, value="bayesian").grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🔗 Coupled (Preprocessing+Model)", variable=self.optimization_method, value="coupled").grid(row=0, column=3, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="⚡ Unified Bayesian", variable=self.optimization_method, value="unified").grid(row=0, column=2, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=3, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🔗 Coupled (Preprocessing+Model)", variable=self.optimization_method, value="coupled").grid(row=0, column=4, sticky=tk.W, padx=5)
 
         # Parameter frame for optimization-specific settings
         param_frame = ttk.Frame(opt_frame)
@@ -5770,6 +5779,11 @@ class SpectralPredictApp:
         ttk.Label(param_frame, text="Bayesian Trials:", style='Normal.TLabel').grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         self.n_trials_entry = ttk.Entry(param_frame, textvariable=self.n_bayesian_trials, width=8)
         self.n_trials_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+
+        # Unified Bayesian trials input
+        ttk.Label(param_frame, text="Unified Trials:", style='Normal.TLabel').grid(row=1, column=0, sticky=tk.W, padx=(0, 5))
+        self.n_unified_trials_entry = ttk.Entry(param_frame, textvariable=self.n_unified_trials, width=8)
+        self.n_unified_trials_entry.grid(row=1, column=1, sticky=tk.W, padx=(0, 20))
 
         # NSGA-II parameters
         ttk.Label(param_frame, text="NSGA-II Pop:", style='Normal.TLabel').grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
@@ -5783,6 +5797,7 @@ class SpectralPredictApp:
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
                     "   Bayesian: Smart search in 30-50 trials (fast, single-objective)\n"
+                    "   Unified Bayesian: Joint optimization of preprocessing + model + variables (300 trials, finds optimal combinations)\n"
                     "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)\n"
                     "   Coupled: Joint optimization of preprocessing + model (finds optimal combinations)")
         ttk.Label(opt_frame, text=info_text,
@@ -16247,6 +16262,94 @@ class SpectralPredictApp:
                     best = results_df.iloc[0]
                     self._log_progress(f"  Best: {best.get('Model', 'N/A')} + {best.get('Preprocess', 'N/A')}")
                     self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
+
+            elif optimization_method == "unified":
+                # === UNIFIED BAYESIAN OPTIMIZATION (Joint Preprocessing + Model + Variable Selection) ===
+                self._log_progress("\n⚡ Running Unified Bayesian Optimization...")
+                self._log_progress(f"   Jointly optimizing preprocessing + model + variable selection")
+                self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
+                self._log_progress(f"   This intelligently explores the full configuration space\n")
+
+                if not HAS_UNIFIED_BAYESIAN:
+                    self._log_progress("❌ ERROR: Unified Bayesian module not available!")
+                    self._log_progress("   Please ensure src/spectral_predict/unified_bayesian.py exists")
+                    messagebox.showerror("Module Missing", "Unified Bayesian module not found!")
+                    return
+
+                # Get wavelengths for proper variable output
+                wavelengths = None
+                if hasattr(X_filtered, 'columns'):
+                    try:
+                        wavelengths = np.array([float(c) for c in X_filtered.columns])
+                    except (ValueError, TypeError):
+                        pass
+
+                # If no wavelengths from columns, create sequential indices
+                if wavelengths is None:
+                    n_features = X_filtered.shape[1]
+                    wavelengths = np.arange(n_features)
+
+                # Convert to numpy if DataFrame
+                X_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
+                y_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
+
+                # Run unified Bayesian for each selected model
+                all_results = []
+                label_encoder = None
+
+                for model_name in selected_models:
+                    self._log_progress(f"\n  Optimizing {model_name}...")
+
+                    try:
+                        # Run unified Bayesian optimization
+                        results_df_model, study = run_unified_bayesian(
+                            X=X_np,
+                            y=y_np,
+                            wavelengths=wavelengths,
+                            model_name=model_name,
+                            task_type=task_type,
+                            n_trials=self.n_unified_trials.get(),
+                            cv_folds=self.folds.get(),
+                            random_state=42,
+                            verbose=False
+                        )
+
+                        if len(results_df_model) > 0:
+                            best = results_df_model.iloc[0]
+                            self._log_progress(f"    ✓ Best RMSE: {best['RMSE']:.4f}")
+                            self._log_progress(f"    Preprocessing: {best['Preprocess']}")
+                            self._log_progress(f"    Variables: {best['n_vars']}/{best['full_vars']}")
+
+                            # Add model name column and store results
+                            results_df_model['Model'] = model_name
+                            all_results.append(results_df_model)
+                        else:
+                            self._log_progress(f"    ⚠️ No results returned")
+
+                    except Exception as e:
+                        self._log_progress(f"    ✗ Error: {str(e)}")
+                        import traceback
+                        self._log_progress(f"    Traceback: {traceback.format_exc()}")
+                        continue
+
+                # Combine results from all models
+                if all_results:
+                    results_df = pd.concat(all_results, ignore_index=True)
+                    results_df = results_df.sort_values('RMSE' if task_type == 'regression' else 'CV Error').reset_index(drop=True)
+                    results_df['Rank'] = results_df.index + 1
+                else:
+                    results_df = pd.DataFrame()
+
+                # Log completion
+                self._log_progress(f"\n> Unified Bayesian Optimization Complete!")
+                self._log_progress(f"  Tested {len(all_results)} models")
+                if len(results_df) > 0:
+                    best = results_df.iloc[0]
+                    self._log_progress(f"  Best: {best.get('Model', 'N/A')}")
+                    if task_type == 'regression':
+                        self._log_progress(f"    RMSE: {best.get('RMSE', 'N/A'):.4f}")
+                    else:
+                        self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
 
             elif optimization_method == "nsga2":
                 # === NSGA-II MULTI-OBJECTIVE OPTIMIZATION ===
