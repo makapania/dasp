@@ -32,6 +32,7 @@ Example:
 from __future__ import annotations
 
 import logging
+import re
 import numpy as np
 import pandas as pd
 import optuna
@@ -871,10 +872,16 @@ def convert_study_to_dataframe(
         if trial.value is not None and trial.value >= 1e9:
             continue
 
+        # Convert preprocessing name to Grid Search format (strip number)
+        # snv_deriv4 -> snv_deriv, deriv3 -> deriv, deriv1_snv -> deriv_snv
+        # The derivative order is stored separately in the Deriv column
+        prep_name = trial.user_attrs.get('preprocessing', 'unknown')
+        base_prep = re.sub(r'\d+', '', prep_name)
+
         row = {
             'Task': task_type,
             'Model': model_name,
-            'Preprocess': trial.user_attrs.get('preprocessing', 'unknown'),
+            'Preprocess': base_prep,
             'Deriv': trial.user_attrs.get('deriv', 0),
             'Window': trial.user_attrs.get('window', 0),
             'Poly': trial.user_attrs.get('poly', 0),
