@@ -1048,6 +1048,54 @@ Add edge masking to `chromosome_to_transform()` in `ga_preprocessing.py`, OR app
 
 ---
 
+## ✅ CLASSIFICATION METRICS FOR CV AND VALIDATION (2026-01-05) - COMPLETE
+
+**Problem:** F1, Precision, and Recall metrics only appeared for validation data, not for calibration (CV) results. Additionally, validation metrics showed all NaN for classification.
+
+### CV (Calibration) Metrics - ADDED
+- Added F1, Precision, Recall computation in `_run_single_fold()` for each CV fold
+- Added averaging across folds in `_run_single_config()`
+- Uses `is_binary_classification` flag (from full dataset) for consistent averaging
+- Binary: `average='binary'`, Multiclass: `average='weighted'`
+
+### Validation Metrics - FIXED
+Multiple bugs causing NaN validation metrics:
+
+1. **Label encoding mismatch** - Training used encoded labels (`y_np` via LabelEncoder) but validation passed original un-encoded labels. Fixed by:
+   - Using `y_np` (encoded) for training data in validation
+   - Encoding validation labels with same `label_encoder.transform()`
+
+2. **Undefined variable** - `n_classes` renamed to `n_classes_train` but ROC AUC still used old name
+
+3. **Class count mismatch in ROC AUC** - Validation set had fewer classes than training, causing "Number of classes in y_true not equal to columns in y_score". Fixed by:
+   - Detecting when validation has fewer classes
+   - Subsetting probability matrix to matching classes
+   - Relabeling validation labels for ROC AUC computation
+
+4. **Column ordering** - Calibration F1/Precision/Recall weren't ordered correctly. Fixed reordering to: Accuracy, ROC_AUC, F1, Precision, Recall (cal), then val_* columns
+
+### Files Modified
+- `src/spectral_predict/search.py`:
+  - `_run_single_fold()` lines 2860-2896: Added F1/Precision/Recall computation
+  - `_run_single_config()` lines 3107-3111: Added metric averaging
+  - `compute_validation_metrics_for_top_models()`: Label encoding fixes, ROC AUC class handling
+  - Column reordering logic for classification
+- `src/spectral_predict/scoring.py`:
+  - `create_results_dataframe()`: Added F1/Precision/Recall to classification columns
+
+### Commits
+- `7957a01` - feat: Add F1, Precision, Recall to classification CV results
+- `736725d` - fix: Classification validation metrics and column ordering
+- `217209e` - fix: Use encoded training labels for validation metrics
+- `19afa6a` - fix: Robust validation F1/Precision/Recall with fallback averaging
+- `4e5d024` - fix: Use n_classes_train for validation ROC AUC
+- `2b6d615` - fix: Handle class mismatch in validation ROC AUC
+
+### Note on Small Validation Sets
+With < 20 validation samples across 3+ classes, metrics may appear perfect (1.0) or jump dramatically (0.25). This is expected behavior with small samples, not a bug. Recommend 10-20+ samples per class for meaningful validation metrics.
+
+---
+
 ## ✅ MINOR CHANGES (2026-01-05)
 
 ### Regional Subset Analysis Default Changed
