@@ -508,7 +508,7 @@ def compute_validation_metrics_for_top_models(
                 try:
                     if hasattr(model, 'predict_proba'):
                         y_proba = model.predict_proba(X_val_final)
-                        if n_classes == 2:
+                        if n_classes_train == 2:
                             # Binary classification - use probability of positive class
                             val_roc_auc = roc_auc_score(y_val, y_proba[:, 1])
                         else:
