@@ -16301,6 +16301,34 @@ class SpectralPredictApp:
                 all_results = []
                 label_encoder = None
 
+                # Track best model across ALL models (not just current model)
+                unified_best_overall = [None]  # Use list to allow mutation in closure
+
+                def unified_progress_wrapper(info):
+                    """Wrapper to track best model across all model types."""
+                    best_model = info.get('best_model')
+                    if best_model:
+                        current_best = unified_best_overall[0]
+                        is_better = False
+
+                        if current_best is None:
+                            is_better = True
+                        elif 'RMSE' in best_model:
+                            # Regression: lower RMSE is better
+                            is_better = best_model['RMSE'] < current_best.get('RMSE', float('inf'))
+                        elif 'Accuracy' in best_model:
+                            # Classification: higher Accuracy is better
+                            is_better = best_model['Accuracy'] > current_best.get('Accuracy', 0)
+
+                        if is_better:
+                            unified_best_overall[0] = best_model.copy()
+                            info['best_model'] = best_model
+                        else:
+                            # Keep showing the overall best, not this model's best
+                            info['best_model'] = unified_best_overall[0]
+
+                    self._progress_callback(info)
+
                 for model_name in selected_models:
                     self._log_progress(f"\n  Optimizing {model_name}...")
 
@@ -16316,7 +16344,7 @@ class SpectralPredictApp:
                             cv_folds=self.folds.get(),
                             random_state=42,
                             verbose=False,
-                            progress_callback=self._progress_callback
+                            progress_callback=unified_progress_wrapper
                         )
 
                         if len(results_df_model) > 0:

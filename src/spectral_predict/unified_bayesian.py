@@ -808,7 +808,7 @@ def run_unified_bayesian(
                 best = study.best_trial
                 best_model = {
                     'Model': model_name,
-                    'Preprocess': best.params.get('preprocess_type', 'raw'),
+                    'Preprocess': best.params.get('preprocessing', 'raw'),
                     'n_vars': best.params.get('n_vars', 'N/A'),
                 }
                 if task_type == 'regression':
