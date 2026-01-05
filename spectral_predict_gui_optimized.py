@@ -1483,7 +1483,7 @@ class SpectralPredictApp:
         # Subset Analysis options
         self.enable_variable_subsets = tk.BooleanVar(value=True)  # Top-N variable analysis
         self.enable_region_subsets = tk.BooleanVar(value=True)  # Spectral region analysis
-        self.n_top_regions = tk.IntVar(value=5)  # Number of top regions to analyze (5, 10, 15, 20)
+        self.n_top_regions = tk.IntVar(value=10)  # Number of top regions to analyze (5, 10, 15, 20)
 
         # Top-N variable counts (checkboxes for each)
         self.var_10 = tk.BooleanVar(value=True)

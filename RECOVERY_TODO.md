@@ -1045,3 +1045,11 @@ Add edge masking to `chromosome_to_transform()` in `ga_preprocessing.py`, OR app
 5. Consider if ensemble approach is fundamentally unsuited for spectral data
 
 **Literature note:** The SPRR paper (Talanta 2024) showed ensemble preprocessing outperformed single preprocessing on 6 datasets - but those may have had more samples or different data characteristics.
+
+---
+
+## ✅ MINOR CHANGES (2026-01-05)
+
+### Regional Subset Analysis Default Changed
+- Changed default from 5 regions to 10 regions
+- Files: `spectral_predict_gui_optimized.py` line 1486, `search.py` line 616 and docstring
