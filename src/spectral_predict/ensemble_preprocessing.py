@@ -492,7 +492,7 @@ def create_standard_preprocessing_ensemble(
     >>> y_pred = ensemble.predict(X_test)
     """
     if compact:
-        # Compact mode: fewer preprocessings for faster training
+        # Compact mode: 10 preprocessings for faster training
         preprocessings = [
             ('raw', []),
             ('snv', [('snv', SNV())]),
@@ -505,34 +505,78 @@ def create_standard_preprocessing_ensemble(
             ('snv_deriv2_w17', [
                 ('snv', SNV()),
                 ('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))
+            ]),
+            ('deriv1_snv_w17', [
+                ('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2)),
+                ('snv', SNV())
+            ]),
+            ('deriv2_snv_w17', [
+                ('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3)),
+                ('snv', SNV())
             ]),
         ]
     else:
-        # Full mode: multiple window sizes for diversity
+        # Full mode: comprehensive coverage with multiple windows and orderings
+        # Total: ~30 preprocessings for maximum diversity
         preprocessings = [
             ('raw', []),
             ('snv', [('snv', SNV())]),
-            # 1st derivative with multiple windows
+
+            # 1st derivative with multiple windows (7, 11, 17, 25)
+            ('deriv1_w7', [('deriv', SavgolDerivative(deriv=1, window=7, polyorder=2))]),
             ('deriv1_w11', [('deriv', SavgolDerivative(deriv=1, window=11, polyorder=2))]),
             ('deriv1_w17', [('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2))]),
             ('deriv1_w25', [('deriv', SavgolDerivative(deriv=1, window=25, polyorder=2))]),
+
             # 2nd derivative with multiple windows
+            ('deriv2_w7', [('deriv', SavgolDerivative(deriv=2, window=7, polyorder=3))]),
             ('deriv2_w11', [('deriv', SavgolDerivative(deriv=2, window=11, polyorder=3))]),
             ('deriv2_w17', [('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))]),
             ('deriv2_w25', [('deriv', SavgolDerivative(deriv=2, window=25, polyorder=3))]),
-            # SNV + derivative combinations (using common window)
+
+            # 3rd derivative (needs larger windows for stability)
+            ('deriv3_w17', [('deriv', SavgolDerivative(deriv=3, window=17, polyorder=4))]),
+            ('deriv3_w25', [('deriv', SavgolDerivative(deriv=3, window=25, polyorder=4))]),
+
+            # SNV then derivative (multiple windows)
+            ('snv_deriv1_w11', [
+                ('snv', SNV()),
+                ('deriv', SavgolDerivative(deriv=1, window=11, polyorder=2))
+            ]),
             ('snv_deriv1_w17', [
                 ('snv', SNV()),
                 ('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2))
             ]),
+            ('snv_deriv2_w11', [
+                ('snv', SNV()),
+                ('deriv', SavgolDerivative(deriv=2, window=11, polyorder=3))
+            ]),
             ('snv_deriv2_w17', [
                 ('snv', SNV()),
                 ('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))
+            ]),
+
+            # Derivative then SNV (different results than snv_deriv!)
+            ('deriv1_snv_w11', [
+                ('deriv', SavgolDerivative(deriv=1, window=11, polyorder=2)),
+                ('snv', SNV())
+            ]),
+            ('deriv1_snv_w17', [
+                ('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2)),
+                ('snv', SNV())
+            ]),
+            ('deriv2_snv_w11', [
+                ('deriv', SavgolDerivative(deriv=2, window=11, polyorder=3)),
+                ('snv', SNV())
+            ]),
+            ('deriv2_snv_w17', [
+                ('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3)),
+                ('snv', SNV())
             ]),
         ]
 
     if include_baseline:
-        # Add baseline-corrected versions (typically redundant with derivatives)
+        # Add baseline-corrected versions for raw/SNV (redundant with derivatives)
         preprocessings.extend([
             ('baseline_als', [('baseline', BaselineALS(lambda_=1e6, p=0.001))]),
             ('baseline_als_snv', [

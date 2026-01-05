@@ -1020,3 +1020,28 @@ Add edge masking to `chromosome_to_transform()` in `ga_preprocessing.py`, OR app
 - `src/spectral_predict/ga_preprocessing.py` - `chromosome_to_transform()` function
 - `src/spectral_predict/search.py` - Lines 1194-1215 (Grid Search edge masking), lines 1068-1120 (GA preprocessing integration)
 - `spectral_predict_gui_optimized.py` - Model Development reconstruction for GA results
+
+### Issue 4: Ensemble Preprocessing Still Underperforms Grid Search
+
+**Problem:** Even after expanding to 24 preprocessings, ensemble stacking still produces worse models than simple Grid Search.
+
+**Current ensemble setup:**
+- 24 preprocessings: raw, SNV, deriv1-3 with multiple windows (7,11,17,25), SNV+deriv combos, deriv+SNV combos, baseline variants
+- RidgeCV meta-model with wide alpha range (1e-4 to 1e4)
+- 5-fold CV for meta-model
+- Hyperparameter tuning for base model before stacking
+
+**Possible fundamental issues:**
+1. **Stacking may not suit spectral data** - Different preprocessings emphasize different spectral features, but the meta-model can only see predictions, not which features drove them
+2. **Same base model for all preprocessings** - But different preprocessings may work better with different models
+3. **Poor preprocessing predictions can harm ensemble** - Unlike model selection which picks the best, stacking averages all (weighted)
+4. **OOF predictions noisy with small datasets** - Typical spectral datasets (50-500 samples) may not have enough data for stable OOF predictions
+
+**Possible fixes to try:**
+1. Use different base models for different preprocessing types (PLS for derivatives, RF for raw)
+2. Add feature selection within each preprocessing branch
+3. Use nonlinear meta-model (e.g., LightGBM instead of Ridge)
+4. Add threshold to drop poor preprocessing branches before stacking
+5. Consider if ensemble approach is fundamentally unsuited for spectral data
+
+**Literature note:** The SPRR paper (Talanta 2024) showed ensemble preprocessing outperformed single preprocessing on 6 datasets - but those may have had more samples or different data characteristics.

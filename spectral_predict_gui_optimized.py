@@ -16136,14 +16136,14 @@ class SpectralPredictApp:
 
                             best_params = {
                                 'preprocessing': 'ensemble_stacked',
-                                'n_preprocessings': 8,  # raw, snv, deriv1, deriv2, snv_deriv1, snv_deriv2, als, als_snv
+                                'n_preprocessings': 24,  # 22 core + 2 baseline variants
                                 'meta_model': 'RidgeCV',
                                 'base_model_params': tuning_best_params,
                             }
                             study = None
 
                             self._log_progress(f"    ✓ Ensemble CV score: {best_score:.4f}")
-                            self._log_progress(f"    Stacking 8 preprocessing methods with tuned {model_name}")
+                            self._log_progress(f"    Stacking 24 preprocessing methods with tuned {model_name}")
 
                         # === STANDARD COUPLED OPTIMIZATION MODE ===
                         else:
