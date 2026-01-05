@@ -277,9 +277,8 @@ def suggest_model_params(
             'bagging_freq': 1,  # Required when subsample < 1.0
             'colsample_bytree': 0.8,
             'reg_alpha': 0.1,
-            'reg_lambda': 1.0,
-            'verbosity': -1,
-            'n_jobs': 1
+            'reg_lambda': 1.0
+            # verbosity and n_jobs are set by build_model()
         }
 
     elif model_name_lower == 'xgboost':
@@ -291,10 +290,8 @@ def suggest_model_params(
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree': 0.8,
             'reg_alpha': 0.1,
-            'reg_lambda': 1.0,
-            'tree_method': 'hist',  # Optimized for high-dimensional spectral data
-            'verbosity': 0,
-            'n_jobs': 1
+            'reg_lambda': 1.0
+            # tree_method, verbosity, n_jobs are set by build_model()
         }
 
     elif model_name_lower == 'catboost':
@@ -302,8 +299,8 @@ def suggest_model_params(
             'iterations': trial.suggest_int('iterations', 50, 300),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
             'depth': trial.suggest_int('depth', 4, 10),
-            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0),
-            'verbose': False
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0)
+            # verbose is set by build_model()
         }
 
     elif model_name_lower in ('svr', 'svm'):
