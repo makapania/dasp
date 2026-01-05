@@ -465,30 +465,44 @@ def compute_validation_metrics_for_top_models(
                 val_acc = accuracy_score(y_val, y_pred)
                 df_results.loc[idx, 'val_Accuracy'] = val_acc
 
-                # Determine if binary or multiclass
-                n_classes = len(np.unique(y_val))
-                average_method = 'binary' if n_classes == 2 else 'weighted'
+                # Determine if binary or multiclass based on training data classes
+                # Use 'weighted' for safety - works for both binary and multiclass
+                n_classes_train = len(np.unique(y_train))
+                average_method = 'binary' if n_classes_train == 2 else 'weighted'
 
                 # F1 Score
                 try:
                     val_f1 = f1_score(y_val, y_pred, average=average_method, zero_division=0)
                     df_results.loc[idx, 'val_F1'] = val_f1
                 except Exception as e:
-                    print(f"  [Warning] Could not compute F1 for model {i+1}: {e}")
+                    # Fallback to weighted if binary fails
+                    try:
+                        val_f1 = f1_score(y_val, y_pred, average='weighted', zero_division=0)
+                        df_results.loc[idx, 'val_F1'] = val_f1
+                    except Exception as e2:
+                        print(f"  [Warning] Could not compute F1 for model {i+1}: {e2}")
 
                 # Precision
                 try:
                     val_precision = precision_score(y_val, y_pred, average=average_method, zero_division=0)
                     df_results.loc[idx, 'val_Precision'] = val_precision
                 except Exception as e:
-                    print(f"  [Warning] Could not compute Precision for model {i+1}: {e}")
+                    try:
+                        val_precision = precision_score(y_val, y_pred, average='weighted', zero_division=0)
+                        df_results.loc[idx, 'val_Precision'] = val_precision
+                    except Exception as e2:
+                        print(f"  [Warning] Could not compute Precision for model {i+1}: {e2}")
 
                 # Recall
                 try:
                     val_recall = recall_score(y_val, y_pred, average=average_method, zero_division=0)
                     df_results.loc[idx, 'val_Recall'] = val_recall
                 except Exception as e:
-                    print(f"  [Warning] Could not compute Recall for model {i+1}: {e}")
+                    try:
+                        val_recall = recall_score(y_val, y_pred, average='weighted', zero_division=0)
+                        df_results.loc[idx, 'val_Recall'] = val_recall
+                    except Exception as e2:
+                        print(f"  [Warning] Could not compute Recall for model {i+1}: {e2}")
 
                 # ROC AUC (requires predict_proba)
                 try:
