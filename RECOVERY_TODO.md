@@ -331,8 +331,11 @@ e6b631a - fix: Match grid search preprocessing name format for Model Development
 ### Test Script
 Regression test at `scripts/test_unified_bayesian_model_dev.py` verifies R² matches for all window sizes.
 
-### Handoff Document
-See `.claude/analysis/HANDOFF_STATUS.md` for detailed session notes.
+### Technical Note: Why Unified Bayesian Uses "Coupled" Code Path
+Unified Bayesian uses preprocessing names like `'deriv1'`, `'snv_deriv2'` (with numbers).
+The fallback regex at line 21090 (`deriv\d`) matches these, causing it to be detected as "coupled".
+The Window Size fix compensates by reading Window from the config's Window column.
+Grid Search uses names like `'deriv'`, `'snv_deriv'` (no numbers) and goes through a different path.
 
 ---
 
