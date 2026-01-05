@@ -346,7 +346,7 @@ def create_results_dataframe(task_type):
     if task_type == "regression":
         metric_cols = ["RMSE", "R2"]
     else:
-        metric_cols = ["Accuracy", "ROC_AUC"]
+        metric_cols = ["Accuracy", "ROC_AUC", "F1", "Precision", "Recall"]
 
     all_cols = common_cols + metric_cols + ["top_vars", "all_vars", "CompositeScore", "Rank"]
 

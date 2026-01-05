@@ -2849,6 +2849,24 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         y_pred = pipe_clone.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
 
+        # Determine averaging method for multiclass metrics
+        n_classes = len(np.unique(y_test))
+        average_method = 'binary' if n_classes == 2 else 'weighted'
+
+        # F1, Precision, Recall
+        try:
+            f1 = f1_score(y_test, y_pred, average=average_method, zero_division=0)
+        except Exception:
+            f1 = np.nan
+        try:
+            precision = precision_score(y_test, y_pred, average=average_method, zero_division=0)
+        except Exception:
+            precision = np.nan
+        try:
+            recall = recall_score(y_test, y_pred, average=average_method, zero_division=0)
+        except Exception:
+            recall = np.nan
+
         # ROC AUC
         try:
             if is_binary_classification:
@@ -2863,7 +2881,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         except Exception:
             auc = np.nan
 
-        return {"Accuracy": acc, "ROC_AUC": auc}
+        return {"Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall}
 
 
 def _run_single_config(
@@ -3086,6 +3104,9 @@ def _run_single_config(
     else:
         mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
         mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
+        mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
+        mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
+        mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
         regional_rmse = None  # Not applicable for classification
 
     # Capture complete parameters for ALL models (not just those with feature importance)
@@ -3199,6 +3220,9 @@ def _run_single_config(
     else:
         result["Accuracy"] = mean_acc
         result["ROC_AUC"] = mean_auc
+        result["F1"] = mean_f1
+        result["Precision"] = mean_precision
+        result["Recall"] = mean_recall
 
     # Save all_vars for ALL models (including full spectrum)
     # This ensures Model Development can reconstruct the exact wavelengths used
