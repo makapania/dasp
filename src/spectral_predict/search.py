@@ -508,14 +508,31 @@ def compute_validation_metrics_for_top_models(
                 try:
                     if hasattr(model, 'predict_proba'):
                         y_proba = model.predict_proba(X_val_final)
-                        if n_classes_train == 2:
+                        n_classes_val = len(np.unique(y_val))
+
+                        if n_classes_train == 2 and n_classes_val == 2:
                             # Binary classification - use probability of positive class
                             val_roc_auc = roc_auc_score(y_val, y_proba[:, 1])
-                        else:
-                            # Multiclass - use one-vs-rest with macro average
-                            # Macro gives equal weight to each class (consistent with CV metrics)
+                            df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
+                        elif n_classes_val == n_classes_train:
+                            # All classes present - standard multiclass ROC AUC
                             val_roc_auc = roc_auc_score(y_val, y_proba, multi_class='ovr', average='macro')
-                        df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
+                            df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
+                        else:
+                            # Validation has fewer classes than training - subset probabilities
+                            # Get classes present in validation
+                            val_classes = np.unique(y_val)
+                            # Subset probability columns to only those classes
+                            y_proba_subset = y_proba[:, val_classes.astype(int)]
+                            if n_classes_val == 2:
+                                val_roc_auc = roc_auc_score(y_val, y_proba_subset[:, 1])
+                            else:
+                                # Relabel y_val to consecutive integers for ROC AUC
+                                from sklearn.preprocessing import LabelEncoder
+                                le_val = LabelEncoder()
+                                y_val_relabeled = le_val.fit_transform(y_val)
+                                val_roc_auc = roc_auc_score(y_val_relabeled, y_proba_subset, multi_class='ovr', average='macro')
+                            df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
                 except Exception as e:
                     print(f"  [Warning] Could not compute ROC AUC for model {i+1}: {e}")
 
@@ -613,7 +630,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
                mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
                enable_variable_subsets=True, variable_counts=None,
-               enable_region_subsets=True, n_top_regions=5, progress_callback=None,
+               enable_region_subsets=True, n_top_regions=10, progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
@@ -674,7 +691,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         Variable counts to test (e.g., [10, 20, 50])
     enable_region_subsets : bool, default=True
         Enable spectral region subset analysis
-    n_top_regions : int, default=5
+    n_top_regions : int, default=10
         Number of top regions to analyze (5, 10, 15, or 20)
     progress_callback : callable, optional
         Function to call with progress updates. Should accept dict with keys:
