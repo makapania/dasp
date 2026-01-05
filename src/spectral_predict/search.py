@@ -587,8 +587,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                imbalance_method=None, imbalance_params=None, enable_class_weight=False,
                reproducible=False, random_state=42,
                ga_preprocess=False,
-               ga_preprocess_population=32,
-               ga_preprocess_generations=50,
+               ga_preprocess_method='ga',
+               ga_preprocess_population=48,
+               ga_preprocess_generations=30,
                ga_preprocess_cv_folds=5,
                ga_quick_mode=False,
                # GA variable selection parameters
@@ -965,8 +966,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         print(f"\n{'='*70}")
         print("GA PREPROCESSING OPTIMIZATION")
         print(f"{'='*70}")
-        print(f"  Population size: {ga_preprocess_population}")
-        print(f"  Generations: {ga_preprocess_generations}")
+        print(f"  Search method: {ga_preprocess_method.upper()}")
+        print(f"  Search space: 238 combinations (14 preproc x 17 windows)")
+        if ga_preprocess_method == 'ga':
+            print(f"  Population size: {ga_preprocess_population}")
+            print(f"  Generations: {ga_preprocess_generations}")
         print(f"  CV folds: {ga_preprocess_cv_folds}")
         print(f"  Task type: {task_type}")
         print(f"  Note: This REPLACES user-selected preprocessing methods")
@@ -986,10 +990,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         # Run GA optimization for PLS models (using PLS fitness)
         if has_pls_models:
-            print(f"Running GA optimization for PLS models (using PLS fitness)...")
+            print(f"Running {ga_preprocess_method.upper()} optimization for PLS models (using PLS fitness)...")
             ga_result_pls = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
+                method=ga_preprocess_method,
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
                 cv_folds=folds,  # Use same CV folds as main search
@@ -998,7 +1003,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 random_state=random_state,
                 verbose=1,
                 progress_callback=progress_callback,
-                fitness_model='pls'
+                fitness_model='pls',
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nPLS Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_pls['best_config']}")
@@ -1006,10 +1012,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         # Run GA optimization for Neural/SVM models (using MLP fitness)
         if has_neural_svm_models:
-            print(f"Running GA optimization for Neural/SVM models (using MLP fitness)...")
+            print(f"Running {ga_preprocess_method.upper()} optimization for Neural/SVM models (using MLP fitness)...")
             ga_result_neural_svm = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
+                method=ga_preprocess_method,
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
                 cv_folds=folds,  # Use same CV folds as main search
@@ -1018,7 +1025,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 random_state=random_state,
                 verbose=1,
                 progress_callback=progress_callback,
-                fitness_model='mlp'
+                fitness_model='mlp',
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nNeural/SVM Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_neural_svm['best_config']}")
@@ -1026,11 +1034,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         # Run GA optimization for tree models (using LightGBM fitness)
         if has_tree_models:
-            print(f"Running GA optimization for TREE models (using LightGBM fitness)...")
+            print(f"Running {ga_preprocess_method.upper()} optimization for TREE models (using LightGBM fitness)...")
 
             ga_result_tree = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
+                method=ga_preprocess_method,
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
                 cv_folds=folds,  # Use same CV folds as main search
@@ -1039,7 +1048,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 random_state=random_state,
                 verbose=1,
                 progress_callback=progress_callback,
-                fitness_model='lightgbm'
+                fitness_model='lightgbm',
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nTree Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_tree['best_config']}")
@@ -1047,10 +1057,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         # Run GA optimization for NeuralBoosted model (using NeuralBoosted fitness)
         if has_neuralboosted_models:
-            print(f"Running GA optimization for NeuralBoosted model (using NeuralBoosted fitness)...")
+            print(f"Running {ga_preprocess_method.upper()} optimization for NeuralBoosted model (using NeuralBoosted fitness)...")
             ga_result_neuralboosted = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
+                method=ga_preprocess_method,
                 population_size=ga_preprocess_population,
                 n_generations=ga_preprocess_generations,
                 cv_folds=folds,  # Use same CV folds as main search
@@ -1059,7 +1070,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 random_state=random_state,
                 verbose=1,
                 progress_callback=progress_callback,
-                fitness_model='neuralboosted'
+                fitness_model='neuralboosted',
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nNeuralBoosted Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_neuralboosted['best_config']}")

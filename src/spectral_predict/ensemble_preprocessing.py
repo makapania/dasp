@@ -172,8 +172,11 @@ class StackedPreprocessingRegressor(BaseEstimator, RegressorMixin):
 
         # Train meta-model on out-of-fold predictions
         if self.meta_model is None:
-            # Default: RidgeCV with automatic alpha selection
-            self.meta_model_ = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0, 100.0], cv=3)
+            # Default: RidgeCV with wide alpha range for better regularization
+            self.meta_model_ = RidgeCV(
+                alphas=np.logspace(-4, 4, 17),  # 0.0001 to 10000
+                cv=5
+            )
         else:
             self.meta_model_ = clone(self.meta_model)
 
@@ -445,10 +448,17 @@ class StackedPreprocessingClassifier(BaseEstimator, ClassifierMixin):
 
 # Convenience function to create common preprocessing ensembles
 def create_standard_preprocessing_ensemble(
-    base_model, task_type: str = 'regression', include_baseline: bool = True
+    base_model,
+    task_type: str = 'regression',
+    include_baseline: bool = False,
+    compact: bool = False
 ):
     """
     Create a standard ensemble with common preprocessing methods.
+
+    The ensemble includes multiple window sizes for derivatives to capture
+    different spectral resolutions and ensure at least one is optimal for
+    the specific dataset.
 
     Parameters
     ----------
@@ -456,8 +466,12 @@ def create_standard_preprocessing_ensemble(
         Base model to use for all preprocessing methods
     task_type : str, default='regression'
         'regression' or 'classification'
-    include_baseline : bool, default=True
-        Whether to include baseline-corrected versions
+    include_baseline : bool, default=False
+        Whether to include baseline-corrected versions.
+        Note: Baseline correction is typically redundant when using derivatives.
+    compact : bool, default=False
+        If True, use fewer preprocessings (faster training).
+        If False, use full set with multiple window sizes.
 
     Returns
     -------
@@ -477,23 +491,48 @@ def create_standard_preprocessing_ensemble(
     >>> ensemble.fit(X_train, y_train)
     >>> y_pred = ensemble.predict(X_test)
     """
-    preprocessings = [
-        ('raw', []),
-        ('snv', [('snv', SNV())]),
-        ('deriv1', [('deriv', SavgolDerivative(deriv=1, window=11, polyorder=2))]),
-        ('deriv2', [('deriv', SavgolDerivative(deriv=2, window=11, polyorder=3))]),
-        ('snv_deriv1', [
-            ('snv', SNV()),
-            ('deriv', SavgolDerivative(deriv=1, window=11, polyorder=2))
-        ]),
-        ('snv_deriv2', [
-            ('snv', SNV()),
-            ('deriv', SavgolDerivative(deriv=2, window=11, polyorder=3))
-        ]),
-    ]
+    if compact:
+        # Compact mode: fewer preprocessings for faster training
+        preprocessings = [
+            ('raw', []),
+            ('snv', [('snv', SNV())]),
+            ('deriv1_w17', [('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2))]),
+            ('deriv2_w17', [('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))]),
+            ('snv_deriv1_w17', [
+                ('snv', SNV()),
+                ('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2))
+            ]),
+            ('snv_deriv2_w17', [
+                ('snv', SNV()),
+                ('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))
+            ]),
+        ]
+    else:
+        # Full mode: multiple window sizes for diversity
+        preprocessings = [
+            ('raw', []),
+            ('snv', [('snv', SNV())]),
+            # 1st derivative with multiple windows
+            ('deriv1_w11', [('deriv', SavgolDerivative(deriv=1, window=11, polyorder=2))]),
+            ('deriv1_w17', [('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2))]),
+            ('deriv1_w25', [('deriv', SavgolDerivative(deriv=1, window=25, polyorder=2))]),
+            # 2nd derivative with multiple windows
+            ('deriv2_w11', [('deriv', SavgolDerivative(deriv=2, window=11, polyorder=3))]),
+            ('deriv2_w17', [('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))]),
+            ('deriv2_w25', [('deriv', SavgolDerivative(deriv=2, window=25, polyorder=3))]),
+            # SNV + derivative combinations (using common window)
+            ('snv_deriv1_w17', [
+                ('snv', SNV()),
+                ('deriv', SavgolDerivative(deriv=1, window=17, polyorder=2))
+            ]),
+            ('snv_deriv2_w17', [
+                ('snv', SNV()),
+                ('deriv', SavgolDerivative(deriv=2, window=17, polyorder=3))
+            ]),
+        ]
 
     if include_baseline:
-        # Add baseline-corrected versions
+        # Add baseline-corrected versions (typically redundant with derivatives)
         preprocessings.extend([
             ('baseline_als', [('baseline', BaselineALS(lambda_=1e6, p=0.001))]),
             ('baseline_als_snv', [

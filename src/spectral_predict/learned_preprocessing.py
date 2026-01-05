@@ -242,7 +242,16 @@ else:
             self.batch_size = batch_size
             self.device = device
 
-        def fit(self, X, y, epochs: int = 100, validation_split: float = 0.2, verbose: bool = False):
+        def fit(
+            self,
+            X,
+            y,
+            epochs: int = 100,
+            validation_split: float = 0.2,
+            patience: int = 10,
+            min_delta: float = 1e-4,
+            verbose: bool = False
+        ):
             """
             Fit the learned preprocessing + regression model.
 
@@ -253,9 +262,13 @@ else:
             y : array-like, shape (n_samples,)
                 Training target values
             epochs : int, default=100
-                Number of training epochs
+                Maximum number of training epochs
             validation_split : float, default=0.2
                 Fraction of training data to use for validation
+            patience : int, default=10
+                Number of epochs with no improvement before stopping
+            min_delta : float, default=1e-4
+                Minimum change in validation loss to qualify as improvement
             verbose : bool, default=False
                 Whether to print training progress
 
@@ -343,7 +356,12 @@ else:
             optimizer = optim.Adam(self.model_.parameters(), lr=self.learning_rate)
             criterion = nn.MSELoss()
 
-            # Training loop
+            # Early stopping tracking
+            best_val_loss = float('inf')
+            patience_counter = 0
+            best_state = None
+
+            # Training loop with early stopping
             for epoch in range(epochs):
                 # Training phase
                 self.model_.train()
@@ -373,11 +391,29 @@ else:
 
                 val_loss /= len(val_dataset)
 
+                # Early stopping check
+                if val_loss < best_val_loss - min_delta:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Save best model weights
+                    best_state = {k: v.cpu().clone() for k, v in self.model_.state_dict().items()}
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        if verbose:
+                            print(f"Early stopping at epoch {epoch+1} (patience={patience})")
+                        break
+
                 if verbose and (epoch + 1) % 10 == 0:
                     print(
                         f"Epoch {epoch+1}/{epochs} - "
                         f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}"
                     )
+
+            # Restore best model weights
+            if best_state is not None:
+                self.model_.load_state_dict(best_state)
+                self.model_.to(self.device_)
 
             return self
 
@@ -430,6 +466,220 @@ else:
         def fit_transform(self, X, y, **fit_params):
             """Fit and transform in one step."""
             self.fit(X, y, **fit_params)
+            return self.transform(X)
+
+
+    class LearnedPreprocessor(BaseEstimator, TransformerMixin):
+        """
+        Sklearn-compatible learned preprocessing transformer.
+
+        This class learns optimal spectral preprocessing using neural network layers,
+        then provides a transform() method to apply the learned preprocessing to
+        any data. Unlike SpectralPreprocessorWithRegressor, this class is designed
+        to be used with any sklearn model.
+
+        Usage:
+            # Learn preprocessing
+            preprocessor = LearnedPreprocessor()
+            preprocessor.fit(X_train, y_train)
+            X_train_preproc = preprocessor.transform(X_train)
+            X_test_preproc = preprocessor.transform(X_test)
+
+            # Use with any sklearn model
+            pls = PLSRegression(n_components=10)
+            pls.fit(X_train_preproc, y_train)
+            y_pred = pls.predict(X_test_preproc)
+
+        Parameters
+        ----------
+        n_conv_layers : int, default=2
+            Number of convolutional preprocessing layers
+        n_filters : int, default=16
+            Number of filters in each convolutional layer
+        kernel_size : int, default=11
+            Kernel size for convolutions (like Savitzky-Golay window)
+        dropout : float, default=0.2
+            Dropout rate for regularization
+        epochs : int, default=50
+            Maximum training epochs
+        patience : int, default=10
+            Early stopping patience
+        batch_size : int, default=32
+            Batch size for training
+        learning_rate : float, default=1e-3
+            Learning rate for optimizer
+        device : str, optional
+            Device for computation ('cpu', 'cuda', 'mps')
+        """
+
+        def __init__(
+            self,
+            n_conv_layers: int = 2,
+            n_filters: int = 16,
+            kernel_size: int = 11,
+            dropout: float = 0.2,
+            epochs: int = 50,
+            patience: int = 10,
+            batch_size: int = 32,
+            learning_rate: float = 1e-3,
+            device: str = None,
+        ):
+            self.n_conv_layers = n_conv_layers
+            self.n_filters = n_filters
+            self.kernel_size = kernel_size
+            self.dropout = dropout
+            self.epochs = epochs
+            self.patience = patience
+            self.batch_size = batch_size
+            self.learning_rate = learning_rate
+            self.device = device
+
+        def fit(self, X, y):
+            """
+            Learn optimal preprocessing from training data.
+
+            Parameters
+            ----------
+            X : array-like, shape (n_samples, n_wavelengths)
+                Training spectral data
+            y : array-like, shape (n_samples,)
+                Training target values (used to guide preprocessing learning)
+
+            Returns
+            -------
+            self : object
+                Fitted transformer
+            """
+            X = np.asarray(X, dtype=np.float32)
+            y = np.asarray(y, dtype=np.float32).reshape(-1, 1)
+
+            self.n_wavelengths_ = X.shape[1]
+
+            # Determine device
+            if self.device is None:
+                if torch.cuda.is_available():
+                    self.device_ = torch.device('cuda')
+                elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    self.device_ = torch.device('mps')
+                else:
+                    self.device_ = torch.device('cpu')
+            else:
+                self.device_ = torch.device(self.device)
+
+            # Create preprocessing network
+            self.preprocessor_ = LearnedSpectralPreprocessing(
+                n_wavelengths=self.n_wavelengths_,
+                n_conv_layers=self.n_conv_layers,
+                n_filters=self.n_filters,
+                kernel_size=self.kernel_size,
+                dropout=self.dropout,
+            ).to(self.device_)
+
+            # Simple regression head for training
+            self.regressor_ = nn.Sequential(
+                nn.Linear(self.n_wavelengths_, 64),
+                nn.ReLU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(64, 1)
+            ).to(self.device_)
+
+            # Combined parameters
+            params = list(self.preprocessor_.parameters()) + list(self.regressor_.parameters())
+            optimizer = optim.Adam(params, lr=self.learning_rate)
+            criterion = nn.MSELoss()
+
+            # Split for validation
+            n_samples = len(X)
+            n_val = max(1, int(n_samples * 0.2))
+            indices = np.random.permutation(n_samples)
+            val_indices = indices[:n_val]
+            train_indices = indices[n_val:]
+
+            X_train, y_train = X[train_indices], y[train_indices]
+            X_val, y_val = X[val_indices], y[val_indices]
+
+            train_dataset = TensorDataset(
+                torch.from_numpy(X_train), torch.from_numpy(y_train)
+            )
+            train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+
+            X_val_tensor = torch.from_numpy(X_val).to(self.device_)
+            y_val_tensor = torch.from_numpy(y_val).to(self.device_)
+
+            # Training with early stopping
+            best_val_loss = float('inf')
+            patience_counter = 0
+            best_preproc_state = None
+
+            for epoch in range(self.epochs):
+                # Training
+                self.preprocessor_.train()
+                self.regressor_.train()
+                for X_batch, y_batch in train_loader:
+                    X_batch = X_batch.to(self.device_)
+                    y_batch = y_batch.to(self.device_)
+
+                    optimizer.zero_grad()
+                    X_preproc = self.preprocessor_(X_batch)
+                    y_pred = self.regressor_(X_preproc)
+                    loss = criterion(y_pred, y_batch)
+                    loss.backward()
+                    optimizer.step()
+
+                # Validation
+                self.preprocessor_.eval()
+                self.regressor_.eval()
+                with torch.no_grad():
+                    X_val_preproc = self.preprocessor_(X_val_tensor)
+                    y_val_pred = self.regressor_(X_val_preproc)
+                    val_loss = criterion(y_val_pred, y_val_tensor).item()
+
+                # Early stopping
+                if val_loss < best_val_loss - 1e-4:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    best_preproc_state = {
+                        k: v.cpu().clone()
+                        for k, v in self.preprocessor_.state_dict().items()
+                    }
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.patience:
+                        break
+
+            # Restore best preprocessing weights
+            if best_preproc_state is not None:
+                self.preprocessor_.load_state_dict(best_preproc_state)
+                self.preprocessor_.to(self.device_)
+
+            return self
+
+        def transform(self, X):
+            """
+            Apply learned preprocessing to data.
+
+            Parameters
+            ----------
+            X : array-like, shape (n_samples, n_wavelengths)
+                Spectral data to preprocess
+
+            Returns
+            -------
+            X_preprocessed : array, shape (n_samples, n_wavelengths)
+                Preprocessed spectral data
+            """
+            X = np.asarray(X, dtype=np.float32)
+            X_tensor = torch.from_numpy(X).to(self.device_)
+
+            self.preprocessor_.eval()
+            with torch.no_grad():
+                X_preprocessed = self.preprocessor_(X_tensor)
+
+            return X_preprocessed.cpu().numpy()
+
+        def fit_transform(self, X, y):
+            """Fit and transform in one step."""
+            self.fit(X, y)
             return self.transform(X)
 
 

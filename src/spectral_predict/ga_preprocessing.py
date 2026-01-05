@@ -2,15 +2,17 @@
 Genetic Algorithm for Preprocessing Optimization (V1).
 
 This module implements a genetic algorithm to optimize spectral preprocessing
-parameters including:
+parameters. The search space is simplified to just 2 genes:
 - Preprocessing type (raw, SNV, derivatives, combinations)
 - Savitzky-Golay window size
-- Baseline correction method and parameters
-- Smoothing settings
+
+Baseline correction and smoothing are removed as they are redundant when using
+derivatives (SG derivatives already smooth, and derivatives remove baselines).
+
+Total search space: 14 preprocessing types × 17 window sizes = 238 combinations
 
 The GA evaluates preprocessing configurations using cross-validated RMSECV
-with either PLS or LightGBM models for fitness evaluation, then returns the
-optimal preprocessing transform.
+with either PLS or LightGBM models for fitness evaluation.
 
 Fitness Models
 --------------
@@ -23,28 +25,28 @@ References
 ----------
 - Stefansson, A., et al. (2020). "Fast method for GA-PLS."
   Journal of Chemometrics.
-- Studies show 30-110% improvement in RMSECV over manual preprocessing selection.
 """
 
+from __future__ import annotations
+
 import numpy as np
-from typing import Tuple, Callable, Optional, Dict, Any
+from typing import Tuple, Callable, Optional, Dict, Any, List
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import cross_val_predict, KFold, StratifiedKFold
 from sklearn.metrics import mean_squared_error, accuracy_score
 
 # Import V1 preprocessing transformers
-from .preprocess import SNV, SavgolDerivative, SavgolSmooth
-from .baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
+from .preprocess import SNV, SavgolDerivative
 
 # Import LightGBM for fitness evaluation (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
 
 
 # =============================================================================
-# CHROMOSOME ENCODING
+# CHROMOSOME ENCODING (SIMPLIFIED: 2 GENES ONLY)
 # =============================================================================
 
-# Gene 0: Preprocessing type
+# Gene 0: Preprocessing type (14 options)
 PREPROC_TYPES = [
     'raw',           # 0
     'snv',           # 1
@@ -62,43 +64,23 @@ PREPROC_TYPES = [
     'deriv4_snv',    # 13
 ]
 
-# Gene 1: S-G window sizes (odd values only)
+# Gene 1: S-G window sizes (odd values only, 17 options)
 WINDOW_SIZES = [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, 41, 51]
 
-# Gene 2: Baseline methods
-BASELINE_METHODS = [
-    'none',          # 0
-    'polynomial',    # 1
-    'als',           # 2 - V1 uses BaselineALS
-    'airpls',        # 3
-]
-
-# Gene 3: Baseline lambda (log scale)
-BASELINE_LAMBDAS = [1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
-
-# Gene 4: Smoothing enabled
-SMOOTHING_OPTIONS = [False, True]
-
-# Gene 5: Smoothing window
-SMOOTHING_WINDOWS = [5, 7, 9, 11, 13, 15, 17, 19, 21]
-
-# Chromosome structure: [preproc_type, window, baseline, baseline_lambda, smoothing, smooth_window]
-N_GENES = 6
+# Total search space: 14 × 17 = 238 combinations
+N_GENES = 2
+TOTAL_COMBINATIONS = len(PREPROC_TYPES) * len(WINDOW_SIZES)  # 238
 
 
 def random_chromosome(rng: np.random.RandomState) -> np.ndarray:
-    """Generate a random chromosome with 10% smoothing probability."""
+    """Generate a random chromosome with 2 genes."""
     return np.array([
         rng.randint(0, len(PREPROC_TYPES)),
         rng.randint(0, len(WINDOW_SIZES)),
-        rng.randint(0, len(BASELINE_METHODS)),
-        rng.randint(0, len(BASELINE_LAMBDAS)),
-        1 if rng.random() < 0.10 else 0,  # 10% smoothing probability (was 50%)
-        rng.randint(0, len(SMOOTHING_WINDOWS)),
     ], dtype=np.int32)
 
 
-def get_seed_chromosomes() -> list:
+def get_seed_chromosomes() -> List[np.ndarray]:
     """
     Return proven good preprocessing configurations as seed chromosomes.
 
@@ -107,16 +89,11 @@ def get_seed_chromosomes() -> list:
     """
     seeds = []
 
-    def make_seed(preproc: str, window: int = 17, baseline: str = 'none',
-                  smoothing: bool = False) -> np.ndarray:
+    def make_seed(preproc: str, window: int = 17) -> np.ndarray:
         """Helper to create a seed chromosome from named parameters."""
         return np.array([
             PREPROC_TYPES.index(preproc),
             WINDOW_SIZES.index(window) if window in WINDOW_SIZES else 6,  # default idx 6 = 17
-            BASELINE_METHODS.index(baseline),
-            0,  # baseline lambda (unused for 'none')
-            1 if smoothing else 0,
-            0,  # smooth window (unused when smoothing=False)
         ], dtype=np.int32)
 
     # Proven good configurations from literature and practice
@@ -148,7 +125,7 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     Parameters
     ----------
     genes : np.ndarray
-        Integer-encoded chromosome [preproc_type, window, baseline, lambda, smoothing, smooth_window]
+        Integer-encoded chromosome [preproc_type, window]
 
     Returns
     -------
@@ -159,53 +136,25 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     """
     preproc_idx = genes[0]
     window_idx = genes[1]
-    baseline_idx = genes[2]
-    lambda_idx = genes[3]
-    smoothing_enabled = SMOOTHING_OPTIONS[genes[4]]
-    smooth_window_idx = genes[5]
 
     preproc_type = PREPROC_TYPES[preproc_idx]
     window = WINDOW_SIZES[window_idx]
-    baseline_method = BASELINE_METHODS[baseline_idx]
-    baseline_lambda = BASELINE_LAMBDAS[lambda_idx]
-    smooth_window = SMOOTHING_WINDOWS[smooth_window_idx]
 
     # Build name
-    name_parts = [preproc_type]
-    if preproc_type not in ['raw', 'snv']:
-        name_parts.append(f'w{window}')
-    if baseline_method != 'none':
-        name_parts.append(f'{baseline_method}')
-    if smoothing_enabled:
-        name_parts.append(f'smooth{smooth_window}')
+    if preproc_type in ['raw', 'snv']:
+        name = preproc_type
+    else:
+        name = f"{preproc_type}_w{window}"
 
-    name = '_'.join(name_parts)
+    # Return early for raw (no transform needed)
+    if preproc_type == 'raw':
+        return (name, None)
 
     # Build transform function
-    def transform(X, pt=preproc_type, w=window, bl=baseline_method,
-                  bl_lam=baseline_lambda, sm=smoothing_enabled, sm_w=smooth_window):
+    def transform(X, pt=preproc_type, w=window):
         X_out = np.asarray(X, dtype=np.float64)
 
-        # Apply smoothing first (if enabled)
-        if sm:
-            smoother = SavgolSmooth(window_length=sm_w, polyorder=2)
-            X_out = smoother.fit_transform(X_out)
-
-        # Apply baseline correction (before main preprocessing)
-        if bl == 'polynomial':
-            baseline = BaselinePolynomial(degree=2)
-            X_out = baseline.fit_transform(X_out)
-        elif bl == 'als':
-            baseline = BaselineALS(lambda_=bl_lam, p=0.01, niter=10)
-            X_out = baseline.fit_transform(X_out)
-        elif bl == 'airpls':
-            baseline = BaselineAirPLS(lam=bl_lam, max_iter=15)
-            X_out = baseline.fit_transform(X_out)
-
-        # Apply main preprocessing
-        if pt == 'raw':
-            pass
-        elif pt == 'snv':
+        if pt == 'snv':
             X_out = SNV().fit_transform(X_out)
         elif pt == 'deriv1':
             X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
@@ -221,18 +170,18 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
         elif pt == 'snv_deriv2':
             X_out = SNV().fit_transform(X_out)
             X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv1_snv':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv2_snv':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
         elif pt == 'snv_deriv3':
             X_out = SNV().fit_transform(X_out)
             X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
         elif pt == 'snv_deriv4':
             X_out = SNV().fit_transform(X_out)
             X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+        elif pt == 'deriv1_snv':
+            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
+        elif pt == 'deriv2_snv':
+            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
         elif pt == 'deriv3_snv':
             X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
@@ -242,9 +191,6 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
 
         return X_out
 
-    if preproc_type == 'raw' and baseline_method == 'none' and not smoothing_enabled:
-        return (name, None)
-
     return (name, transform)
 
 
@@ -252,20 +198,11 @@ def get_config_description(genes: np.ndarray) -> str:
     """Get human-readable description of chromosome configuration."""
     preproc_type = PREPROC_TYPES[genes[0]]
     window = WINDOW_SIZES[genes[1]]
-    baseline_method = BASELINE_METHODS[genes[2]]
-    baseline_lambda = BASELINE_LAMBDAS[genes[3]]
-    smoothing_enabled = SMOOTHING_OPTIONS[genes[4]]
-    smooth_window = SMOOTHING_WINDOWS[genes[5]]
 
-    parts = [f"Preproc: {preproc_type}"]
-    if preproc_type not in ['raw', 'snv']:
-        parts.append(f"Window: {window}")
-    if baseline_method != 'none':
-        parts.append(f"Baseline: {baseline_method} (lam={baseline_lambda:.0e})")
-    if smoothing_enabled:
-        parts.append(f"Smooth: w{smooth_window}")
-
-    return ", ".join(parts)
+    if preproc_type in ['raw', 'snv']:
+        return f"Preproc: {preproc_type}"
+    else:
+        return f"Preproc: {preproc_type}, Window: {window}"
 
 
 # =============================================================================
@@ -290,7 +227,7 @@ def evaluate_fitness(
     Parameters
     ----------
     genes : np.ndarray
-        Chromosome encoding preprocessing configuration
+        Chromosome encoding preprocessing configuration [preproc_type, window]
     X : np.ndarray
         Raw spectral data (n_samples, n_features)
     y : np.ndarray
@@ -304,8 +241,7 @@ def evaluate_fitness(
     random_state : int
         Random state for CV splitting
     fitness_model : str
-        Model to use for fitness evaluation: 'pls' or 'lightgbm'
-        Default is 'pls'. Falls back to PLS if LightGBM not available.
+        Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', or 'neuralboosted'
 
     Returns
     -------
@@ -316,13 +252,6 @@ def evaluate_fitness(
     try:
         # Get transform function
         name, transform_func = chromosome_to_transform(genes)
-
-        # Check for smoothing + derivative penalty
-        # Smoothing before derivatives is largely redundant since S-G derivatives already smooth
-        smoothing_enabled = SMOOTHING_OPTIONS[genes[4]]
-        preproc_type = PREPROC_TYPES[genes[0]]
-        is_derivative = 'deriv' in preproc_type
-        smoothing_penalty = 0.90 if (smoothing_enabled and is_derivative) else 1.0  # 10% penalty
 
         # Apply preprocessing
         if transform_func is not None:
@@ -351,141 +280,119 @@ def evaluate_fitness(
 
         # Choose fitness model
         if fitness_model == 'lightgbm':
-            # Use LightGBM for fitness evaluation
-            if task_type == 'classification':
-                # For classification, ensure labels are numeric
-                y_class = np.asarray(y)
-                if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-                    from sklearn.preprocessing import LabelEncoder
-                    le = LabelEncoder()
-                    y_class = le.fit_transform(y_class)
-                else:
-                    y_class = y_class.astype(int)
-
-                model = LGBMClassifier(
-                    n_estimators=100,
-                    learning_rate=0.1,
-                    max_depth=5,
-                    random_state=random_state,
-                    verbosity=-1,
-                    force_col_wise=True
-                )
-                y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
-                return accuracy_score(y_class, y_pred) * smoothing_penalty
-            else:
-                # Regression
-                model = LGBMRegressor(
-                    n_estimators=100,
-                    learning_rate=0.1,
-                    max_depth=5,
-                    random_state=random_state,
-                    verbosity=-1,
-                    force_col_wise=True
-                )
-                y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
-                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
+            return _evaluate_lightgbm(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'mlp':
-            # Use MLP (Multi-Layer Perceptron) for fitness evaluation
-            from sklearn.neural_network import MLPRegressor, MLPClassifier
-
-            if task_type == 'classification':
-                # Classification
-                y_class = np.asarray(y)
-                if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-                    # Encode string labels
-                    from sklearn.preprocessing import LabelEncoder
-                    le = LabelEncoder()
-                    y_class = le.fit_transform(y_class)
-                else:
-                    y_class = y_class.astype(int)
-
-                model = MLPClassifier(
-                    hidden_layer_sizes=(100, 50),
-                    max_iter=500,
-                    random_state=random_state,
-                    early_stopping=True,
-                    validation_fraction=0.1
-                )
-                y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
-                return accuracy_score(y_class, y_pred) * smoothing_penalty
-            else:
-                # Regression
-                model = MLPRegressor(
-                    hidden_layer_sizes=(100, 50),
-                    max_iter=500,
-                    random_state=random_state,
-                    early_stopping=True,
-                    validation_fraction=0.1
-                )
-                y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
-                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
+            return _evaluate_mlp(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'neuralboosted':
-            # Use NeuralBoosted for fitness evaluation (with fallback to PLS)
-            try:
-                from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
-
-                if task_type == 'classification':
-                    # Classification
-                    y_class = np.asarray(y)
-                    if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-                        # Encode string labels
-                        from sklearn.preprocessing import LabelEncoder
-                        le = LabelEncoder()
-                        y_class = le.fit_transform(y_class)
-                    else:
-                        y_class = y_class.astype(int)
-
-                    model = NeuralBoostedClassifier(random_state=random_state)
-                    y_pred = cross_val_predict(model, X_preproc, y_class, cv=cv)
-                    return accuracy_score(y_class, y_pred) * smoothing_penalty
-                else:
-                    # Regression
-                    model = NeuralBoostedRegressor(random_state=random_state)
-                    y_pred = cross_val_predict(model, X_preproc, y, cv=cv)
-                    rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                    return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
-            except ImportError:
-                # NeuralBoosted not available, fall back to PLS
-                pls = PLSRegression(n_components=n_comp, scale=False)
-                y_pred = cross_val_predict(pls, X_preproc, y, cv=cv)
-
-                if task_type == 'classification':
-                    y_class = np.asarray(y)
-                    if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-                        from sklearn.preprocessing import LabelEncoder
-                        le = LabelEncoder()
-                        y_class = le.fit_transform(y_class)
-                    y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
-                    return accuracy_score(y_class, y_pred_class) * smoothing_penalty
-                else:
-                    rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                    return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
+            return _evaluate_neuralboosted(X_preproc, y, cv, n_comp, task_type, random_state)
         else:
-            # Use PLS for fitness evaluation (default)
-            pls = PLSRegression(n_components=n_comp, scale=False)
-            y_pred = cross_val_predict(pls, X_preproc, y, cv=cv)
-
-            if task_type == 'classification':
-                # For classification, threshold predictions and compute accuracy
-                y_class = np.asarray(y)
-                if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-                    # Encode string labels
-                    from sklearn.preprocessing import LabelEncoder
-                    le = LabelEncoder()
-                    y_class = le.fit_transform(y_class)
-                y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
-                return accuracy_score(y_class, y_pred_class) * smoothing_penalty
-            else:
-                # Calculate RMSECV
-                rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-                # Return negative RMSECV (we maximize fitness)
-                return -rmsecv / smoothing_penalty  # Divide to penalize (makes more negative)
+            # Default: PLS
+            return _evaluate_pls(X_preproc, y, cv, n_comp, task_type)
 
     except Exception:
         # Any error = very poor fitness
         return -np.inf
+
+
+def _evaluate_pls(X, y, cv, n_comp, task_type):
+    """Evaluate fitness using PLS."""
+    pls = PLSRegression(n_components=n_comp, scale=False)
+    y_pred = cross_val_predict(pls, X, y, cv=cv)
+
+    if task_type == 'classification':
+        y_class = np.asarray(y)
+        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_class = le.fit_transform(y_class)
+        y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
+        return accuracy_score(y_class, y_pred_class)
+    else:
+        rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+        return -rmsecv
+
+
+def _evaluate_lightgbm(X, y, cv, task_type, random_state):
+    """Evaluate fitness using LightGBM."""
+    if task_type == 'classification':
+        y_class = np.asarray(y)
+        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_class = le.fit_transform(y_class)
+        else:
+            y_class = y_class.astype(int)
+
+        model = LGBMClassifier(
+            n_estimators=100, learning_rate=0.1, max_depth=5,
+            random_state=random_state, verbosity=-1, force_col_wise=True
+        )
+        y_pred = cross_val_predict(model, X, y_class, cv=cv)
+        return accuracy_score(y_class, y_pred)
+    else:
+        model = LGBMRegressor(
+            n_estimators=100, learning_rate=0.1, max_depth=5,
+            random_state=random_state, verbosity=-1, force_col_wise=True
+        )
+        y_pred = cross_val_predict(model, X, y, cv=cv)
+        rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+        return -rmsecv
+
+
+def _evaluate_mlp(X, y, cv, task_type, random_state):
+    """Evaluate fitness using MLP."""
+    from sklearn.neural_network import MLPRegressor, MLPClassifier
+
+    if task_type == 'classification':
+        y_class = np.asarray(y)
+        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_class = le.fit_transform(y_class)
+        else:
+            y_class = y_class.astype(int)
+
+        model = MLPClassifier(
+            hidden_layer_sizes=(100, 50), max_iter=500,
+            random_state=random_state, early_stopping=True, validation_fraction=0.1
+        )
+        y_pred = cross_val_predict(model, X, y_class, cv=cv)
+        return accuracy_score(y_class, y_pred)
+    else:
+        model = MLPRegressor(
+            hidden_layer_sizes=(100, 50), max_iter=500,
+            random_state=random_state, early_stopping=True, validation_fraction=0.1
+        )
+        y_pred = cross_val_predict(model, X, y, cv=cv)
+        rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+        return -rmsecv
+
+
+def _evaluate_neuralboosted(X, y, cv, n_comp, task_type, random_state):
+    """Evaluate fitness using NeuralBoosted (falls back to PLS if unavailable)."""
+    try:
+        from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
+
+        if task_type == 'classification':
+            y_class = np.asarray(y)
+            if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                from sklearn.preprocessing import LabelEncoder
+                le = LabelEncoder()
+                y_class = le.fit_transform(y_class)
+            else:
+                y_class = y_class.astype(int)
+
+            model = NeuralBoostedClassifier(random_state=random_state)
+            y_pred = cross_val_predict(model, X, y_class, cv=cv)
+            return accuracy_score(y_class, y_pred)
+        else:
+            model = NeuralBoostedRegressor(random_state=random_state)
+            y_pred = cross_val_predict(model, X, y, cv=cv)
+            rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+            return -rmsecv
+    except ImportError:
+        # Fall back to PLS
+        return _evaluate_pls(X, y, cv, n_comp, task_type)
 
 
 # =============================================================================
@@ -537,10 +444,6 @@ def mutate(
     gene_ranges = [
         len(PREPROC_TYPES),
         len(WINDOW_SIZES),
-        len(BASELINE_METHODS),
-        len(BASELINE_LAMBDAS),
-        len(SMOOTHING_OPTIONS),
-        len(SMOOTHING_WINDOWS),
     ]
 
     for i in range(len(mutated)):
@@ -551,16 +454,174 @@ def mutate(
 
 
 # =============================================================================
+# EXHAUSTIVE SEARCH (FOR SMALL SEARCH SPACE)
+# =============================================================================
+
+def exhaustive_search(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv_folds: int = 5,
+    n_components: int = 10,
+    task_type: str = 'regression',
+    random_state: int = 42,
+    fitness_model: str = 'pls',
+    n_jobs: int = 1,
+    verbose: int = 1,
+    progress_callback: Optional[Callable] = None
+) -> Dict[str, Any]:
+    """
+    Exhaustively search all 238 preprocessing combinations.
+
+    With only 238 combinations (14 preprocessing types × 17 window sizes),
+    exhaustive search is feasible and guarantees finding the optimal solution.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Raw spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    cv_folds : int
+        Number of CV folds for fitness evaluation
+    n_components : int
+        Max PLS components for evaluation
+    task_type : str
+        'regression' or 'classification'
+    random_state : int
+        Random seed for reproducibility
+    fitness_model : str
+        Model to use for fitness evaluation
+    n_jobs : int
+        Number of parallel jobs (-1 for all cores)
+    verbose : int
+        Verbosity level (0=silent, 1=progress, 2=detailed)
+    progress_callback : callable, optional
+        Progress callback function
+
+    Returns
+    -------
+    result : dict
+        Same format as optimize_preprocessing()
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y).ravel()
+
+    n_samples, n_features = X.shape
+
+    if verbose >= 1:
+        print(f"Exhaustive Preprocessing Search")
+        print(f"  Data: {n_samples} samples, {n_features} features")
+        print(f"  Task: {task_type}")
+        print(f"  Fitness model: {fitness_model.upper()}")
+        print(f"  Total combinations: {TOTAL_COMBINATIONS}")
+
+    # Generate all possible chromosomes
+    all_genes = [
+        np.array([p, w], dtype=np.int32)
+        for p in range(len(PREPROC_TYPES))
+        for w in range(len(WINDOW_SIZES))
+    ]
+
+    # Evaluate all combinations
+    if n_jobs != 1:
+        # Parallel evaluation
+        try:
+            from joblib import Parallel, delayed
+
+            if verbose >= 1:
+                print(f"  Parallel evaluation with n_jobs={n_jobs}")
+
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(evaluate_fitness)(
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
+                )
+                for genes in all_genes
+            )
+        except ImportError:
+            # Fall back to sequential
+            if verbose >= 1:
+                print("  joblib not available, using sequential evaluation")
+            results = []
+            for i, genes in enumerate(all_genes):
+                fitness = evaluate_fitness(
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
+                )
+                results.append(fitness)
+                if progress_callback and (i + 1) % 10 == 0:
+                    progress_callback({
+                        'algorithm': 'exhaustive_preprocessing',
+                        'current': i + 1,
+                        'total': len(all_genes),
+                        'best_fitness': max(results),
+                        'message': f"Tested {i+1}/{len(all_genes)} combinations"
+                    })
+    else:
+        # Sequential evaluation
+        results = []
+        for i, genes in enumerate(all_genes):
+            fitness = evaluate_fitness(
+                genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
+            )
+            results.append(fitness)
+
+            if verbose >= 2 and (i + 1) % 50 == 0:
+                print(f"  Tested {i+1}/{len(all_genes)} combinations")
+
+            if progress_callback and (i + 1) % 10 == 0:
+                progress_callback({
+                    'algorithm': 'exhaustive_preprocessing',
+                    'current': i + 1,
+                    'total': len(all_genes),
+                    'best_fitness': max(results),
+                    'message': f"Tested {i+1}/{len(all_genes)} combinations"
+                })
+
+    # Find best
+    best_idx = np.argmax(results)
+    best_genes = all_genes[best_idx]
+    best_fitness = results[best_idx]
+
+    best_name, best_transform = chromosome_to_transform(best_genes)
+    best_config = get_config_description(best_genes)
+
+    if verbose >= 1:
+        print(f"\nExhaustive search complete!")
+        if task_type == 'classification':
+            print(f"  Best Accuracy: {best_fitness:.4f}")
+        else:
+            print(f"  Best RMSECV: {-best_fitness:.4f}")
+        print(f"  Best config: {best_config}")
+
+    # Return score in format expected by callers
+    if task_type == 'classification':
+        best_score = 1.0 - best_fitness
+    else:
+        best_score = -best_fitness
+
+    return {
+        'best_genes': best_genes,
+        'best_name': best_name,
+        'best_transform': best_transform,
+        'best_rmsecv': best_score,
+        'best_config': best_config,
+        'history': [{'combination': i, 'fitness': f} for i, f in enumerate(results)],
+        'task_type': task_type,
+        'method': 'exhaustive'
+    }
+
+
+# =============================================================================
 # MAIN GA FUNCTION
 # =============================================================================
 
 def optimize_preprocessing(
     X: np.ndarray,
     y: np.ndarray,
-    population_size: int = 64,
-    n_generations: int = 50,
+    method: str = 'ga',
+    population_size: int = 48,
+    n_generations: int = 30,
     crossover_rate: float = 0.7,
-    mutation_rate: float = 0.1,
+    mutation_rate: float = 0.15,
     tournament_size: int = 3,
     cv_folds: int = 5,
     n_components: int = 10,
@@ -569,10 +630,11 @@ def optimize_preprocessing(
     random_state: int = 42,
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
-    fitness_model: str = 'pls'
+    fitness_model: str = 'pls',
+    n_jobs: int = 1
 ) -> Dict[str, Any]:
     """
-    Optimize spectral preprocessing using genetic algorithm.
+    Optimize spectral preprocessing using genetic algorithm or exhaustive search.
 
     Parameters
     ----------
@@ -580,22 +642,25 @@ def optimize_preprocessing(
         Raw spectral data (n_samples, n_features)
     y : np.ndarray
         Target values
+    method : str
+        Optimization method: 'ga' (genetic algorithm) or 'exhaustive'
+        Default is 'ga'. Exhaustive search tests all 238 combinations.
     population_size : int
-        Number of individuals in population
+        Number of individuals in population (GA only)
     n_generations : int
-        Number of generations to evolve
+        Number of generations to evolve (GA only)
     crossover_rate : float
-        Probability of crossover (0-1)
+        Probability of crossover (0-1, GA only)
     mutation_rate : float
-        Probability of mutation per gene (0-1)
+        Probability of mutation per gene (0-1, GA only)
     tournament_size : int
-        Number of individuals in tournament selection
+        Number of individuals in tournament selection (GA only)
     cv_folds : int
         Number of CV folds for fitness evaluation
     n_components : int
-        Max PLS components for evaluation (used when fitness_model='pls')
+        Max PLS components for evaluation
     elitism : int
-        Number of best individuals to preserve each generation
+        Number of best individuals to preserve each generation (GA only)
     task_type : str
         'regression' or 'classification'
     random_state : int
@@ -603,15 +668,11 @@ def optimize_preprocessing(
     verbose : int
         Verbosity level (0=silent, 1=progress, 2=detailed)
     progress_callback : callable, optional
-        Function called with dict containing:
-        - 'algorithm': 'ga_preprocessing'
-        - 'generation': current generation
-        - 'total_generations': total generations
-        - 'best_fitness': best fitness
-        - 'message': human-readable status
-    fitness_model : str, optional
-        Model to use for fitness evaluation: 'pls' or 'lightgbm'
-        Default is 'pls'. Falls back to PLS if LightGBM not available.
+        Function called with progress dict
+    fitness_model : str
+        Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', 'neuralboosted'
+    n_jobs : int
+        Number of parallel jobs for exhaustive search (-1 for all cores)
 
     Returns
     -------
@@ -622,8 +683,16 @@ def optimize_preprocessing(
         - 'best_transform': callable - Transform function
         - 'best_rmsecv': float - Best RMSECV (regression) or 1-accuracy (classification)
         - 'best_config': str - Human-readable configuration
-        - 'history': list - Fitness history per generation
+        - 'history': list - Fitness history
+        - 'method': str - Method used ('ga' or 'exhaustive')
     """
+    if method == 'exhaustive':
+        return exhaustive_search(
+            X, y, cv_folds, n_components, task_type, random_state,
+            fitness_model, n_jobs, verbose, progress_callback
+        )
+
+    # Genetic Algorithm
     rng = np.random.RandomState(random_state)
 
     X = np.asarray(X, dtype=np.float64)
@@ -636,12 +705,13 @@ def optimize_preprocessing(
         print(f"  Data: {n_samples} samples, {n_features} features")
         print(f"  Task: {task_type}")
         print(f"  Fitness model: {fitness_model.upper()}")
+        print(f"  Search space: {TOTAL_COMBINATIONS} combinations")
         print(f"  Population: {population_size}, Generations: {n_generations}")
         print(f"  CV folds: {cv_folds}, PLS components: {n_components}")
 
     # Initialize population with seeds + random
     seed_chromosomes = get_seed_chromosomes()
-    n_seeds = min(len(seed_chromosomes), population_size // 4)  # Max 25% seeds
+    n_seeds = min(len(seed_chromosomes), population_size // 3)  # Max 33% seeds
 
     population_list = []
     for i in range(n_seeds):
@@ -654,7 +724,7 @@ def optimize_preprocessing(
     population = np.array(population_list)
 
     if verbose >= 1:
-        print(f"  Seeds: {n_seeds} (max 25% of population)")
+        print(f"  Seeds: {n_seeds} (max 33% of population)")
 
     # Evaluate initial fitness
     fitness = np.array([
@@ -726,7 +796,7 @@ def optimize_preprocessing(
             'mean_fitness': mean_fit
         })
 
-        if verbose >= 1 and gen % 10 == 0:
+        if verbose >= 1 and gen % 5 == 0:
             if task_type == 'classification':
                 print(f"  Gen {gen}: Best Accuracy = {best_fitness:.4f}")
             else:
@@ -758,20 +828,20 @@ def optimize_preprocessing(
         print(f"  Best config: {best_config}")
 
     # Return score in format expected by callers
-    # For regression: positive RMSECV, for classification: 1 - accuracy (to match error metric)
     if task_type == 'classification':
-        best_score = 1.0 - best_fitness  # Convert accuracy to error
+        best_score = 1.0 - best_fitness
     else:
-        best_score = -best_fitness  # Convert negative RMSECV to positive
+        best_score = -best_fitness
 
     return {
         'best_genes': best_genes,
         'best_name': best_name,
         'best_transform': best_transform,
-        'best_rmsecv': best_score,  # Kept as 'best_rmsecv' for backward compatibility
+        'best_rmsecv': best_score,
         'best_config': best_config,
         'history': history,
-        'task_type': task_type
+        'task_type': task_type,
+        'method': 'ga'
     }
 
 
@@ -815,8 +885,9 @@ def get_optimized_preproc_config(
     if quick:
         result = optimize_preprocessing(
             X, y,
-            population_size=16,
-            n_generations=25,
+            method='ga',
+            population_size=32,
+            n_generations=20,
             cv_folds=3,
             random_state=random_state,
             verbose=verbose
@@ -824,8 +895,9 @@ def get_optimized_preproc_config(
     else:
         result = optimize_preprocessing(
             X, y,
-            population_size=32,
-            n_generations=50,
+            method='ga',
+            population_size=48,
+            n_generations=30,
             cv_folds=5,
             random_state=random_state,
             verbose=verbose

@@ -1515,8 +1515,9 @@ class SpectralPredictApp:
 
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
-        self.ga_preprocess_population = tk.IntVar(value=64)
-        self.ga_preprocess_generations = tk.IntVar(value=50)
+        self.ga_preprocess_method = tk.StringVar(value="ga")  # 'ga' or 'exhaustive'
+        self.ga_preprocess_population = tk.IntVar(value=48)
+        self.ga_preprocess_generations = tk.IntVar(value=30)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
 
         # Advanced model options (NeuralBoosted)
@@ -5443,30 +5444,38 @@ class SpectralPredictApp:
         self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
         self.ga_preproc_options_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
 
-        ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        # Search method dropdown
+        ttk.Label(self.ga_preproc_options_frame, text="Search Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        method_combo = ttk.Combobox(self.ga_preproc_options_frame, textvariable=self.ga_preprocess_method,
+                                     values=["ga", "exhaustive"], state="readonly", width=12)
+        method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(self.ga_preproc_options_frame, text="(exhaustive = guaranteed optimal)",
+                  style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=5)
+
+        ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         ga_pop_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=16, to=128,
                                       textvariable=self.ga_preprocess_population, width=8)
-        ga_pop_spinbox.grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Label(self.ga_preproc_options_frame, text="(default: 32)", style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=5)
+        ga_pop_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="(GA only, default: 48)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=5, pady=(5, 0))
 
-        ttk.Label(self.ga_preproc_options_frame, text="Generations:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="Generations:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         ga_gen_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=10, to=200,
                                       textvariable=self.ga_preprocess_generations, width=8)
-        ga_gen_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-        ttk.Label(self.ga_preproc_options_frame, text="(default: 50)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=5, pady=(5, 0))
+        ga_gen_spinbox.grid(row=2, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="(GA only, default: 30)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=5, pady=(5, 0))
 
-        ttk.Label(self.ga_preproc_options_frame, text="CV Folds:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="CV Folds:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         ga_cv_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=3, to=10,
                                      textvariable=self.ga_preprocess_cv_folds, width=8)
-        ga_cv_spinbox.grid(row=2, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-        ttk.Label(self.ga_preproc_options_frame, text="(default: 5)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=5, pady=(5, 0))
+        ga_cv_spinbox.grid(row=3, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        ttk.Label(self.ga_preproc_options_frame, text="(default: 5)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=5, pady=(5, 0))
 
-        # Info about what GA optimizes
+        # Info about what GA optimizes (updated for simplified search space)
         ttk.Label(ga_preproc_frame,
-                 text="GA optimizes: preprocessing type, S-G window, baseline method/params, smoothing",
+                 text="Optimizes: preprocessing type (14) x S-G window (17) = 238 combinations",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
         ttk.Label(ga_preproc_frame,
-                 text="Note: Increases analysis time but may find better preprocessing than manual selection",
+                 text="Runs separate optimization for each model group (PLS, Trees, Neural/SVM)",
                  style='Caption.TLabel', foreground=self.colors['warning']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         # Initially hide GA options
@@ -16602,6 +16611,7 @@ class SpectralPredictApp:
                 ga_quick_mode=self.ga_quick_mode.get(),
                 # GA preprocessing parameters
                 ga_preprocess=self.enable_ga_preprocessing.get(),
+                ga_preprocess_method=self.ga_preprocess_method.get(),
                 ga_preprocess_population=self.ga_preprocess_population.get(),
                 ga_preprocess_generations=self.ga_preprocess_generations.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
