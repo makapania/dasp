@@ -3144,7 +3144,9 @@ def _run_single_config(
         fitted_model_for_importance = None
 
     # Extract LVs (for PLS models) - must be done before building result dict
-    lvs = params.get("n_components", np.nan)
+    # Use int to avoid decimal display, None for non-PLS models
+    n_comp = params.get("n_components")
+    lvs = int(n_comp) if n_comp is not None else None
 
     # Format imbalance handling indicator for display
     if imbalance_method is None:

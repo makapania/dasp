@@ -37,9 +37,10 @@ import pandas as pd
 import optuna
 from optuna import Trial
 from optuna.samplers import TPESampler
-from sklearn.model_selection import cross_val_score, cross_validate, KFold, StratifiedKFold
+from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
+from sklearn.metrics import roc_auc_score
 from typing import Dict, List, Optional, Callable, Tuple, Any
 
 # Import existing infrastructure
@@ -273,6 +274,7 @@ def suggest_model_params(
             'max_depth': max_depth,
             'min_child_samples': 5,
             'subsample': 0.8,
+            'bagging_freq': 1,  # Required when subsample < 1.0
             'colsample_bytree': 0.8,
             'reg_alpha': 0.1,
             'reg_lambda': 1.0,
@@ -290,6 +292,7 @@ def suggest_model_params(
             'colsample_bytree': 0.8,
             'reg_alpha': 0.1,
             'reg_lambda': 1.0,
+            'tree_method': 'hist',  # Optimized for high-dimensional spectral data
             'verbosity': 0,
             'n_jobs': 1
         }
@@ -612,11 +615,27 @@ def create_unified_objective(
                 r2 = cv_results['test_r2'].mean()
                 metric = rmse  # Minimize RMSE
             else:
-                # Classification: use accuracy
+                # Classification: use accuracy and ROC_AUC
                 scores = cross_val_score(
                     model, X_final, y, cv=cv, scoring='accuracy', n_jobs=1, error_score='raise'
                 )
                 accuracy = scores.mean()
+
+                # Compute ROC_AUC using cross_val_predict for probability estimates
+                try:
+                    y_proba = cross_val_predict(
+                        model, X_final, y, cv=cv, method='predict_proba', n_jobs=1
+                    )
+                    n_classes = len(np.unique(y))
+                    if n_classes == 2:
+                        # Binary classification
+                        roc_auc = roc_auc_score(y, y_proba[:, 1])
+                    else:
+                        # Multiclass - use weighted average
+                        roc_auc = roc_auc_score(y, y_proba, multi_class='ovr', average='weighted')
+                except Exception:
+                    roc_auc = np.nan
+
                 metric = -accuracy  # Minimize negative accuracy
 
             # Store additional info in trial
@@ -634,6 +653,7 @@ def create_unified_objective(
                 trial.set_user_attr('R2', r2)
             else:
                 trial.set_user_attr('Accuracy', accuracy)
+                trial.set_user_attr('ROC_AUC', roc_auc)
 
             # Store selected wavelengths in TRAINING ORDER (importance order)
             # CRITICAL: Do NOT sort - Model Development expects wavelengths in the same
@@ -939,18 +959,19 @@ def convert_study_to_dataframe(
             accuracy = trial.user_attrs.get('Accuracy', -trial.value if trial.value else np.nan)
             row['Accuracy'] = accuracy
             row['CV Error'] = 1 - accuracy if accuracy is not None and not np.isnan(accuracy) else np.nan
-            row['ROC_AUC'] = np.nan  # Placeholder for report.py compatibility
+            row['ROC_AUC'] = trial.user_attrs.get('ROC_AUC', np.nan)
 
         # Add wavelength info
         row['top_vars'] = trial.user_attrs.get('selected_wavelengths', 'N/A')
         row['all_vars'] = trial.user_attrs.get('all_wavelengths', 'N/A')
 
-        # Extract LVs for PLS
+        # Extract LVs for PLS (store as int, use None for non-PLS to avoid float conversion)
         if model_name.lower() in ('pls', 'pls-da'):
             params = trial.params
-            row['LVs'] = params.get('n_components', np.nan)
+            n_comp = params.get('n_components')
+            row['LVs'] = int(n_comp) if n_comp is not None else None
         else:
-            row['LVs'] = np.nan
+            row['LVs'] = None
 
         results.append(row)
 
