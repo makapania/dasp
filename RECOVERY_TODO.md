@@ -207,7 +207,7 @@ Three optimization modules for spectral modeling - ADDITIVE to existing search.p
 ---
 
 
-## ✅ UNIFIED BAYESIAN OPTIMIZATION (2026-01-04) - COMPLETE
+## ✅ UNIFIED BAYESIAN OPTIMIZATION (2026-01-05) - COMPLETE
 
 **STATUS: FULLY WORKING - Regression and Classification both confirmed working**
 
@@ -224,7 +224,7 @@ All regression issues fixed (see commits below).
 - `KeyError: 'RMSE'` - GUI hardcoded for regression columns
 - `KeyError: 'Accuracy'` - missing CV Error column for GUI
 
-**Fixes Applied (NOT YET COMMITTED):**
+**Fixes Applied:**
 
 1. **unified_bayesian.py:**
    - Added `task_type` param to `compute_importances()` (was hardcoded to 'regression')
@@ -244,6 +244,51 @@ All regression issues fixed (see commits below).
 - ✅ Standalone test with synthetic data PASSED
 - ✅ String labels work correctly
 - ✅ GUI integration confirmed working by user (2026-01-04)
+
+### Progress Feedback - COMPLETE ✅ (2026-01-05)
+
+**Problem:** Unified Bayesian showed no progress in Progress tab until completion (unlike Grid Search).
+
+**Fixes Applied:**
+1. Connected `progress_callback` to `run_unified_bayesian()` call (line 16347)
+2. Added `best_model` tracking to progress_wrapper for "Best Model So Far" display
+3. Fixed preprocessing param key: `'preprocess_type'` → `'preprocessing'`
+4. Added `unified_progress_wrapper` to track best across ALL models (not just current)
+
+**Progress tab now shows:**
+- Trial-by-trial updates: `"PLS: Trial 1/50 - RMSE: 0.0523"`
+- Time estimation (elapsed/remaining)
+- "Best Model So Far" with correct preprocessing and overall best across models
+
+**Commits:**
+- `0fb179f` - feat: Add progress feedback to Unified Bayesian optimization
+- `60aa6ea` - fix: Unified Bayesian progress shows correct preprocessing and overall best
+
+### Confusion Matrix Class Names - FIXED ✅ (2026-01-05)
+
+**Problem:** Confusion matrix in Model Development showed numbers (0, 1, 2) instead of class names ("High", "Low", "Medium").
+
+**Root Cause:** Code checked `self.label_encoder` (from Results search) but Model Development stores its encoder in `self.refined_label_encoder`.
+
+**Fix:** Updated 4 locations to check `refined_label_encoder` first, fallback to `label_encoder`:
+- Confusion matrix plot (line 19764)
+- ROC curve plot (line 20062)
+- Annotation tooltip Y value (line 11324)
+- Annotation tooltip predicted value (line 11346)
+
+**Commit:** `b104199` - fix: Show class names instead of numbers in confusion matrix
+
+### LVs Integer Display - FIXED ✅ (2026-01-05)
+
+**Problem:** LVs column showed decimals (e.g., "5.0") instead of integers ("5").
+
+**Root Cause:** `np.nan` for non-PLS models caused pandas to convert column to float.
+
+**Fix:** Use `int()` conversion and `None` instead of `np.nan` in both:
+- `unified_bayesian.py` line 972
+- `search.py` line 3149
+
+**Commit:** `bc716ea` - fix: Display LVs as integers instead of decimals in results
 
 ---
 
