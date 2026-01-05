@@ -20987,7 +20987,7 @@ F1 Score:  {f1:.4f}
                     # For any higher derivative, use deriv + 1
                     return max(2, deriv_value + 1)
 
-            def _parse_coupled_preprocessing(preprocess_str: str, params_str: str) -> dict:
+            def _parse_coupled_preprocessing(preprocess_str: str, params_str: str, window_config=None) -> dict:
                 """
                 Parse coupled optimization preprocessing string into components.
 
@@ -20999,12 +20999,16 @@ F1 Score:  {f1:.4f}
 
                 Returns dict with: baseline, snv, deriv, snv_first, window, polyorder
                 """
+                # Use window from config if provided (Unified Bayesian stores it in Window column)
+                # Otherwise default to 11 (for old results or coupled optimization)
+                default_window = window_config if window_config is not None else 11
+
                 result = {
                     'baseline': None,
                     'snv': False,
                     'deriv': None,
                     'snv_first': True,
-                    'window': 11,  # Default
+                    'window': default_window,
                     'polyorder': 2  # Default
                 }
 
@@ -21098,9 +21102,13 @@ F1 Score:  {f1:.4f}
 
             if is_coupled_result:
                 # Parse coupled preprocessing string
+                # CRITICAL: Pass Window from config for Unified Bayesian results
+                # Unified Bayesian stores window in 'Window' column, not in 'Params'
+                window_from_config = self.selected_model_config.get('Window', None)
                 coupled_config = _parse_coupled_preprocessing(
                     self.selected_model_config.get('Preprocess', 'raw'),
-                    self.selected_model_config.get('Params', '')
+                    self.selected_model_config.get('Params', ''),
+                    window_config=window_from_config
                 )
 
                 deriv = coupled_config['deriv']
