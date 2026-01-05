@@ -2191,17 +2191,19 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     # =========================================================================
     if compute_validation and X_validation is not None and y_validation is not None:
         # Convert X to numpy if it's a DataFrame
-        X_train_np = X.values if hasattr(X, 'values') else X
-        y_train_np = y.values if hasattr(y, 'values') else y
-        X_val_np = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
-        y_val_np = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+        X_train_for_val = X.values if hasattr(X, 'values') else X
+        X_val_for_val = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
+        y_val_for_val = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+
+        # CRITICAL: Use encoded training labels (y_np) for consistency
+        # y_np was encoded earlier if label_encoder exists, so model training
+        # and validation must use the same encoding
+        y_train_for_val = y_np  # Use the (possibly encoded) training labels
 
         # CRITICAL: Encode validation labels using the same encoder as training
-        # Without this, classification validation fails (model predicts encoded labels
-        # but we compare to un-encoded labels)
         if label_encoder is not None:
             try:
-                y_val_np = label_encoder.transform(y_val_np)
+                y_val_for_val = label_encoder.transform(y_val_for_val)
                 print(f"[Validation] Encoded validation labels using training label encoder")
             except ValueError as e:
                 print(f"[Warning] Could not encode validation labels: {e}")
@@ -2212,10 +2214,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         df_ranked = compute_validation_metrics_for_top_models(
             df_ranked,
-            X_train_np,
-            y_train_np,
-            X_val_np,
-            y_val_np,
+            X_train_for_val,
+            y_train_for_val,
+            X_val_for_val,
+            y_val_for_val,
             task_type,
             wavelengths_for_validation,
             top_n=validation_top_n,
@@ -2761,17 +2763,19 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     # =========================================================================
     if compute_validation and X_validation is not None and y_validation is not None:
         # Convert X to numpy if it's a DataFrame
-        X_train_np = X.values if hasattr(X, 'values') else X
-        y_train_np = y.values if hasattr(y, 'values') else y
-        X_val_np = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
-        y_val_np = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+        X_train_for_val = X.values if hasattr(X, 'values') else X
+        X_val_for_val = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
+        y_val_for_val = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+
+        # CRITICAL: Use encoded training labels (y_np) for consistency
+        # y_np was encoded earlier if label_encoder exists, so model training
+        # and validation must use the same encoding
+        y_train_for_val = y_np  # Use the (possibly encoded) training labels
 
         # CRITICAL: Encode validation labels using the same encoder as training
-        # Without this, classification validation fails (model predicts encoded labels
-        # but we compare to un-encoded labels)
         if label_encoder is not None:
             try:
-                y_val_np = label_encoder.transform(y_val_np)
+                y_val_for_val = label_encoder.transform(y_val_for_val)
                 print(f"[Validation] Encoded validation labels using training label encoder")
             except ValueError as e:
                 print(f"[Warning] Could not encode validation labels: {e}")
@@ -2782,10 +2786,10 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
         df_ranked = compute_validation_metrics_for_top_models(
             df_ranked,
-            X_train_np,
-            y_train_np,
-            X_val_np,
-            y_val_np,
+            X_train_for_val,
+            y_train_for_val,
+            X_val_for_val,
+            y_val_for_val,
             task_type,
             wavelengths_for_validation,
             top_n=validation_top_n,
