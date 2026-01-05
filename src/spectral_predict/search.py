@@ -522,7 +522,8 @@ def compute_validation_metrics_for_top_models(
 
     print(f"[Validation] Completed validation metrics for {n_to_process} models")
 
-    # Reorder columns to place validation metrics after CV metrics
+    # Reorder columns to place metrics in logical order:
+    # Calibration metrics first, then validation metrics
     cols = list(df_results.columns)
     if task_type == 'regression' and 'val_RMSE' in cols and 'R2' in cols:
         # Move val_RMSE and val_R2 after R2
@@ -532,17 +533,36 @@ def compute_validation_metrics_for_top_models(
         cols.insert(r2_idx + 1, 'val_RMSE')
         cols.insert(r2_idx + 2, 'val_R2')
         df_results = df_results[cols]
-    elif task_type == 'classification' and 'ROC_AUC' in cols:
-        # Move all validation metrics after ROC_AUC
+    elif task_type == 'classification':
+        # Order: Accuracy, ROC_AUC, F1, Precision, Recall (calibration)
+        #        val_Accuracy, val_ROC_AUC, val_F1, val_Precision, val_Recall (validation)
+        cal_cols = ['Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall']
         val_cols = ['val_Accuracy', 'val_ROC_AUC', 'val_F1', 'val_Precision', 'val_Recall']
-        # Remove all validation columns that exist
-        for col in val_cols:
+
+        # Remove all metric columns that exist
+        for col in cal_cols + val_cols:
             if col in cols:
                 cols.remove(col)
-        # Insert them after ROC_AUC
-        auc_idx = cols.index('ROC_AUC')
+
+        # Find insertion point (after Imbalance column, or after common metadata)
+        if 'Imbalance' in cols:
+            insert_idx = cols.index('Imbalance') + 1
+        elif 'SubsetTag' in cols:
+            insert_idx = cols.index('SubsetTag') + 1
+        else:
+            insert_idx = 0
+
+        # Insert calibration metrics first, then validation metrics
+        for i, col in enumerate(cal_cols):
+            if col in df_results.columns:
+                cols.insert(insert_idx + i, col)
+
+        # Insert validation metrics after calibration metrics
+        cal_count = sum(1 for c in cal_cols if c in df_results.columns)
         for i, col in enumerate(val_cols):
-            cols.insert(auc_idx + 1 + i, col)
+            if col in df_results.columns:
+                cols.insert(insert_idx + cal_count + i, col)
+
         df_results = df_results[cols]
 
     return df_results
@@ -2176,6 +2196,17 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         X_val_np = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
         y_val_np = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
 
+        # CRITICAL: Encode validation labels using the same encoder as training
+        # Without this, classification validation fails (model predicts encoded labels
+        # but we compare to un-encoded labels)
+        if label_encoder is not None:
+            try:
+                y_val_np = label_encoder.transform(y_val_np)
+                print(f"[Validation] Encoded validation labels using training label encoder")
+            except ValueError as e:
+                print(f"[Warning] Could not encode validation labels: {e}")
+                print(f"          Validation labels may contain classes not seen during training")
+
         # Get wavelengths for subsetting
         wavelengths_for_validation = X.columns.astype(float).values if hasattr(X, 'columns') else np.arange(X.shape[1])
 
@@ -2734,6 +2765,17 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         y_train_np = y.values if hasattr(y, 'values') else y
         X_val_np = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
         y_val_np = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+
+        # CRITICAL: Encode validation labels using the same encoder as training
+        # Without this, classification validation fails (model predicts encoded labels
+        # but we compare to un-encoded labels)
+        if label_encoder is not None:
+            try:
+                y_val_np = label_encoder.transform(y_val_np)
+                print(f"[Validation] Encoded validation labels using training label encoder")
+            except ValueError as e:
+                print(f"[Warning] Could not encode validation labels: {e}")
+                print(f"          Validation labels may contain classes not seen during training")
 
         # Get wavelengths for subsetting
         wavelengths_for_validation = X.columns.astype(float).values if hasattr(X, 'columns') else np.arange(X.shape[1])
