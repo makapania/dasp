@@ -498,8 +498,9 @@ def compute_validation_metrics_for_top_models(
                             # Binary classification - use probability of positive class
                             val_roc_auc = roc_auc_score(y_val, y_proba[:, 1])
                         else:
-                            # Multiclass - use one-vs-rest with weighted average
-                            val_roc_auc = roc_auc_score(y_val, y_proba, multi_class='ovr', average='weighted')
+                            # Multiclass - use one-vs-rest with macro average
+                            # Macro gives equal weight to each class (consistent with CV metrics)
+                            val_roc_auc = roc_auc_score(y_val, y_proba, multi_class='ovr', average='macro')
                         df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
                 except Exception as e:
                     print(f"  [Warning] Could not compute ROC AUC for model {i+1}: {e}")
@@ -2861,9 +2862,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         y_pred = pipe_clone.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
 
-        # Determine averaging method for multiclass metrics
-        n_classes = len(np.unique(y_test))
-        average_method = 'binary' if n_classes == 2 else 'weighted'
+        # Use is_binary_classification flag (determined from full dataset) for consistent averaging
+        # This avoids issues where a CV fold might have missing classes
+        average_method = 'binary' if is_binary_classification else 'weighted'
 
         # F1, Precision, Recall
         try:
