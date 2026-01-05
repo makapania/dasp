@@ -207,66 +207,41 @@ Three optimization modules for spectral modeling - ADDITIVE to existing search.p
 ---
 
 
-## ⚠️ UNIFIED BAYESIAN OPTIMIZATION (2026-01-04) - PARTIALLY FIXED
+## ✅ UNIFIED BAYESIAN OPTIMIZATION (2026-01-04) - COMPLETE
 
-**STATUS: Top models work, Window size bug remaining**
+**STATUS: FULLY WORKING - All issues resolved**
 
 A completely new "Unified Bayesian" optimization method that performs TRUE joint optimization of preprocessing + hyperparameters + variable selection + subset size together.
 
-### Current State (2026-01-04 Updated)
-- **FIXED:** Wavelength ordering - now stores in training order (commit 7ccdfd4)
-- **FIXED:** R2 matches EXACTLY for top-ranked models (1-10)
-- **REMAINING BUG:** R2 diverges for models with window size != 11
+### All Issues Fixed
 
-### What Was Fixed (This Session)
-
-#### 1. Wavelength Ordering Fix (Commit 7ccdfd4)
+#### 1. Wavelength Ordering - FIXED (Commit 7ccdfd4)
 **Problem:** Wavelengths were stored in spectral order but training used importance order.
-
-**Root Cause:** Code at line 625 had `sorted_indices = np.sort(top_indices)` which sorted wavelengths to spectral order before storage, but training used `top_indices` directly.
-
 **Fix:** Removed `np.sort(top_indices)` - wavelengths now stored in training order.
-
 **File:** `src/spectral_predict/unified_bayesian.py` lines 625-638
 
-#### 2. Previously Fixed (Still Working)
+#### 2. Window Size Bug - FIXED (Commit 86d0ddb)
+**Problem:** Model Development used hardcoded window=11 instead of reading from config.
+**Root Cause:** `_parse_coupled_preprocessing()` had hardcoded `'window': 11` default.
+**Fix:** Added `window_config` parameter to pass Window from config.
+**File:** `spectral_predict_gui_optimized.py` lines 20990, 21002-21010, 21105-21109
+
+**Test Result:**
+```
+Original:          Window=31, R²=0.913829
+Model Development: Window=31, R²=0.913829
+Difference:        0.000000 ✅
+```
+
+#### 3. Previously Fixed (Still Working)
 - `Poly` column - required by report.py
 - `ROC_AUC` placeholder for classification tasks
 - `all_vars` column - ALL wavelengths for model reconstruction
 - Report generation - no longer crashes
 
-### Remaining Bug: Window Size Not Read
-
-**Symptom:** R2 matches for window=11, diverges for other window sizes (7, 15, 17, etc.)
-
-**Root Cause:** Model Development reads `Deriv` from config but NOT `Window`.
-
-**Location:** `spectral_predict_gui_optimized.py` lines 21139-21148
-
-**The Fix Needed (4 lines):**
-```python
-# After line ~21147, add:
-config_window = self.selected_model_config.get('Window', None)
-if config_window is not None and not pd.isna(config_window):
-    window = int(config_window)
-    print(f"DEBUG: Using window={window} from loaded config")
+### Commits
 ```
-
-**Why window=11 works:** The coupled parser (line 21007) has `'window': 11` as hardcoded default.
-
-### Code Trace - Where Window Flows
-
-| Step | File | Lines | Status |
-|------|------|-------|--------|
-| 1. Storage | unified_bayesian.py | 611 | Working |
-| 2. DataFrame | unified_bayesian.py | 880 | Working |
-| 3. Load | gui_optimized.py | 19338 | Working |
-| 4. Execute | gui_optimized.py | 20947-20955 | Working |
-| 5. **BUG** | gui_optimized.py | 21139-21148 | BROKEN - Window not read |
-| 6. Default | gui_optimized.py | 21007 | Why 11 works |
-
-### Commits (This Session)
-```
+86d0ddb - fix: Read Window from config for Unified Bayesian Model Development
 7ccdfd4 - fix: Store wavelengths in training order (removed np.sort)
 a757086 - revert: Remove preprocessing name stripping that broke Model Development
 361f8aa - fix: Sort wavelengths only for storage, not during training
@@ -274,20 +249,11 @@ e6b631a - fix: Match grid search preprocessing name format for Model Development
 08a3c30 - fix: Add missing columns and spectral order for Model Development
 ```
 
-### Key Files
-| File | Purpose | Key Lines |
-|------|---------|-----------|
-| `src/spectral_predict/unified_bayesian.py` | Unified Bayesian optimization | 609-617 (storage), 625-638 (wavelengths) |
-| `src/spectral_predict/search.py` | Grid search (reference - WORKS, DO NOT MODIFY) | N/A |
-| `spectral_predict_gui_optimized.py` | Model Development | 21139-21148 (BUG: Window not read) |
-
-### Verification After Fix
-1. Run Unified Bayesian with various window sizes (7, 11, 15, 17, etc.)
-2. Double-click results in Model Development
-3. R2 should match for ALL window sizes, not just 11
+### Test Script
+Regression test at `scripts/test_unified_bayesian_model_dev.py` verifies R² matches for all window sizes.
 
 ### Handoff Document
-See `.claude/analysis/HANDOFF_STATUS.md` for detailed session notes and investigation findings.
+See `.claude/analysis/HANDOFF_STATUS.md` for detailed session notes.
 
 ---
 
