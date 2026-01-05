@@ -27,6 +27,19 @@ def write_markdown_report(target, df_ranked, out_dir):
 
     report_path = out_dir / f"{target}.md"
 
+    # Handle empty results
+    if len(df_ranked) == 0:
+        lines = [
+            f"# Spectral Predict Report: {target}",
+            "",
+            "**No models completed successfully.**",
+            "",
+            "Check the optimization logs for error messages.",
+        ]
+        with open(report_path, "w") as f:
+            f.write("\n".join(lines))
+        return report_path
+
     # Detect which score column exists (Bayesian uses 'Score', grid search uses 'CompositeScore')
     score_col = 'Score' if 'Score' in df_ranked.columns else 'CompositeScore'
 

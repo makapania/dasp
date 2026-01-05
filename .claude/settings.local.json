@@ -31,7 +31,12 @@
       "Bash(if exist backup_2025-12-20nsga2_search.py type backup_2025-12-20nsga2_search.py)",
       "Bash(git fetch:*)",
       "Bash(git ls-tree:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(git checkout:*)",
+      "Bash(find:*)",
+      "Bash(del:*)",
+      "Bash(git -C C:/Users/sponheim/.claude status)",
+      "Bash(git -C C:/Users/sponheim/.claude log --oneline -3)"
     ],
     "deny": [],
     "ask": []

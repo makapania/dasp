@@ -345,7 +345,8 @@ def compute_importances(
     method: str,
     model_name: str,
     cv_folds: int = 5,
-    random_state: int = 42
+    random_state: int = 42,
+    task_type: str = 'regression'
 ) -> np.ndarray:
     """Compute feature importances using specified method.
 
@@ -363,6 +364,8 @@ def compute_importances(
         Number of CV folds for variable selection methods
     random_state : int
         Random seed
+    task_type : str
+        'regression' or 'classification'
 
     Returns
     -------
@@ -385,7 +388,7 @@ def compute_importances(
         else:
             params = {}
 
-        model = build_model(model_name, params, task_type='regression')
+        model = build_model(model_name, params, task_type=task_type)
         model.fit(X, y)
 
         return get_feature_importances(model, model_name, X, y)
@@ -411,7 +414,7 @@ def compute_importances(
             return importances
         except Exception as e:
             logging.warning(f"CARS failed: {e}, falling back to importance")
-            return compute_importances(X, y, 'importance', model_name, cv_folds, random_state)
+            return compute_importances(X, y, 'importance', model_name, cv_folds, random_state, task_type)
 
     else:
         # Default: uniform importances (full model)
@@ -532,7 +535,7 @@ def create_unified_objective(
                         if n_vars < 5:
                             n_vars = min(5, n_features_prep - 1)
                         importances = compute_importances(
-                            X_prep, y, 'importance', model_name, cv_folds, random_state
+                            X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
                         )
                         top_indices = np.argsort(importances)[-n_vars:]
                         subset_tag = f"top{n_vars}_importance_fallback"
@@ -543,7 +546,7 @@ def create_unified_objective(
                     if n_vars < 5:
                         n_vars = min(5, n_features_prep - 1)
                     importances = compute_importances(
-                        X_prep, y, 'importance', model_name, cv_folds, random_state
+                        X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
                     )
                     top_indices = np.argsort(importances)[-n_vars:]
                     subset_tag = f"top{n_vars}_importance_fallback"
@@ -561,7 +564,7 @@ def create_unified_objective(
 
                     # Compute importances
                     importances = compute_importances(
-                        X_prep, y, subset_type, model_name, cv_folds, random_state
+                        X_prep, y, subset_type, model_name, cv_folds, random_state, task_type
                     )
 
                     # Select top variables
@@ -584,6 +587,16 @@ def create_unified_objective(
 
             # 6. Build and cross-validate model
             model = build_model(model_name, model_params, task_type=task_type)
+
+            # For PLS-DA classification, wrap PLSTransformer with LogisticRegression
+            # (just like search.py does at lines 2998-3005)
+            if task_type == 'classification' and model_name.lower() in ('pls', 'pls-da'):
+                from sklearn.pipeline import Pipeline
+                from sklearn.linear_model import LogisticRegression
+                model = Pipeline([
+                    ('pls', model),
+                    ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
+                ])
 
             # 7. Compute metrics using cross_validate for proper scoring
             if task_type == 'regression':
@@ -722,6 +735,14 @@ def run_unified_bayesian(
     wavelengths = np.asarray(wavelengths)
     n_samples, n_features = X.shape
 
+    # Label-encode y for classification (string labels -> integers)
+    # This matches how search.py handles classification at lines 737-740
+    label_encoder = None
+    if task_type == 'classification':
+        from sklearn.preprocessing import LabelEncoder
+        label_encoder = LabelEncoder()
+        y = label_encoder.fit_transform(y)
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"Unified Bayesian Optimization")
@@ -808,26 +829,32 @@ def run_unified_bayesian(
         print(f"\n{'='*70}")
         print(f"Optimization Complete")
         print(f"{'='*70}")
-        if task_type == 'regression':
-            best_rmse = results_df['RMSE'].min()
-            best_r2 = results_df.loc[results_df['RMSE'].idxmin(), 'R2']
-            print(f"Best RMSE: {best_rmse:.6f}")
-            print(f"Best R2: {best_r2:.6f}")
-        else:
-            best_acc = results_df['Accuracy'].max()
-            print(f"Best Accuracy: {best_acc:.6f}")
 
-        # Show best configuration
-        if task_type == 'regression':
-            best_row = results_df.loc[results_df['RMSE'].idxmin()]
+        if len(results_df) == 0:
+            print("WARNING: No successful trials completed!")
+            print("All trials may have failed. Check the warnings above.")
+            print(f"{'='*70}\n")
         else:
-            best_row = results_df.loc[results_df['Accuracy'].idxmax()]
+            if task_type == 'regression':
+                best_rmse = results_df['RMSE'].min()
+                best_r2 = results_df.loc[results_df['RMSE'].idxmin(), 'R2']
+                print(f"Best RMSE: {best_rmse:.6f}")
+                print(f"Best R2: {best_r2:.6f}")
+            else:
+                best_acc = results_df['Accuracy'].max()
+                print(f"Best Accuracy: {best_acc:.6f}")
 
-        print(f"\nBest Configuration:")
-        print(f"  Preprocessing: {best_row['Preprocess']}")
-        print(f"  Subset: {best_row['SubsetTag']} ({best_row['n_vars']} vars)")
-        print(f"  Params: {best_row['Params']}")
-        print(f"{'='*70}\n")
+            # Show best configuration
+            if task_type == 'regression':
+                best_row = results_df.loc[results_df['RMSE'].idxmin()]
+            else:
+                best_row = results_df.loc[results_df['Accuracy'].idxmax()]
+
+            print(f"\nBest Configuration:")
+            print(f"  Preprocessing: {best_row['Preprocess']}")
+            print(f"  Subset: {best_row['SubsetTag']} ({best_row['n_vars']} vars)")
+            print(f"  Params: {best_row['Params']}")
+            print(f"{'='*70}\n")
 
     return results_df, study
 
@@ -893,7 +920,9 @@ def convert_study_to_dataframe(
             row['RMSE'] = trial.user_attrs.get('RMSE', trial.value)
             row['R2'] = trial.user_attrs.get('R2', np.nan)
         else:
-            row['Accuracy'] = trial.user_attrs.get('Accuracy', -trial.value if trial.value else np.nan)
+            accuracy = trial.user_attrs.get('Accuracy', -trial.value if trial.value else np.nan)
+            row['Accuracy'] = accuracy
+            row['CV Error'] = 1 - accuracy if accuracy is not None and not np.isnan(accuracy) else np.nan
             row['ROC_AUC'] = np.nan  # Placeholder for report.py compatibility
 
         # Add wavelength info
@@ -911,11 +940,22 @@ def convert_study_to_dataframe(
 
     df = pd.DataFrame(results)
 
+    # Handle empty results (all trials failed)
+    if len(df) == 0:
+        cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'n_vars', 'top_vars',
+                'all_vars', 'Window', 'Poly', 'Deriv', 'LVs', 'full_vars', 'SubsetTag',
+                'trial_number', 'Folds', 'Optimization']
+        if task_type == 'classification':
+            cols.extend(['Accuracy', 'CV Error', 'ROC_AUC', 'CompositeScore', 'Score'])
+        else:
+            cols.extend(['RMSE', 'R2', 'CompositeScore', 'Score'])
+        return pd.DataFrame(columns=cols)
+
     # Sort by performance
     if task_type == 'regression':
         df = df.sort_values('RMSE', ascending=True)
     else:
-        df = df.sort_values('Accuracy', ascending=False)
+        df = df.sort_values('CV Error', ascending=True)  # Lower CV Error is better
 
     df = df.reset_index(drop=True)
 
@@ -923,11 +963,17 @@ def convert_study_to_dataframe(
     df.insert(0, 'Rank', range(1, len(df) + 1))
 
     # Add CompositeScore column (required for report.py compatibility)
-    # Lower is better for both regression (RMSE) and classification (negated accuracy)
+    # Lower is better for both regression (RMSE) and classification (CV Error)
     if task_type == 'regression':
         df['CompositeScore'] = df['RMSE']
     else:
-        df['CompositeScore'] = -df['Accuracy']
+        df['CompositeScore'] = df['CV Error']
+
+    # Add Score column for compatibility with Coupled format
+    if task_type == 'classification':
+        df['Score'] = df['CV Error']
+    else:
+        df['Score'] = df['RMSE']
 
     return df
 

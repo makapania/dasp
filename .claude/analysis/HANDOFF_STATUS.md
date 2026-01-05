@@ -1,11 +1,44 @@
-# Unified Bayesian Model Development Integration - Handoff
+# Unified Bayesian Handoff Status
 
 **Date:** 2026-01-04 (Final Update)
-**Status:** ✅ FULLY FIXED - All issues resolved
+**Status:** ✅ CLASSIFICATION WORKING - User confirmed it runs
 
 ---
 
-## ALL ISSUES FIXED
+## CURRENT WORK: Classification Support (2026-01-04) - COMPLETE
+
+### Problem (FIXED)
+Unified Bayesian classification was failing with:
+- `could not convert string to float: 'High'` (string labels not encoded)
+- `KeyError: 'RMSE'` (GUI hardcoded for regression)
+- `KeyError: 'Accuracy'` (missing CV Error column)
+
+### Fixes Applied (NOT YET COMMITTED)
+
+#### 1. unified_bayesian.py - Multiple fixes:
+- **Line 349**: Added `task_type` param to `compute_importances()`
+- **Line 391**: Use `task_type=task_type` instead of hardcoded `'regression'`
+- **Lines 417, 538, 549, 567**: Pass `task_type` to all `compute_importances()` calls
+- **Lines 591-599**: Wrap PLS-DA with LogisticRegression for classification
+- **Lines 738-744**: Add LabelEncoder for string labels (e.g., "High", "Low")
+- **Line 898**: Add `CV Error = 1 - Accuracy` column
+- **Lines 916-925**: Handle empty DataFrame gracefully
+- **Lines 945-949**: Add `Score` column for GUI compatibility
+
+#### 2. spectral_predict_gui_optimized.py:
+- **Line 16319-16322**: Task-type aware logging (RMSE vs Accuracy)
+
+#### 3. report.py:
+- **Lines 30-41**: Handle empty results DataFrame
+
+### Testing Status
+- ✅ Standalone test with synthetic data PASSED
+- ✅ String labels ("High", "Low", "Medium") work correctly
+- ✅ GUI integration confirmed working by user (2026-01-04)
+
+---
+
+## PREVIOUS FIXES (Regression - COMPLETE)
 
 ### 1. Wavelength Ordering - FIXED (Commit 7ccdfd4)
 **Problem:** Wavelengths were stored in spectral order but training used importance order.

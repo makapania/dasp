@@ -209,11 +209,45 @@ Three optimization modules for spectral modeling - ADDITIVE to existing search.p
 
 ## ✅ UNIFIED BAYESIAN OPTIMIZATION (2026-01-04) - COMPLETE
 
-**STATUS: FULLY WORKING - All issues resolved**
+**STATUS: FULLY WORKING - Regression and Classification both confirmed working**
 
 A completely new "Unified Bayesian" optimization method that performs TRUE joint optimization of preprocessing + hyperparameters + variable selection + subset size together.
 
-### All Issues Fixed
+### Regression - COMPLETE ✅
+
+All regression issues fixed (see commits below).
+
+### Classification - COMPLETE ✅ (2026-01-04)
+
+**Problem (FIXED):** Unified Bayesian classification was failing with multiple errors:
+- `could not convert string to float: 'High'` - string labels not encoded
+- `KeyError: 'RMSE'` - GUI hardcoded for regression columns
+- `KeyError: 'Accuracy'` - missing CV Error column for GUI
+
+**Fixes Applied (NOT YET COMMITTED):**
+
+1. **unified_bayesian.py:**
+   - Added `task_type` param to `compute_importances()` (was hardcoded to 'regression')
+   - Added LabelEncoder for string class labels (e.g., "High", "Low", "Medium")
+   - Wrap PLS-DA with LogisticRegression pipeline for classification
+   - Added `CV Error = 1 - Accuracy` column for GUI compatibility
+   - Added `Score` column for GUI compatibility
+   - Handle empty DataFrame gracefully
+
+2. **spectral_predict_gui_optimized.py:**
+   - Line 16319-16322: Task-type aware logging (RMSE vs Accuracy)
+
+3. **report.py:**
+   - Handle empty results DataFrame
+
+**Testing:**
+- ✅ Standalone test with synthetic data PASSED
+- ✅ String labels work correctly
+- ✅ GUI integration confirmed working by user (2026-01-04)
+
+---
+
+### Previous Regression Fixes (COMPLETE)
 
 #### 1. Wavelength Ordering - FIXED (Commit 7ccdfd4)
 **Problem:** Wavelengths were stored in spectral order but training used importance order.
@@ -780,3 +814,46 @@ All major features from December 16-20 work have been restored:
 
 ### Backup Location
 `C:\Users\sponheim\git\dasp\backup_2025-12-20\`
+
+---
+
+## 🚨 OUTSTANDING: Reproducibility Mode Not Working (2026-01-04)
+
+**STATUS: UNFIXED - Results still vary between program restarts**
+
+**Problem:** When running Grid Search with Reproducibility Mode enabled, results (e.g., PLS R²) vary significantly between program restarts (0.946 vs 0.91). The user expects identical results when using the same data and settings.
+
+**Investigation Completed:**
+1. Identified that `np.random.seed()` was never called in `search.py`
+2. Added seed setting at line 711-713 of `search.py`:
+   ```python
+   import random
+   random.seed(random_state)
+   np.random.seed(random_state)
+   ```
+3. Updated print message to confirm seed is applied (line 724)
+4. Verified KFold/StratifiedKFold have `random_state=random_state`
+5. Verified GUI passes `reproducibility_random_state` (not hardcoded 42)
+
+**Fix Did NOT Work:** User still reports different results after program restart with fix in place.
+
+**Possible Additional Causes to Investigate:**
+1. **Data loading order** - Does GUI reorder data before passing to `grid_search_models()`?
+2. **Preprocessing randomness** - Are there operations in `preprocess.py` that use randomness?
+3. **Joblib parallel state** - Even with `n_jobs=1`, could there be residual parallel state?
+4. **BLAS numerical instability** - Different BLAS thread states could cause floating-point non-determinism
+5. **Model-specific RNG** - Some sklearn models may use internal RNG not controlled by global seed
+6. **Import order** - Module imports may affect RNG state before seeding happens
+7. **Multiple code paths** - There are TWO cv_splitter creations (lines 1400 and 2478) - are both paths using the same seed?
+
+**Files Involved:**
+- `src/spectral_predict/search.py` - Lines 709-713 (seed setting), 1400-1402, 2478-2480 (CV splitters)
+- `src/spectral_predict/reproducibility.py` - Has `ensure_reproducibility()` function (NOT currently called)
+- `spectral_predict_gui_optimized.py` - Lines 16582-16583 (passes reproducible and random_state)
+
+**Next Steps:**
+1. Try calling `ensure_reproducibility()` from `reproducibility.py` instead of manual seeding
+2. Add seed at VERY START of script (before any imports)
+3. Add hash of input data to verify data is identical between runs
+4. Add detailed logging of RNG state at key points
+5. Test if results are identical WITHIN a session (multiple runs without closing)

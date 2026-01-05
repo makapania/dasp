@@ -16316,7 +16316,10 @@ class SpectralPredictApp:
 
                         if len(results_df_model) > 0:
                             best = results_df_model.iloc[0]
-                            self._log_progress(f"    ✓ Best RMSE: {best['RMSE']:.4f}")
+                            if task_type == 'regression':
+                                self._log_progress(f"    ✓ Best RMSE: {best['RMSE']:.4f}")
+                            else:
+                                self._log_progress(f"    ✓ Best Accuracy: {best['Accuracy']:.4f}")
                             self._log_progress(f"    Preprocessing: {best['Preprocess']}")
                             self._log_progress(f"    Variables: {best['n_vars']}/{best['full_vars']}")
 

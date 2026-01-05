@@ -706,6 +706,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Set BLAS/LAPACK to single-threaded for deterministic linear algebra
         set_blas_threads(1)
 
+        # Set random seeds for full reproducibility
+        # This ensures all random operations use the same sequence across program restarts
+        import random
+        random.seed(random_state)
+        np.random.seed(random_state)
+
         # Use serial execution for all parallel operations
         n_jobs = 1
         print("\n" + "="*80)
@@ -715,7 +721,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         print("  - BLAS threads: 1 (deterministic linear algebra)")
         print("  - CV execution: Serial (n_jobs=1)")
         print("  - Model parallelism: Disabled (n_jobs=1)")
-        print(f"  - Random seed: {random_state}")
+        print(f"  - Random seed: {random_state} (applied to numpy + python random)")
         print("WARNING: Reproducible mode is ~3-5x slower than parallel execution.")
         print("After this run completes, BLAS settings will be restored automatically.")
         print("="*80 + "\n")
