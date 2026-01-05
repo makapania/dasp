@@ -11320,11 +11320,13 @@ class SpectralPredictApp:
         # Format Y value (handle both regression and classification)
         if y_value is not None:
             # Check if this is a classification task with text labels
-            if self.label_encoder is not None:
+            # Check refined_label_encoder first (from Model Development), then label_encoder (from Results search)
+            encoder = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+            if encoder is not None:
                 try:
                     # Decode numeric value back to text label
                     if isinstance(y_value, (int, np.integer)):
-                        text_label = self.label_encoder.inverse_transform([int(y_value)])[0]
+                        text_label = encoder.inverse_transform([int(y_value)])[0]
                     else:
                         text_label = str(y_value)
                     lines.append(f"Y: {text_label}")
@@ -11340,11 +11342,13 @@ class SpectralPredictApp:
 
         # Add predicted value if available
         if y_pred is not None:
-            if self.label_encoder is not None:
+            # Check refined_label_encoder first (from Model Development), then label_encoder (from Results search)
+            encoder = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+            if encoder is not None:
                 try:
                     # Decode predicted value for classification
                     if isinstance(y_pred, (int, np.integer)):
-                        text_label = self.label_encoder.inverse_transform([int(y_pred)])[0]
+                        text_label = encoder.inverse_transform([int(y_pred)])[0]
                     else:
                         text_label = str(y_pred)
                     lines.append(f"Predicted: {text_label}")
@@ -19760,8 +19764,10 @@ Performance (Classification):
         cm = confusion_matrix(self.refined_y_true, self.refined_y_pred)
 
         # Get class labels (handle label encoder if present)
-        if self.label_encoder is not None:
-            class_labels = self.label_encoder.classes_
+        # Check refined_label_encoder first (from Model Development), then label_encoder (from Results search)
+        encoder = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+        if encoder is not None:
+            class_labels = encoder.classes_
         else:
             class_labels = np.unique(np.concatenate([self.refined_y_true, self.refined_y_pred]))
 
@@ -20056,8 +20062,10 @@ F1 Score:  {f1:.4f}
             return
 
         # Get class labels
-        if self.label_encoder is not None:
-            class_labels = self.label_encoder.classes_
+        # Check refined_label_encoder first (from Model Development), then label_encoder (from Results search)
+        encoder = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+        if encoder is not None:
+            class_labels = encoder.classes_
         else:
             class_labels = np.unique(self.refined_y_true)
 
