@@ -16155,7 +16155,7 @@ class SpectralPredictApp:
                                 model_name=coupled_model_name,
                                 n_trials=self.n_bayesian_trials.get(),  # Reuse Bayesian trials setting
                                 cv_folds=self.folds.get(),
-                                random_state=42,
+                                random_state=self.reproducibility_random_state.get(),
                                 verbose=False  # Suppress per-trial output
                             )
 
@@ -16351,7 +16351,7 @@ class SpectralPredictApp:
                             task_type=task_type,
                             n_trials=self.n_unified_trials.get(),
                             cv_folds=self.folds.get(),
-                            random_state=42,
+                            random_state=self.reproducibility_random_state.get(),
                             verbose=False,
                             progress_callback=unified_progress_wrapper
                         )
@@ -16427,7 +16427,7 @@ class SpectralPredictApp:
                     n_generations=self.nsga2_generations.get(),
                     cv_folds=self.folds.get(),
                     min_wavelengths=10,
-                    random_state=42,
+                    random_state=self.reproducibility_random_state.get(),
                     verbose=1,
                     progress_callback=self._progress_callback,
                     controller=self.search_controller,

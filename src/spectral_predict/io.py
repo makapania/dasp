@@ -271,8 +271,10 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
 
         # Build alignment using normalized matching
         # Map: ref_id -> X_id
+        # IMPORTANT: Sort to ensure deterministic order (Python's hash randomization
+        # causes different set iteration order between program restarts)
         id_mapping = {}
-        for norm_id in common_norm_ids:
+        for norm_id in sorted(common_norm_ids):
             ref_id = ref_norm_map[norm_id]
             X_id = X_norm_map[norm_id]
             id_mapping[ref_id] = X_id

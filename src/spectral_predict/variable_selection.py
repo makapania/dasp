@@ -101,7 +101,7 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, ra
     n_augmented_features = X_augmented.shape[1]
     coefficients = np.zeros((cv_folds, n_augmented_features))
 
-    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     fold_idx = 0
 
     for train_idx, _ in kfold.split(X_augmented):
@@ -231,7 +231,7 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     n_augmented_features = X_augmented.shape[1]
     coefficients = np.zeros((cv_folds, n_augmented_features))
 
-    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     fold_idx = 0
 
     for train_idx, _ in kfold.split(X_augmented):
