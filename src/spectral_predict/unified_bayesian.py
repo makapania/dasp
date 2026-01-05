@@ -803,6 +803,22 @@ def run_unified_bayesian(
                 else:
                     progress_info['message'] += f" - Acc: {-trial.value:.4f}"
 
+            # Add best model tracking for "Best Model So Far" display
+            if study.best_trial is not None:
+                best = study.best_trial
+                best_model = {
+                    'Model': model_name,
+                    'Preprocess': best.params.get('preprocess_type', 'raw'),
+                    'n_vars': best.params.get('n_vars', 'N/A'),
+                }
+                if task_type == 'regression':
+                    best_model['RMSE'] = best.value
+                    # R² not available (only RMSE optimized), use placeholder
+                    best_model['R2'] = 0.0
+                else:
+                    best_model['Accuracy'] = -best.value
+                progress_info['best_model'] = best_model
+
             progress_callback(progress_info)
 
         if verbose and (trial.number + 1) % 10 == 0:

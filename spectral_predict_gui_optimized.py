@@ -16315,7 +16315,8 @@ class SpectralPredictApp:
                             n_trials=self.n_unified_trials.get(),
                             cv_folds=self.folds.get(),
                             random_state=42,
-                            verbose=False
+                            verbose=False,
+                            progress_callback=self._progress_callback
                         )
 
                         if len(results_df_model) > 0:
