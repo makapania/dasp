@@ -33,6 +33,7 @@ from pymoo.core.problem import Problem
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
+from pymoo.core.mutation import Mutation
 from pymoo.operators.sampling.rnd import IntegerRandomSampling
 from pymoo.core.sampling import Sampling
 from pymoo.operators.repair.rounding import RoundingRepair
@@ -61,20 +62,82 @@ PREPROC_TYPES = [
     'snv',           # 1
     'deriv1',        # 2
     'deriv2',        # 3
-    'snv_deriv1',    # 4
-    'snv_deriv2',    # 5
-    'deriv1_snv',    # 6
-    'deriv2_snv',    # 7
-    'deriv3',        # 8
-    'deriv4',        # 9
+    'deriv3',        # 4
+    'deriv4',        # 5
+    'snv_deriv1',    # 6
+    'snv_deriv2',    # 7
+    'snv_deriv3',    # 8
+    'snv_deriv4',    # 9
+    'deriv1_snv',    # 10
+    'deriv2_snv',    # 11
+    'deriv3_snv',    # 12
+    'deriv4_snv',    # 13
 ]
 
-WINDOW_SIZES = list(range(5, 35, 2))  # 5, 7, 9, ..., 33
+WINDOW_SIZES = [5, 7, 9, 11, 13, 15, 17, 19, 21, 25, 31, 37, 43, 51]
 
 MODEL_TYPES = [
     'PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest',
     'LightGBM', 'XGBoost', 'CatBoost', 'SVR', 'MLP', 'NeuralBoosted'
 ]  # All supported models for NSGA-II
+
+# Hyperparameter genes (indices 4-12) relevance per model type
+# Genes: 4=lr, 5=reg_alpha, 6=reg_lambda, 7=l1_ratio, 8=subsample,
+#        9=colsample, 10=min_samples, 11=gamma, 12=max_features
+MODEL_ACTIVE_GENES = {
+    'PLS':          [],                           # Uses only n_components (gene 3)
+    'Ridge':        [],                           # Uses only alpha (gene 3)
+    'Lasso':        [],                           # Uses only alpha (gene 3)
+    'ElasticNet':   [7],                          # l1_ratio
+    'RandomForest': [10, 12],                     # min_samples, max_features
+    'LightGBM':     [4, 5, 6, 8, 9, 10],          # lr, reg_alpha, reg_lambda, subsample, colsample, min_samples
+    'XGBoost':      [4, 5, 6, 8, 9, 10, 11],      # + gamma
+    'CatBoost':     [4, 8, 11],                   # lr, subsample, gamma (as l2_leaf_reg)
+    'SVR':          [11],                         # gamma (kernel parameter)
+    'MLP':          [4],                          # learning_rate
+    'NeuralBoosted': [4, 6],                      # lr, reg_lambda
+}
+
+
+class SmartMutation(Mutation):
+    """
+    Custom mutation that only mutates hyperparameter genes relevant to the model type.
+
+    Gene layout:
+    - 0: preprocessing type (always mutate)
+    - 1: window size (always mutate)
+    - 2: model type (always mutate)
+    - 3: model param (always mutate)
+    - 4-12: hyperparameters (only mutate if relevant to model)
+    - 13+: wavelengths (always mutate)
+
+    This focuses evolutionary pressure on genes that actually affect fitness,
+    rather than wasting mutations on hyperparameters that are ignored for
+    certain model types (e.g., learning_rate for PLS).
+    """
+
+    def __init__(self, prob: float = 0.1, eta: float = 20):
+        super().__init__()
+        self.prob = prob
+        self.eta = eta
+        self.pm = PM(prob=prob, eta=eta, vtype=float, repair=RoundingRepair())
+
+    def _do(self, problem, X, **kwargs):
+        # Apply standard PM mutation to all genes first
+        X_mutated = self.pm._do(problem, X.copy(), **kwargs)
+
+        # For each individual, restore hyperparameter genes that aren't relevant
+        for i in range(len(X)):
+            model_idx = int(X[i, 2])
+            model_type = MODEL_TYPES[min(model_idx, len(MODEL_TYPES) - 1)]
+            active_genes = MODEL_ACTIVE_GENES.get(model_type, [])
+
+            # For genes 4-12, restore original if not active for this model
+            for gene_idx in range(4, 13):
+                if gene_idx not in active_genes:
+                    X_mutated[i, gene_idx] = X[i, gene_idx]
+
+        return X_mutated
 
 
 def _get_edge_zone_size(preproc_idx: int, window_idx: int) -> int:
@@ -1189,7 +1252,7 @@ def run_nsga2_search(
         pop_size=population_size,
         sampling=custom_sampling,
         crossover=SBX(prob=0.9, eta=15, vtype=float, repair=RoundingRepair()),
-        mutation=PM(prob=0.1, eta=20, vtype=float, repair=RoundingRepair()),
+        mutation=SmartMutation(prob=0.1, eta=20),
         eliminate_duplicates=True,
     )
 

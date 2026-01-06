@@ -6,15 +6,28 @@
 
 ---
 
-## 🔍 TO INVESTIGATE
+## ✅ RESOLVED: CARS vs CARS-Tree Investigation (2026-01-06)
 
-### CARS vs CARS-Tree - Do they produce different results?
+### Conclusion: They ARE Different Algorithms - Keep Both
+
 **File:** `src/spectral_predict/variable_selection.py`
 
-Looking at the code, CARS and CARS-Tree appear to create the same/similar variables. Need to investigate:
-1. Are they actually different algorithms or just different names?
-2. Do they produce different variable selections on the same data?
-3. If identical, remove one to simplify the codebase
+**Findings:**
+
+1. **Different internal models:**
+   - CARS: Uses PLS regression coefficients for importance
+   - CARS-Tree: Uses LightGBM with hybrid split+gain importance blend
+
+2. **Different variable selection behavior:**
+   - CARS-Tree selects MORE variables (best RMSECV at earlier iterations)
+   - Tree models tolerate high dimensionality; PLS needs cleaner variable sets
+   - Minimum weight floor (`1e-6`) in CARS-Tree keeps variables alive longer
+
+3. **Different use cases:**
+   - CARS: Best for linear models (PLS, Ridge, Lasso, ElasticNet)
+   - CARS-Tree: Best for tree models (LightGBM, RF, XGBoost, CatBoost)
+
+**Decision:** Keep both as separate options. User observation confirmed - tree models prefer CARS-Tree subsets.
 
 ---
 
