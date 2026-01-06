@@ -865,20 +865,35 @@ All major features from December 16-20 work have been restored:
 
 ---
 
-## ✅ REPRODUCIBILITY MODE (2026-01-05) - FIXED
+## ✅ REPRODUCIBILITY MODE (2026-01-05) - REMOVED
 
-**STATUS: FIXED** - Results now consistent between program restarts.
+**STATUS: REMOVED** - Reproducibility toggle deleted from GUI; feature no longer needed.
 
-**Root Cause:** Python's hash randomization (PYTHONHASHSEED) caused set iteration order to vary between program restarts during fuzzy filename matching in `io.py`. This changed the row order of aligned data, causing different CV fold assignments even with the same seed.
+### History
+**Original Problem:** Different results between program restarts.
 
-**Why within-session was consistent:** Hash seed stays constant within a Python process.
+**Root Cause Found (Commit fe152f1):** Python's hash randomization (PYTHONHASHSEED) caused set iteration order to vary between program restarts during fuzzy filename matching in `io.py`. This changed the row order of aligned data, causing different CV fold assignments even with the same seed.
 
-**Fixes Applied (Commit fe152f1):**
-1. `io.py:277` - Sort set iteration in fuzzy matching: `for norm_id in sorted(common_norm_ids)`
-2. `variable_selection.py:104,234` - Use passed `random_state` parameter instead of hardcoded 42
-3. `spectral_predict_gui_optimized.py:16158,16354,16430` - Use `self.reproducibility_random_state.get()` for Coupled/Unified Bayesian/NSGA-II
+**Fix Applied:** `io.py:277` - Sort set iteration in fuzzy matching: `for norm_id in sorted(common_norm_ids)`
 
-**Applies to:** Any import using reference alignment with fuzzy filename matching (ASD+CSV, ASD+Excel, OPUS+CSV, etc.)
+### Analysis After Fix (Commit be1f18e)
+With io.py fixed, we tested whether BLAS threading still affected results:
+
+**Test:** 1000 samples × 2500 wavelengths (PLS, Ridge, LightGBM)
+**Result:** All differences = 0.00e+00 (IDENTICAL regardless of threading)
+
+**Conclusion:** Reproducibility mode provided no additional value. The io.py fix was the only thing needed.
+
+### Changes Made (Commit be1f18e)
+- Removed reproducibility toggle from GUI (Settings tab)
+- Removed `reproducible` parameter from `run_search()`
+- Deleted `src/spectral_predict/reproducibility.py` module
+- Deleted `examples/reproducibility_demo.py`
+- Deleted `tests/test_reproducibility.py`
+- Added `src/spectral_predict/constants.py` with `RANDOM_STATE = 42`
+- Added `scripts/test_threading_impact.py` to verify threading has no effect
+
+**Note:** `random_state=42` is still used internally throughout the codebase for CV splits and model initialization. Users simply no longer need to manage a toggle.
 
 ---
 
