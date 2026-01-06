@@ -979,7 +979,45 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 **Files Modified:**
 - `src/spectral_predict/search.py` - Lines 1132-1240 (GA config creation)
 
-### Issue 4: Ensemble Preprocessing Still Underperforms Grid Search
+### ❌ Issue 4: GA Fitness Hyperparameters - FIX REVERTED (2026-01-05)
+
+**Problem:** GA/Exhaustive fitness evaluation uses hardcoded simplified hyperparameters that don't match user's actual configuration.
+
+| Model | GA Fitness Uses (WRONG) | Should Use |
+|-------|------------------------|-----------|
+| LightGBM | `max_depth=5` hardcoded | User's configured values |
+| MLP | `hidden_layer_sizes=(100, 50)` hardcoded | User's configured values |
+| NeuralBoosted | sklearn defaults | User's configured values |
+| Ridge/Lasso/ElasticNet | Uses PLS proxy | Should use their own fitness |
+| RandomForest/XGBoost/CatBoost | Uses LightGBM proxy | Should use their own fitness |
+| SVR | Uses MLP proxy | Should use its own fitness |
+
+**Failed Fix Attempt (Commits 210a71f, 295306d - REVERTED):**
+
+Attempted to add `model_config` parameter to GA fitness functions and extract user hyperparameters in search.py. This caused Grid Search to run far fewer configurations when GA preprocessing was enabled.
+
+**Revert Commit:** 4dfaba1
+
+**Why It Broke:**
+Unknown - need to investigate. The changes only added parameters to GA functions and extracted config dicts inside the `if ga_preprocess:` block. Should not have affected Grid Search hyperparameter grids.
+
+**TODO - Correct Implementation:**
+
+1. **Investigate root cause** - Why did adding model_config to GA functions affect Grid Search?
+2. **Per-model fitness functions** - Add individual fitness for each model type:
+   - `_evaluate_ridge()` - uses user's Ridge alpha
+   - `_evaluate_lasso()` - uses user's Lasso alpha
+   - `_evaluate_elasticnet()` - uses user's alpha/l1_ratio
+   - `_evaluate_randomforest()` - uses user's RF config
+   - `_evaluate_xgboost()` - uses user's XGBoost config
+   - `_evaluate_catboost()` - uses user's CatBoost config
+   - `_evaluate_svr()` - uses user's SVR config
+3. **Run GA per model** - Not per model group (since users typically run 3-4 models)
+4. **Pass user hyperparameters** - Extract first value from each user list
+
+---
+
+### Issue 5: Ensemble Preprocessing Still Underperforms Grid Search
 
 **Problem:** Even after expanding to 24 preprocessings, ensemble stacking still produces worse models than simple Grid Search.
 
