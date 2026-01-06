@@ -979,19 +979,22 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 **Files Modified:**
 - `src/spectral_predict/search.py` - Lines 1132-1240 (GA config creation)
 
-### ✅ Issue 4: GA Fitness Now Uses User-Configured Hyperparameters - FIXED (2026-01-05)
+### ⚠️ Issue 4: GA Fitness Hyperparameters - PARTIAL FIX (2026-01-05)
 
 **Problem:** GA/Exhaustive fitness evaluation used hardcoded simplified hyperparameters that didn't match the user's actual configuration.
 
-| Model | GA Fitness Used (WRONG) | Now Uses |
-|-------|------------------------|----------|
-| LightGBM | `max_depth=5` hardcoded | User's first configured value (e.g., `num_leaves=31`) |
-| MLP | `hidden_layer_sizes=(100, 50)` hardcoded | User's first configured value (e.g., `(64,)`) |
-| NeuralBoosted | sklearn defaults | User's first configured value (e.g., `hidden_layer_size=100`) |
+**Current State (Proxy Model Approach):**
 
-**Impact:** Preprocessing is now optimized using the SAME hyperparameters the user configured in the GUI.
+GA preprocessing uses 4 PROXY fitness models for model groups:
 
-**Fix Applied:**
+| Model Group | Models Using This Fitness | Proxy Fitness Model |
+|-------------|--------------------------|---------------------|
+| PLS/Linear | PLS, Ridge, Lasso, ElasticNet | `_evaluate_pls()` |
+| Tree | RandomForest, XGBoost, LightGBM, CatBoost | `_evaluate_lightgbm()` |
+| Neural/SVM | MLP, SVR | `_evaluate_mlp()` |
+| NeuralBoosted | NeuralBoosted | `_evaluate_neuralboosted()` |
+
+**What Was Fixed (Commit 210a71f):**
 
 1. **ga_preprocessing.py** - Added `model_config` parameter throughout:
    - `evaluate_fitness()` - accepts and passes model_config
@@ -1005,14 +1008,48 @@ Parallel evaluation via joblib when `n_jobs=-1`.
    - Added helper function `_get_first_or_default()` to get first value from user lists
    - Created `lightgbm_config`, `mlp_config`, `neuralboosted_config` dicts from user settings
    - Passes appropriate config to each GA call
+   - Console now shows which hyperparameters are being used
 
-**Console output now shows:**
-```
-Running EXHAUSTIVE optimization for TREE models (using LightGBM fitness)...
-  Using user config: n_estimators=100, num_leaves=31
-```
+**What's Still Wrong (Proxy Limitations):**
 
-**Note:** Tier only controls WHICH models are run, NOT hyperparameters. All tiers use the same hyperparameters from the user's configuration.
+| Model | Current Behavior | Problem |
+|-------|-----------------|---------|
+| **Ridge** | Uses PLS fitness | Ignores user's `alpha` config |
+| **Lasso** | Uses PLS fitness | Ignores user's `alpha` config |
+| **ElasticNet** | Uses PLS fitness | Ignores user's `alpha`, `l1_ratio` config |
+| **RandomForest** | Uses LightGBM fitness | Ignores user's RF-specific config (n_trees, max_features, etc.) |
+| **XGBoost** | Uses LightGBM fitness | Ignores user's XGBoost-specific config |
+| **CatBoost** | Uses LightGBM fitness | Ignores user's CatBoost-specific config |
+| **SVR** | Uses MLP fitness | Ignores user's SVR-specific config (kernel, C, gamma) |
+
+---
+
+### 🚨 TODO: Shift to Per-Model Fitness Functions
+
+**Rationale:**
+1. Users typically run only 3-4 models, so per-model fitness is not prohibitively slow
+2. Different models respond differently to preprocessing - Ridge vs PLS have fundamentally different behavior
+3. Current proxy approach can select preprocessing that's suboptimal for the actual model being used
+
+**Implementation Plan:**
+
+Add individual fitness functions for each model type:
+- `_evaluate_ridge(X, y, cv, task_type, random_state, model_config)` - uses user's Ridge alpha
+- `_evaluate_lasso(X, y, cv, task_type, random_state, model_config)` - uses user's Lasso alpha
+- `_evaluate_elasticnet(X, y, cv, task_type, random_state, model_config)` - uses user's alpha/l1_ratio
+- `_evaluate_randomforest(X, y, cv, task_type, random_state, model_config)` - uses user's RF config
+- `_evaluate_xgboost(X, y, cv, task_type, random_state, model_config)` - uses user's XGBoost config
+- `_evaluate_catboost(X, y, cv, task_type, random_state, model_config)` - uses user's CatBoost config
+- `_evaluate_svr(X, y, cv, task_type, random_state, model_config)` - uses user's SVR config
+
+**Changes needed:**
+1. **ga_preprocessing.py**: Add 7 new fitness functions
+2. **search.py**:
+   - Run GA separately for EACH selected model (not per model group)
+   - Extract user config for each model type
+   - Pass model-specific config to each GA run
+
+**Expected benefit:** Preprocessing optimized specifically for each model the user selected, using their exact hyperparameters.
 
 ---
 
