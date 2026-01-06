@@ -961,39 +961,23 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 - Check if Grid Search uses different window sizes (e.g., w7, w9, w11)
 - Check if fitness model matches actual model being optimized
 
-### Issue 2: R² Mismatch Between Model Development and Results (GA/Exhaustive)
+### ✅ Issue 2 & 3: R² Mismatch / Edge Masking for GA Preprocessing - FIXED (2026-01-05)
 
-**Problem:** When using GA or Exhaustive preprocessing, R² in Model Development tab does NOT match R² in Results tab. Works fine for normal Grid Search.
+**Problem:** When using GA or Exhaustive preprocessing, R² in Model Development tab did NOT match R² in Results tab. Edge masking was not being applied for GA preprocessing.
 
-**Possible causes:**
-1. **Wavelength order corruption** - Variables may not be ported in correct order
-2. **Preprocessing not applied correctly** - GA preprocessing uses combined transform function, may not serialize/deserialize correctly
-3. **Edge wavelength exclusion missing** - Derivatives create boundary artifacts that should be excluded
+**Root Cause:**
+- GA preprocessing stored `deriv=None` and `window=None` in results
+- Edge masking check (`if preprocess_cfg.get("deriv") and preprocess_cfg.get("window")`) FAILED
+- Edge wavelengths were NOT excluded for GA preprocessing (but WERE excluded for Grid Search)
 
-**Specific suspicion:** Edge wavelengths that should be excluded (due to derivative window artifacts) ARE being included for GA preprocessing, but ARE correctly excluded for normal Grid Search.
+**Fix Applied:**
+- Added `_decode_ga_genes()` helper function in `search.py` (lines 1132-1160)
+- Decodes `ga_genes` array to extract actual `deriv` order (1-4) and `window` size (5-51)
+- Updated all 4 GA config creations (pls, neural_svm, tree, neuralboosted) to store actual values
+- Existing edge masking code now works automatically for GA preprocessing
 
-### Issue 3: Edge Wavelength Exclusion Not Happening for GA Preprocessing
-
-**Problem:** User suspects edge wavelengths (destroyed by derivative window) are coming through when using GA preprocessing, but ARE correctly excluded in normal Grid Search.
-
-**Background:**
-- When applying SG derivatives with window=W, the first/last `W//2` wavelengths are artifacts
-- Normal Grid Search applies edge masking after preprocessing
-- GA preprocessing uses a combined `transform_func` that may bypass edge masking
-
-**Investigation needed:**
-1. Check where edge masking is applied in `search.py` for normal Grid Search
-2. Check if GA preprocessing path (`chromosome_to_transform()`) applies edge masking
-3. Check how wavelengths are stored/retrieved for GA preprocessing results
-4. Compare wavelength counts: GA results vs Grid Search results (should be fewer for GA if edges excluded)
-
-**Likely fix:**
-Add edge masking to `chromosome_to_transform()` in `ga_preprocessing.py`, OR apply edge masking in `search.py` AFTER GA preprocessing is applied.
-
-**Files to investigate:**
-- `src/spectral_predict/ga_preprocessing.py` - `chromosome_to_transform()` function
-- `src/spectral_predict/search.py` - Lines 1194-1215 (Grid Search edge masking), lines 1068-1120 (GA preprocessing integration)
-- `spectral_predict_gui_optimized.py` - Model Development reconstruction for GA results
+**Files Modified:**
+- `src/spectral_predict/search.py` - Lines 1132-1240 (GA config creation)
 
 ### Issue 4: Ensemble Preprocessing Still Underperforms Grid Search
 

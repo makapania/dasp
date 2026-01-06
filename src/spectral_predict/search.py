@@ -27,7 +27,7 @@ from .ga_pls import ga_pls_selection
 from .ga_lightgbm import ga_lightgbm_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
 
-from .ga_preprocessing import optimize_preprocessing
+from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
 
 # NSGA-II import
 from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
@@ -1129,16 +1129,47 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             print(f"  Best config: {ga_result_neuralboosted['best_config']}")
             print(f"  Best RMSECV: {ga_result_neuralboosted['best_rmsecv']:.4f}\n")
 
+        # Helper function to decode GA genes into deriv/window values
+        def _decode_ga_genes(ga_genes):
+            """Extract actual deriv order and window size from GA genes.
+
+            Returns (deriv_order, window_size, polyorder) where:
+            - deriv_order: 1, 2, 3, 4 or None (for raw/snv)
+            - window_size: actual window size (5-51)
+            - polyorder: deriv_order - 1 (for SG) or None
+            """
+            preproc_idx = int(ga_genes[0])
+            window_idx = int(ga_genes[1])
+            preproc_type = PREPROC_TYPES[preproc_idx]
+            window_size = WINDOW_SIZES[window_idx]
+
+            # Extract derivative order from preprocessing type name
+            deriv_order = None
+            if 'deriv1' in preproc_type:
+                deriv_order = 1
+            elif 'deriv2' in preproc_type:
+                deriv_order = 2
+            elif 'deriv3' in preproc_type:
+                deriv_order = 3
+            elif 'deriv4' in preproc_type:
+                deriv_order = 4
+
+            # Polyorder for Savitzky-Golay = deriv_order - 1 (minimum 0)
+            polyorder = max(deriv_order - 1, 0) if deriv_order else None
+
+            return deriv_order, window_size, polyorder
+
         # Create preprocessing configs from GA results
         # Create one config per model group that has selected models
         preprocess_configs = []
 
         if ga_result_pls is not None:
+            deriv, window, polyorder = _decode_ga_genes(ga_result_pls['best_genes'])
             preprocess_configs.append({
                 "name": ga_result_pls['best_name'] + "_pls",
-                "deriv": None,  # GA handles all preprocessing internally
-                "window": None,
-                "polyorder": None,
+                "deriv": deriv,  # Actual derivative order for edge masking
+                "window": window,  # Actual window size for edge masking
+                "polyorder": polyorder,
                 "interference": interference_to_add,
                 "baseline_method": baseline_method,
                 "baseline_params": baseline_params,
@@ -1152,11 +1183,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             })
 
         if ga_result_neural_svm is not None:
+            deriv, window, polyorder = _decode_ga_genes(ga_result_neural_svm['best_genes'])
             preprocess_configs.append({
                 "name": ga_result_neural_svm['best_name'] + "_neural_svm",
-                "deriv": None,  # GA handles all preprocessing internally
-                "window": None,
-                "polyorder": None,
+                "deriv": deriv,  # Actual derivative order for edge masking
+                "window": window,  # Actual window size for edge masking
+                "polyorder": polyorder,
                 "interference": interference_to_add,
                 "baseline_method": baseline_method,
                 "baseline_params": baseline_params,
@@ -1170,11 +1202,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             })
 
         if ga_result_tree is not None:
+            deriv, window, polyorder = _decode_ga_genes(ga_result_tree['best_genes'])
             preprocess_configs.append({
                 "name": ga_result_tree['best_name'] + "_tree",
-                "deriv": None,  # GA handles all preprocessing internally
-                "window": None,
-                "polyorder": None,
+                "deriv": deriv,  # Actual derivative order for edge masking
+                "window": window,  # Actual window size for edge masking
+                "polyorder": polyorder,
                 "interference": interference_to_add,
                 "baseline_method": baseline_method,
                 "baseline_params": baseline_params,
@@ -1188,11 +1221,12 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             })
 
         if ga_result_neuralboosted is not None:
+            deriv, window, polyorder = _decode_ga_genes(ga_result_neuralboosted['best_genes'])
             preprocess_configs.append({
                 "name": ga_result_neuralboosted['best_name'] + "_neuralboosted",
-                "deriv": None,  # GA handles all preprocessing internally
-                "window": None,
-                "polyorder": None,
+                "deriv": deriv,  # Actual derivative order for edge masking
+                "window": window,  # Actual window size for edge masking
+                "polyorder": polyorder,
                 "interference": interference_to_add,
                 "baseline_method": baseline_method,
                 "baseline_params": baseline_params,
