@@ -41,9 +41,6 @@ from .preprocess import SNV, SavgolDerivative
 # Import LightGBM for fitness evaluation (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
 
-# Import get_model to use consistent hyperparameters with Grid Search
-from .models import get_model
-
 
 # =============================================================================
 # CHROMOSOME ENCODING (SIMPLIFIED: 2 GENES ONLY)
@@ -220,8 +217,7 @@ def evaluate_fitness(
     n_components: int = 10,
     task_type: str = 'regression',
     random_state: int = 42,
-    fitness_model: str = 'pls',
-    model_config: Optional[Dict[str, Any]] = None
+    fitness_model: str = 'pls'
 ) -> float:
     """
     Evaluate fitness of a preprocessing configuration.
@@ -246,9 +242,6 @@ def evaluate_fitness(
         Random state for CV splitting
     fitness_model : str
         Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', or 'neuralboosted'
-    model_config : dict, optional
-        User-configured hyperparameters for the fitness model. If None, uses defaults.
-        Keys depend on fitness_model (e.g., 'n_estimators', 'learning_rate' for LightGBM).
 
     Returns
     -------
@@ -285,13 +278,13 @@ def evaluate_fitness(
         else:
             cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-        # Choose fitness model - pass model_config for user hyperparameters
+        # Choose fitness model
         if fitness_model == 'lightgbm':
-            return _evaluate_lightgbm(X_preproc, y, cv, task_type, random_state, model_config)
+            return _evaluate_lightgbm(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'mlp':
-            return _evaluate_mlp(X_preproc, y, cv, task_type, random_state, model_config)
+            return _evaluate_mlp(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'neuralboosted':
-            return _evaluate_neuralboosted(X_preproc, y, cv, n_comp, task_type, random_state, model_config)
+            return _evaluate_neuralboosted(X_preproc, y, cv, n_comp, task_type, random_state)
         else:
             # Default: PLS
             return _evaluate_pls(X_preproc, y, cv, n_comp, task_type)
@@ -319,23 +312,36 @@ def _evaluate_pls(X, y, cv, n_comp, task_type):
         return -rmsecv
 
 
-def _evaluate_lightgbm(X, y, cv, task_type, random_state, model_config=None):
-    """Evaluate fitness using LightGBM with user-configured or default hyperparameters."""
-    # Start with get_model() defaults (same as Grid Search base config)
-    model = get_model('LightGBM', task_type, n_jobs=1)
+def _evaluate_lightgbm(X, y, cv, task_type, random_state):
+    """Evaluate fitness using LightGBM."""
+    if task_type == 'classification':
+        y_class = np.asarray(y)
+        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_class = le.fit_transform(y_class)
+        else:
+            y_class = y_class.astype(int)
 
-    # Override with user-configured hyperparameters if provided
-    if model_config:
-        # Filter to only valid LightGBM params
-        valid_params = {k: v for k, v in model_config.items()
-                        if k in ['n_estimators', 'learning_rate', 'num_leaves', 'max_depth',
-                                'min_child_samples', 'subsample', 'colsample_bytree',
-                                'reg_alpha', 'reg_lambda']}
-        if valid_params:
-            model.set_params(**valid_params)
+        model = LGBMClassifier(
+            n_estimators=100, learning_rate=0.1, max_depth=5,
+            random_state=random_state, verbosity=-1, force_col_wise=True
+        )
+        y_pred = cross_val_predict(model, X, y_class, cv=cv)
+        return accuracy_score(y_class, y_pred)
+    else:
+        model = LGBMRegressor(
+            n_estimators=100, learning_rate=0.1, max_depth=5,
+            random_state=random_state, verbosity=-1, force_col_wise=True
+        )
+        y_pred = cross_val_predict(model, X, y, cv=cv)
+        rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+        return -rmsecv
 
-    # Override random_state and ensure quiet operation
-    model.set_params(random_state=random_state, verbosity=-1, force_col_wise=True)
+
+def _evaluate_mlp(X, y, cv, task_type, random_state):
+    """Evaluate fitness using MLP."""
+    from sklearn.neural_network import MLPRegressor, MLPClassifier
 
     if task_type == 'classification':
         y_class = np.asarray(y)
@@ -346,67 +352,26 @@ def _evaluate_lightgbm(X, y, cv, task_type, random_state, model_config=None):
         else:
             y_class = y_class.astype(int)
 
+        model = MLPClassifier(
+            hidden_layer_sizes=(100, 50), max_iter=500,
+            random_state=random_state, early_stopping=True, validation_fraction=0.1
+        )
         y_pred = cross_val_predict(model, X, y_class, cv=cv)
         return accuracy_score(y_class, y_pred)
     else:
+        model = MLPRegressor(
+            hidden_layer_sizes=(100, 50), max_iter=500,
+            random_state=random_state, early_stopping=True, validation_fraction=0.1
+        )
         y_pred = cross_val_predict(model, X, y, cv=cv)
         rmsecv = np.sqrt(mean_squared_error(y, y_pred))
         return -rmsecv
 
 
-def _evaluate_mlp(X, y, cv, task_type, random_state, model_config=None):
-    """Evaluate fitness using MLP with user-configured or default hyperparameters."""
-    # Start with get_model() defaults (same as Grid Search base config)
-    model = get_model('MLP', task_type)
-
-    # Override with user-configured hyperparameters if provided
-    if model_config:
-        # Filter to only valid MLP params
-        valid_params = {k: v for k, v in model_config.items()
-                        if k in ['hidden_layer_sizes', 'alpha', 'learning_rate_init',
-                                'activation', 'solver', 'batch_size', 'learning_rate',
-                                'momentum', 'max_iter']}
-        if valid_params:
-            model.set_params(**valid_params)
-
-    # Override random_state
-    model.set_params(random_state=random_state)
-
-    if task_type == 'classification':
-        y_class = np.asarray(y)
-        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
-            from sklearn.preprocessing import LabelEncoder
-            le = LabelEncoder()
-            y_class = le.fit_transform(y_class)
-        else:
-            y_class = y_class.astype(int)
-
-        y_pred = cross_val_predict(model, X, y_class, cv=cv)
-        return accuracy_score(y_class, y_pred)
-    else:
-        y_pred = cross_val_predict(model, X, y, cv=cv)
-        rmsecv = np.sqrt(mean_squared_error(y, y_pred))
-        return -rmsecv
-
-
-def _evaluate_neuralboosted(X, y, cv, n_comp, task_type, random_state, model_config=None):
-    """Evaluate fitness using NeuralBoosted with user-configured or default hyperparameters."""
+def _evaluate_neuralboosted(X, y, cv, n_comp, task_type, random_state):
+    """Evaluate fitness using NeuralBoosted (falls back to PLS if unavailable)."""
     try:
-        # Start with get_model() defaults (same as Grid Search base config)
-        model = get_model('NeuralBoosted', task_type)
-
-        # Override with user-configured hyperparameters if provided
-        if model_config:
-            # Filter to only valid NeuralBoosted params
-            valid_params = {k: v for k, v in model_config.items()
-                            if k in ['n_estimators', 'learning_rate', 'hidden_layer_size',
-                                    'activation', 'alpha', 'early_stopping',
-                                    'validation_fraction', 'n_iter_no_change']}
-            if valid_params:
-                model.set_params(**valid_params)
-
-        # Override random_state
-        model.set_params(random_state=random_state)
+        from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 
         if task_type == 'classification':
             y_class = np.asarray(y)
@@ -417,9 +382,11 @@ def _evaluate_neuralboosted(X, y, cv, n_comp, task_type, random_state, model_con
             else:
                 y_class = y_class.astype(int)
 
+            model = NeuralBoostedClassifier(random_state=random_state)
             y_pred = cross_val_predict(model, X, y_class, cv=cv)
             return accuracy_score(y_class, y_pred)
         else:
+            model = NeuralBoostedRegressor(random_state=random_state)
             y_pred = cross_val_predict(model, X, y, cv=cv)
             rmsecv = np.sqrt(mean_squared_error(y, y_pred))
             return -rmsecv
@@ -500,8 +467,7 @@ def exhaustive_search(
     fitness_model: str = 'pls',
     n_jobs: int = 1,
     verbose: int = 1,
-    progress_callback: Optional[Callable] = None,
-    model_config: Optional[Dict[str, Any]] = None
+    progress_callback: Optional[Callable] = None
 ) -> Dict[str, Any]:
     """
     Exhaustively search all 238 preprocessing combinations.
@@ -531,8 +497,6 @@ def exhaustive_search(
         Verbosity level (0=silent, 1=progress, 2=detailed)
     progress_callback : callable, optional
         Progress callback function
-    model_config : dict, optional
-        User-configured hyperparameters for the fitness model
 
     Returns
     -------
@@ -569,7 +533,7 @@ def exhaustive_search(
 
             results = Parallel(n_jobs=n_jobs)(
                 delayed(evaluate_fitness)(
-                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
                 )
                 for genes in all_genes
             )
@@ -580,7 +544,7 @@ def exhaustive_search(
             results = []
             for i, genes in enumerate(all_genes):
                 fitness = evaluate_fitness(
-                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
                 )
                 results.append(fitness)
                 if progress_callback and (i + 1) % 10 == 0:
@@ -596,7 +560,7 @@ def exhaustive_search(
         results = []
         for i, genes in enumerate(all_genes):
             fitness = evaluate_fitness(
-                genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
+                genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
             )
             results.append(fitness)
 
@@ -667,8 +631,7 @@ def optimize_preprocessing(
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     fitness_model: str = 'pls',
-    n_jobs: int = 1,
-    model_config: Optional[Dict[str, Any]] = None
+    n_jobs: int = 1
 ) -> Dict[str, Any]:
     """
     Optimize spectral preprocessing using genetic algorithm or exhaustive search.
@@ -710,8 +673,6 @@ def optimize_preprocessing(
         Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', 'neuralboosted'
     n_jobs : int
         Number of parallel jobs for exhaustive search (-1 for all cores)
-    model_config : dict, optional
-        User-configured hyperparameters for the fitness model. If None, uses defaults.
 
     Returns
     -------
@@ -728,7 +689,7 @@ def optimize_preprocessing(
     if method == 'exhaustive':
         return exhaustive_search(
             X, y, cv_folds, n_components, task_type, random_state,
-            fitness_model, n_jobs, verbose, progress_callback, model_config
+            fitness_model, n_jobs, verbose, progress_callback
         )
 
     # Genetic Algorithm
@@ -767,7 +728,7 @@ def optimize_preprocessing(
 
     # Evaluate initial fitness
     fitness = np.array([
-        evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config)
+        evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model)
         for ind in population
     ])
 
@@ -817,7 +778,7 @@ def optimize_preprocessing(
 
         # Evaluate fitness
         fitness = np.array([
-            evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config)
+            evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model)
             for ind in population
         ])
 

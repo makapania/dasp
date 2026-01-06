@@ -1040,49 +1040,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         ga_result_tree = None
         ga_result_neuralboosted = None
 
-        # Extract user-configured hyperparameters for GA fitness models
-        # Uses FIRST value from each list as representative config
-        def _get_first_or_default(lst, default):
-            """Get first value from list or return default if empty/None."""
-            if lst and len(lst) > 0:
-                return lst[0]
-            return default
-
-        # LightGBM config (for tree model fitness)
-        lightgbm_config = {
-            'n_estimators': _get_first_or_default(lightgbm_n_estimators_list, 100),
-            'learning_rate': _get_first_or_default(lightgbm_learning_rates, 0.1),
-            'num_leaves': _get_first_or_default(lightgbm_num_leaves_list, 31),
-            'max_depth': _get_first_or_default(lightgbm_max_depth_list, -1),
-            'min_child_samples': _get_first_or_default(lightgbm_min_child_samples_list, 5),
-            'subsample': _get_first_or_default(lightgbm_subsample_list, 0.8),
-            'colsample_bytree': _get_first_or_default(lightgbm_colsample_bytree_list, 0.8),
-            'reg_alpha': _get_first_or_default(lightgbm_reg_alpha_list, 0.1),
-            'reg_lambda': _get_first_or_default(lightgbm_reg_lambda_list, 1.0),
-        }
-
-        # MLP config (for neural/SVM model fitness)
-        mlp_config = {
-            'hidden_layer_sizes': _get_first_or_default(mlp_hidden_layer_sizes_list, (64,)),
-            'alpha': _get_first_or_default(mlp_alphas_list, 0.001),
-            'learning_rate_init': _get_first_or_default(mlp_learning_rate_inits, 0.001),
-            'activation': _get_first_or_default(mlp_activation_list, 'relu'),
-            'solver': _get_first_or_default(mlp_solver_list, 'adam'),
-            'batch_size': _get_first_or_default(mlp_batch_size_list, 'auto'),
-            'learning_rate': _get_first_or_default(mlp_learning_rate_schedule_list, 'constant'),
-            'momentum': _get_first_or_default(mlp_momentum_list, 0.9),
-        }
-
-        # NeuralBoosted config
-        neuralboosted_config = {
-            'n_estimators': _get_first_or_default(n_estimators_list, 100),
-            'learning_rate': _get_first_or_default(learning_rates, 0.1),
-            'hidden_layer_size': _get_first_or_default(neuralboosted_hidden_sizes, 100),
-            'activation': _get_first_or_default(neuralboosted_activations, 'relu'),
-        }
-
         # Run GA optimization for PLS models (using PLS fitness)
-        # PLS fitness uses n_components from safe_max_components, no additional config needed
         if has_pls_models:
             print(f"Running {ga_preprocess_method.upper()} optimization for PLS models (using PLS fitness)...")
             ga_result_pls = optimize_preprocessing(
@@ -1098,8 +1056,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 verbose=1,
                 progress_callback=progress_callback,
                 fitness_model='pls',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1,
-                model_config=None  # PLS fitness uses n_components, not model_config
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nPLS Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_pls['best_config']}")
@@ -1108,7 +1065,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Run GA optimization for Neural/SVM models (using MLP fitness)
         if has_neural_svm_models:
             print(f"Running {ga_preprocess_method.upper()} optimization for Neural/SVM models (using MLP fitness)...")
-            print(f"  Using user config: hidden_layer_sizes={mlp_config['hidden_layer_sizes']}, alpha={mlp_config['alpha']}")
             ga_result_neural_svm = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
@@ -1122,8 +1078,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 verbose=1,
                 progress_callback=progress_callback,
                 fitness_model='mlp',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1,
-                model_config=mlp_config  # Pass user-configured MLP hyperparameters
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nNeural/SVM Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_neural_svm['best_config']}")
@@ -1132,7 +1087,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Run GA optimization for tree models (using LightGBM fitness)
         if has_tree_models:
             print(f"Running {ga_preprocess_method.upper()} optimization for TREE models (using LightGBM fitness)...")
-            print(f"  Using user config: n_estimators={lightgbm_config['n_estimators']}, num_leaves={lightgbm_config['num_leaves']}")
+
             ga_result_tree = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
@@ -1146,8 +1101,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 verbose=1,
                 progress_callback=progress_callback,
                 fitness_model='lightgbm',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1,
-                model_config=lightgbm_config  # Pass user-configured LightGBM hyperparameters
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nTree Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_tree['best_config']}")
@@ -1156,7 +1110,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Run GA optimization for NeuralBoosted model (using NeuralBoosted fitness)
         if has_neuralboosted_models:
             print(f"Running {ga_preprocess_method.upper()} optimization for NeuralBoosted model (using NeuralBoosted fitness)...")
-            print(f"  Using user config: n_estimators={neuralboosted_config['n_estimators']}, hidden_layer_size={neuralboosted_config['hidden_layer_size']}")
             ga_result_neuralboosted = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
@@ -1170,8 +1123,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 verbose=1,
                 progress_callback=progress_callback,
                 fitness_model='neuralboosted',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1,
-                model_config=neuralboosted_config  # Pass user-configured NeuralBoosted hyperparameters
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
             )
             print(f"\nNeuralBoosted Model GA Optimization Complete!")
             print(f"  Best config: {ga_result_neuralboosted['best_config']}")
