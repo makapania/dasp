@@ -2047,11 +2047,6 @@ class SpectralPredictApp:
         self.resume_btn = None
         self.stop_btn = None
 
-        # Reproducibility mode (Phase 2)
-        self.enable_reproducibility = tk.BooleanVar(value=False)  # Default: OFF for speed
-        self.reproducibility_random_state = tk.IntVar(value=42)  # Random seed for reproducibility
-        self.reproducibility_n_threads = tk.IntVar(value=1)  # BLAS threads (1 = full reproducibility)
-
         # Outlier detection variables (Phase 3)
         self.n_pca_components = tk.IntVar(value=5)
         self.y_min_bound = tk.StringVar(value="")
@@ -5480,58 +5475,6 @@ class SpectralPredictApp:
 
         # Initially hide GA options
         self.ga_preproc_options_frame.grid_remove()
-
-        # === Advanced Settings: Reproducibility ===
-        self._create_section_header(content_frame, "Advanced Settings", row=row, columnspan=2)
-        row += 1
-
-        # Create card for reproducibility
-        repro_card_outer, repro_card = self._create_card(content_frame, title="Reproducibility Mode",
-                                                          subtitle="Ensure exact result reproducibility across runs")
-        repro_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
-        row += 1
-        # Inner frame for grid layout within card
-        repro_frame = tk.Frame(repro_card, bg=self.colors['card_bg'])
-        repro_frame.pack(fill='both', expand=True)
-
-        # Enable reproducibility checkbox
-        self.repro_checkbox = ttk.Checkbutton(repro_frame,
-                                              text="Enable Reproducibility Mode (Grid Search only)",
-                                              variable=self.enable_reproducibility)
-        self.repro_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        CreateToolTip(self.repro_checkbox,
-                     text=("Reproducibility mode ensures identical results across multiple runs by:\n"
-                           "- Using fixed random seed for cross-validation splits\n"
-                           "- Setting BLAS threads to 1 (prevents floating-point variation)\n"
-                           "- Only available for Grid Search (not Bayesian Optimization)\n\n"
-                           "[!] WARNING: Slower performance (~2-3x) due to single-threaded linear algebra.\n"
-                           "Recommended for: final results, publications, validation.\n"
-                           "Default: OFF for faster exploratory analysis."),
-                     delay=500)
-
-        # Random seed input
-        ttk.Label(repro_frame, text="Random Seed:", style='Subheading.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
-        seed_spinbox = ttk.Spinbox(repro_frame, from_=1, to=9999,
-                                    textvariable=self.reproducibility_random_state,
-                                    width=12)
-        seed_spinbox.grid(row=1, column=1, sticky=tk.W, pady=(0, 5), padx=(10, 0))
-        CreateToolTip(seed_spinbox,
-                     text=("Random seed for CV fold splitting and model initialization.\n"
-                           "Using the same seed ensures identical cross-validation splits.\n"
-                           "Default: 42 (convention in ML community)\n"
-                           "Valid range: 1-9999"),
-                     delay=500)
-
-        # Info label explaining impact
-        ttk.Label(repro_frame,
-                 text="[!] Performance Impact: ~2-3x slower due to single-threaded linear algebra (BLAS threads=1)",
-                 style='Caption.TLabel',
-                 foreground=self.colors['warning']).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 5))
-
-        ttk.Label(repro_frame,
-                 text="💡 Only affects Grid Search. Bayesian Optimization uses its own reproducibility settings.",
-                 style='Caption.TLabel',
-                 foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
 
     def _create_tab4b_variable_selection(self):
         """Subtab 4B: Variable Selection - Subset analysis and variable selection methods."""
@@ -16155,7 +16098,7 @@ class SpectralPredictApp:
                                 model_name=coupled_model_name,
                                 n_trials=self.n_bayesian_trials.get(),  # Reuse Bayesian trials setting
                                 cv_folds=self.folds.get(),
-                                random_state=self.reproducibility_random_state.get(),
+                                random_state=42,  # Fixed seed (hardcoded throughout codebase)
                                 verbose=False  # Suppress per-trial output
                             )
 
@@ -16351,7 +16294,7 @@ class SpectralPredictApp:
                             task_type=task_type,
                             n_trials=self.n_unified_trials.get(),
                             cv_folds=self.folds.get(),
-                            random_state=self.reproducibility_random_state.get(),
+                            random_state=42,  # Fixed seed (hardcoded throughout codebase)
                             verbose=False,
                             progress_callback=unified_progress_wrapper
                         )
@@ -16427,7 +16370,7 @@ class SpectralPredictApp:
                     n_generations=self.nsga2_generations.get(),
                     cv_folds=self.folds.get(),
                     min_wavelengths=10,
-                    random_state=self.reproducibility_random_state.get(),
+                    random_state=42,  # Fixed seed (hardcoded throughout codebase)
                     verbose=1,
                     progress_callback=self._progress_callback,
                     controller=self.search_controller,
@@ -16624,9 +16567,6 @@ class SpectralPredictApp:
                 # Imbalance handling (NEW - Phase 2 implementation)
                 imbalance_method=imbalance_method,
                 imbalance_params=imbalance_params,
-                # Reproducibility settings (Phase 2)
-                reproducible=self.enable_reproducibility.get(),
-                random_state=self.reproducibility_random_state.get(),
                 # Search control (pause/resume/stop)
                 controller=self.search_controller,
                 # Validation metrics for results table

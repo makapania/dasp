@@ -26,6 +26,7 @@ from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
 from .ga_lightgbm import ga_lightgbm_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
+from .constants import RANDOM_STATE
 
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
 
@@ -637,7 +638,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                tier='standard', enabled_models=None,
                analysis_wl_min=None, analysis_wl_max=None,
                imbalance_method=None, imbalance_params=None, enable_class_weight=False,
-               reproducible=False, random_state=42,
                ga_preprocess=False,
                ga_preprocess_method='ga',
                ga_preprocess_population=48,
@@ -720,67 +720,17 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     enabled_models : list of str, optional
         List of specific models to include. If None, uses all models in tier.
         Takes precedence over tier if both are specified.
-    reproducible : bool, default=False
-        Enable reproducible mode for scientific research. When True:
-        - Runs CV folds serially (n_jobs=1) instead of in parallel
-        - Sets BLAS/LAPACK threads to 1 (deterministic linear algebra)
-        - Ensures all RNG operations use fixed random_state
-        - Passes n_jobs=1 to all models (RandomForest, XGBoost, etc.)
-        WARNING: Reproducible mode is ~3-5x slower than default parallel execution.
-        Use this mode when exact result reproducibility is required for scientific papers.
-    random_state : int, default=42
-        Random seed for reproducibility. Controls:
-        - CV fold splits
-        - Variable selection methods (UVE noise generation, etc.)
-        - Model initialization
-        All stochastic operations use this seed for consistent results.
 
     Returns
     -------
     df_ranked : pd.DataFrame
         Ranked results with all model runs
     """
-    # =========================================================================
-    # REPRODUCIBILITY CONTROLS
-    # =========================================================================
-    # Save original environment for restoration later
-    _saved_blas_env = None
+    # Fixed random state used throughout codebase
+    random_state = RANDOM_STATE
 
-    if reproducible:
-        # Import reproducibility utilities
-        from .reproducibility import set_blas_threads
-
-        # Save current BLAS environment variables before modifying
-        _saved_blas_env = {}
-        for var in ['OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                    'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS']:
-            _saved_blas_env[var] = os.environ.get(var, None)
-
-        # Set BLAS/LAPACK to single-threaded for deterministic linear algebra
-        set_blas_threads(1)
-
-        # Set random seeds for full reproducibility
-        # This ensures all random operations use the same sequence across program restarts
-        import random
-        random.seed(random_state)
-        np.random.seed(random_state)
-
-        # Use serial execution for all parallel operations
-        n_jobs = 1
-        print("\n" + "="*80)
-        print("REPRODUCIBLE MODE ENABLED")
-        print("="*80)
-        print("Settings:")
-        print("  - BLAS threads: 1 (deterministic linear algebra)")
-        print("  - CV execution: Serial (n_jobs=1)")
-        print("  - Model parallelism: Disabled (n_jobs=1)")
-        print(f"  - Random seed: {random_state} (applied to numpy + python random)")
-        print("WARNING: Reproducible mode is ~3-5x slower than parallel execution.")
-        print("After this run completes, BLAS settings will be restored automatically.")
-        print("="*80 + "\n")
-    else:
-        # Fast mode: use all cores
-        n_jobs = -1
+    # Use all cores for parallel execution
+    n_jobs = -1
 
     X_np = X.values
     y_np = y.values
@@ -1764,7 +1714,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     folds=folds,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=n_jobs,
-                    random_state=random_state,
                 )
                 df_results = add_result(df_results, result)
 
@@ -2094,7 +2043,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
-                                            random_state=random_state,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -2123,7 +2071,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
-                                            random_state=random_state,
                                         )
 
                                     # Track if uniform fallback was used for this result
@@ -2190,7 +2137,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
                             n_jobs_cv=n_jobs,
-                            random_state=random_state,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -2235,21 +2181,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     print(f"\n[DEBUG] Results after scoring: {len(df_ranked)} rows")
     if "SubsetTag" in df_ranked.columns:
         print(f"[DEBUG] SubsetTag counts AFTER scoring:\n{df_ranked['SubsetTag'].value_counts().to_string()}")
-
-    # =========================================================================
-    # RESTORE BLAS SETTINGS (if they were changed for reproducibility)
-    # =========================================================================
-    if _saved_blas_env is not None:
-        for var, value in _saved_blas_env.items():
-            if value is None:
-                # Variable wasn't set before, remove it
-                os.environ.pop(var, None)
-            else:
-                # Restore original value
-                os.environ[var] = value
-        print("\n" + "="*80)
-        print("BLAS thread settings restored to original values")
-        print("="*80 + "\n")
 
     # =========================================================================
     # COMPUTE VALIDATION METRICS FOR TOP MODELS (if validation set provided)
@@ -2297,7 +2228,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                         n_trials=None, folds=5, excluded_count=0, validation_count=0,
                         total_samples_original=None, max_n_components=12, tier='standard',
                         imbalance_method=None, imbalance_params=None,
-                        random_state=42, progress_callback=None,
+                        progress_callback=None,
                         enable_variable_subsets=True, variable_counts=None,
                         enable_region_subsets=False, n_top_regions=5,
                         variable_selection_methods=None,
@@ -2350,8 +2281,6 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         Imbalance handling method ('smote', 'rare_boost', 'class_weight', etc.)
     imbalance_params : dict, optional
         Parameters for imbalance method
-    random_state : int, default=42
-        Random seed for reproducibility
     progress_callback : callable, optional
         Function to call with progress updates
 
@@ -2381,6 +2310,9 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     - Results are compatible with grid search results (same DataFrame format)
     - Does NOT replace grid search - runs as alternative method when selected in GUI
     """
+    # Use fixed random state (ignore parameter - hardcoded throughout codebase)
+    random_state = RANDOM_STATE
+
     from .bayesian_utils import create_optuna_study, create_objective_function, convert_optuna_result_to_dasp_format, ProgressCallback
     from .bayesian_config import get_bayesian_search_space
     from .models import build_model
@@ -3032,7 +2964,6 @@ def _run_single_config(
     imbalance_params=None,
     full_vars_original=None,
     n_jobs_cv=1,
-    random_state=42,
 ):
     """
     Run a single model configuration with CV.
@@ -3048,6 +2979,9 @@ def _run_single_config(
     dict
         Dictionary with results, including top important variables.
     """
+    # Use fixed random state (ignore parameter - hardcoded throughout codebase)
+    random_state = RANDOM_STATE
+
     # Apply subset if specified
     if subset_indices is not None:
         X = X[:, subset_indices]
