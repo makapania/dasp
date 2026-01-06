@@ -865,46 +865,20 @@ All major features from December 16-20 work have been restored:
 
 ---
 
-## 🚨 OUTSTANDING: Reproducibility Mode Not Working (2026-01-04)
+## ✅ REPRODUCIBILITY MODE (2026-01-05) - FIXED
 
-**STATUS: UNFIXED - Results still vary between program restarts**
+**STATUS: FIXED** - Results now consistent between program restarts.
 
-**Problem:** When running Grid Search with Reproducibility Mode enabled, results (e.g., PLS R²) vary significantly between program restarts (0.946 vs 0.91). The user expects identical results when using the same data and settings.
+**Root Cause:** Python's hash randomization (PYTHONHASHSEED) caused set iteration order to vary between program restarts during fuzzy filename matching in `io.py`. This changed the row order of aligned data, causing different CV fold assignments even with the same seed.
 
-**Investigation Completed:**
-1. Identified that `np.random.seed()` was never called in `search.py`
-2. Added seed setting at line 711-713 of `search.py`:
-   ```python
-   import random
-   random.seed(random_state)
-   np.random.seed(random_state)
-   ```
-3. Updated print message to confirm seed is applied (line 724)
-4. Verified KFold/StratifiedKFold have `random_state=random_state`
-5. Verified GUI passes `reproducibility_random_state` (not hardcoded 42)
+**Why within-session was consistent:** Hash seed stays constant within a Python process.
 
-**Fix Did NOT Work:** User still reports different results after program restart with fix in place.
+**Fixes Applied (Commit fe152f1):**
+1. `io.py:277` - Sort set iteration in fuzzy matching: `for norm_id in sorted(common_norm_ids)`
+2. `variable_selection.py:104,234` - Use passed `random_state` parameter instead of hardcoded 42
+3. `spectral_predict_gui_optimized.py:16158,16354,16430` - Use `self.reproducibility_random_state.get()` for Coupled/Unified Bayesian/NSGA-II
 
-**Possible Additional Causes to Investigate:**
-1. **Data loading order** - Does GUI reorder data before passing to `grid_search_models()`?
-2. **Preprocessing randomness** - Are there operations in `preprocess.py` that use randomness?
-3. **Joblib parallel state** - Even with `n_jobs=1`, could there be residual parallel state?
-4. **BLAS numerical instability** - Different BLAS thread states could cause floating-point non-determinism
-5. **Model-specific RNG** - Some sklearn models may use internal RNG not controlled by global seed
-6. **Import order** - Module imports may affect RNG state before seeding happens
-7. **Multiple code paths** - There are TWO cv_splitter creations (lines 1400 and 2478) - are both paths using the same seed?
-
-**Files Involved:**
-- `src/spectral_predict/search.py` - Lines 709-713 (seed setting), 1400-1402, 2478-2480 (CV splitters)
-- `src/spectral_predict/reproducibility.py` - Has `ensure_reproducibility()` function (NOT currently called)
-- `spectral_predict_gui_optimized.py` - Lines 16582-16583 (passes reproducible and random_state)
-
-**Next Steps:**
-1. Try calling `ensure_reproducibility()` from `reproducibility.py` instead of manual seeding
-2. Add seed at VERY START of script (before any imports)
-3. Add hash of input data to verify data is identical between runs
-4. Add detailed logging of RNG state at key points
-5. Test if results are identical WITHIN a session (multiple runs without closing)
+**Applies to:** Any import using reference alignment with fuzzy filename matching (ASD+CSV, ASD+Excel, OPUS+CSV, etc.)
 
 ---
 
