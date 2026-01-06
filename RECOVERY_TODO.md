@@ -6,6 +6,18 @@
 
 ---
 
+## 🔍 TO INVESTIGATE
+
+### CARS vs CARS-Tree - Do they produce different results?
+**File:** `src/spectral_predict/variable_selection.py`
+
+Looking at the code, CARS and CARS-Tree appear to create the same/similar variables. Need to investigate:
+1. Are they actually different algorithms or just different names?
+2. Do they produce different variable selections on the same data?
+3. If identical, remove one to simplify the codebase
+
+---
+
 ## ✅ VALIDATION METRICS IN RESULTS TABLE (2026-01-03) - COMPLETE
 
 **Feature:** Checkbox in Validation subtab to compute and display validation metrics for top N models in Results table.
@@ -820,28 +832,25 @@ LGBMRegressor(
 1. First: Implement Option A (V3-style, 4 genes) - proves NSGA-II works, beats Grid Search on preprocessing
 2. Later: Add Option B (staged) - adds hyperparameter tuning for additional gains
 
-### GA Preprocessing - Empty Pipeline Bug (2026-01-02)
+### ❌ GA Preprocessing Running Too Fast - FIX ATTEMPT BROKE GA COMPLETELY (2026-01-05)
 
-**STATUS: OPEN**
+**Original Problem:** GA preprocessing ran in < 1 minute and produced worse models than Grid Search. It should run AT LEAST as much as Grid Search.
 
-**Error:** When clicking on a model after running GA preprocessing, get error:
-```
-Error running refined model:
-This 'Pipeline' has no attribute 'fit_transform'
+**Fix Attempted:**
+1. Modified `ga_preprocessing.py` to return top 5 results per model group (not just best 1)
+2. Modified `search.py` to use ALL top-N configs from each GA result
+3. Added deduplication to prevent testing the same preprocessing twice
 
-IndexError: list index out of range
-  File "spectral_predict_gui_optimized.py", line 20894, in _run_refined_model_thread
-    X_full_preprocessed = prep_pipeline.fit_transform(X_full)
-```
+**Result: FIX BROKE GA COMPLETELY**
+- GA now produces NO results at all
+- RMSECV=inf throughout entire run
+- See "CRITICAL: GA Preprocessing COMPLETELY BROKEN" section above
 
-**Root Cause:** `prep_pipeline.steps` is empty (list index out of range when accessing `self.steps[-1][1]`). The GA preprocessing pipeline is not being reconstructed correctly when loading a model from the Results tab into Model Development.
+**Files Modified (WITH UNCOMMITTED CHANGES):**
+- `src/spectral_predict/ga_preprocessing.py` - Added `configs` list with `deriv`, `window`, `polyorder` fields
+- `src/spectral_predict/search.py` - Loop through `configs` list, deduplicate by preprocessing key
 
-**Location:** `spectral_predict_gui_optimized.py:20894` in `_run_refined_model_thread()`
-
-**Investigation Needed:**
-- Check how GA preprocessing pipelines are serialized/stored in results
-- Check `_reconstruct_models_from_results()` for GA preprocessing handling
-- Verify the `GAPreprocessWrapper` class is properly creating pipeline steps
+**TODO:** Either revert these changes or debug why fitness returns -inf
 
 ---
 
@@ -959,22 +968,83 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 
 ---
 
+## 🚨 OUTSTANDING: Classification Validation Statistics Show NaN (2026-01-05)
+
+**Problem:** Validation statistics for classification models show NaN instead of actual values.
+
+**Status:** NOT INVESTIGATED YET
+
+**TODO for next session:**
+1. Check if validation data is being passed correctly to `compute_validation_metrics_for_top_models()`
+2. Check if label encoding is applied consistently between training and validation
+3. Check if models have `predict_proba` available for ROC AUC
+4. Debug the actual metric computation in `search.py` lines 463-505
+
+**Note:** This may be related to the previous fix in commits 217209e, 19afa6a, 4e5d024 which addressed similar NaN issues - possibly a regression or edge case not covered.
+
+---
+
+## 🚨 CRITICAL: GA Preprocessing COMPLETELY BROKEN (2026-01-05)
+
+**STATUS: NON-FUNCTIONAL** - GA preprocessing produces NO RESULTS at all.
+
+### Symptoms
+- Selecting "Genetic Algorithm" method produces ZERO results
+- RMSECV=inf throughout entire run
+- Finishes in ~10 seconds with empty output
+
+### Root Cause (Suspected)
+Recent changes to `ga_preprocessing.py` and `search.py` have broken the GA preprocessing flow. The exact breaking change is unknown.
+
+### Files With Uncommitted Changes
+- `src/spectral_predict/ga_preprocessing.py`
+- `src/spectral_predict/search.py`
+
+### TODO to Fix
+1. **Option A:** Revert changes with `git restore src/spectral_predict/ga_preprocessing.py src/spectral_predict/search.py`
+2. **Option B:** Debug what's causing fitness evaluations to return -inf
+
+### Secondary Issue: Only 2nd Derivative Appears
+User reports only ever seeing 2nd derivative in GA genes - never 1st, 3rd, or 4th. Code shows all derivatives ARE in PREPROC_TYPES, but may not be evaluated or may all return worse fitness than deriv2.
+
+---
+
 ## 🚨 OUTSTANDING: GA/Exhaustive Preprocessing Issues (2026-01-05)
 
-### Issue 1: Exhaustive Search Does NOT Outperform Grid Search
+### ❌ Issue 1: Exhaustive Search Performance - COMPREHENSIVE FIX FAILED (2026-01-05)
 
-**Problem:** User reports exhaustive search (guaranteed optimal) does not clearly outperform default grid search preprocessing.
+**Original Problem:** User reports exhaustive search (guaranteed optimal) does not clearly outperform default grid search preprocessing.
 
-**Possible causes:**
+**Fix Attempt #2 (FAILED 2026-01-05):**
+
+Implemented comprehensive 5-phase fix:
+1. Reduced PREPROC_TYPES from 14 to 10 (removed snv_deriv3/4, deriv3/4_snv)
+2. Modified `optimize_preprocessing()` to return top 5 configs instead of just 1
+3. Added `_evaluate_with_actual_model()` to use real model with user hyperparameters
+4. Changed GA to run per-model instead of per-model-group
+5. Created multiple preprocessing configs per model
+
+**Result: DOES NOT WORK**
+- Produces only **3 models** (should produce many more)
+- Models have **awful performance** (worse than before)
+- Uncommitted changes remain in `ga_preprocessing.py` and `search.py`
+
+**Files created (can be deleted):**
+- `scripts/verify_grid_search_unchanged.py`
+- `COUPLED_OPTIMIZATION_FIX_SUMMARY.md`
+
+**TODO for next session:**
+1. Revert changes: `git restore src/spectral_predict/ga_preprocessing.py src/spectral_predict/search.py`
+2. Investigate why only 3 models produced - debug actual execution flow
+3. Investigate awful performance - check if fitness evaluation working correctly
+4. Consider simpler approach - fix fitness model mismatch first without per-model architecture
+
+**Root cause hypothesis:** The per-model architecture change may have broken something fundamental in how preprocessing configs map to models.
+
+**Original possible causes (still valid):**
 1. Grid search defaults are actually near-optimal for most data
-2. The 238-combination search may still miss good window sizes Grid Search uses
-3. Fitness model (PLS/LightGBM/MLP) may not correlate with actual model performance
-4. Window sizes included (5-51 odd) may not include Grid Search defaults
-
-**Investigation needed:**
-- Compare Grid Search default preprocessing combos vs GA/Exhaustive combos
-- Check if Grid Search uses different window sizes (e.g., w7, w9, w11)
-- Check if fitness model matches actual model being optimized
+2. Fitness model (PLS/LightGBM/MLP) may not correlate with actual model performance
+3. Window sizes included (5-51 odd) may not include Grid Search defaults
 
 ### ✅ Issue 2 & 3: R² Mismatch / Edge Masking for GA Preprocessing - FIXED (2026-01-05)
 
