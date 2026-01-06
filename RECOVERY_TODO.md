@@ -979,7 +979,44 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 **Files Modified:**
 - `src/spectral_predict/search.py` - Lines 1132-1240 (GA config creation)
 
-### Issue 4: Ensemble Preprocessing Still Underperforms Grid Search
+### ✅ Issue 4: GA Fitness Now Uses User-Configured Hyperparameters - FIXED (2026-01-05)
+
+**Problem:** GA/Exhaustive fitness evaluation used hardcoded simplified hyperparameters that didn't match the user's actual configuration.
+
+| Model | GA Fitness Used (WRONG) | Now Uses |
+|-------|------------------------|----------|
+| LightGBM | `max_depth=5` hardcoded | User's first configured value (e.g., `num_leaves=31`) |
+| MLP | `hidden_layer_sizes=(100, 50)` hardcoded | User's first configured value (e.g., `(64,)`) |
+| NeuralBoosted | sklearn defaults | User's first configured value (e.g., `hidden_layer_size=100`) |
+
+**Impact:** Preprocessing is now optimized using the SAME hyperparameters the user configured in the GUI.
+
+**Fix Applied:**
+
+1. **ga_preprocessing.py** - Added `model_config` parameter throughout:
+   - `evaluate_fitness()` - accepts and passes model_config
+   - `_evaluate_lightgbm()` - uses model_config if provided, else falls back to `get_model()` defaults
+   - `_evaluate_mlp()` - uses model_config if provided, else falls back to `get_model()` defaults
+   - `_evaluate_neuralboosted()` - uses model_config if provided, else falls back to `get_model()` defaults
+   - `exhaustive_search()` - accepts and passes model_config
+   - `optimize_preprocessing()` - accepts and passes model_config
+
+2. **search.py** - Extracts user hyperparameters and passes to GA:
+   - Added helper function `_get_first_or_default()` to get first value from user lists
+   - Created `lightgbm_config`, `mlp_config`, `neuralboosted_config` dicts from user settings
+   - Passes appropriate config to each GA call
+
+**Console output now shows:**
+```
+Running EXHAUSTIVE optimization for TREE models (using LightGBM fitness)...
+  Using user config: n_estimators=100, num_leaves=31
+```
+
+**Note:** Tier only controls WHICH models are run, NOT hyperparameters. All tiers use the same hyperparameters from the user's configuration.
+
+---
+
+### Issue 5: Ensemble Preprocessing Still Underperforms Grid Search
 
 **Problem:** Even after expanding to 24 preprocessings, ensemble stacking still produces worse models than simple Grid Search.
 
