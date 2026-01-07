@@ -64,8 +64,8 @@ if edge_zone > 0:
    - Random solutions get 125-375 wavelengths (target/2 to target*1.5)
 
 3. **Sparsity bias in mutation** (SmartMutation class, lines 157-200)
-   - Added `sparsity_bias=2.0` parameter
-   - Dropping wavelengths is 2x more likely than adding
+   - Added `sparsity_bias` parameter (default 2.0, adjusted to 1.9)
+   - Dropping wavelengths is 1.9x more likely than adding
    - Combined with importance protection: high-importance wavelengths harder to drop
 
 4. **Quadratic wavelength penalty** (line 1141-1144)
@@ -97,34 +97,87 @@ if edge_zone > 0:
 
 ---
 
-### Issue 3: Grid Search Model Won't Run in Model Development
+### Issue 3: Model Won't Run in Model Development - PARTIALLY FIXED
 
 **Error:** `slice indices must be integers or None or have an __index__ method`
 
-**Full Traceback:**
+**Root Cause:** Window parameter loaded as float (e.g., `31.0`) instead of int (`31`).
+
+**Fix Applied (2026-01-06):** Added `int()` cast at line 21103-21105:
+```python
+window_from_config = self.selected_model_config.get('Window', None)
+if window_from_config is not None and not pd.isna(window_from_config):
+    window_from_config = int(window_from_config)
 ```
-File "spectral_predict_gui_optimized.py", line 21650, in _run_refined_model_thread
-    X_full_preprocessed = prep_pipeline.fit_transform(X_full)
-File "sklearn/pipeline.py", line 731, in fit_transform
-    return last_step.fit_transform(
-File "src/spectral_predict/preprocess.py", line 103, in transform
-    X_deriv = savgol_filter(
-```
 
-**Root Cause (Likely):** The `savgol_filter` is receiving non-integer parameters for `window_length` or `polyorder`. This could happen if:
-1. Window size is stored as float instead of int in results
-2. Window size parsing returns string/float instead of int
-3. Config reconstruction doesn't properly cast types
+**Status:**
+- ✅ NSGA-II results with derivatives now load into Model Development
+- ❌ NSGA-II results with raw preprocessing still fail (see Issue 4)
+- ❌ R² mismatch between Results and Model Development for derivatives (see Issue 5)
 
-**Files to Check:**
-- `spectral_predict_gui_optimized.py` - `_run_refined_model_thread()` (line 21650)
-- `spectral_predict_gui_optimized.py` - `_populate_from_result()` or similar config reconstruction
-- `src/spectral_predict/preprocess.py` - `transform()` (line 103)
+---
 
-**TODO:**
-1. Add `int()` casts to window_length and polyorder in preprocess.py
-2. Check where config values come from when selecting Grid Search result
-3. Trace how preprocessing parameters are stored and retrieved
+### Issue 4: NSGA-II Raw Preprocessing Fails in Model Development
+
+**Problem:** When NSGA-II selects 'raw' preprocessing, Model Development fails to run the model.
+
+**Status:** NOT INVESTIGATED
+
+**TODO:** Debug what happens when preprocessing is 'raw' - may be missing handling in `_parse_coupled_preprocessing()` or similar.
+
+---
+
+### Issue 5: NSGA-II R² Mismatch with Derivatives
+
+**Problem:** R² shown in Results tab does not match R² computed in Model Development tab when derivatives are used.
+
+**Status:** NOT INVESTIGATED
+
+**Possible Causes:**
+1. Edge masking differences between NSGA-II and Model Development
+2. Wavelength order issues (similar to previous Unified Bayesian bug)
+3. Different CV setup between optimization and Model Development
+
+**TODO:** Compare how preprocessing + wavelengths are applied in:
+- `nsga2_search.py` - `_compute_solution_r2()`
+- `spectral_predict_gui_optimized.py` - `_run_refined_model_thread()`
+
+---
+
+### Issue 6: NSGA-II Only Shows PLS Results When Multiple Models Selected - LOGGING ADDED (2026-01-06)
+
+**Problem:** User selects multiple models (PLS, Ridge, LightGBM, etc.) for regression, but results only contain PLS models. Runs quickly, suggesting other models aren't being evaluated.
+
+**Status:** LOGGING ADDED - Ready to diagnose
+
+**Root Cause Found:** Non-PLS models were failing silently in `_compute_prediction_error()`. The exception handler returned 1e10 (penalty) with NO logging, making it impossible to debug.
+
+**Fix Applied (2026-01-06):**
+
+1. **Added logging module** (line 54-56):
+   ```python
+   import logging
+   logger = logging.getLogger(__name__)
+   ```
+
+2. **Replaced silent exception handler** (lines 1247-1268):
+   - Tracks failures per model type in `_failure_counts` dict
+   - Logs WARNING on first failure of each model type (visible by default)
+   - Logs DEBUG for subsequent failures
+   - Includes model type, preprocessing, wavelength count, and error message
+
+3. **Added failure summary after optimization** (lines 1707-1716):
+   - Prints model failure counts when verbose >= 1
+   - Logs INFO level summary
+
+4. **Fixed XGBoost deprecated parameter** (line 866):
+   - Removed `use_label_encoder=False` (deprecated in XGBoost 1.3+, removed in 2.0)
+
+**Next Steps:**
+1. Run NSGA-II with multiple models
+2. Check console for failure warnings (e.g., "NSGA-II: First failure for LightGBM: ...")
+3. Failure summary at end shows which models failed and how many times
+4. Fix the specific model failures based on the logged error messages
 
 ---
 

@@ -51,6 +51,10 @@ from xgboost import XGBRegressor, XGBClassifier
 from catboost import CatBoostRegressor, CatBoostClassifier
 from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 
 
@@ -859,7 +863,6 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
                 random_state=random_state,
                 n_jobs=1,
                 verbosity=0,
-                use_label_encoder=False,
                 eval_metric='logloss'
             )
 
@@ -1033,6 +1036,7 @@ class SpectralOptimizationProblem(Problem):
         # Track ALL evaluations for bias=0 (minimum error) selection
         self._all_solutions = []    # All chromosomes evaluated
         self._all_objectives = []   # Their objective values [error, wavelengths, complexity]
+        self._failure_counts = {}   # Track failures per model type for debugging
 
         # Decision variables:
         # [preproc_type, window_idx, model_type, model_param, lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
@@ -1239,7 +1243,27 @@ class SpectralOptimizationProblem(Problem):
                 # Return 1 - accuracy (to minimize)
                 return 1.0 - np.mean(scores)
 
-        except Exception:
+        except Exception as e:
+            # Track and log model failures for debugging
+            model_type = self.model_types[min(model_idx, len(self.model_types) - 1)]
+
+            if model_type not in self._failure_counts:
+                self._failure_counts[model_type] = 0
+            self._failure_counts[model_type] += 1
+
+            # Warn on first failure of each model type (visible by default)
+            if self._failure_counts[model_type] == 1:
+                logger.warning(
+                    f"NSGA-II: First failure for {model_type}: {type(e).__name__}: {e}"
+                )
+
+            # Debug level for subsequent failures
+            logger.debug(
+                f"NSGA-II model failed: model={model_type}, preproc={preproc_idx}, "
+                f"window={window_idx}, n_wavelengths={np.sum(wavelength_mask)}, "
+                f"error={type(e).__name__}: {e}"
+            )
+
             return 1e10  # Return high error on failure (matches Bayesian)
 
     def _compute_complexity(
@@ -1568,12 +1592,12 @@ def run_nsga2_search(
     )
 
     # Create mutation operator with CARS importance and sparsity bias
-    # sparsity_bias=2.0 means dropping is 2x more likely than adding (encourages compact subsets)
+    # sparsity_bias=1.9 means dropping is 1.9x more likely than adding (encourages compact subsets)
     mutation_operator = SmartMutation(
         prob=0.1,
         eta=20,
         importance_scores=cars_importance,
-        sparsity_bias=2.0,
+        sparsity_bias=1.9,
     )
 
     algorithm = NSGA2(
@@ -1677,6 +1701,17 @@ def run_nsga2_search(
             seed=random_state,
             callback=callback,
             verbose=False,
+        )
+
+    # Log failure summary if any models failed
+    if problem._failure_counts:
+        if verbose >= 1:
+            print("\nNSGA-II model failure summary:")
+            for model_type, count in sorted(problem._failure_counts.items()):
+                print(f"  {model_type}: {count} evaluation failures")
+            print("  (First failure for each model type was logged as warning)")
+        logger.info(
+            f"NSGA-II failures: {dict(problem._failure_counts)}"
         )
 
     # Check if cancelled
