@@ -144,40 +144,52 @@ if window_from_config is not None and not pd.isna(window_from_config):
 
 ---
 
-### Issue 6: NSGA-II Only Shows PLS Results When Multiple Models Selected - LOGGING ADDED (2026-01-06)
+### Issue 6: NSGA-II Only Shows PLS Results When Multiple Models Selected - IN PROGRESS (2026-01-06)
 
-**Problem:** User selects multiple models (PLS, Ridge, LightGBM, etc.) for regression, but results only contain PLS models. Runs quickly, suggesting other models aren't being evaluated.
+**Problem:** User selects multiple models (PLS, Ridge, LightGBM, etc.) for regression, but results only contain PLS models.
 
-**Status:** LOGGING ADDED - Ready to diagnose
+**Status:** DIAGNOSTIC LOGGING ADDED - Awaiting analysis
 
-**Root Cause Found:** Non-PLS models were failing silently in `_compute_prediction_error()`. The exception handler returned 1e10 (penalty) with NO logging, making it impossible to debug.
+**Initial Test Results (2026-01-06):**
+```
+NSGA-II: First failure for ElasticNet: ValueError: Window length (5) must be >= polyorder (4) + 2
+NSGA-II: First failure for PLS: ValueError: Window length (5) must be >= polyorder (4) + 2
 
-**Fix Applied (2026-01-06):**
+NSGA-II model failure summary:
+  ElasticNet: 1 evaluation failures
+  PLS: 3 evaluation failures
+```
 
-1. **Added logging module** (line 54-56):
-   ```python
-   import logging
-   logger = logging.getLogger(__name__)
-   ```
+**Key Finding:** Only 4 failures out of 7032 evaluations - models ARE working, but only PLS appears in results. This suggests PLS is dominating the Pareto front (expected for spectral data).
 
-2. **Replaced silent exception handler** (lines 1247-1268):
-   - Tracks failures per model type in `_failure_counts` dict
-   - Logs WARNING on first failure of each model type (visible by default)
-   - Logs DEBUG for subsequent failures
-   - Includes model type, preprocessing, wavelength count, and error message
+**Diagnostic Code Added (uncommitted):**
 
-3. **Added failure summary after optimization** (lines 1707-1716):
-   - Prints model failure counts when verbose >= 1
-   - Logs INFO level summary
+1. **Model evaluation tracking** (`_model_eval_counts` dict):
+   - Tracks how many times each model type is evaluated
+   - Shows distribution at end of optimization
 
-4. **Fixed XGBoost deprecated parameter** (line 866):
-   - Removed `use_label_encoder=False` (deprecated in XGBoost 1.3+, removed in 2.0)
+2. **Pareto front diversity summary**:
+   - Shows which models ended up in the final Pareto front
+   - Reveals if PLS truly dominates or if there's a bug
 
-**Next Steps:**
-1. Run NSGA-II with multiple models
-2. Check console for failure warnings (e.g., "NSGA-II: First failure for LightGBM: ...")
-3. Failure summary at end shows which models failed and how many times
-4. Fix the specific model failures based on the logged error messages
+**Next Session TODO:**
+1. Run NSGA-II again with new diagnostics
+2. Check "Model evaluation distribution" output - are all models being evaluated?
+3. Check "Pareto front model diversity" - is PLS 100% of Pareto front?
+4. If PLS dominates legitimately, this is expected behavior (not a bug)
+5. If other models aren't being evaluated, investigate gene bounds
+
+**Possible Outcomes:**
+- **PLS dominates Pareto front** → Expected for spectral data (PLS is optimal for n << p)
+- **Other models not evaluated** → Bug in gene selection or bounds
+- **Other models evaluated but filtered** → Bug in results conversion
+
+**Files Modified (uncommitted):**
+- `src/spectral_predict/nsga2_search.py`:
+  - Added `_model_eval_counts` tracking (line 1040)
+  - Added evaluation counting (lines 1206-1209)
+  - Added model evaluation distribution summary (lines 1712-1718)
+  - Added Pareto front diversity summary (lines 1766-1775)
 
 ---
 

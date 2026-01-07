@@ -1037,6 +1037,7 @@ class SpectralOptimizationProblem(Problem):
         self._all_solutions = []    # All chromosomes evaluated
         self._all_objectives = []   # Their objective values [error, wavelengths, complexity]
         self._failure_counts = {}   # Track failures per model type for debugging
+        self._model_eval_counts = {}  # Track successful evaluations per model type
 
         # Decision variables:
         # [preproc_type, window_idx, model_type, model_param, lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
@@ -1201,6 +1202,11 @@ class SpectralOptimizationProblem(Problem):
 
             # Build model
             model_type = self.model_types[min(model_idx, len(self.model_types) - 1)]
+
+            # Track model evaluation attempts
+            if model_type not in self._model_eval_counts:
+                self._model_eval_counts[model_type] = 0
+            self._model_eval_counts[model_type] += 1
 
             # Decode hyperparameter genes (including new regularization genes)
             hyperparams = _decode_hyperparameter_genes(
@@ -1703,6 +1709,14 @@ def run_nsga2_search(
             verbose=False,
         )
 
+    # Log model evaluation distribution
+    if verbose >= 1 and problem._model_eval_counts:
+        print("\nNSGA-II model evaluation distribution:")
+        for model_type, count in sorted(problem._model_eval_counts.items()):
+            failures = problem._failure_counts.get(model_type, 0)
+            success_rate = (count - failures) / count * 100 if count > 0 else 0
+            print(f"  {model_type}: {count} evals ({failures} failures, {success_rate:.1f}% success)")
+
     # Log failure summary if any models failed
     if problem._failure_counts:
         if verbose >= 1:
@@ -1748,6 +1762,17 @@ def run_nsga2_search(
             'label_encoder': problem.label_encoder,
             'cancelled': False,
         }
+
+    # Summarize model diversity in Pareto front
+    if verbose >= 1 and pareto_solutions is not None and len(pareto_solutions) > 0:
+        pareto_model_counts = {}
+        for sol in pareto_solutions:
+            model_idx = int(sol[2])
+            model_name = models[min(model_idx, len(models) - 1)]
+            pareto_model_counts[model_name] = pareto_model_counts.get(model_name, 0) + 1
+        print("\nPareto front model diversity:")
+        for model_name, count in sorted(pareto_model_counts.items(), key=lambda x: -x[1]):
+            print(f"  {model_name}: {count} solutions ({count/len(pareto_solutions)*100:.1f}%)")
 
     # Select solution based on bias
     if selection_bias <= 0 and len(problem._all_objectives) > 0:
