@@ -1250,6 +1250,28 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 
 ---
 
+## ✅ Smart Preprocessing Discovery (2026-01-07) - WORKING
+
+**STATUS: WORKING** - Discovery runs correctly and results work in Model Development tab.
+
+### Features
+- Smart Preprocessing Discovery finds promising preprocessing configs
+- R² shown during discovery matches grid search (uses all wavelengths)
+- Results appear in Results table with correct preprocessing names
+- Results work correctly in Model Development tab
+
+### Implementation Details
+- 14 preprocessing types (raw, snv, deriv1-4, snv_deriv1-4, deriv1-4_snv)
+- 17 window sizes (5-51 odd) for comprehensive coverage
+- ~200 total combinations tested exhaustively
+- Uses CARS-Tree or user-selected importance method for wavelength ranking
+
+### Files
+- `src/spectral_predict/preprocessing_discovery.py` - Main module
+- `src/spectral_predict/search.py` - Grid search integration
+
+---
+
 ## 🚨 CRITICAL: GA Preprocessing COMPLETELY BROKEN (2026-01-05)
 
 **STATUS: NON-FUNCTIONAL** - GA preprocessing produces NO RESULTS at all.
