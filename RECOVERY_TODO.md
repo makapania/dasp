@@ -6,6 +6,128 @@
 
 ---
 
+## ✅ FIXED: NSGA-II Result Discrepancy (2026-01-06)
+
+**Problem:** Optimization reports one RMSE but results display shows different value.
+
+**Observed:**
+- During optimization: Best error converged to **1.04**
+- In results table: RMSE = **1.17**, R² = **0.95**
+- Discrepancy: ~0.13 RMSE difference
+
+**Root Cause Found (2nd investigation):**
+`_compute_display_rmse()` and `_compute_solution_r2()` were **missing edge masking** that `_compute_prediction_error()` applies. During optimization, edge wavelengths (first/last `window//2`) are excluded because Savitzky-Golay interpolation creates unreliable boundary artifacts. But the display functions were including these unreliable edges, causing worse RMSE.
+
+**Fix Applied (2026-01-06):**
+Added edge masking to both display functions in `nsga2_search.py`:
+1. `_compute_display_rmse()` - lines 2156-2162
+2. `_compute_solution_r2()` - lines 2052-2058
+
+```python
+# Apply edge masking (same as _compute_prediction_error)
+edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+if edge_zone > 0:
+    wavelength_mask = wavelength_mask.copy()
+    wavelength_mask[:edge_zone] = False
+    wavelength_mask[-edge_zone:] = False
+```
+
+**Result:** Optimization RMSE and display RMSE now match exactly.
+
+**Previous partial fix:** Also added `include_best_from_all` parameter to `convert_nsga2_to_v1_format()` to ensure minimum error solution from all evaluations appears in results table.
+
+**Added:** 2026-01-06 after importance-biased mutation implementation
+
+---
+
+## ✅ FIXED: NSGA-II Wavelength Reduction (2026-01-06)
+
+### Issue 1: NSGA-II Selects Too Many Wavelengths - FIXED
+
+**Problem:** NSGA-II consistently selected 800-1100+ wavelengths, while Grid Search's most competitive models use much smaller subsets (typically 50-300 wavelengths via CARS, SPA, iPLS, importance selection).
+
+**Root Causes Found:**
+1. Initial population started with 100% wavelengths selected
+2. Wavelength count objective was linear (no extra penalty for large counts)
+3. Mutation had no sparsity bias (equally likely to add/drop)
+
+**Fixes Applied (2026-01-06):**
+
+1. **CARS-Tree importance guidance** (lines 1527-1554)
+   - Pre-compute CARS-Tree importance scores before NSGA-II starts
+   - Uses hybrid split+gain importance (denser than plain CARS)
+   - Provides principled wavelength importance for all downstream operations
+
+2. **Importance-weighted population initialization** (SeededWavelengthSampling class, lines 303-426)
+   - Population starts with ~250 wavelengths (configurable via `target_n_wavelengths`)
+   - Wavelength selection probability proportional to CARS importance
+   - Random solutions get 125-375 wavelengths (target/2 to target*1.5)
+
+3. **Sparsity bias in mutation** (SmartMutation class, lines 157-200)
+   - Added `sparsity_bias=2.0` parameter
+   - Dropping wavelengths is 2x more likely than adding
+   - Combined with importance protection: high-importance wavelengths harder to drop
+
+4. **Quadratic wavelength penalty** (line 1141-1144)
+   - Changed from `n_selected / n_total` to `(n_selected / n_total)²`
+   - 800 wavelengths penalized 4x more than 400 wavelengths
+
+**Results:**
+- Before: 800-1100+ wavelengths
+- After: 48-201 wavelengths (mean ~115)
+- Test validation: PASS (mean < 300, max < 400)
+
+**Test script:** `scripts/test_nsga2_wavelength_reduction.py`
+
+**Files modified:** `src/spectral_predict/nsga2_search.py`
+
+---
+
+### Issue 2: R² Appears Low Relative to RMSE
+
+**Problem:** The R² values in NSGA-II results seem low compared to what the RMSE would suggest.
+
+**TODO:** Verify `_compute_solution_r2()` calculation is correct:
+- Check if it uses the same edge masking (now added)
+- Check if cross-validation setup matches optimization
+- Compare R² formula with Grid Search R² calculation
+- Verify same wavelengths and preprocessing are used
+
+**Files:** `src/spectral_predict/nsga2_search.py` - `_compute_solution_r2()` (lines 1996-2092)
+
+---
+
+### Issue 3: Grid Search Model Won't Run in Model Development
+
+**Error:** `slice indices must be integers or None or have an __index__ method`
+
+**Full Traceback:**
+```
+File "spectral_predict_gui_optimized.py", line 21650, in _run_refined_model_thread
+    X_full_preprocessed = prep_pipeline.fit_transform(X_full)
+File "sklearn/pipeline.py", line 731, in fit_transform
+    return last_step.fit_transform(
+File "src/spectral_predict/preprocess.py", line 103, in transform
+    X_deriv = savgol_filter(
+```
+
+**Root Cause (Likely):** The `savgol_filter` is receiving non-integer parameters for `window_length` or `polyorder`. This could happen if:
+1. Window size is stored as float instead of int in results
+2. Window size parsing returns string/float instead of int
+3. Config reconstruction doesn't properly cast types
+
+**Files to Check:**
+- `spectral_predict_gui_optimized.py` - `_run_refined_model_thread()` (line 21650)
+- `spectral_predict_gui_optimized.py` - `_populate_from_result()` or similar config reconstruction
+- `src/spectral_predict/preprocess.py` - `transform()` (line 103)
+
+**TODO:**
+1. Add `int()` casts to window_length and polyorder in preprocess.py
+2. Check where config values come from when selecting Grid Search result
+3. Trace how preprocessing parameters are stored and retrieved
+
+---
+
 ## ✅ RESOLVED: CARS vs CARS-Tree Investigation (2026-01-06)
 
 ### Conclusion: They ARE Different Algorithms - Keep Both
@@ -31,6 +153,41 @@
 
 ---
 
+## ✅ CLASSIFICATION METRICS FIXES (2026-01-06)
+
+### Issue: Rankings Decoupled from Accuracy
+Models with high accuracy were ranked poorly because ranking used ROC_AUC instead of Accuracy.
+
+### Fixes Applied
+
+**1. Changed Classification Ranking (scoring.py lines 83-100)**
+- BEFORE: Ranked by ROC_AUC only
+- AFTER: Ranked by Accuracy (primary) + F1 (tiebreaker, 0.0001 weight)
+
+**2. Changed CV Metrics Averaging (search.py line 2812)**
+- BEFORE: `'weighted'` averaging for F1/Precision/Recall
+- AFTER: `'macro'` averaging (treats all classes equally, consistent with ROC_AUC)
+
+**3. Fixed Validation ROC_AUC Class Mismatch (search.py lines 507-541)**
+- Problem: Training has N classes, validation has fewer (e.g., train=3, val=2)
+- Model's `predict_proba()` returns columns for ALL training classes
+- Fix: Always subset probabilities to classes present in validation, then renormalize
+- Works for any number of classes (binary or multiclass)
+
+**4. Fixed CV ROC_AUC Single-Class Folds (search.py lines 2877-2881)**
+- Problem: Some CV folds might have only one class by chance
+- Fix: Check `n_classes_test < 2` before computing ROC_AUC, return NaN if single class
+
+**5. Fixed Pipeline Not Fitted Warning (search.py lines 2738-2902)**
+- Problem: When sample weights are used, Pipeline steps are fitted manually but Pipeline itself not marked as fitted
+- Fix: Track manual fitting with `manual_fit_used` flag, use manual transform/predict when needed
+
+### Verification
+- Validation ROC_AUC now computes correctly even when val set has fewer classes
+- ROC_AUC = 1.0 with F1 < 1.0 is valid (perfect ranking but suboptimal threshold)
+
+---
+
 ## ✅ VALIDATION METRICS IN RESULTS TABLE (2026-01-03) - COMPLETE
 
 **Feature:** Checkbox in Validation subtab to compute and display validation metrics for top N models in Results table.
@@ -42,12 +199,12 @@
 - Uses `ast.literal_eval()` + `set_params()` for model reconstruction
 - Columns appear in CSV export
 
-### Classification - COMPLETE (2026-01-03)
+### Classification - COMPLETE (2026-01-03, updated 2026-01-06)
 - `val_Accuracy` - accuracy score
-- `val_ROC_AUC` - ROC AUC (binary or weighted multiclass, requires predict_proba)
-- `val_F1` - F1 score (binary or weighted for multiclass)
-- `val_Precision` - Precision score (binary or weighted for multiclass)
-- `val_Recall` - Recall score (binary or weighted for multiclass)
+- `val_ROC_AUC` - ROC AUC (handles class mismatch between train/val)
+- `val_F1` - F1 score (macro averaging for multiclass)
+- `val_Precision` - Precision score (macro averaging for multiclass)
+- `val_Recall` - Recall score (macro averaging for multiclass)
 
 **PLS-DA ISSUE - FIXED:**
 - `_rebuild_model_from_row()` now wraps PLSTransformer with LogisticRegression for PLS-DA classification
@@ -981,19 +1138,50 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 
 ---
 
-## 🚨 OUTSTANDING: Classification Validation Statistics Show NaN (2026-01-05)
+## 🚨 OUTSTANDING: Validation ROC_AUC Still Shows NaN (2026-01-06)
 
-**Problem:** Validation statistics for classification models show NaN instead of actual values.
+**Problem:** Validation ROC_AUC shows NaN for classification, even though other validation metrics (Accuracy, F1, Precision, Recall) work correctly.
 
-**Status:** NOT INVESTIGATED YET
+**Status:** PARTIALLY INVESTIGATED - needs more debugging
 
-**TODO for next session:**
-1. Check if validation data is being passed correctly to `compute_validation_metrics_for_top_models()`
-2. Check if label encoding is applied consistently between training and validation
-3. Check if models have `predict_proba` available for ROC AUC
-4. Debug the actual metric computation in `search.py` lines 463-505
+### What Was Fixed (2026-01-06)
 
-**Note:** This may be related to the previous fix in commits 217209e, 19afa6a, 4e5d024 which addressed similar NaN issues - possibly a regression or edge case not covered.
+1. **CV Metrics Ranking** - Changed from ROC_AUC to Accuracy (primary) + F1 (tiebreaker)
+   - File: `src/spectral_predict/scoring.py` lines 83-100
+
+2. **CV Metrics Averaging** - Changed from `'weighted'` to `'macro'` for multiclass
+   - File: `src/spectral_predict/search.py` line 2812
+
+3. **Validation Metrics Averaging** - Changed from `'weighted'` to `'macro'` for multiclass
+   - File: `src/spectral_predict/search.py` line 471
+
+4. **CV ROC_AUC label_binarize bug** - Removed incorrect `label_binarize` usage
+   - File: `src/spectral_predict/search.py` lines 2840-2845
+
+5. **CV ROC_AUC class alignment** - Added `labels=pipe_clone.classes_` parameter
+   - File: `src/spectral_predict/search.py` lines 2835-2838
+
+6. **Validation ROC_AUC simplification** - Removed `labels` parameter that was causing issues
+   - File: `src/spectral_predict/search.py` lines 513-521
+
+### What Still Doesn't Work
+
+**Validation ROC_AUC** - Still returns NaN despite:
+- Other validation metrics (Accuracy, F1, Precision, Recall) working correctly
+- Model having `predict_proba` method
+- Simplified code without `labels` parameter
+
+### TODO for Next Session
+
+1. Add debug print statements to see actual error in exception handler (line 522-523)
+2. Check if `y_proba` shape matches expected dimensions
+3. Check if `y_val` contains valid encoded labels (0, 1, 2...) not strings
+4. Check if model is a Pipeline vs raw model (Pipeline needs different handling)
+5. Consider if multiclass `roc_auc_score` has edge case issues with validation data
+
+### Files Modified (2026-01-06)
+- `src/spectral_predict/scoring.py` - Ranking by Accuracy+F1
+- `src/spectral_predict/search.py` - Multiple ROC_AUC and averaging fixes
 
 ---
 

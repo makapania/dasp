@@ -43,6 +43,7 @@ from pymoo.termination import get_termination
 # V1 imports - use local modules
 from .preprocess import SNV, SavgolDerivative
 from .models import get_feature_importances
+from .variable_selection import cars_selection
 
 # All model libraries are required dependencies
 from lightgbm import LGBMRegressor, LGBMClassifier
@@ -101,7 +102,9 @@ MODEL_ACTIVE_GENES = {
 
 class SmartMutation(Mutation):
     """
-    Custom mutation that only mutates hyperparameter genes relevant to the model type.
+    Custom mutation with two key features:
+    1. Only mutates hyperparameter genes relevant to the model type
+    2. Importance-biased wavelength mutation (optional)
 
     Gene layout:
     - 0: preprocessing type (always mutate)
@@ -109,21 +112,29 @@ class SmartMutation(Mutation):
     - 2: model type (always mutate)
     - 3: model param (always mutate)
     - 4-12: hyperparameters (only mutate if relevant to model)
-    - 13+: wavelengths (always mutate)
+    - 13+: wavelengths (biased mutation based on importance if available)
 
-    This focuses evolutionary pressure on genes that actually affect fitness,
-    rather than wasting mutations on hyperparameters that are ignored for
-    certain model types (e.g., learning_rate for PLS).
+    Importance-biased mutation:
+    - High importance wavelengths: protected from being dropped
+    - Low importance wavelengths: easier to drop
     """
 
-    def __init__(self, prob: float = 0.1, eta: float = 20):
+    def __init__(self, prob: float = 0.1, eta: float = 20, importance_scores: Optional[np.ndarray] = None,
+                 sparsity_bias: float = 2.0):
         super().__init__()
         self.prob = prob
         self.eta = eta
         self.pm = PM(prob=prob, eta=eta, vtype=float, repair=RoundingRepair())
+        self.importance_scores = importance_scores
+        self.sparsity_bias = sparsity_bias  # Drop is N times more likely than add
+        self._rng = np.random.default_rng()
+
+    def set_importance_scores(self, importance: np.ndarray):
+        """Update the wavelength importance scores for biased mutation."""
+        self.importance_scores = importance
 
     def _do(self, problem, X, **kwargs):
-        # Apply standard PM mutation to all genes first
+        # Apply standard PM mutation to control genes (0-12) first
         X_mutated = self.pm._do(problem, X.copy(), **kwargs)
 
         # For each individual, restore hyperparameter genes that aren't relevant
@@ -137,7 +148,124 @@ class SmartMutation(Mutation):
                 if gene_idx not in active_genes:
                     X_mutated[i, gene_idx] = X[i, gene_idx]
 
+        # Apply importance-biased mutation to wavelength genes if available
+        if self.importance_scores is not None:
+            X_mutated = self._biased_wavelength_mutation(X, X_mutated)
+
         return X_mutated
+
+    def _biased_wavelength_mutation(self, X_orig: np.ndarray, X_mutated: np.ndarray) -> np.ndarray:
+        """
+        Apply importance-biased mutation with sparsity pressure to wavelength genes.
+
+        Logic:
+        - If wavelength selected (1): P(drop) = base_prob * sparsity_bias * (1 - importance)
+          High importance → low drop chance; sparsity_bias increases drop pressure
+        - If wavelength not selected (0): P(add) = base_prob * (1/sparsity_bias) * importance
+          High importance → high add chance; sparsity_bias reduces add likelihood
+
+        With sparsity_bias=2.0, dropping is 2x more likely than adding (encourages smaller subsets).
+
+        IMPORTANT: First restores original wavelength values (undoes PM mutation),
+        then applies biased mutation. This ensures only biased mutation controls
+        wavelength genes, not the random PM mutation.
+        """
+        n_wl = len(self.importance_scores)
+
+        for i in range(len(X_orig)):
+            for j in range(n_wl):
+                gene_idx = 13 + j
+                current = int(X_orig[i, gene_idx])
+                imp = self.importance_scores[j]
+
+                # FIRST: Restore original value (undo PM mutation for wavelengths)
+                X_mutated[i, gene_idx] = current
+
+                # THEN: Apply biased mutation with sparsity pressure
+                if current == 1:
+                    # Currently selected: probability of dropping
+                    # High importance → low drop probability
+                    # sparsity_bias multiplier increases drop pressure
+                    drop_prob = self.prob * self.sparsity_bias * (1.0 - imp)
+                    if self._rng.random() < drop_prob:
+                        X_mutated[i, gene_idx] = 0
+                else:
+                    # Currently not selected: probability of adding
+                    # High importance → high add probability
+                    # 1/sparsity_bias reduces add likelihood (encourages sparsity)
+                    add_prob = self.prob * (1.0 / self.sparsity_bias) * imp
+                    if self._rng.random() < add_prob:
+                        X_mutated[i, gene_idx] = 1
+
+        return X_mutated
+
+
+class ImportanceTracker:
+    """
+    Tracks best preprocessing and manages adaptive importance score computation.
+
+    Updates importance scores every N generations based on the current best
+    preprocessing configuration from the Pareto front.
+    """
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        task_type: str = 'regression',
+        update_interval: int = 10,
+        random_state: int = 42,
+    ):
+        self.X = X
+        self.y = y
+        self.task_type = task_type
+        self.update_interval = update_interval
+        self.random_state = random_state
+
+        self.n_wavelengths = X.shape[1]
+        # Start with uniform importance
+        self.importance_scores = np.ones(self.n_wavelengths) / self.n_wavelengths
+        self.last_update_gen = 0
+
+        # Initial best guesses (raw preprocessing, window 17, PLS model)
+        self.best_preproc_idx = 0
+        self.best_window_idx = 6
+        self.best_model_type = 'PLS'
+
+    def update_best_from_population(self, population: np.ndarray, objectives: np.ndarray):
+        """
+        Update best preprocessing configuration from current population.
+
+        Finds the solution with lowest error and extracts its preprocessing settings.
+        """
+        if len(objectives) == 0:
+            return
+
+        # Find solution with minimum error (first objective)
+        best_idx = np.argmin(objectives[:, 0])
+        best_chromosome = population[best_idx]
+
+        self.best_preproc_idx = int(best_chromosome[0])
+        self.best_window_idx = int(best_chromosome[1])
+        model_idx = int(best_chromosome[2])
+        self.best_model_type = MODEL_TYPES[min(model_idx, len(MODEL_TYPES) - 1)]
+
+    def should_update(self, generation: int) -> bool:
+        """Check if importance scores should be recomputed."""
+        return (generation - self.last_update_gen) >= self.update_interval
+
+    def compute_importance(self) -> np.ndarray:
+        """Compute importance scores using current best preprocessing configuration."""
+        self.importance_scores = _compute_wavelength_importance(
+            X=self.X,
+            y=self.y,
+            preproc_idx=self.best_preproc_idx,
+            window_idx=self.best_window_idx,
+            model_type=self.best_model_type,
+            task_type=self.task_type,
+            random_state=self.random_state,
+        )
+        return self.importance_scores
 
 
 def _get_edge_zone_size(preproc_idx: int, window_idx: int) -> int:
@@ -176,24 +304,33 @@ class SeededWavelengthSampling(Sampling):
     """
     Custom sampling that seeds initial population with strategic solutions.
 
-    Includes:
-    - All-wavelengths solutions (one per model type) to ensure baseline performance
-    - Random solutions for exploration
+    Uses CARS/CARS-Tree importance scores for importance-weighted wavelength selection:
+    - Seeded solutions start with ~target_n_wavelengths selected (based on importance)
+    - Random solutions get importance-weighted random selection
+    - This encourages NSGA-II to explore compact, high-quality subsets from the start
 
-    This addresses the issue where pure random sampling makes it very unlikely
-    to generate solutions with all wavelengths selected, causing NSGA to miss
-    the high-performance corner of the Pareto front.
+    Parameters
+    ----------
+    importance_scores : np.ndarray, optional
+        CARS/CARS-Tree importance scores (higher = more important).
+        If None, uses uniform importance (all wavelengths equally likely).
+    target_n_wavelengths : int, default 250
+        Target number of wavelengths for seeded solutions.
     """
 
-    def __init__(self, n_wavelengths: int, model_types: List[str], n_preproc: int = 10, n_window: int = 15):
+    def __init__(self, n_wavelengths: int, model_types: List[str], n_preproc: int = 10, n_window: int = 15,
+                 importance_scores: Optional[np.ndarray] = None, target_n_wavelengths: int = 250):
         super().__init__()
         self.n_wavelengths = n_wavelengths
         self.model_types = model_types
         self.n_preproc = n_preproc
         self.n_window = n_window
+        self.importance_scores = importance_scores
+        self.target_n_wavelengths = min(target_n_wavelengths, n_wavelengths)
+        self._rng = np.random.default_rng()
 
     def _do(self, problem, n_samples, **kwargs):
-        """Generate initial population with seeded all-wavelengths solutions."""
+        """Generate initial population with importance-weighted wavelength selection."""
         # Variable structure: [preproc_idx, window_idx, model_idx, model_param, lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
         #                      subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene, wl_0, wl_1, ..., wl_n]
         n_vars = 13 + self.n_wavelengths
@@ -205,47 +342,86 @@ class SeededWavelengthSampling(Sampling):
             size=(n_samples, n_vars)
         )
 
-        # Seed first few solutions with ALL wavelengths and different model types
-        # This ensures NSGA has "full wavelength" baselines to work from
-        n_seeded = min(len(self.model_types), n_samples // 4, 5)  # Seed up to 5 solutions
+        # Compute selection probabilities from importance scores
+        if self.importance_scores is not None:
+            # Normalize to probabilities (higher importance = higher selection probability)
+            probs = self.importance_scores.copy()
+            probs = np.maximum(probs, 1e-10)  # Ensure no zeros
+            probs = probs / probs.sum()
+        else:
+            # Uniform probability if no importance scores
+            probs = np.ones(self.n_wavelengths) / self.n_wavelengths
 
-        for i in range(n_seeded):
-            model_idx = i % len(self.model_types)
-            # Use raw preprocessing (idx=0) and default window (idx=6 = window 17)
-            X[i, 0] = 0   # raw preprocessing
-            X[i, 1] = 6   # default window
-            X[i, 2] = model_idx  # cycle through model types
-            X[i, 3] = 7   # middle model_param value (good default)
-            # Use Grid Search default hyperparameters for seeded solutions
-            X[i, 4] = 10  # lr ≈ 0.1 (0.01 * 30^(10/14) ≈ 0.105)
-            X[i, 5] = 12  # reg_alpha ≈ 0.07 (close to Grid Search 0.1)
-            X[i, 6] = 14  # reg_lambda = 1.0 (matches Grid Search exactly)
-            X[i, 7] = 7   # l1_ratio = 0.5 (middle, reasonable default)
-            X[i, 8] = 10  # subsample ≈ 0.86 (close to Grid Search 0.8)
-            X[i, 9] = 10  # colsample ≈ 0.86 (close to Grid Search 0.8)
-            X[i, 10] = 2  # min_samples ≈ 5 (1 + (2/14)*29 ≈ 5, matches Grid Search)
-            X[i, 11] = 0  # gamma = 0 (no penalty)
-            X[i, 12] = 7  # max_features = 0.3 (reasonable default)
-            X[i, 13:] = 1  # ALL wavelengths selected
+        # Seed with diverse preprocessing types including derivatives (commonly best)
+        # PREPROC_TYPES indices: 0=raw, 1=snv, 2=deriv1, 3=deriv2, 4=deriv3, 5=deriv4,
+        #                        6=snv_deriv1, 7=snv_deriv2, 8=snv_deriv3, 9=snv_deriv4,
+        #                        10=deriv1_snv, 11=deriv2_snv, 12=deriv3_snv, 13=deriv4_snv
+        # Prioritize snv_deriv combinations (commonly best), then plain derivs, then raw/snv
+        SEED_PREPROC = [6, 7, 8, 9, 2, 3, 4, 5, 10, 11, 0, 1]  # 12 preprocessing types
 
-        # Also add some solutions with SNV preprocessing + all wavelengths
-        for i in range(n_seeded, min(n_seeded * 2, n_samples // 2)):
-            model_idx = (i - n_seeded) % len(self.model_types)
-            X[i, 0] = 1   # SNV preprocessing
-            X[i, 1] = 6   # default window
-            X[i, 2] = model_idx
-            X[i, 3] = 7   # middle model_param value
-            # Use Grid Search default hyperparameters for seeded solutions
-            X[i, 4] = 10  # lr ≈ 0.1 (matches Grid Search)
-            X[i, 5] = 12  # reg_alpha ≈ 0.07 (close to Grid Search 0.1)
-            X[i, 6] = 14  # reg_lambda = 1.0 (matches Grid Search exactly)
-            X[i, 7] = 7   # l1_ratio = 0.5 (reasonable default)
-            X[i, 8] = 10  # subsample ≈ 0.86 (close to Grid Search 0.8)
-            X[i, 9] = 10  # colsample ≈ 0.86 (close to Grid Search 0.8)
-            X[i, 10] = 2  # min_samples ≈ 5 (matches Grid Search)
-            X[i, 11] = 0  # gamma = 0 (no penalty)
-            X[i, 12] = 7  # max_features = 0.3 (reasonable default)
-            X[i, 13:] = 1  # ALL wavelengths selected
+        # Default hyperparameters (Grid Search defaults)
+        DEFAULT_HYPERPARAMS = {
+            'lr': 10,        # lr ≈ 0.1
+            'reg_alpha': 12, # reg_alpha ≈ 0.07
+            'reg_lambda': 14,# reg_lambda = 1.0
+            'l1_ratio': 7,   # l1_ratio = 0.5
+            'subsample': 10, # subsample ≈ 0.86
+            'colsample': 10, # colsample ≈ 0.86
+            'min_samples': 2,# min_samples ≈ 5
+            'gamma': 0,      # gamma = 0
+            'max_features': 7# max_features = 0.3
+        }
+
+        # Seed solutions: one per (preprocessing × model) combination
+        solution_idx = 0
+        for preproc_idx in SEED_PREPROC:
+            if solution_idx >= n_samples // 2:  # Don't seed more than half the population
+                break
+            for model_idx in range(len(self.model_types)):
+                if solution_idx >= n_samples // 2:
+                    break
+
+                X[solution_idx, 0] = preproc_idx
+                X[solution_idx, 1] = 6   # window index 6 = window 17 (good default for derivatives)
+                X[solution_idx, 2] = model_idx
+                X[solution_idx, 3] = 7   # middle model_param value
+                X[solution_idx, 4] = DEFAULT_HYPERPARAMS['lr']
+                X[solution_idx, 5] = DEFAULT_HYPERPARAMS['reg_alpha']
+                X[solution_idx, 6] = DEFAULT_HYPERPARAMS['reg_lambda']
+                X[solution_idx, 7] = DEFAULT_HYPERPARAMS['l1_ratio']
+                X[solution_idx, 8] = DEFAULT_HYPERPARAMS['subsample']
+                X[solution_idx, 9] = DEFAULT_HYPERPARAMS['colsample']
+                X[solution_idx, 10] = DEFAULT_HYPERPARAMS['min_samples']
+                X[solution_idx, 11] = DEFAULT_HYPERPARAMS['gamma']
+                X[solution_idx, 12] = DEFAULT_HYPERPARAMS['max_features']
+
+                # Use importance-weighted selection instead of all wavelengths
+                X[solution_idx, 13:] = 0  # Start with none selected
+                selected_indices = self._rng.choice(
+                    self.n_wavelengths,
+                    size=self.target_n_wavelengths,
+                    replace=False,
+                    p=probs
+                )
+                X[solution_idx, 13 + selected_indices] = 1
+
+                solution_idx += 1
+
+        # For remaining (random) solutions, also use importance-weighted wavelength selection
+        for i in range(solution_idx, n_samples):
+            # Random number of wavelengths between target/2 and target*1.5
+            n_wl_to_select = self._rng.integers(
+                max(10, self.target_n_wavelengths // 2),
+                min(self.n_wavelengths, int(self.target_n_wavelengths * 1.5)) + 1
+            )
+            X[i, 13:] = 0  # Start with none selected
+            selected_indices = self._rng.choice(
+                self.n_wavelengths,
+                size=n_wl_to_select,
+                replace=False,
+                p=probs
+            )
+            X[i, 13 + selected_indices] = 1
 
         return X
 
@@ -309,6 +485,117 @@ def _get_preprocessing_transform(preproc_idx: int, window_idx: int):
     return None
 
 
+# Tree-based models that should use LightGBM importance
+TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
+
+
+def _compute_wavelength_importance(
+    X: np.ndarray,
+    y: np.ndarray,
+    preproc_idx: int,
+    window_idx: int,
+    model_type: str,
+    task_type: str = 'regression',
+    random_state: int = 42,
+) -> np.ndarray:
+    """
+    Compute normalized wavelength importance scores for biased mutation.
+
+    For tree-based models (LightGBM, XGBoost, CatBoost, RandomForest):
+        Uses LightGBM feature_importances_ (fast, good proxy for all tree models)
+
+    For linear models (PLS, Ridge, Lasso, ElasticNet, SVR, MLP, NeuralBoosted):
+        Uses PLS VIP scores (captures linear relationships)
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Raw spectral data (n_samples, n_wavelengths)
+    y : np.ndarray
+        Target values
+    preproc_idx : int
+        Index into PREPROC_TYPES for current best preprocessing
+    window_idx : int
+        Index into WINDOW_SIZES for current best preprocessing
+    model_type : str
+        Model type name from MODEL_TYPES
+    task_type : str
+        'regression' or 'classification'
+    random_state : int
+        Random state for reproducibility
+
+    Returns
+    -------
+    importance : np.ndarray
+        Normalized importance scores in [0, 1] for each wavelength
+        Higher values = more important wavelengths
+    """
+    n_wavelengths = X.shape[1]
+
+    # Apply preprocessing
+    try:
+        transform = _get_preprocessing_transform(preproc_idx, window_idx)
+        X_proc = transform(X) if transform is not None else X.copy()
+    except Exception:
+        X_proc = X.copy()
+
+    # Handle edge zones - zero out importance for unreliable edge wavelengths
+    edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+
+    try:
+        if model_type in TREE_MODELS:
+            # Use LightGBM feature importance for tree-based models
+            from lightgbm import LGBMRegressor, LGBMClassifier
+            if task_type == 'regression':
+                model = LGBMRegressor(
+                    n_estimators=50, max_depth=5, random_state=random_state,
+                    verbosity=-1, n_jobs=1
+                )
+            else:
+                model = LGBMClassifier(
+                    n_estimators=50, max_depth=5, random_state=random_state,
+                    verbosity=-1, n_jobs=1
+                )
+            model.fit(X_proc, y)
+            importance = model.feature_importances_.astype(float)
+        else:
+            # Use PLS VIP scores for linear models
+            from sklearn.cross_decomposition import PLSRegression
+            n_comp = min(5, X_proc.shape[1] // 2, X_proc.shape[0] - 1)
+            n_comp = max(1, n_comp)
+
+            pls = PLSRegression(n_components=n_comp)
+            pls.fit(X_proc, y)
+
+            # Compute VIP scores
+            W = pls.x_weights_  # (n_features, n_components)
+            T = pls.x_scores_   # (n_samples, n_components)
+
+            y_arr = np.asarray(y).reshape(-1, 1)
+            ssy_comp = np.sum(T**2, axis=0) * np.var(y_arr, axis=0)
+            ssy_total = np.sum(ssy_comp)
+
+            if ssy_total < 1e-10:
+                importance = np.ones(n_wavelengths)
+            else:
+                n_features = W.shape[0]
+                weight = np.sum((W ** 2) * ssy_comp, axis=1)
+                importance = np.sqrt(n_features * weight / ssy_total)
+
+    except Exception:
+        # Fallback to uniform importance if computation fails
+        importance = np.ones(n_wavelengths)
+
+    # Normalize to [0, 1]
+    if importance.max() > 0:
+        importance = importance / importance.max()
+
+    # Zero out edge zones (these wavelengths can't be used anyway)
+    if edge_zone > 0:
+        importance[:edge_zone] = 0.0
+        importance[-edge_zone:] = 0.0
+
+    return importance
 
 
 def _decode_hyperparameter_genes(
@@ -851,8 +1138,10 @@ class SpectralOptimizationProblem(Problem):
             )
             F[i, 0] = error
 
-            # Objective 2: Wavelength count (normalized to 0-1)
-            F[i, 1] = n_selected / self.n_wavelengths
+            # Objective 2: Wavelength count (quadratic penalty for large counts)
+            # Using (n/total)^2 so 800 wavelengths is penalized 4x more than 400
+            # This encourages NSGA-II to find more compact solutions
+            F[i, 1] = (n_selected / self.n_wavelengths) ** 2
 
             # Objective 3: Model complexity (normalized to 0-1)
             complexity = self._compute_complexity(model_idx, model_param, preproc_idx)
@@ -1151,8 +1440,8 @@ def run_nsga2_search(
     X: np.ndarray,
     y: np.ndarray,
     task_type: str = 'regression',
-    population_size: int = 50,
-    n_generations: int = 100,
+    population_size: int = 60,
+    n_generations: int = 120,
     cv_folds: int = 5,
     min_wavelengths: int = 10,
     random_state: int = 42,
@@ -1160,7 +1449,7 @@ def run_nsga2_search(
     progress_callback: Optional[Callable] = None,
     models: Optional[List[str]] = None,
     controller=None,
-    selection_bias: float = 2.0,
+    selection_bias: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1237,22 +1526,61 @@ def run_nsga2_search(
         models=models,
     )
 
-    # Configure NSGA-II with custom seeded sampling
-    # SeededWavelengthSampling ensures we include "all wavelengths" solutions
-    # in the initial population, which helps NSGA find the high-performance
-    # corner of the Pareto front (competitive with Bayesian/Grid Search)
+    # Compute CARS-Tree importance for principled wavelength guidance
+    # CARS-Tree uses hybrid split+gain importance (denser than plain CARS)
+    if verbose >= 1:
+        print("  Computing CARS-Tree importance scores for wavelength guidance...")
+    try:
+        cars_importance = cars_selection(
+            X, y,
+            n_iterations=50,
+            pls_components=min(10, X.shape[0] - 1),
+            cv_folds=min(cv_folds, X.shape[0] // 2),  # Ensure enough samples per fold
+            monte_carlo_samples=80,
+            random_state=random_state,
+            model_type='LightGBM',  # Use tree model for denser importance distribution
+            use_hybrid_importance=True,  # CARS-Tree mode: blend split+gain importance
+            hybrid_importance_weight=0.5
+        )
+        # Normalize to [0, 1]
+        if cars_importance.max() > 0:
+            cars_importance = cars_importance / cars_importance.max()
+        else:
+            cars_importance = np.ones(X.shape[1]) / X.shape[1]
+        if verbose >= 1:
+            n_nonzero = np.sum(cars_importance > 0.01)
+            print(f"  CARS-Tree selected {n_nonzero} important wavelengths (>1% importance)")
+    except Exception as e:
+        if verbose >= 1:
+            print(f"  CARS-Tree failed ({e}), using uniform importance")
+        cars_importance = np.ones(X.shape[1]) / X.shape[1]
+
+    # Configure NSGA-II with custom seeded sampling using CARS importance
+    # Population is initialized with importance-weighted wavelength selection
+    # (targets ~250 wavelengths per solution instead of all wavelengths)
     custom_sampling = SeededWavelengthSampling(
         n_wavelengths=problem.n_wavelengths,
         model_types=models,
         n_preproc=len(PREPROC_TYPES),
         n_window=len(WINDOW_SIZES),
+        importance_scores=cars_importance,
+        target_n_wavelengths=250,  # Start with compact subsets
+    )
+
+    # Create mutation operator with CARS importance and sparsity bias
+    # sparsity_bias=2.0 means dropping is 2x more likely than adding (encourages compact subsets)
+    mutation_operator = SmartMutation(
+        prob=0.1,
+        eta=20,
+        importance_scores=cars_importance,
+        sparsity_bias=2.0,
     )
 
     algorithm = NSGA2(
         pop_size=population_size,
         sampling=custom_sampling,
         crossover=SBX(prob=0.9, eta=15, vtype=float, repair=RoundingRepair()),
-        mutation=SmartMutation(prob=0.1, eta=20),
+        mutation=mutation_operator,
         eliminate_duplicates=True,
     )
 
@@ -1263,7 +1591,8 @@ def run_nsga2_search(
     history = []
 
     class ProgressCallback:
-        def __init__(self, total_gen, callback, verbose, ctrl):
+        def __init__(self, total_gen, callback, verbose, ctrl,
+                     importance_tracker=None, mutation_operator=None):
             self.total_gen = total_gen
             self.callback = callback
             self.verbose = verbose
@@ -1272,6 +1601,8 @@ def run_nsga2_search(
             self.best_error = None
             self.n_pareto = 0
             self.cancelled = False
+            self.importance_tracker = importance_tracker
+            self.mutation_operator = mutation_operator
 
         def __call__(self, algorithm):
             self.gen += 1
@@ -1285,11 +1616,30 @@ def run_nsga2_search(
             # Get current Pareto front
             if algorithm.pop is not None and len(algorithm.pop) > 0:
                 F = algorithm.pop.get("F")
+                X_pop = algorithm.pop.get("X")
+
                 if F is not None and len(F) > 0:
                     # Best error (first objective)
                     self.best_error = F[:, 0].min()
                     self.n_pareto = len(F)
                     history.append(self.best_error)
+
+                    # Update importance scores adaptively every N generations
+                    if self.importance_tracker is not None and X_pop is not None:
+                        # Track best preprocessing from current population
+                        self.importance_tracker.update_best_from_population(X_pop, F)
+
+                        # Recompute importance if interval elapsed
+                        if self.importance_tracker.should_update(self.gen):
+                            new_importance = self.importance_tracker.compute_importance()
+                            self.importance_tracker.last_update_gen = self.gen
+
+                            # Update mutation operator with new importance scores
+                            if self.mutation_operator is not None:
+                                self.mutation_operator.set_importance_scores(new_importance)
+
+                            if self.verbose >= 2:
+                                print(f"    Importance scores updated (gen {self.gen})")
 
                     if self.verbose >= 1 and self.gen % 10 == 0:
                         print(f"  Gen {self.gen}/{self.total_gen}: "
@@ -1307,7 +1657,15 @@ def run_nsga2_search(
                     'message': msg,
                 })
 
-    callback = ProgressCallback(n_generations, progress_callback, verbose, controller)
+    # Instantiate callback (no adaptive importance updates - CARS importance is static)
+    callback = ProgressCallback(
+        n_generations,
+        progress_callback,
+        verbose,
+        controller,
+        importance_tracker=None,  # CARS importance is used statically, no adaptive updates
+        mutation_operator=mutation_operator,
+    )
 
     # Run optimization
     with warnings.catch_warnings():
@@ -1761,6 +2119,14 @@ def _compute_solution_r2(
         max_features_gene = int(solution[12])
         wavelength_mask = solution[13:].astype(bool)
 
+        # Apply edge masking (same as _compute_prediction_error)
+        # Edge zone = window // 2 on each side (unreliable due to SG interpolation)
+        edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+        if edge_zone > 0:
+            wavelength_mask = wavelength_mask.copy()
+            wavelength_mask[:edge_zone] = False
+            wavelength_mask[-edge_zone:] = False
+
         # Decode hyperparameter genes (including new regularization genes)
         hyperparams = _decode_hyperparameter_genes(
             lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
@@ -1816,10 +2182,9 @@ def _compute_display_rmse(
     random_state: int = 42,
 ) -> Optional[float]:
     """
-    Compute RMSE using mean(sqrt(MSE)) formula to match Model Development display.
+    Compute RMSE for display, with edge masking to match optimization.
 
-    NSGA optimization uses sqrt(mean(MSE)) for better Pareto trade-offs, but
-    this function recomputes RMSE using the Model Development formula so
+    This function recomputes RMSE using the same edge masking as optimization so
     that displayed values match between Results and Model Development tabs.
 
     Parameters
@@ -1865,6 +2230,14 @@ def _compute_display_rmse(
         gamma_gene = int(solution[11])
         max_features_gene = int(solution[12])
         wavelength_mask = solution[13:].astype(bool)
+
+        # Apply edge masking (same as _compute_prediction_error)
+        # Edge zone = window // 2 on each side (unreliable due to SG interpolation)
+        edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+        if edge_zone > 0:
+            wavelength_mask = wavelength_mask.copy()
+            wavelength_mask[:edge_zone] = False
+            wavelength_mask[-edge_zone:] = False
 
         # Decode hyperparameter genes (including new regularization genes)
         hyperparams = _decode_hyperparameter_genes(
@@ -2039,6 +2412,7 @@ def convert_nsga2_to_v1_format(
     X: np.ndarray = None,
     y: np.ndarray = None,
     compute_r2: bool = True,
+    include_best_from_all: bool = True,
 ) -> pd.DataFrame:
     """
     Convert NSGA-II results to V1 results DataFrame format.
@@ -2056,6 +2430,9 @@ def convert_nsga2_to_v1_format(
         Target values for R2 computation
     compute_r2 : bool, default True
         Whether to compute R2 for regression tasks (adds ~1s per solution)
+    include_best_from_all : bool, default True
+        When selection_bias=0, the minimum error solution may not be on the
+        Pareto front. If True, include this solution in results even if dominated.
     """
     if len(result['pareto_front']) == 0:
         return pd.DataFrame()
@@ -2138,6 +2515,106 @@ def convert_nsga2_to_v1_format(
             row['CompositeScore'] = 1.0 - objectives[0]  # Use accuracy as composite
 
         rows.append(row)
+
+    # Include best solution from all evaluations if not already in Pareto front
+    # This happens when selection_bias=0 and the minimum error solution is dominated
+    if include_best_from_all and result.get('knee_solution') is not None:
+        knee_sol = result['knee_solution']
+        knee_idx = result.get('knee_idx', -1)
+
+        # knee_idx == -1 means the solution came from all evaluations, not Pareto front
+        if knee_idx == -1 and knee_sol.get('objectives'):
+            # Check if this solution has better error than anything in the Pareto front
+            knee_error = knee_sol['objectives'].get('error', float('inf'))
+            pareto_min_error = min(obj[0] for obj in result['pareto_front']) if len(result['pareto_front']) > 0 else float('inf')
+
+            # Only add if it's actually better than what's in the Pareto front
+            if knee_error < pareto_min_error:
+                # Parse preprocessing info
+                preproc = knee_sol.get('preprocessing', 'raw')
+                deriv_order = None
+                window_size = None
+                if 'deriv1' in preproc or 'deriv2' in preproc or 'deriv3' in preproc or 'deriv4' in preproc:
+                    for d in ['deriv4', 'deriv3', 'deriv2', 'deriv1']:
+                        if d in preproc:
+                            deriv_order = int(d[-1])
+                            break
+                    window_idx = knee_sol.get('window_idx', 6)
+                    window_size = 5 + window_idx * 2
+
+                best_row = {
+                    'Task': task_type,
+                    'Model': knee_sol.get('model', 'Unknown'),
+                    'Preprocessing': preproc,
+                    'Preprocess': preproc,
+                    'Folds': folds,
+                    'N_Calibration': n_calibration,
+                    'N_Excluded': excluded_count,
+                    'N_Validation': validation_count,
+                    'Parameters': knee_sol.get('model_params', ''),
+                    'Params': knee_sol.get('model_params', ''),
+                    'Variables': f"nsga2_{knee_sol.get('n_wavelengths', 0)}",
+                    'full_vars': n_wavelengths,
+                    'SubsetTag': 'nsga2_best',  # Mark as best from all evaluations
+                    'Imbalance': 'none',
+                    'top_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', [])[:30], wavelengths) if knee_sol.get('selected_indices') else 'N/A',
+                    'all_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', []), wavelengths) if knee_sol.get('selected_indices') else 'N/A',
+                    'n_vars': knee_sol.get('n_wavelengths', 0),
+                    'Deriv': deriv_order,
+                    'Window': window_size,
+                    'Poly': 2 if deriv_order else None,
+                    'LVs': knee_sol.get('model_params', {}).get('n_components') if knee_sol.get('model') == 'PLS' else None,
+                    'Complexity': knee_sol['objectives'].get('complexity', 0),
+                    'Is_Knee': False,
+                    'Is_Best_Error': True,  # Mark this as the minimum error solution
+                }
+
+                if task_type == 'regression':
+                    best_row['RMSE'] = knee_error
+                    # Compute R2 for this solution if X and y are provided
+                    if compute_r2 and X is not None and y is not None:
+                        # Re-fit the model to get R2
+                        try:
+                            from sklearn.model_selection import cross_val_predict
+                            from .models import get_model
+
+                            # Get wavelength mask
+                            selected_indices = knee_sol.get('selected_indices', [])
+                            if selected_indices:
+                                X_selected = X[:, selected_indices]
+                            else:
+                                X_selected = X
+
+                            # Apply preprocessing
+                            preproc_idx = knee_sol.get('preproc_idx', 0)
+                            window_idx = knee_sol.get('window_idx', 6)
+                            transform = _get_preprocessing_transform(preproc_idx, window_idx)
+                            X_proc = transform(X_selected) if transform else X_selected
+
+                            # Get model
+                            model = get_model(knee_sol.get('model', 'PLS'), task_type, knee_sol.get('stored_params', {}))
+
+                            # Cross-val predict
+                            from sklearn.model_selection import KFold
+                            kf = KFold(n_splits=folds, shuffle=True, random_state=42)
+                            y_pred = cross_val_predict(model, X_proc, y, cv=kf)
+
+                            # Compute R2
+                            ss_res = np.sum((y - y_pred) ** 2)
+                            ss_tot = np.sum((y - np.mean(y)) ** 2)
+                            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+                            best_row['R2'] = r2
+                        except Exception:
+                            best_row['R2'] = None
+                    else:
+                        best_row['R2'] = None
+                    best_row['CompositeScore'] = knee_error
+                else:
+                    best_row['Accuracy'] = 1.0 - knee_error
+                    best_row['ROC_AUC'] = None
+                    best_row['CompositeScore'] = 1.0 - knee_error
+
+                rows.append(best_row)
 
     df = pd.DataFrame(rows)
 
