@@ -1265,46 +1265,49 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 
 ## ✅ Smart Preprocessing Discovery (2026-01-07) - NEW MODULE
 
-**STATUS: WORKING** - Discovery runs correctly and results work in Model Development tab.
+**STATUS: WORKING** - Discovery runs correctly (~10 seconds) and results work in Model Development tab.
 
 > **NOTE:** This is a completely NEW module (`preprocessing_discovery.py`), separate from
-> and replacing the broken GA Preprocessing. It uses exhaustive search with CARS-Tree
-> importance, not genetic algorithms.
+> and replacing the broken GA Preprocessing. It uses exhaustive search with model-specific
+> importance methods, not genetic algorithms.
 
 ### Features
 - Smart Preprocessing Discovery finds promising preprocessing configs
 - R² shown during discovery matches grid search (uses all wavelengths)
 - Results appear in Results table with correct preprocessing names
 - Results work correctly in Model Development tab
+- **Per-model importance:** When multiple models selected, computes separate importance for each
+- **Progress updates:** Shows "Computing PLS importance for deriv2 w=17" etc.
 
 ### Implementation Details
 - 14 preprocessing types (raw, snv, deriv1-4, snv_deriv1-4, deriv1-4_snv)
-- 17 window sizes (5-51 odd) for comprehensive coverage
-- ~200 total combinations tested exhaustively
-- Uses CARS-Tree or user-selected importance method for wavelength ranking
+- 5 window sizes [7, 11, 17, 25, 31] for fast discovery (~62 combos)
+- Default importance method: **model_specific** (VIP for PLS, coefficients for Ridge, etc.)
+- Per-model expansion: 3 models × 10 top configs = 30 model-specific configurations
+
+### Importance Methods
+| Method | Description | Speed |
+|--------|-------------|-------|
+| **model_specific** (default) | VIP for PLS, coefficients for Ridge/Lasso, tree importance for RF/LightGBM | Fast |
+| lightgbm | Native LightGBM gain importance | Fast |
+| vip | PLS Variable Importance in Projection | Fast |
+| cars_tree | CARS-Tree hybrid (50 iterations) | SLOW - avoid |
 
 ### Files
 - `src/spectral_predict/preprocessing_discovery.py` - Main module
 - `src/spectral_predict/search.py` - Grid search integration
 
-### ⚠️ Known Issue: Window Size Scoring Bias (2026-01-07)
+### ✅ Fixed: CARS-Tree Performance Bug (2026-01-07)
 
-Expanding from 5 window sizes [7, 11, 17, 25, 31] to 17 window sizes [5-51] led to
-potential model degradation. The wavelength penalty (25% of score) rewards fewer
-wavelengths after edge masking, giving larger windows (35, 41, 51) an unfair advantage.
+**Problem:** Smart preprocessing took 20+ minutes instead of 60 seconds.
 
-**Problem:** Larger windows lose more wavelengths to edge masking and receive a scoring
-bonus for this, not because they produce better preprocessing.
+**Root Cause:** The original code passed `verbose=0` to `cars_selection()`, but that function
+doesn't accept a `verbose` parameter. This caused a TypeError, caught by try/except, which
+fell back to fast LightGBM importance. When `verbose=0` was removed (fixing the "bug"),
+CARS actually ran - and it's SLOW (50 iterations per preprocessing combo).
 
-**Potential Solutions (TODO):**
-1. **Dropdown for window set selection** - Let user choose "Classic" (5 windows) or "Extended" (17 windows)
-2. **Cap at 31** - Simple but loses ability to use larger windows for 4th derivative
-3. **Normalize wavelength scoring per-config** (PREFERRED) - Normalize each config's wavelength
-   count relative to its own post-preprocessing count, so window=7 and window=51 start on
-   level playing field. Larger windows remain valid for 4th derivative without unfair bonus.
-
-**Files:**
-- `src/spectral_predict/preprocessing_discovery.py` - `score_config()` function, line ~717
+**Solution:** Changed default importance method from `cars_tree` to `model_specific`.
+Model-specific importance is fast AND tailored to each model type.
 
 ---
 
