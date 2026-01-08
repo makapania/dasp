@@ -1420,6 +1420,7 @@ class SpectralPredictApp:
         self.nsga2_population = tk.IntVar(value=60)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=120)  # NSGA-II number of generations
         self.nsga2_selection_method = tk.StringVar(value="Min Error")  # "Min Error", "Balanced", "Knee Point"
+        self.nsga2_mode = tk.StringVar(value="NSGA-II w/Guidance")  # "NSGA-II", "NSGA-II w/Guidance"
 
         # Advanced preprocessing options (for coupled optimization)
         self.use_ensemble_preprocessing = tk.BooleanVar(value=False)  # Stacked preprocessing
@@ -5795,6 +5796,13 @@ class SpectralPredictApp:
                                        values=["Min Error", "Balanced", "Knee Point"],
                                        state="readonly", width=10)
         selection_combo.grid(row=0, column=7, sticky=tk.W)
+
+        # NSGA-II mode selection (standard vs guided)
+        ttk.Label(param_frame, text="Mode:", style='Normal.TLabel').grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        self.nsga2_mode_combo = ttk.Combobox(param_frame, textvariable=self.nsga2_mode,
+                                             values=["NSGA-II", "NSGA-II w/Guidance"],
+                                             state="readonly", width=18)
+        self.nsga2_mode_combo.grid(row=1, column=3, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
@@ -16454,6 +16462,7 @@ class SpectralPredictApp:
                     selection_bias={"Min Error": 0.0, "Balanced": 1.0, "Knee Point": 2.0}.get(
                         self.nsga2_selection_method.get(), 0.0
                     ),
+                    use_guidance=(self.nsga2_mode.get() == "NSGA-II w/Guidance"),
                 )
 
                 # Convert to V1 format for results display

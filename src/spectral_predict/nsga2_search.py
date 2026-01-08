@@ -1480,6 +1480,7 @@ def run_nsga2_search(
     models: Optional[List[str]] = None,
     controller=None,
     selection_bias: float = 0.0,
+    use_guidance: bool = True,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1521,6 +1522,9 @@ def run_nsga2_search(
         - 2.0: Select knee point (default behavior)
         - 1.0: Weighted compromise between min-error and knee point
         Values are clamped to [0, 2] range.
+    use_guidance : bool, default True
+        If True, use CARS-Tree importance for guided wavelength selection (SeededWavelengthSampling + SmartMutation).
+        If False, use standard NSGA-II (IntegerRandomSampling + PM mutation).
 
     Returns
     -------
@@ -1556,55 +1560,67 @@ def run_nsga2_search(
         models=models,
     )
 
-    # Compute CARS-Tree importance for principled wavelength guidance
+    # Compute CARS-Tree importance for principled wavelength guidance (if use_guidance=True)
     # CARS-Tree uses hybrid split+gain importance (denser than plain CARS)
-    if verbose >= 1:
-        print("  Computing CARS-Tree importance scores for wavelength guidance...")
-    try:
-        cars_importance = cars_selection(
-            X, y,
-            n_iterations=50,
-            pls_components=min(10, X.shape[0] - 1),
-            cv_folds=min(cv_folds, X.shape[0] // 2),  # Ensure enough samples per fold
-            monte_carlo_samples=80,
-            random_state=random_state,
-            model_type='LightGBM',  # Use tree model for denser importance distribution
-            use_hybrid_importance=True,  # CARS-Tree mode: blend split+gain importance
-            hybrid_importance_weight=0.5
-        )
-        # Normalize to [0, 1]
-        if cars_importance.max() > 0:
-            cars_importance = cars_importance / cars_importance.max()
-        else:
+    if use_guidance:
+        if verbose >= 1:
+            print("  Computing CARS-Tree importance scores for wavelength guidance...")
+        try:
+            cars_importance = cars_selection(
+                X, y,
+                n_iterations=50,
+                pls_components=min(10, X.shape[0] - 1),
+                cv_folds=min(cv_folds, X.shape[0] // 2),  # Ensure enough samples per fold
+                monte_carlo_samples=80,
+                random_state=random_state,
+                model_type='LightGBM',  # Use tree model for denser importance distribution
+                use_hybrid_importance=True,  # CARS-Tree mode: blend split+gain importance
+                hybrid_importance_weight=0.5
+            )
+            # Normalize to [0, 1]
+            if cars_importance.max() > 0:
+                cars_importance = cars_importance / cars_importance.max()
+            else:
+                cars_importance = np.ones(X.shape[1]) / X.shape[1]
+            if verbose >= 1:
+                n_nonzero = np.sum(cars_importance > 0.01)
+                print(f"  CARS-Tree selected {n_nonzero} important wavelengths (>1% importance)")
+        except Exception as e:
+            if verbose >= 1:
+                print(f"  CARS-Tree failed ({e}), using uniform importance")
             cars_importance = np.ones(X.shape[1]) / X.shape[1]
+    else:
+        # Standard NSGA-II: No importance guidance
         if verbose >= 1:
-            n_nonzero = np.sum(cars_importance > 0.01)
-            print(f"  CARS-Tree selected {n_nonzero} important wavelengths (>1% importance)")
-    except Exception as e:
-        if verbose >= 1:
-            print(f"  CARS-Tree failed ({e}), using uniform importance")
-        cars_importance = np.ones(X.shape[1]) / X.shape[1]
+            print("  Using standard NSGA-II (no importance guidance)")
+        cars_importance = None
 
-    # Configure NSGA-II with custom seeded sampling using CARS importance
-    # Population is initialized with importance-weighted wavelength selection
-    # (targets ~250 wavelengths per solution instead of all wavelengths)
-    custom_sampling = SeededWavelengthSampling(
-        n_wavelengths=problem.n_wavelengths,
-        model_types=models,
-        n_preproc=len(PREPROC_TYPES),
-        n_window=len(WINDOW_SIZES),
-        importance_scores=cars_importance,
-        target_n_wavelengths=250,  # Start with compact subsets
-    )
+    # Configure NSGA-II operators based on use_guidance flag
+    if use_guidance:
+        # Guided NSGA-II: Use CARS importance for seeded sampling and smart mutation
+        # Population is initialized with importance-weighted wavelength selection
+        # (targets ~250 wavelengths per solution instead of all wavelengths)
+        custom_sampling = SeededWavelengthSampling(
+            n_wavelengths=problem.n_wavelengths,
+            model_types=models,
+            n_preproc=len(PREPROC_TYPES),
+            n_window=len(WINDOW_SIZES),
+            importance_scores=cars_importance,
+            target_n_wavelengths=250,  # Start with compact subsets
+        )
 
-    # Create mutation operator with CARS importance and sparsity bias
-    # sparsity_bias=1.9 means dropping is 1.9x more likely than adding (encourages compact subsets)
-    mutation_operator = SmartMutation(
-        prob=0.1,
-        eta=20,
-        importance_scores=cars_importance,
-        sparsity_bias=1.9,
-    )
+        # Create mutation operator with CARS importance and sparsity bias
+        # sparsity_bias=1.9 means dropping is 1.9x more likely than adding (encourages compact subsets)
+        mutation_operator = SmartMutation(
+            prob=0.1,
+            eta=20,
+            importance_scores=cars_importance,
+            sparsity_bias=1.9,
+        )
+    else:
+        # Standard NSGA-II: Use random sampling and polynomial mutation
+        custom_sampling = IntegerRandomSampling()
+        mutation_operator = PM(prob=0.1, eta=20, vtype=float, repair=RoundingRepair())
 
     algorithm = NSGA2(
         pop_size=population_size,
@@ -2685,5 +2701,41 @@ def convert_nsga2_to_v1_format(
         df = df.sort_values('Accuracy', ascending=False).reset_index(drop=True)
 
     df['Rank'] = range(1, len(df) + 1)
+
+    # Remove duplicate columns (keep 'Params' not 'Parameters', keep 'Preprocess' not 'Preprocessing')
+    if 'Parameters' in df.columns:
+        df = df.drop(columns=['Parameters'])
+    if 'Preprocessing' in df.columns:
+        df = df.drop(columns=['Preprocessing'])
+
+    # Reorder columns to match Grid Search format
+    # Rank first, then standard columns, RMSE/R2/Accuracy after Imbalance, NSGA-specific columns at end
+    base_cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'Variables', 'full_vars',
+                 'SubsetTag', 'Imbalance']
+
+    # Performance metrics after Imbalance
+    if task_type == 'regression':
+        perf_cols = ['RMSE', 'R2', 'CompositeScore']
+    else:
+        perf_cols = ['Accuracy', 'ROC_AUC', 'CompositeScore']
+
+    # Other standard columns
+    other_cols = ['top_vars', 'all_vars', 'n_vars', 'Deriv', 'Window', 'Poly', 'LVs']
+
+    # NSGA-specific columns at end
+    nsga_cols = ['Complexity', 'Is_Knee', 'Folds', 'N_Calibration', 'N_Excluded', 'N_Validation']
+    if 'Is_Best_Error' in df.columns:
+        nsga_cols.append('Is_Best_Error')
+
+    # Build final column order (only include columns that exist in df)
+    final_cols = []
+    for col_list in [base_cols, perf_cols, other_cols, nsga_cols]:
+        final_cols.extend([col for col in col_list if col in df.columns])
+
+    # Add any remaining columns not in our explicit lists
+    remaining = [col for col in df.columns if col not in final_cols]
+    final_cols.extend(remaining)
+
+    df = df[final_cols]
 
     return df
