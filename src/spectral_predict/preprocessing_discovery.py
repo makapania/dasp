@@ -859,11 +859,9 @@ def discover_preprocessing(
 
     print(f"Testing {len(combinations)} preprocessing combinations...")
 
-    # Get representative model for model-specific importance
-    model_for_importance = None
-    if importance_method == 'model_specific' and models_to_test:
-        # Use first model as representative
-        model_for_importance = models_to_test[0] if models_to_test else None
+    # For initial evaluation, use LightGBM importance (fast) to get scores
+    # Model-specific importance will be computed later for each model
+    initial_importance_method = 'lightgbm' if importance_method == 'model_specific' else importance_method
 
     # Evaluate all combinations
     all_configs = []
@@ -879,13 +877,13 @@ def discover_preprocessing(
         window_str = f"w={window}" if window else ""
         print(f"  [{i+1}/{total}] {preproc_name} {window_str}...", end=" ", flush=True)
 
-        # Evaluate this config
+        # Evaluate this config (uses fast importance for initial ranking)
         result = evaluate_preprocessing_config(
             X, y,
             preproc_name=preproc_name,
             window=window,
-            importance_method=importance_method,
-            model_name=model_for_importance,
+            importance_method=initial_importance_method,
+            model_name=None,
             task_type=task_type,
             cv_folds=cv_folds
         )
@@ -905,11 +903,60 @@ def discover_preprocessing(
     print(f"\nSelecting top {n_top} diverse configurations...")
     top_configs = select_diverse_configs(all_configs, n_top, task_type)
 
+    # For model_specific importance with multiple models, compute per-model importance
+    if importance_method == 'model_specific' and models_to_test and len(models_to_test) > 1:
+        print(f"\n=== Computing Model-Specific Importance ===")
+        print(f"Models: {models_to_test}")
+
+        expanded_configs = []
+        for config in top_configs:
+            preproc_name = config['preprocessing']
+            window = config.get('window')
+
+            # Apply preprocessing to get X for importance calculation
+            X_preproc = apply_preprocessing(X, preproc_name, window)
+            edge_zone = get_edge_zone(preproc_name, window)
+            if edge_zone > 0:
+                X_eval = X_preproc[:, edge_zone:-edge_zone]
+            else:
+                X_eval = X_preproc
+
+            # Compute importance for each model
+            for model_name in models_to_test:
+                print(f"  {preproc_name} w={window} -> {model_name}...", end=" ", flush=True)
+                try:
+                    importance = _compute_model_specific_importance(
+                        X_eval, y, model_name, task_type
+                    )
+                    selected_wavelengths = select_wavelengths_by_importance(
+                        importance, target_n=200, edge_zone=0
+                    )
+                    if edge_zone > 0:
+                        selected_wavelengths = selected_wavelengths + edge_zone
+
+                    # Create model-specific config copy
+                    model_config = config.copy()
+                    model_config['selected_wavelengths'] = selected_wavelengths
+                    model_config['importance_method'] = 'model_specific'
+                    model_config['model_name'] = model_name
+                    expanded_configs.append(model_config)
+                    print(f"OK ({len(selected_wavelengths)} wavelengths)")
+                except Exception as e:
+                    print(f"FAILED ({e})")
+                    # Fall back to original config for this model
+                    model_config = config.copy()
+                    model_config['model_name'] = model_name
+                    expanded_configs.append(model_config)
+
+        top_configs = expanded_configs
+        print(f"\nExpanded to {len(top_configs)} model-specific configurations")
+
     # Print summary
     print(f"\n=== Top {len(top_configs)} Configurations ===")
     for i, config in enumerate(top_configs):
         window_str = f"w={config['window']}" if config['window'] else ""
         score_str = f"RMSE={config['score']:.4f}" if task_type == 'regression' else f"Acc={config['score']:.4f}"
-        print(f"  {i+1}. {config['preprocessing']} {window_str}: {score_str}, {config['n_wavelengths']} wavelengths")
+        model_str = f" ({config.get('model_name', 'all')})" if config.get('model_name') else ""
+        print(f"  {i+1}. {config['preprocessing']} {window_str}{model_str}: {score_str}, {config['n_wavelengths']} wavelengths")
 
     return top_configs

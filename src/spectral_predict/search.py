@@ -1041,6 +1041,11 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 else:
                     display_name = base_name
 
+                # Include model name in display if model-specific
+                model_name = cfg.get('model_name')
+                if model_name:
+                    display_name = f"{display_name}_{model_name}"
+
                 preprocess_configs.append({
                     "name": display_name,
                     "base_name": pipeline_name,
@@ -1058,6 +1063,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     "smart_n_wavelengths": cfg.get('n_wavelengths'),
                     "smart_score": cfg.get('score'),
                     "smart_importance_method": cfg.get('importance_method'),
+                    "smart_model_name": model_name,  # Which model this was optimized for
                 })
 
             print(f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search")
