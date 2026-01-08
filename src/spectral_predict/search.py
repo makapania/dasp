@@ -3115,6 +3115,13 @@ def _run_single_config(
     else:
         n_vars = X.shape[1]
 
+    # Cap n_components to actual feature count (for PLS with small wavelength subsets)
+    # Clone model first to avoid affecting other iterations (model passed by reference)
+    if hasattr(model, 'n_components') and model.n_components is not None and model.n_components > n_vars:
+        model = clone(model)
+        capped_n_components = max(1, n_vars - 1)
+        model.set_params(n_components=capped_n_components)
+
     # Use original wavelength count if provided (for wavelength filtering case)
     # Otherwise use current wavelength array length
     full_vars = full_vars_original if full_vars_original is not None else len(wavelengths)
