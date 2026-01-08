@@ -909,6 +909,9 @@ def discover_preprocessing(
         print(f"Models: {models_to_test}")
 
         expanded_configs = []
+        total_importance_calcs = len(top_configs) * len(models_to_test)
+        calc_count = 0
+
         for config in top_configs:
             preproc_name = config['preprocessing']
             window = config.get('window')
@@ -923,7 +926,17 @@ def discover_preprocessing(
 
             # Compute importance for each model
             for model_name in models_to_test:
-                print(f"  {preproc_name} w={window} -> {model_name}...", end=" ", flush=True)
+                calc_count += 1
+                window_str = f"w={window}" if window else ""
+                print(f"  {preproc_name} {window_str} -> {model_name}...", end=" ", flush=True)
+
+                # Update progress
+                if progress_callback:
+                    progress_callback(
+                        calc_count, total_importance_calcs,
+                        f"Computing {model_name} importance for {preproc_name} {window_str}"
+                    )
+
                 try:
                     importance = _compute_model_specific_importance(
                         X_eval, y, model_name, task_type
