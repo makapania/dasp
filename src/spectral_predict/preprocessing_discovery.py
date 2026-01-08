@@ -47,9 +47,9 @@ PREPROCESSING_CANDIDATES = [
     ('deriv4_snv', 4, True),
 ]
 
-# Window sizes to test (matches GA preprocessing for comprehensive coverage)
-# Dense coverage in 7-31 range, sparse 31-51. ~200 total combinations.
-WINDOW_SIZES = [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, 41, 51]
+# Window sizes to test (5 representative values for fast discovery)
+# Covers small (7), medium (11, 17), and large (25, 31) windows
+WINDOW_SIZES = [7, 11, 17, 25, 31]
 
 # Wavelength subset sizes to test
 SUBSET_SIZES = [50, 100, 200, 300]
