@@ -21725,11 +21725,18 @@ F1 Score:  {f1:.4f}
                 print(f"  X_full[0,:5] (first spectrum, first 5 wavelengths): {X_full[0,:5]}")
 
                 print(f"\nDEBUG: Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
+                print(f"DEBUG: prep_steps type: {type(prep_steps)}, value: {prep_steps}")
 
                 # Handle empty pipeline (raw preprocessing with no other options)
-                if len(prep_steps) == 0:
+                # Check type first to avoid sklearn Pipeline internal checks
+                if not isinstance(prep_steps, list):
+                    print(f"WARNING: prep_steps is not a list, got {type(prep_steps)}. Using raw preprocessing.")
+                    X_full_preprocessed = X_full
+                    prep_pipeline = None
+                elif len(prep_steps) == 0:
                     print(f"DEBUG: Raw preprocessing - no transformation needed")
                     X_full_preprocessed = X_full
+                    prep_pipeline = None  # No preprocessing pipeline for raw
                 else:
                     prep_pipeline = Pipeline(prep_steps)
                     X_full_preprocessed = prep_pipeline.fit_transform(X_full)
@@ -22053,8 +22060,12 @@ Configuration:
             if use_full_spectrum_preprocessing:
                 # For derivative + subset: preprocessor was already fitted on full spectrum
                 # We need to save that preprocessor, not create a new one
-                final_preprocessor = prep_pipeline  # Already fitted
-                print("DEBUG: Using full-spectrum preprocessor (already fitted)")
+                # prep_pipeline is None for raw preprocessing (no transformation needed)
+                final_preprocessor = prep_pipeline if prep_pipeline is not None else None
+                if final_preprocessor is not None:
+                    print("DEBUG: Using full-spectrum preprocessor (already fitted)")
+                else:
+                    print("DEBUG: No preprocessor for raw preprocessing")
             elif model_name == "PLS-DA" and task_type == "classification":
                 # For PLS-DA: preprocessing steps are before PLS, PLS+LR are the model
                 if len(pipe_steps) > 2:  # Has preprocessing + PLS + LR

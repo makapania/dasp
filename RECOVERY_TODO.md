@@ -121,13 +121,18 @@ if window_from_config is not None and not pd.isna(window_from_config):
 
 **Problem:** When NSGA-II selects 'raw' preprocessing, Model Development fails to run the model.
 
-**Error:** `This 'Pipeline' has no attribute 'fit_transform'` - IndexError: list index out of range
+**Errors:**
+1. `This 'Pipeline' has no attribute 'fit_transform'` - IndexError: list index out of range
+2. `UnboundLocalError: cannot access local variable 'prep_pipeline'`
 
-**Root Cause:** `build_preprocessing_pipeline()` returns empty list for raw preprocessing with no other options. `Pipeline([])` then fails on `fit_transform()`.
+**Root Cause:** `build_preprocessing_pipeline()` returns empty list for raw preprocessing with no other options. `Pipeline([])` then fails on `fit_transform()`. Additionally, `prep_pipeline` wasn't initialized in the empty case, causing UnboundLocalError later.
 
-**Fix Applied:** Check if `prep_steps` is empty before creating Pipeline. If empty, use data directly without transformation.
+**Fixes Applied:**
+1. Check if `prep_steps` is empty before creating Pipeline
+2. Set `prep_pipeline = None` when empty (line 21733)
+3. Handle `None` case in final_preprocessor assignment (lines 22057-22062)
 
-**File:** `spectral_predict_gui_optimized.py` lines 21729-21735
+**File:** `spectral_predict_gui_optimized.py` lines 21729-21736, 22053-22062
 
 ---
 
@@ -726,6 +731,13 @@ The original Bayesian optimization issues are now resolved by the new Unified Ba
 
 ---
 
+## PENDING FEATURE REQUESTS
+
+### Variable Selection UI
+- [ ] **Custom Variable Subset Input** - In Analysis tab → Basic Settings sub-tab, add a text box where users can input a custom wavelength subset (in addition to existing variable presets). Should allow comma-separated wavelengths or ranges like "1500-1600, 1800, 1900-2000".
+
+---
+
 ## DECEMBER 16-20 FEATURES (From Backup)
 
 *Note: Some overlap with user features above - code exists in `backup_2025-12-20/`*
@@ -1308,6 +1320,20 @@ CARS actually ran - and it's SLOW (50 iterations per preprocessing combo).
 
 **Solution:** Changed default importance method from `cars_tree` to `model_specific`.
 Model-specific importance is fast AND tailored to each model type.
+
+### ⚠️ Known Issue: Model Development Error with Smart Preprocessing (2026-01-07)
+
+**Problem:** Running Model Development on smart preprocessing results (e.g., LightGBM) causes error:
+```
+AttributeError: This 'Pipeline' has no attribute 'fit_transform'
+IndexError: list index out of range
+```
+
+**Status:** Added debug logging and type check to handle edge case. Root cause TBD - possibly
+`prep_steps` returning unexpected type when parsing smart preprocessing names like "deriv2_w17_LightGBM".
+
+**Files:**
+- `spectral_predict_gui_optimized.py` - Line ~21730
 
 ---
 
