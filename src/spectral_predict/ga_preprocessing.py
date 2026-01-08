@@ -9,7 +9,7 @@ parameters. The search space is simplified to just 2 genes:
 Baseline correction and smoothing are removed as they are redundant when using
 derivatives (SG derivatives already smooth, and derivatives remove baselines).
 
-Total search space: 14 preprocessing types × 17 window sizes = 238 combinations
+Total search space: 10 preprocessing types × 17 window sizes = 170 combinations
 
 The GA evaluates preprocessing configurations using cross-validated RMSECV
 with either PLS or LightGBM models for fitness evaluation.
@@ -46,7 +46,8 @@ from lightgbm import LGBMRegressor, LGBMClassifier
 # CHROMOSOME ENCODING (SIMPLIFIED: 2 GENES ONLY)
 # =============================================================================
 
-# Gene 0: Preprocessing type (14 options)
+# Gene 0: Preprocessing type (10 options)
+# Removed snv_deriv3, snv_deriv4, deriv3_snv, deriv4_snv (rarely used)
 PREPROC_TYPES = [
     'raw',           # 0
     'snv',           # 1
@@ -58,18 +59,14 @@ PREPROC_TYPES = [
     'deriv2_snv',    # 7
     'deriv3',        # 8
     'deriv4',        # 9
-    'snv_deriv3',    # 10
-    'snv_deriv4',    # 11
-    'deriv3_snv',    # 12
-    'deriv4_snv',    # 13
 ]
 
 # Gene 1: S-G window sizes (odd values only, 17 options)
 WINDOW_SIZES = [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, 41, 51]
 
-# Total search space: 14 × 17 = 238 combinations
+# Total search space: 10 × 17 = 170 combinations
 N_GENES = 2
-TOTAL_COMBINATIONS = len(PREPROC_TYPES) * len(WINDOW_SIZES)  # 238
+TOTAL_COMBINATIONS = len(PREPROC_TYPES) * len(WINDOW_SIZES)  # 170
 
 
 def random_chromosome(rng: np.random.RandomState) -> np.ndarray:
@@ -105,12 +102,8 @@ def get_seed_chromosomes() -> List[np.ndarray]:
     seeds.append(make_seed('deriv4', window=25))            # 4th derivative (needs even larger window)
     seeds.append(make_seed('snv_deriv1', window=17))        # SNV then 1st deriv
     seeds.append(make_seed('snv_deriv2', window=17))        # SNV then 2nd deriv
-    seeds.append(make_seed('snv_deriv3', window=21))        # SNV then 3rd deriv
-    seeds.append(make_seed('snv_deriv4', window=25))        # SNV then 4th deriv
     seeds.append(make_seed('deriv1_snv', window=17))        # 1st deriv then SNV
     seeds.append(make_seed('deriv2_snv', window=17))        # 2nd deriv then SNV
-    seeds.append(make_seed('deriv3_snv', window=21))        # 3rd deriv then SNV
-    seeds.append(make_seed('deriv4_snv', window=25))        # 4th deriv then SNV
 
     return seeds
 
@@ -170,23 +163,11 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
         elif pt == 'snv_deriv2':
             X_out = SNV().fit_transform(X_out)
             X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv3':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'snv_deriv4':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
         elif pt == 'deriv1_snv':
             X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
         elif pt == 'deriv2_snv':
             X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv3_snv':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv4_snv':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
 
         return X_out
@@ -217,7 +198,8 @@ def evaluate_fitness(
     n_components: int = 10,
     task_type: str = 'regression',
     random_state: int = 42,
-    fitness_model: str = 'pls'
+    fitness_model: str = 'pls',
+    model_config: Optional[Dict[str, Any]] = None
 ) -> float:
     """
     Evaluate fitness of a preprocessing configuration.
@@ -242,6 +224,10 @@ def evaluate_fitness(
         Random state for CV splitting
     fitness_model : str
         Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', or 'neuralboosted'
+        Ignored if model_config is provided.
+    model_config : dict, optional
+        If provided, uses actual model for fitness evaluation.
+        Dict with keys: 'name' (str), 'params' (dict of hyperparameters)
 
     Returns
     -------
@@ -278,7 +264,14 @@ def evaluate_fitness(
         else:
             cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-        # Choose fitness model
+        # If model_config provided, use actual model for fitness
+        if model_config is not None:
+            return _evaluate_with_actual_model(
+                X_preproc, y, cv, task_type,
+                model_config['name'], model_config.get('params', {}), random_state
+            )
+
+        # Otherwise use proxy fitness model
         if fitness_model == 'lightgbm':
             return _evaluate_lightgbm(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'mlp':
@@ -291,6 +284,81 @@ def evaluate_fitness(
 
     except Exception:
         # Any error = very poor fitness
+        return -np.inf
+
+
+def _evaluate_with_actual_model(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv,
+    task_type: str,
+    model_name: str,
+    model_params: Dict[str, Any],
+    random_state: int
+) -> float:
+    """
+    Evaluate fitness using actual model with user hyperparameters.
+
+    This ensures preprocessing is optimized for the ACTUAL model the user wants
+    to test, not a proxy model with hardcoded hyperparameters.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Preprocessed spectral data
+    y : np.ndarray
+        Target values
+    cv : CV splitter
+        Cross-validation strategy
+    task_type : str
+        'regression' or 'classification'
+    model_name : str
+        Name of model (e.g., 'pls', 'lightgbm', 'xgboost')
+    model_params : dict
+        User hyperparameters for the model
+    random_state : int
+        Random state for reproducibility
+
+    Returns
+    -------
+    fitness : float
+        Negative RMSECV (regression) or accuracy (classification)
+    """
+    from .models import get_model
+
+    try:
+        # Get the actual model instance
+        model = get_model(model_name, task_type=task_type, random_state=random_state)
+
+        # Apply user hyperparameters
+        if model_params:
+            model.set_params(**model_params)
+
+        # Cross-validated prediction
+        y_pred = cross_val_predict(model, X, y, cv=cv)
+
+        # Calculate fitness
+        if task_type == 'classification':
+            y_class = np.asarray(y)
+            if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+                from sklearn.preprocessing import LabelEncoder
+                le = LabelEncoder()
+                y_class = le.fit_transform(y_class)
+            else:
+                y_class = y_class.astype(int)
+
+            # Ensure y_pred is integer class labels
+            y_pred_class = np.asarray(y_pred)
+            if y_pred_class.dtype != int:
+                y_pred_class = y_pred_class.astype(int)
+
+            return accuracy_score(y_class, y_pred_class)
+        else:
+            rmsecv = np.sqrt(mean_squared_error(y, y_pred))
+            return -rmsecv
+
+    except Exception as e:
+        # Model evaluation failed - return very poor fitness
         return -np.inf
 
 
@@ -467,12 +535,14 @@ def exhaustive_search(
     fitness_model: str = 'pls',
     n_jobs: int = 1,
     verbose: int = 1,
-    progress_callback: Optional[Callable] = None
+    progress_callback: Optional[Callable] = None,
+    top_n: int = 5,
+    model_config: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Exhaustively search all 238 preprocessing combinations.
+    Exhaustively search all 170 preprocessing combinations.
 
-    With only 238 combinations (14 preprocessing types × 17 window sizes),
+    With only 170 combinations (10 preprocessing types × 17 window sizes),
     exhaustive search is feasible and guarantees finding the optimal solution.
 
     Parameters
@@ -497,6 +567,11 @@ def exhaustive_search(
         Verbosity level (0=silent, 1=progress, 2=detailed)
     progress_callback : callable, optional
         Progress callback function
+    top_n : int
+        Number of top preprocessing configs to return (default=5)
+    model_config : dict, optional
+        Dict with 'name' and 'params' for actual model fitness evaluation
+        If None, uses proxy fitness_model instead
 
     Returns
     -------
@@ -533,7 +608,7 @@ def exhaustive_search(
 
             results = Parallel(n_jobs=n_jobs)(
                 delayed(evaluate_fitness)(
-                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
                 )
                 for genes in all_genes
             )
@@ -544,7 +619,7 @@ def exhaustive_search(
             results = []
             for i, genes in enumerate(all_genes):
                 fitness = evaluate_fitness(
-                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
                 )
                 results.append(fitness)
                 if progress_callback and (i + 1) % 10 == 0:
@@ -560,7 +635,7 @@ def exhaustive_search(
         results = []
         for i, genes in enumerate(all_genes):
             fitness = evaluate_fitness(
-                genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model
+                genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
             )
             results.append(fitness)
 
@@ -576,30 +651,76 @@ def exhaustive_search(
                     'message': f"Tested {i+1}/{len(all_genes)} combinations"
                 })
 
-    # Find best
-    best_idx = np.argmax(results)
-    best_genes = all_genes[best_idx]
-    best_fitness = results[best_idx]
+    # Sort by fitness (descending) and get top-N
+    results_array = np.array(results)
+    sorted_indices = np.argsort(results_array)[::-1]  # Descending order
+    top_n_actual = min(top_n, len(sorted_indices))
 
-    best_name, best_transform = chromosome_to_transform(best_genes)
-    best_config = get_config_description(best_genes)
+    # Build top-N configs list
+    configs = []
+    for i in range(top_n_actual):
+        idx = sorted_indices[i]
+        genes = all_genes[idx]
+        fitness = results[idx]
+        name, transform = chromosome_to_transform(genes)
+        config_desc = get_config_description(genes)
+
+        # Extract deriv and window from genes for search.py integration
+        preproc_type = PREPROC_TYPES[genes[0]]
+        window = WINDOW_SIZES[genes[1]]
+
+        # Determine derivative order from preprocessing type name
+        deriv_order = None
+        if 'deriv1' in preproc_type:
+            deriv_order = 1
+        elif 'deriv2' in preproc_type:
+            deriv_order = 2
+        elif 'deriv3' in preproc_type:
+            deriv_order = 3
+        elif 'deriv4' in preproc_type:
+            deriv_order = 4
+
+        # Polyorder for Savitzky-Golay = deriv_order - 1 (minimum 0)
+        polyorder = max(deriv_order - 1, 0) if deriv_order else None
+
+        # Convert fitness to RMSECV/error score format
+        if task_type == 'classification':
+            score = 1.0 - fitness  # Convert accuracy to error rate
+        else:
+            score = -fitness  # Convert negative RMSECV to positive RMSECV
+
+        configs.append({
+            'genes': genes,
+            'name': name,
+            'transform': transform,
+            'rmsecv': score,
+            'config': config_desc,
+            'fitness': fitness,
+            'deriv': deriv_order,
+            'window': window,
+            'polyorder': polyorder
+        })
+
+    # Best is first in list
+    best_genes = configs[0]['genes']
+    best_name = configs[0]['name']
+    best_transform = configs[0]['transform']
+    best_score = configs[0]['rmsecv']
+    best_config = configs[0]['config']
+    best_fitness = configs[0]['fitness']
 
     if verbose >= 1:
         print(f"\nExhaustive search complete!")
         if task_type == 'classification':
             print(f"  Best Accuracy: {best_fitness:.4f}")
         else:
-            print(f"  Best RMSECV: {-best_fitness:.4f}")
+            print(f"  Best RMSECV: {best_score:.4f}")
         print(f"  Best config: {best_config}")
-
-    # Return score in format expected by callers
-    if task_type == 'classification':
-        best_score = 1.0 - best_fitness
-    else:
-        best_score = -best_fitness
+        print(f"  Returning top {top_n_actual} configs")
 
     return {
-        'best_genes': best_genes,
+        'configs': configs,  # NEW: List of top-N configs
+        'best_genes': best_genes,  # Backward compatibility
         'best_name': best_name,
         'best_transform': best_transform,
         'best_rmsecv': best_score,
@@ -631,7 +752,9 @@ def optimize_preprocessing(
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     fitness_model: str = 'pls',
-    n_jobs: int = 1
+    n_jobs: int = 1,
+    top_n: int = 5,
+    model_config: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Optimize spectral preprocessing using genetic algorithm or exhaustive search.
@@ -644,7 +767,7 @@ def optimize_preprocessing(
         Target values
     method : str
         Optimization method: 'ga' (genetic algorithm) or 'exhaustive'
-        Default is 'ga'. Exhaustive search tests all 238 combinations.
+        Default is 'ga'. Exhaustive search tests all 170 combinations.
     population_size : int
         Number of individuals in population (GA only)
     n_generations : int
@@ -673,12 +796,18 @@ def optimize_preprocessing(
         Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', 'neuralboosted'
     n_jobs : int
         Number of parallel jobs for exhaustive search (-1 for all cores)
+    top_n : int
+        Number of top preprocessing configs to return (default=5)
+    model_config : dict, optional
+        Dict with 'name' and 'params' for actual model fitness evaluation
+        If None, uses proxy fitness_model instead
 
     Returns
     -------
     result : dict
         Dictionary containing:
-        - 'best_genes': np.ndarray - Best chromosome
+        - 'configs': list - Top-N preprocessing configs (NEW)
+        - 'best_genes': np.ndarray - Best chromosome (backward compat)
         - 'best_name': str - Name of best preprocessing
         - 'best_transform': callable - Transform function
         - 'best_rmsecv': float - Best RMSECV (regression) or 1-accuracy (classification)
@@ -689,7 +818,7 @@ def optimize_preprocessing(
     if method == 'exhaustive':
         return exhaustive_search(
             X, y, cv_folds, n_components, task_type, random_state,
-            fitness_model, n_jobs, verbose, progress_callback
+            fitness_model, n_jobs, verbose, progress_callback, top_n, model_config
         )
 
     # Genetic Algorithm
@@ -728,9 +857,13 @@ def optimize_preprocessing(
 
     # Evaluate initial fitness
     fitness = np.array([
-        evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model)
+        evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config)
         for ind in population
     ])
+
+    # Track top-N individuals across all generations
+    # Store as list of (genes, fitness) tuples
+    all_individuals = [(population[i].copy(), fitness[i]) for i in range(len(population))]
 
     # Track best
     best_idx = np.argmax(fitness)
@@ -778,9 +911,13 @@ def optimize_preprocessing(
 
         # Evaluate fitness
         fitness = np.array([
-            evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model)
+            evaluate_fitness(ind, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config)
             for ind in population
         ])
+
+        # Add new individuals to tracking list
+        for i in range(len(population)):
+            all_individuals.append((population[i].copy(), fitness[i]))
 
         # Update best
         gen_best_idx = np.argmax(fitness)
@@ -815,26 +952,84 @@ def optimize_preprocessing(
                 'message': f"Gen {gen}/{n_generations}: {score_str} ({get_config_description(best_genes)})"
             })
 
-    # Get final result
-    best_name, best_transform = chromosome_to_transform(best_genes)
-    best_config = get_config_description(best_genes)
+    # Extract top-N unique individuals from all_individuals
+    # Sort by fitness (descending), remove duplicates based on gene content
+    all_individuals_sorted = sorted(all_individuals, key=lambda x: x[1], reverse=True)
+
+    unique_configs = []
+    seen_genes = []
+    for genes, fitness in all_individuals_sorted:
+        # Check if we've seen this gene configuration before
+        is_duplicate = False
+        for seen in seen_genes:
+            if np.array_equal(genes, seen):
+                is_duplicate = True
+                break
+
+        if not is_duplicate and len(unique_configs) < top_n:
+            seen_genes.append(genes.copy())
+            name, transform = chromosome_to_transform(genes)
+            config_desc = get_config_description(genes)
+
+            # Extract deriv and window from genes for search.py integration
+            preproc_type = PREPROC_TYPES[genes[0]]
+            window = WINDOW_SIZES[genes[1]]
+
+            # Determine derivative order from preprocessing type name
+            deriv_order = None
+            if 'deriv1' in preproc_type:
+                deriv_order = 1
+            elif 'deriv2' in preproc_type:
+                deriv_order = 2
+            elif 'deriv3' in preproc_type:
+                deriv_order = 3
+            elif 'deriv4' in preproc_type:
+                deriv_order = 4
+
+            # Polyorder for Savitzky-Golay = deriv_order - 1 (minimum 0)
+            polyorder = max(deriv_order - 1, 0) if deriv_order else None
+
+            # Convert fitness to RMSECV/error score format
+            if task_type == 'classification':
+                score = 1.0 - fitness  # Convert accuracy to error rate
+            else:
+                score = -fitness  # Convert negative RMSECV to positive RMSECV
+
+            unique_configs.append({
+                'genes': genes,
+                'name': name,
+                'transform': transform,
+                'rmsecv': score,
+                'config': config_desc,
+                'fitness': fitness,
+                'deriv': deriv_order,
+                'window': window,
+                'polyorder': polyorder
+            })
+
+        if len(unique_configs) >= top_n:
+            break
+
+    # Best is first in list
+    best_genes = unique_configs[0]['genes']
+    best_name = unique_configs[0]['name']
+    best_transform = unique_configs[0]['transform']
+    best_score = unique_configs[0]['rmsecv']
+    best_config = unique_configs[0]['config']
+    best_fitness_final = unique_configs[0]['fitness']
 
     if verbose >= 1:
         print(f"\nOptimization complete!")
         if task_type == 'classification':
-            print(f"  Best Accuracy: {best_fitness:.4f}")
+            print(f"  Best Accuracy: {best_fitness_final:.4f}")
         else:
-            print(f"  Best RMSECV: {-best_fitness:.4f}")
+            print(f"  Best RMSECV: {best_score:.4f}")
         print(f"  Best config: {best_config}")
-
-    # Return score in format expected by callers
-    if task_type == 'classification':
-        best_score = 1.0 - best_fitness
-    else:
-        best_score = -best_fitness
+        print(f"  Returning top {len(unique_configs)} unique configs")
 
     return {
-        'best_genes': best_genes,
+        'configs': unique_configs,  # NEW: List of top-N configs
+        'best_genes': best_genes,  # Backward compatibility
         'best_name': best_name,
         'best_transform': best_transform,
         'best_rmsecv': best_score,

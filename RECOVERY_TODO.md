@@ -97,7 +97,7 @@ if edge_zone > 0:
 
 ---
 
-### Issue 3: Model Won't Run in Model Development - PARTIALLY FIXED
+### Issue 3: Model Won't Run in Model Development - FIXED (2026-01-07)
 
 **Error:** `slice indices must be integers or None or have an __index__ method`
 
@@ -112,35 +112,48 @@ if window_from_config is not None and not pd.isna(window_from_config):
 
 **Status:**
 - ✅ NSGA-II results with derivatives now load into Model Development
-- ❌ NSGA-II results with raw preprocessing still fail (see Issue 4)
-- ❌ R² mismatch between Results and Model Development for derivatives (see Issue 5)
+- ✅ NSGA-II results with raw preprocessing now work (Issue 4 FIXED 2026-01-07)
+- ✅ R² mismatch between Results and Model Development fixed (Issue 5 FIXED 2026-01-07)
 
 ---
 
-### Issue 4: NSGA-II Raw Preprocessing Fails in Model Development
+### Issue 4: NSGA-II Raw Preprocessing Fails in Model Development - FIXED (2026-01-07)
 
 **Problem:** When NSGA-II selects 'raw' preprocessing, Model Development fails to run the model.
 
-**Status:** NOT INVESTIGATED
+**Error:** `This 'Pipeline' has no attribute 'fit_transform'` - IndexError: list index out of range
 
-**TODO:** Debug what happens when preprocessing is 'raw' - may be missing handling in `_parse_coupled_preprocessing()` or similar.
+**Root Cause:** `build_preprocessing_pipeline()` returns empty list for raw preprocessing with no other options. `Pipeline([])` then fails on `fit_transform()`.
+
+**Fix Applied:** Check if `prep_steps` is empty before creating Pipeline. If empty, use data directly without transformation.
+
+**File:** `spectral_predict_gui_optimized.py` lines 21729-21735
 
 ---
 
-### Issue 5: NSGA-II R² Mismatch with Derivatives
+### Issue 5: NSGA-II R² Mismatch with Derivatives - FIXED (2026-01-07)
 
 **Problem:** R² shown in Results tab does not match R² computed in Model Development tab when derivatives are used.
 
-**Status:** NOT INVESTIGATED
+**Root Cause:** Window size calculation bug in `convert_nsga2_to_v1_format()`.
 
-**Possible Causes:**
-1. Edge masking differences between NSGA-II and Model Development
-2. Wavelength order issues (similar to previous Unified Bayesian bug)
-3. Different CV setup between optimization and Model Development
+The formula `window_size = 5 + window_idx * 2` does NOT match the actual `WINDOW_SIZES` array:
+```python
+WINDOW_SIZES = [5, 7, 9, 11, 13, 15, 17, 19, 21, 25, 31, 37, 43, 51]
+```
 
-**TODO:** Compare how preprocessing + wavelengths are applied in:
-- `nsga2_search.py` - `_compute_solution_r2()`
-- `spectral_predict_gui_optimized.py` - `_run_refined_model_thread()`
+For indices 0-8, the formula works. For indices ≥9:
+- Index 9: formula=23, actual=25
+- Index 10: formula=25, actual=31
+- Index 11: formula=27, actual=37
+- etc.
+
+**Fix Applied:** Replace formula with actual array lookup:
+```python
+window_size = WINDOW_SIZES[min(window_idx, len(WINDOW_SIZES) - 1)]
+```
+
+**Files:** `src/spectral_predict/nsga2_search.py` lines 2523, 2603
 
 ---
 
@@ -1250,9 +1263,13 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 
 ---
 
-## ✅ Smart Preprocessing Discovery (2026-01-07) - WORKING
+## ✅ Smart Preprocessing Discovery (2026-01-07) - NEW MODULE
 
 **STATUS: WORKING** - Discovery runs correctly and results work in Model Development tab.
+
+> **NOTE:** This is a completely NEW module (`preprocessing_discovery.py`), separate from
+> and replacing the broken GA Preprocessing. It uses exhaustive search with CARS-Tree
+> importance, not genetic algorithms.
 
 ### Features
 - Smart Preprocessing Discovery finds promising preprocessing configs
@@ -1269,6 +1286,25 @@ Parallel evaluation via joblib when `n_jobs=-1`.
 ### Files
 - `src/spectral_predict/preprocessing_discovery.py` - Main module
 - `src/spectral_predict/search.py` - Grid search integration
+
+### ⚠️ Known Issue: Window Size Scoring Bias (2026-01-07)
+
+Expanding from 5 window sizes [7, 11, 17, 25, 31] to 17 window sizes [5-51] led to
+potential model degradation. The wavelength penalty (25% of score) rewards fewer
+wavelengths after edge masking, giving larger windows (35, 41, 51) an unfair advantage.
+
+**Problem:** Larger windows lose more wavelengths to edge masking and receive a scoring
+bonus for this, not because they produce better preprocessing.
+
+**Potential Solutions (TODO):**
+1. **Dropdown for window set selection** - Let user choose "Classic" (5 windows) or "Extended" (17 windows)
+2. **Cap at 31** - Simple but loses ability to use larger windows for 4th derivative
+3. **Normalize wavelength scoring per-config** (PREFERRED) - Normalize each config's wavelength
+   count relative to its own post-preprocessing count, so window=7 and window=51 start on
+   level playing field. Larger windows remain valid for 4th derivative without unfair bonus.
+
+**Files:**
+- `src/spectral_predict/preprocessing_discovery.py` - `score_config()` function, line ~717
 
 ---
 

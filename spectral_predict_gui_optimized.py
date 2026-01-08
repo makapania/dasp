@@ -21713,8 +21713,6 @@ F1 Score:  {f1:.4f}
                     smoothing_window=smoothing_window_size,
                     smoothing_polyorder=smoothing_poly
                 )
-                prep_pipeline = Pipeline(prep_steps)
-
                 # 2. Preprocess FULL spectrum (all wavelengths)
                 X_full = X_base_df.values
 
@@ -21727,7 +21725,14 @@ F1 Score:  {f1:.4f}
                 print(f"  X_full[0,:5] (first spectrum, first 5 wavelengths): {X_full[0,:5]}")
 
                 print(f"\nDEBUG: Preprocessing full spectrum ({X_full.shape[1]} wavelengths)...")
-                X_full_preprocessed = prep_pipeline.fit_transform(X_full)
+
+                # Handle empty pipeline (raw preprocessing with no other options)
+                if len(prep_steps) == 0:
+                    print(f"DEBUG: Raw preprocessing - no transformation needed")
+                    X_full_preprocessed = X_full
+                else:
+                    prep_pipeline = Pipeline(prep_steps)
+                    X_full_preprocessed = prep_pipeline.fit_transform(X_full)
 
                 # DIAGNOSTIC: Fingerprint AFTER preprocessing
                 X_post_hash = hashlib.md5(X_full_preprocessed.tobytes()).hexdigest()[:8]

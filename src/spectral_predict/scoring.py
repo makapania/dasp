@@ -82,20 +82,22 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
 
     else:  # classification
         if use_zscore:
-            # Z-score for ROC_AUC (higher is better)
-            z_auc = (df["ROC_AUC"] - df["ROC_AUC"].mean()) / df["ROC_AUC"].std()
-            z_auc = z_auc.fillna(0)
-
             # Z-score for Accuracy (higher is better)
             z_acc = (df["Accuracy"] - df["Accuracy"].mean()) / df["Accuracy"].std()
             z_acc = z_acc.fillna(0)
 
+            # Z-score for F1 (higher is better)
+            z_f1 = (df["F1"] - df["F1"].mean()) / df["F1"].std()
+            z_f1 = z_f1.fillna(0)
+
             # Combined performance score (lower is better, so negate)
-            performance_score = -z_auc - 0.3 * z_acc
+            # Primary: Accuracy, Secondary: F1 (30% weight)
+            performance_score = -z_acc - 0.3 * z_f1
         else:
             # Direct metric ranking (no z-score normalization)
-            # Use negative ROC_AUC so lower is better (consistent with other scores)
-            performance_score = -df["ROC_AUC"]
+            # Primary: Accuracy, Secondary: F1 as tiebreaker
+            # Use negative so lower is better (consistent with other scores)
+            performance_score = -df["Accuracy"] - 0.0001 * df["F1"]
 
     # NEW: User-friendly penalty system (0-10 scale)
     # Performance z-scores typically range ±3, so we scale penalties to be meaningful but not overwhelming
