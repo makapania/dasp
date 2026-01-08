@@ -162,6 +162,65 @@ window_size = WINDOW_SIZES[min(window_idx, len(WINDOW_SIZES) - 1)]
 
 ---
 
+## ✅ NSGA-II Mode Selection (2026-01-08)
+
+**Feature:** Added dropdown to select between two NSGA-II modes:
+
+- **NSGA-II** (standard): Uses `IntegerRandomSampling` + `PM` mutation (standard genetic operators, more exploration)
+- **NSGA-II w/Guidance** (default): Uses CARS-Tree importance for `SeededWavelengthSampling` + `SmartMutation` (faster convergence)
+
+**Why:** Standard NSGA-II explores more preprocessing types but may need more generations. Guided mode converges faster but may miss some preprocessing options.
+
+**Files Modified:**
+- `src/spectral_predict/nsga2_search.py` - Added `use_guidance` parameter to `run_nsga2_search()`
+- `spectral_predict_gui_optimized.py` - Added dropdown in NSGA-II parameters section
+
+**Commit:** `1b2b1ec`
+
+---
+
+## ✅ NSGA-II Column Ordering Fix (2026-01-08)
+
+**Problem:** NSGA-II results had different column order than Grid Search (Rank at end, metrics scattered).
+
+**Fix:** Reordered columns in `convert_nsga2_to_v1_format()` to match Grid Search:
+- Rank first
+- RMSE/R2 directly after Imbalance
+- NSGA-specific columns (Complexity, Is_Knee, Folds, etc.) at end
+- Removed duplicate columns (Parameters, Preprocessing)
+
+**Files:** `src/spectral_predict/nsga2_search.py` lines 2705-2739
+
+**Commit:** `1b2b1ec`
+
+---
+
+## ⚠️ NSGA-II Ensemble Fix (2026-01-08) - NOT THOROUGHLY TESTED
+
+**Problem:** Ensemble models built from NSGA-II results had MUCH higher RMSE than individual models.
+
+**Root Cause:** `_reconstruct_models_from_results()` was ignoring:
+1. **Wavelength subsets** - NSGA-II stores selected wavelengths in `all_vars` column, but ensemble training used FULL spectrum
+2. **NSGA-II preprocessing** - Preprocessing names like 'deriv1', 'snv_deriv2' weren't being applied
+
+**Fix Applied:**
+1. Added `parse_wavelength_subset()` helper to extract wavelengths from `all_vars`
+2. Added `WavelengthSubsetWrapper` class to apply wavelength subsetting during predict
+3. Added `CombinedPreprocessWrapper` for preprocessing + wavelength subsetting together
+4. Added NSGA-II preprocessing recognition (`NSGA_PREPROCESS_TYPES` list)
+
+**Files:** `spectral_predict_gui_optimized.py` lines 13684-14021
+
+**Status:** Code implemented, syntax verified, **NOT YET TESTED with real NSGA-II results**
+
+**Testing Needed:**
+1. Run NSGA-II optimization
+2. Select multiple models from results
+3. Click "Train Ensemble"
+4. Verify ensemble RMSE is comparable to or better than individual model RMSE
+
+---
+
 ### Issue 6: NSGA-II Only Shows PLS Results When Multiple Models Selected - IN PROGRESS (2026-01-06)
 
 **Problem:** User selects multiple models (PLS, Ridge, LightGBM, etc.) for regression, but results only contain PLS models.
@@ -734,7 +793,13 @@ The original Bayesian optimization issues are now resolved by the new Unified Ba
 ## PENDING FEATURE REQUESTS
 
 ### Variable Selection UI
-- [ ] **Custom Variable Subset Input** - In Analysis tab → Basic Settings sub-tab, add a text box where users can input a custom wavelength subset (in addition to existing variable presets). Should allow comma-separated wavelengths or ranges like "1500-1600, 1800, 1900-2000".
+- [x] **Custom Variable Subset Input** - (COMPLETED 2026-01-08) Added custom wavelength regions input in Basic Settings tab. Supports:
+  - Single ranges: `"2000-2330"`
+  - Multiple discontinuous regions: `"2000-2100, 2200-2300"`
+  - Individual wavelengths: `"2000, 2050, 2100"`
+  - iPLS warning dialog when used with discontinuous regions
+  - Live preview showing selected wavelength count
+  - Files modified: `spectral_predict_gui_optimized.py`, `src/spectral_predict/search.py`
 
 ---
 

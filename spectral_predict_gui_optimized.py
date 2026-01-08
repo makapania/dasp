@@ -1362,6 +1362,7 @@ class SpectralPredictApp:
         self.enable_analysis_wl_restriction = tk.BooleanVar(value=False)
         self.analysis_wl_min = tk.StringVar(value="")
         self.analysis_wl_max = tk.StringVar(value="")
+        self.analysis_wl_custom = tk.StringVar(value="")  # Custom regions: "2000-2100, 2200-2300"
 
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
@@ -5261,19 +5262,50 @@ class SpectralPredictApp:
                   command=lambda: self._set_analysis_wl_preset(2500, 25000),
                   style='Modern.TButton').pack(side=tk.LEFT, padx=2)
 
+        # Custom regions input
+        custom_wl_frame = ttk.Frame(options_frame)
+        custom_wl_frame.grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
+        ttk.Label(custom_wl_frame, text="Custom Regions:").pack(side=tk.LEFT, padx=(0, 5))
+        self.analysis_wl_custom_entry = ttk.Entry(custom_wl_frame, textvariable=self.analysis_wl_custom, width=45)
+        self.analysis_wl_custom_entry.pack(side=tk.LEFT, padx=2)
+
+        # Example text
+        ttk.Label(options_frame,
+                 text='Examples: "2000-2330" or "2000-2100, 2200-2300" (comma-separated ranges)',
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=12, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
+
+        # Preview label for selected wavelengths
+        self.wl_custom_preview_label = ttk.Label(options_frame,
+                 text="",
+                 style='Caption.TLabel', foreground=self.colors['accent'])
+        self.wl_custom_preview_label.grid(row=13, column=0, columnspan=3, sticky=tk.W, pady=(3, 0), padx=(20, 0))
+
+        # Auto-check and update preview when custom field changes
+        def on_custom_wl_change(*args):
+            """Auto-check restriction checkbox and update preview when custom field has content."""
+            custom_val = self.analysis_wl_custom.get().strip()
+            if custom_val:
+                self.enable_analysis_wl_restriction.set(True)
+                # Update preview (basic count, validation happens at search time)
+                self._update_wl_custom_preview()
+            else:
+                self.wl_custom_preview_label.config(text="")
+
+        self.analysis_wl_custom.trace_add('write', on_custom_wl_change)
+
         # Performance note
         ttk.Label(options_frame,
                  text="💡 Tip: Restricting wavelengths speeds up training (fewer features = faster models)",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(10, 0), padx=(20, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
 
-        ttk.Separator(options_frame, orient='horizontal').grid(row=12, column=0, columnspan=3, sticky='ew', pady=(15, 10))
+        ttk.Separator(options_frame, orient='horizontal').grid(row=15, column=0, columnspan=3, sticky='ew', pady=(15, 10))
 
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=13, column=0, sticky=tk.W, pady=(0, 8), padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=13, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=16, column=0, sticky=tk.W, pady=(0, 8), padx=(0, 10))
+        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=16, column=1, sticky=tk.W)
 
         # Progress monitor
-        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=17, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
         self._create_section_header(content_frame, "Preprocessing Methods", row=row, columnspan=2)
@@ -10796,6 +10828,136 @@ class SpectralPredictApp:
         self.analysis_wl_min.set(str(min_wl))
         self.analysis_wl_max.set(str(max_wl))
         self.enable_analysis_wl_restriction.set(True)
+        # Clear custom field when using presets
+        self.analysis_wl_custom.set("")
+
+    def _update_wl_custom_preview(self):
+        """Update the custom wavelength regions preview label."""
+        try:
+            custom_text = self.analysis_wl_custom.get().strip()
+            if not custom_text:
+                self.wl_custom_preview_label.config(text="")
+                return
+
+            # Parse the regions
+            regions, error = self._parse_wavelength_regions(custom_text)
+            if error:
+                self.wl_custom_preview_label.config(
+                    text=f"Invalid: {error}",
+                    foreground='red'
+                )
+                return
+
+            # Count wavelengths if data is loaded
+            if hasattr(self, 'X') and self.X is not None and len(self.X.columns) > 0:
+                wavelengths = self.X.columns.astype(float)
+                wl_count = 0
+                for region_min, region_max in regions:
+                    mask = (wavelengths >= region_min) & (wavelengths <= region_max)
+                    wl_count += mask.sum()
+
+                n_regions = len(regions)
+                region_text = "region" if n_regions == 1 else "regions"
+                self.wl_custom_preview_label.config(
+                    text=f"Selected: {wl_count} wavelengths in {n_regions} {region_text}",
+                    foreground=self.colors['accent']
+                )
+            else:
+                n_regions = len(regions)
+                region_text = "region" if n_regions == 1 else "regions"
+                self.wl_custom_preview_label.config(
+                    text=f"Parsed: {n_regions} {region_text} (load data to see wavelength count)",
+                    foreground=self.colors['text_light']
+                )
+        except Exception as e:
+            self.wl_custom_preview_label.config(
+                text=f"Parse error: {str(e)[:50]}",
+                foreground='red'
+            )
+
+    def _parse_wavelength_regions(self, custom_text):
+        """
+        Parse custom wavelength region specification.
+
+        Supported formats:
+        - Single range: "2000-2330"
+        - Multiple ranges: "2000-2100, 2200-2300"
+        - Individual wavelengths: "2000, 2050, 2100"
+        - Mixed: "1900-2000, 2050, 2100-2200"
+
+        Returns:
+            tuple: (regions_list, error_message)
+                   regions_list: List of (min, max) tuples
+                   error_message: None if valid, error string if invalid
+        """
+        if not custom_text or not custom_text.strip():
+            return None, None
+
+        regions = []
+        parts = [p.strip() for p in custom_text.split(',')]
+
+        for part in parts:
+            if not part:
+                continue
+
+            # Check if it's a range (contains '-' but handle negative numbers)
+            if '-' in part:
+                # Split on '-' but be careful with negative numbers at start
+                if part.startswith('-'):
+                    # Starts with negative - find next '-'
+                    rest = part[1:]
+                    if '-' in rest:
+                        idx = rest.index('-') + 1
+                        start_str = part[:idx]
+                        end_str = part[idx+1:]
+                    else:
+                        # Single negative value
+                        try:
+                            val = float(part)
+                            regions.append((val, val))
+                            continue
+                        except ValueError:
+                            return None, f"Invalid value: {part}"
+                else:
+                    # Normal range like "2000-2330"
+                    range_parts = part.split('-')
+                    if len(range_parts) == 2:
+                        start_str, end_str = range_parts
+                    else:
+                        return None, f"Invalid range format: {part}"
+
+                try:
+                    start_val = float(start_str.strip())
+                    end_val = float(end_str.strip())
+                    if start_val > end_val:
+                        start_val, end_val = end_val, start_val  # Swap if reversed
+                    regions.append((start_val, end_val))
+                except ValueError:
+                    return None, f"Invalid numbers in range: {part}"
+            else:
+                # Single value
+                try:
+                    val = float(part)
+                    regions.append((val, val))
+                except ValueError:
+                    return None, f"Invalid wavelength value: {part}"
+
+        if not regions:
+            return None, "No valid wavelength regions specified"
+
+        # Sort regions by start value
+        regions.sort(key=lambda r: r[0])
+
+        # Merge overlapping regions
+        merged = [regions[0]]
+        for current in regions[1:]:
+            last = merged[-1]
+            if current[0] <= last[1] + 1:  # Overlapping or adjacent
+                merged[-1] = (last[0], max(last[1], current[1]))
+            else:
+                merged.append(current)
+
+        return merged, None
 
     def _toggle_absorbance(self):
         """
@@ -13681,6 +13843,80 @@ class SpectralPredictApp:
         # GA preprocessing suffixes
         GA_SUFFIXES = ('_pls', '_neural_svm', '_tree', '_neuralboosted')
 
+        def parse_wavelength_subset(all_vars_str, X_columns):
+            """
+            Parse wavelength subset from all_vars string and find matching columns.
+
+            Args:
+                all_vars_str: Comma-separated wavelength values like "1500,1520,1540"
+                X_columns: List/Index of column names from X_train
+
+            Returns:
+                List of column names to use, or None if no subset should be applied
+            """
+            if not all_vars_str or all_vars_str == 'N/A' or pd.isna(all_vars_str):
+                return None
+
+            try:
+                # Parse comma-separated wavelengths
+                wavelengths = [float(w.strip()) for w in str(all_vars_str).split(',')]
+
+                # Convert X_columns to floats for matching
+                col_values = []
+                col_names = list(X_columns)
+                for col in col_names:
+                    try:
+                        col_values.append(float(col))
+                    except (ValueError, TypeError):
+                        col_values.append(None)
+
+                # Find matching columns (within tolerance for float comparison)
+                matching_cols = []
+                for wl in wavelengths:
+                    for i, col_val in enumerate(col_values):
+                        if col_val is not None and abs(col_val - wl) < 0.5:
+                            matching_cols.append(col_names[i])
+                            break
+
+                # Only return if we found a meaningful subset
+                if len(matching_cols) > 0 and len(matching_cols) < len(col_names):
+                    return matching_cols
+                return None
+
+            except Exception as e:
+                # If parsing fails, don't subset
+                return None
+
+        class WavelengthSubsetWrapper:
+            """Wrapper that applies wavelength subsetting during fit and predict."""
+
+            def __init__(self, pipeline, wavelength_cols):
+                self.pipeline = pipeline
+                self.wavelength_cols = wavelength_cols
+
+            def _subset(self, X):
+                """Subset X to selected wavelengths."""
+                if hasattr(X, 'loc'):
+                    # DataFrame - use column selection
+                    return X[self.wavelength_cols]
+                else:
+                    # numpy array - need to find column indices
+                    # This shouldn't happen in normal use, but handle it
+                    return X
+
+            def fit(self, X, y):
+                X_subset = self._subset(X)
+                self.pipeline.fit(X_subset, y)
+                return self
+
+            def predict(self, X):
+                X_subset = self._subset(X)
+                return self.pipeline.predict(X_subset)
+
+            def __getattr__(self, name):
+                # Delegate other attributes to the wrapped pipeline
+                return getattr(self.pipeline, name)
+
         def parse_ga_preprocess_name(name):
             """
             Parse a GA preprocessing name to extract configuration.
@@ -13807,13 +14043,26 @@ class SpectralPredictApp:
                 # Check for GA preprocessing (has suffix like _pls, _tree, etc.)
                 is_ga_preprocess = any(preprocess.endswith(suffix) for suffix in GA_SUFFIXES)
 
+                # Check for NSGA-II preprocessing (deriv1, deriv2, snv_deriv1, snv_deriv2, etc.)
+                NSGA_PREPROCESS_TYPES = ['raw', 'snv', 'deriv1', 'deriv2', 'deriv3', 'deriv4',
+                                         'snv_deriv1', 'snv_deriv2', 'snv_deriv3', 'snv_deriv4',
+                                         'deriv1_snv', 'deriv2_snv', 'deriv3_snv', 'deriv4_snv']
+                is_nsga_preprocess = preprocess in NSGA_PREPROCESS_TYPES
+
                 if is_ga_preprocess:
                     # Parse GA preprocessing name and build transform
                     ga_config = parse_ga_preprocess_name(preprocess)
                     ga_transform = build_ga_transform(ga_config)
                     self._log_progress(f"    [GA] Reconstructed preprocessing: {ga_config['type']} w={ga_config['window']}")
 
-                # Add derivative/SNV preprocessing if applicable (non-GA)
+                elif is_nsga_preprocess:
+                    # NSGA-II preprocessing - build transform using the same logic as GA
+                    # Window comes from the row's Window column
+                    nsga_config = {'type': preprocess, 'window': int(window) if window and not pd.isna(window) else 15, 'baseline': None, 'smooth': None}
+                    ga_transform = build_ga_transform(nsga_config)
+                    self._log_progress(f"    [NSGA] Reconstructed preprocessing: {nsga_config['type']} w={nsga_config['window']}")
+
+                # Add derivative/SNV preprocessing if applicable (Grid Search format)
                 elif preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
                     if preprocess == 'snv':
                         # SNV only - no derivative
@@ -13857,11 +14106,57 @@ class SpectralPredictApp:
                 else:
                     pipeline = model
 
-                # Apply GA preprocessing to training data if needed
-                if ga_transform is not None:
-                    # Preprocess the training data
+                # Check for wavelength subset (NSGA-II and other methods store selected wavelengths in all_vars)
+                wavelength_subset = None
+                if hasattr(row, 'all_vars'):
+                    wavelength_subset = parse_wavelength_subset(row.all_vars, X_train.columns)
+                    if wavelength_subset:
+                        self._log_progress(f"    [Subset] Using {len(wavelength_subset)} of {len(X_train.columns)} wavelengths")
+
+                # Apply preprocessing and wavelength subsetting as needed
+                # Cases:
+                # 1. GA/NSGA preprocessing + wavelength subset (NSGA-II): preprocess then subset
+                # 2. GA/NSGA preprocessing only: preprocess only
+                # 3. Wavelength subset only: subset only
+                # 4. Neither: fit on full data
+
+                if ga_transform is not None and wavelength_subset is not None:
+                    # NSGA-II case: preprocessing + wavelength selection
+                    # Create combined wrapper that does both
+                    class CombinedPreprocessWrapper:
+                        def __init__(self, pipeline, transform, wavelength_cols, all_columns):
+                            self.pipeline = pipeline
+                            self.transform = transform
+                            self.wavelength_cols = wavelength_cols
+                            # Build index mapping from original columns to subset
+                            self.col_indices = [list(all_columns).index(c) for c in wavelength_cols]
+
+                        def _preprocess_and_subset(self, X):
+                            X_arr = X.values if hasattr(X, 'values') else X
+                            X_preproc = self.transform(X_arr)
+                            # Subset to selected wavelengths (after preprocessing)
+                            return X_preproc[:, self.col_indices]
+
+                        def fit(self, X, y):
+                            X_processed = self._preprocess_and_subset(X)
+                            self.pipeline.fit(X_processed, y)
+                            return self
+
+                        def predict(self, X):
+                            X_processed = self._preprocess_and_subset(X)
+                            return self.pipeline.predict(X_processed)
+
+                    # Fit on preprocessed + subsetted data
+                    X_preproc = ga_transform(X_train.values if hasattr(X_train, 'values') else X_train)
+                    col_indices = [list(X_train.columns).index(c) for c in wavelength_subset]
+                    X_train_final = X_preproc[:, col_indices]
+                    pipeline.fit(X_train_final, y_train)
+                    pipeline = CombinedPreprocessWrapper(pipeline, ga_transform, wavelength_subset, X_train.columns)
+                    self._log_progress(f"    [Combined] Preprocessing + {len(wavelength_subset)} wavelength subset")
+
+                elif ga_transform is not None:
+                    # GA/NSGA preprocessing only (no wavelength subset)
                     X_train_preprocessed = ga_transform(X_train.values if hasattr(X_train, 'values') else X_train)
-                    # Fit on preprocessed data
                     pipeline.fit(X_train_preprocessed, y_train)
 
                     # Wrap pipeline in a class that applies preprocessing during predict
@@ -13879,22 +14174,31 @@ class SpectralPredictApp:
                             return self.pipeline.fit(X_preproc, y)
 
                     pipeline = GAPreprocessWrapper(pipeline, ga_transform)
+
+                elif wavelength_subset is not None:
+                    # NSGA-II or other method with wavelength selection
+                    # Subset X_train to selected wavelengths and wrap model
+                    X_train_subset = X_train[wavelength_subset]
+                    pipeline.fit(X_train_subset, y_train)
+                    pipeline = WavelengthSubsetWrapper(pipeline, wavelength_subset)
                 else:
-                    # Fit on training data (standard path)
+                    # Fit on training data (standard path - full spectrum)
                     pipeline.fit(X_train, y_train)
 
                 # Store metadata (including wavelength information for transparency)
+                actual_wavelengths = wavelength_subset if wavelength_subset else X_train.columns.tolist()
                 metadata = {
                     'model_name': model_name,
                     'preprocess': preprocess,
                     'params': params_dict,
                     'score': row.CompositeScore if hasattr(row, 'CompositeScore') else 0.0,
                     # Wavelength information for reproducibility
-                    'wavelengths': X_train.columns.tolist(),
-                    'n_vars': X_train.shape[1],
-                    'use_full_spectrum_preprocessing': True,
+                    'wavelengths': actual_wavelengths,
+                    'n_vars': len(actual_wavelengths),
+                    'use_full_spectrum_preprocessing': wavelength_subset is None,
                     'full_wavelengths': X_train.columns.tolist(),
-                    'ga_preprocessing': ga_transform is not None
+                    'ga_preprocessing': ga_transform is not None,
+                    'wavelength_subset': wavelength_subset is not None
                 }
 
                 reconstructed_models.append((pipeline, model_name, metadata))
@@ -15887,6 +16191,53 @@ class SpectralPredictApp:
                         analysis_wl_min_value = None
                         analysis_wl_max_value = None
 
+            # Parse custom wavelength regions (takes precedence over min/max if specified)
+            analysis_wl_regions_value = None
+            custom_wl_text = self.analysis_wl_custom.get().strip()
+
+            if self.enable_analysis_wl_restriction.get() and custom_wl_text:
+                regions, error = self._parse_wavelength_regions(custom_wl_text)
+                if error:
+                    self._log_progress(f"\n[!] WARNING: Invalid custom wavelength regions: {error}\n")
+                    self._log_progress(f"    Falling back to min/max range if specified\n")
+                elif regions:
+                    # Validate regions are within data range
+                    wavelengths = X_filtered.columns.astype(float)
+                    wl_min_data, wl_max_data = wavelengths.min(), wavelengths.max()
+
+                    # Count total wavelengths in custom regions
+                    total_wl_count = 0
+                    valid_regions = []
+                    for r_min, r_max in regions:
+                        # Check if region overlaps with data
+                        if r_max < wl_min_data or r_min > wl_max_data:
+                            self._log_progress(f"    [!] Region {r_min:.0f}-{r_max:.0f} nm is outside data range, skipping")
+                            continue
+                        # Clip to data range
+                        r_min_clipped = max(r_min, wl_min_data)
+                        r_max_clipped = min(r_max, wl_max_data)
+                        region_count = ((wavelengths >= r_min_clipped) & (wavelengths <= r_max_clipped)).sum()
+                        total_wl_count += region_count
+                        valid_regions.append((r_min_clipped, r_max_clipped))
+
+                    if valid_regions and total_wl_count > 0:
+                        analysis_wl_regions_value = valid_regions
+                        # Clear min/max when using custom regions (custom takes precedence)
+                        analysis_wl_min_value = None
+                        analysis_wl_max_value = None
+
+                        # Log custom regions
+                        n_regions = len(valid_regions)
+                        self._log_progress(f"\n🔬 CUSTOM WAVELENGTH REGIONS FOR VARIABLE SELECTION:")
+                        for i, (r_min, r_max) in enumerate(valid_regions):
+                            region_count = ((wavelengths >= r_min) & (wavelengths <= r_max)).sum()
+                            self._log_progress(f"   Region {i+1}: {r_min:.1f} - {r_max:.1f} nm ({region_count} wavelengths)")
+                        self._log_progress(f"   Total: {total_wl_count} wavelengths in {n_regions} region(s)")
+                        self._log_progress(f"")
+                        self._log_progress(f"   > Preprocessing (SNV, derivatives) will use FULL imported spectrum")
+                        self._log_progress(f"   > Variable selection will be constrained to specified regions\n")
+                    else:
+                        self._log_progress(f"\n[!] WARNING: No valid wavelengths in custom regions, ignoring\n")
 
             # Parse UVE n_components (empty string = None)
             uve_n_comp = None
@@ -15924,6 +16275,32 @@ class SpectralPredictApp:
 
             # Log selected variable selection methods
             self._log_progress(f"  Variable selection methods: {selected_varsel_methods}")
+
+            # Check for iPLS with discontinuous regions warning
+            if 'ipls' in selected_varsel_methods and analysis_wl_regions_value and len(analysis_wl_regions_value) > 1:
+                # Check if regions are discontinuous (have gaps)
+                sorted_regions = sorted(analysis_wl_regions_value, key=lambda r: r[0])
+                has_gaps = False
+                for i in range(len(sorted_regions) - 1):
+                    # Check if there's a gap between regions (more than 1 nm)
+                    if sorted_regions[i+1][0] > sorted_regions[i][1] + 1:
+                        has_gaps = True
+                        break
+
+                if has_gaps:
+                    result = messagebox.askyesno(
+                        "iPLS with Discontinuous Regions",
+                        "You have selected iPLS (Interval PLS) with discontinuous wavelength regions.\n\n"
+                        "iPLS normally divides the spectrum into contiguous intervals. With discontinuous "
+                        "regions, each region will be analyzed separately.\n\n"
+                        "This may reduce iPLS effectiveness as it cannot find intervals spanning multiple regions.\n\n"
+                        "Continue with iPLS enabled?",
+                        icon='warning'
+                    )
+                    if not result:
+                        # User chose not to continue - remove iPLS from methods
+                        selected_varsel_methods = [m for m in selected_varsel_methods if m != 'ipls']
+                        self._log_progress("[!] iPLS removed from variable selection methods due to discontinuous regions")
 
             # SAFETY CHECK: Ensure X and y are properly aligned
             if len(X_filtered) != len(y_filtered):
@@ -16409,6 +16786,56 @@ class SpectralPredictApp:
                     results_df = pd.concat(all_results, ignore_index=True)
                     results_df = results_df.sort_values('RMSE' if task_type == 'regression' else 'CV Error').reset_index(drop=True)
                     results_df['Rank'] = results_df.index + 1
+
+                    # === COMPUTE VALIDATION METRICS FOR UNIFIED BAYESIAN ===
+                    if (self.validation_enabled.get() and
+                        self.show_validation_metrics.get() and
+                        self.validation_X is not None and
+                        self.validation_y is not None and
+                        len(results_df) > 0):
+
+                        self._log_progress("\n📊 Computing validation metrics for Unified Bayesian results...")
+
+                        try:
+                            from spectral_predict.search import compute_validation_metrics_for_top_models
+
+                            # Prepare validation data as numpy arrays
+                            X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
+                            y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+
+                            # For classification, re-create label encoder from training data
+                            # (run_unified_bayesian doesn't return it)
+                            if task_type == 'classification':
+                                from sklearn.preprocessing import LabelEncoder
+                                temp_encoder = LabelEncoder()
+                                temp_encoder.fit(y_np)
+                                try:
+                                    y_val_np = temp_encoder.transform(y_val_np)
+                                    self._log_progress("  Encoded validation labels")
+                                except ValueError as e:
+                                    self._log_progress(f"  [Warning] Could not encode validation labels: {e}")
+
+                            # Compute validation metrics
+                            results_df = compute_validation_metrics_for_top_models(
+                                df_results=results_df,
+                                X_train=X_np,
+                                y_train=y_np,
+                                X_val=X_val_np,
+                                y_val=y_val_np,
+                                task_type=task_type,
+                                wavelengths=wavelengths,
+                                top_n=self.validation_top_n.get(),
+                                progress_callback=self._progress_callback
+                            )
+
+                            n_computed = min(self.validation_top_n.get(), len(results_df))
+                            self._log_progress(f"  ✓ Validation metrics computed for top {n_computed} models")
+
+                        except Exception as e:
+                            self._log_progress(f"  [Warning] Failed to compute validation metrics: {e}")
+                            import traceback
+                            self._log_progress(f"  {traceback.format_exc()}")
+
                 else:
                     results_df = pd.DataFrame()
 
@@ -16480,6 +16907,54 @@ class SpectralPredictApp:
                     compute_r2=True,
                 )
 
+                # Get label_encoder BEFORE computing validation metrics
+                label_encoder = nsga_result.get('label_encoder')
+
+                # === COMPUTE VALIDATION METRICS FOR NSGA-II ===
+                if (self.validation_enabled.get() and
+                    self.show_validation_metrics.get() and
+                    self.validation_X is not None and
+                    self.validation_y is not None and
+                    len(results_df) > 0):
+
+                    self._log_progress("\n📊 Computing validation metrics for NSGA-II results...")
+
+                    try:
+                        from spectral_predict.search import compute_validation_metrics_for_top_models
+
+                        # Prepare validation data as numpy arrays
+                        X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
+                        y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+
+                        # Handle label encoding for classification
+                        if task_type == 'classification' and label_encoder is not None:
+                            try:
+                                y_val_np = label_encoder.transform(y_val_np)
+                                self._log_progress("  Encoded validation labels using training encoder")
+                            except ValueError as e:
+                                self._log_progress(f"  [Warning] Could not encode validation labels: {e}")
+
+                        # Compute validation metrics
+                        results_df = compute_validation_metrics_for_top_models(
+                            df_results=results_df,
+                            X_train=X_np,
+                            y_train=y_np,
+                            X_val=X_val_np,
+                            y_val=y_val_np,
+                            task_type=task_type,
+                            wavelengths=wavelengths,
+                            top_n=self.validation_top_n.get(),
+                            progress_callback=self._progress_callback
+                        )
+
+                        n_computed = min(self.validation_top_n.get(), len(results_df))
+                        self._log_progress(f"  ✓ Validation metrics computed for top {n_computed} models")
+
+                    except Exception as e:
+                        self._log_progress(f"  [Warning] Failed to compute validation metrics: {e}")
+                        import traceback
+                        self._log_progress(f"  {traceback.format_exc()}")
+
                 # Log Pareto front info
                 if nsga_result.get('pareto_front') is not None and len(nsga_result['pareto_front']) > 0:
                     self._log_progress(f"\n> NSGA-II Complete!")
@@ -16490,8 +16965,6 @@ class SpectralPredictApp:
                         self._log_progress(f"  Knee point: {ks['model']} + {ks['preprocessing']}")
                         self._log_progress(f"    Wavelengths: {ks['n_wavelengths']}")
                         self._log_progress(f"    Error: {ks['objectives']['error']:.4f}")
-
-                label_encoder = nsga_result.get('label_encoder')
 
             elif optimization_method == "bayesian":
                 # === BAYESIAN OPTIMIZATION ===
@@ -16655,6 +17128,7 @@ class SpectralPredictApp:
                 # Wavelength restriction for variable selection only (preprocessing uses full spectrum)
                 analysis_wl_min=analysis_wl_min_value,
                 analysis_wl_max=analysis_wl_max_value,
+                analysis_wl_regions=analysis_wl_regions_value,  # Custom multi-region support
                 # Imbalance handling (NEW - Phase 2 implementation)
                 imbalance_method=imbalance_method,
                 imbalance_params=imbalance_params,

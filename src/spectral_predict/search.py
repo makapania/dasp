@@ -642,6 +642,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                spa_n_random_starts=10, ipls_n_intervals=20,
                tier='standard', enabled_models=None,
                analysis_wl_min=None, analysis_wl_max=None,
+               analysis_wl_regions=None,  # List of (min, max) tuples for multi-region support
                imbalance_method=None, imbalance_params=None, enable_class_weight=False,
                ga_preprocess=False,
                ga_preprocess_method='ga',
@@ -1557,7 +1558,52 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         n_original_wavelengths = len(wavelengths)
 
         # Step 3: Apply wavelength filtering to preprocessed data
-        if analysis_wl_min is not None or analysis_wl_max is not None:
+        # ═══════════════════════════════════════════════════════════════════════════
+        # WAVELENGTH FILTERING (multi-region or single range)
+        # Custom regions take precedence over min/max if specified
+        # ═══════════════════════════════════════════════════════════════════════════
+        if analysis_wl_regions is not None and len(analysis_wl_regions) > 0:
+            # Multi-region filtering (custom wavelength regions)
+            wavelengths_float = wavelengths.astype(float)
+            wl_mask = np.zeros(len(wavelengths), dtype=bool)
+
+            # Build OR-mask across all regions
+            for region_min, region_max in analysis_wl_regions:
+                region_mask = (wavelengths_float >= region_min) & (wavelengths_float <= region_max)
+                wl_mask |= region_mask
+
+            # Validate non-empty selection
+            n_wavelengths_selected = wl_mask.sum()
+            if n_wavelengths_selected == 0:
+                regions_str = ", ".join([f"{r[0]:.0f}-{r[1]:.0f}" for r in analysis_wl_regions])
+                raise ValueError(
+                    f"Custom wavelength regions [{regions_str}] nm exclude all wavelengths. "
+                    f"Available range: {wavelengths_float.min():.1f}-{wavelengths_float.max():.1f} nm"
+                )
+
+            # Create filtered variables (scoped to this preprocessing config)
+            X_for_models = X_preprocessed[:, wl_mask]
+            wavelengths_for_models = wavelengths[wl_mask]
+
+            # Generate preprocessing name for display
+            prep_display = preprocess_cfg["name"]
+            if preprocess_cfg["deriv"] is not None:
+                prep_display += f"_d{preprocess_cfg['deriv']}"
+
+            # Print filtering summary (shown once per preprocessing method)
+            print(f"\n{'='*70}")
+            print(f"WAVELENGTH FILTERING - CUSTOM REGIONS (after {prep_display} preprocessing)")
+            print(f"{'='*70}")
+            n_regions = len(analysis_wl_regions)
+            for i, (r_min, r_max) in enumerate(analysis_wl_regions):
+                region_count = ((wavelengths_float >= r_min) & (wavelengths_float <= r_max)).sum()
+                print(f"  Region {i+1}: {r_min:.0f} - {r_max:.0f} nm ({region_count} wavelengths)")
+            print(f"  Total wavelengths kept: {len(wavelengths_for_models)} of {len(wavelengths)}")
+            print(f"  Note: Preprocessing applied to FULL spectrum before filtering")
+            print(f"{'='*70}\n")
+
+        elif analysis_wl_min is not None or analysis_wl_max is not None:
+            # Single-range filtering (original behavior)
             wavelengths_float = wavelengths.astype(float)
             wl_mask = np.ones(len(wavelengths), dtype=bool)
 
