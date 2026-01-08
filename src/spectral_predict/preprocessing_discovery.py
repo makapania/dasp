@@ -100,7 +100,7 @@ IMPORTANCE_METHODS = {
 def compute_importance(
     X: np.ndarray,
     y: np.ndarray,
-    method: str = 'cars_tree',
+    method: str = 'model_specific',
     model_name: Optional[str] = None,
     task_type: str = 'regression'
 ) -> np.ndarray:
@@ -178,8 +178,7 @@ def _compute_cars_tree_importance(
             use_hybrid_importance=True,
             hybrid_importance_weight=0.5,
             cv_folds=cv_folds,
-            random_state=RANDOM_STATE,
-            verbose=0
+            random_state=RANDOM_STATE
         )
         return importance
 
@@ -808,7 +807,7 @@ def discover_preprocessing(
     y: np.ndarray,
     models_to_test: Optional[List[str]] = None,
     task_type: str = 'regression',
-    importance_method: str = 'cars_tree',
+    importance_method: str = 'model_specific',
     n_top: int = 10,
     cv_folds: int = 5,
     progress_callback: Optional[Callable] = None

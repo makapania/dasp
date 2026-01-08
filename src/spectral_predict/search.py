@@ -11,7 +11,6 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score
 )
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import label_binarize
 from sklearn.base import clone
 from joblib import Parallel, delayed
 
@@ -29,6 +28,7 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 from .constants import RANDOM_STATE
 
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
+from .preprocessing_discovery import discover_preprocessing, IMPORTANCE_METHODS
 
 # NSGA-II import
 from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
@@ -467,9 +467,9 @@ def compute_validation_metrics_for_top_models(
                 df_results.loc[idx, 'val_Accuracy'] = val_acc
 
                 # Determine if binary or multiclass based on training data classes
-                # Use 'weighted' for safety - works for both binary and multiclass
+                # Use 'macro' for multiclass to treat all classes equally (consistent with CV metrics)
                 n_classes_train = len(np.unique(y_train))
-                average_method = 'binary' if n_classes_train == 2 else 'weighted'
+                average_method = 'binary' if n_classes_train == 2 else 'macro'
 
                 # F1 Score
                 try:
@@ -505,34 +505,39 @@ def compute_validation_metrics_for_top_models(
                     except Exception as e2:
                         print(f"  [Warning] Could not compute Recall for model {i+1}: {e2}")
 
-                # ROC AUC (requires predict_proba)
+                # ROC AUC (requires predict_proba and at least 2 classes in validation)
                 try:
-                    if hasattr(model, 'predict_proba'):
-                        y_proba = model.predict_proba(X_val_final)
-                        n_classes_val = len(np.unique(y_val))
+                    val_classes = np.unique(y_val)
+                    n_classes_val = len(val_classes)
 
-                        if n_classes_train == 2 and n_classes_val == 2:
-                            # Binary classification - use probability of positive class
-                            val_roc_auc = roc_auc_score(y_val, y_proba[:, 1])
-                            df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
-                        elif n_classes_val == n_classes_train:
-                            # All classes present - standard multiclass ROC AUC
-                            val_roc_auc = roc_auc_score(y_val, y_proba, multi_class='ovr', average='macro')
-                            df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
-                        else:
-                            # Validation has fewer classes than training - subset probabilities
-                            # Get classes present in validation
-                            val_classes = np.unique(y_val)
-                            # Subset probability columns to only those classes
-                            y_proba_subset = y_proba[:, val_classes.astype(int)]
+                    if n_classes_val < 2:
+                        # ROC AUC undefined with only one class - skip
+                        pass
+                    elif hasattr(model, 'predict_proba'):
+                        y_proba = model.predict_proba(X_val_final)
+                        model_classes = model.classes_ if hasattr(model, 'classes_') else np.unique(y_train)
+
+                        # Always subset to classes present in validation
+                        # This handles: binary, multiclass, and class-mismatch cases uniformly
+                        col_indices = []
+                        for c in val_classes:
+                            matches = np.where(model_classes == c)[0]
+                            if len(matches) > 0:
+                                col_indices.append(matches[0])
+
+                        if len(col_indices) == n_classes_val:  # All validation classes found in model
+                            y_proba_subset = y_proba[:, col_indices]
+                            # ALWAYS renormalize to sum to 1 (even for binary)
+                            # This is needed when validation has fewer classes than training
+                            y_proba_subset = y_proba_subset / y_proba_subset.sum(axis=1, keepdims=True)
+
                             if n_classes_val == 2:
+                                # Binary: use probability of second class (positive)
                                 val_roc_auc = roc_auc_score(y_val, y_proba_subset[:, 1])
                             else:
-                                # Relabel y_val to consecutive integers for ROC AUC
-                                from sklearn.preprocessing import LabelEncoder
-                                le_val = LabelEncoder()
-                                y_val_relabeled = le_val.fit_transform(y_val)
-                                val_roc_auc = roc_auc_score(y_val_relabeled, y_proba_subset, multi_class='ovr', average='macro')
+                                # Multiclass: compute OvR
+                                val_roc_auc = roc_auc_score(y_val, y_proba_subset, multi_class='ovr', average='macro')
+
                             df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
                 except Exception as e:
                     print(f"  [Warning] Could not compute ROC AUC for model {i+1}: {e}")
@@ -644,6 +649,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                ga_preprocess_generations=30,
                ga_preprocess_cv_folds=5,
                ga_quick_mode=False,
+               # Smart preprocessing discovery parameters (NEW - replaces GA)
+               smart_preprocess=False,
+               smart_preprocess_importance='model_specific',
+               smart_preprocess_n_top=10,
                # GA variable selection parameters
                ga_population_size=64,
                ga_generations=100,
@@ -952,11 +961,117 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Interference methods are enabled - include in configs
         interference_to_add = interference_settings
 
+    # Initialize preprocessing control flag
+    skip_normal_preprocessing = False
+
     # ═══════════════════════════════════════════════════════════════════════════
-    # GA PREPROCESSING OPTIMIZATION (if enabled)
+    # SMART PREPROCESSING DISCOVERY (NEW - replaces GA preprocessing)
+    # Uses NSGA-II-style importance-guided wavelength selection
+    # ═══════════════════════════════════════════════════════════════════════════
+    if smart_preprocess:
+        if progress_callback:
+            progress_callback({
+                'stage': 'smart_preprocessing',
+                'message': 'Discovering optimal preprocessing configurations...',
+                'current': 0,
+                'total': 62  # Approximate number of combinations
+            })
+
+        print(f"\n{'='*70}")
+        print("SMART PREPROCESSING DISCOVERY")
+        print(f"{'='*70}")
+        print(f"  Importance method: {smart_preprocess_importance}")
+        print(f"  Number of top configs: {smart_preprocess_n_top}")
+        print(f"  CV folds: {folds}")
+        print(f"  Task type: {task_type}")
+        print(f"  Note: This REPLACES user-selected preprocessing methods")
+        print(f"{'='*70}\n")
+
+        # Wrap progress callback for discovery
+        def discovery_progress(current, total, message):
+            if progress_callback:
+                progress_callback({
+                    'stage': 'smart_preprocessing',
+                    'message': message,
+                    'current': current,
+                    'total': total
+                })
+
+        # Run smart preprocessing discovery
+        discovered_configs = discover_preprocessing(
+            X.values,  # Convert DataFrame to numpy
+            y.values,  # Convert Series to numpy
+            models_to_test=models_to_test,
+            task_type=task_type,
+            importance_method=smart_preprocess_importance,
+            n_top=smart_preprocess_n_top,
+            cv_folds=folds,
+            progress_callback=discovery_progress
+        )
+
+        if not discovered_configs:
+            print("WARNING: Smart preprocessing discovery found no valid configs!")
+            print("Falling back to default preprocessing...")
+            smart_preprocess = False  # Fall through to normal preprocessing
+        else:
+            # Convert discovered configs to format expected by rest of search.py
+            preprocess_configs = []
+
+            for i, cfg in enumerate(discovered_configs):
+                # Build preprocessing name in format expected by build_preprocessing_pipeline
+                base_name = cfg['preprocessing']
+                window = cfg.get('window')
+                deriv = cfg.get('deriv')
+
+                # Determine base name for pipeline builder
+                if base_name in ('raw', 'snv'):
+                    pipeline_name = base_name
+                elif base_name.startswith('snv_deriv'):
+                    pipeline_name = 'snv_deriv'
+                elif base_name.endswith('_snv'):
+                    pipeline_name = 'deriv_snv'
+                elif base_name.startswith('deriv'):
+                    pipeline_name = 'deriv'
+                else:
+                    pipeline_name = base_name
+
+                # Display name includes window
+                if window:
+                    display_name = f"{base_name}_w{window}"
+                else:
+                    display_name = base_name
+
+                preprocess_configs.append({
+                    "name": display_name,
+                    "base_name": pipeline_name,
+                    "deriv": deriv,
+                    "window": window,
+                    "polyorder": cfg.get('polyorder'),
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder,
+                    # Smart preprocessing specific fields
+                    "smart_selected_wavelengths": cfg.get('selected_wavelengths'),
+                    "smart_n_wavelengths": cfg.get('n_wavelengths'),
+                    "smart_score": cfg.get('score'),
+                    "smart_importance_method": cfg.get('importance_method'),
+                })
+
+            print(f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search")
+            print(f"{'='*70}\n")
+
+            # Skip normal preprocessing config building AND old GA preprocessing
+            skip_normal_preprocessing = True
+            ga_preprocess = False  # Disable old GA since we're using smart preprocessing
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GA PREPROCESSING OPTIMIZATION (LEGACY - kept for backward compatibility)
     # When enabled, this REPLACES user-selected preprocessing with GA-optimized config
     # ═══════════════════════════════════════════════════════════════════════════
-    if ga_preprocess:
+    if ga_preprocess and not smart_preprocess:
         if progress_callback:
             progress_callback({
                 'stage': 'ga_preprocessing',
@@ -978,223 +1093,129 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         print(f"  Note: This REPLACES user-selected preprocessing methods")
         print(f"{'='*70}\n")
 
-        # Determine which model groups are selected (only run GA for groups with models)
-        has_pls_models = any(m in PLS_MODELS for m in models_to_test)
-        has_neural_svm_models = any(m in NEURAL_SVM_MODELS for m in models_to_test)
-        has_tree_models = any(m in TREE_MODELS for m in models_to_test)
-        has_neuralboosted_models = any(m in NEURALBOOSTED_MODELS for m in models_to_test)
-
-        # Storage for GA results (one per model group)
-        ga_result_pls = None
-        ga_result_neural_svm = None
-        ga_result_tree = None
-        ga_result_neuralboosted = None
-
-        # Run GA optimization for PLS models (using PLS fitness)
-        if has_pls_models:
-            print(f"Running {ga_preprocess_method.upper()} optimization for PLS models (using PLS fitness)...")
-            ga_result_pls = optimize_preprocessing(
-                X.values,  # Convert DataFrame to numpy
-                y.values,  # Convert Series to numpy
-                method=ga_preprocess_method,
-                population_size=ga_preprocess_population,
-                n_generations=ga_preprocess_generations,
-                cv_folds=folds,  # Use same CV folds as main search
-                n_components=safe_max_components,  # Match grid search components
-                task_type=task_type,
-                random_state=random_state,
-                verbose=1,
-                progress_callback=progress_callback,
-                fitness_model='pls',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
-            )
-            print(f"\nPLS Model GA Optimization Complete!")
-            print(f"  Best config: {ga_result_pls['best_config']}")
-            print(f"  Best RMSECV: {ga_result_pls['best_rmsecv']:.4f}\n")
-
-        # Run GA optimization for Neural/SVM models (using MLP fitness)
-        if has_neural_svm_models:
-            print(f"Running {ga_preprocess_method.upper()} optimization for Neural/SVM models (using MLP fitness)...")
-            ga_result_neural_svm = optimize_preprocessing(
-                X.values,  # Convert DataFrame to numpy
-                y.values,  # Convert Series to numpy
-                method=ga_preprocess_method,
-                population_size=ga_preprocess_population,
-                n_generations=ga_preprocess_generations,
-                cv_folds=folds,  # Use same CV folds as main search
-                n_components=safe_max_components,  # Match grid search components
-                task_type=task_type,
-                random_state=random_state,
-                verbose=1,
-                progress_callback=progress_callback,
-                fitness_model='mlp',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
-            )
-            print(f"\nNeural/SVM Model GA Optimization Complete!")
-            print(f"  Best config: {ga_result_neural_svm['best_config']}")
-            print(f"  Best RMSECV: {ga_result_neural_svm['best_rmsecv']:.4f}\n")
-
-        # Run GA optimization for tree models (using LightGBM fitness)
-        if has_tree_models:
-            print(f"Running {ga_preprocess_method.upper()} optimization for TREE models (using LightGBM fitness)...")
-
-            ga_result_tree = optimize_preprocessing(
-                X.values,  # Convert DataFrame to numpy
-                y.values,  # Convert Series to numpy
-                method=ga_preprocess_method,
-                population_size=ga_preprocess_population,
-                n_generations=ga_preprocess_generations,
-                cv_folds=folds,  # Use same CV folds as main search
-                n_components=safe_max_components,  # Match grid search components
-                task_type=task_type,
-                random_state=random_state,
-                verbose=1,
-                progress_callback=progress_callback,
-                fitness_model='lightgbm',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
-            )
-            print(f"\nTree Model GA Optimization Complete!")
-            print(f"  Best config: {ga_result_tree['best_config']}")
-            print(f"  Best RMSECV: {ga_result_tree['best_rmsecv']:.4f}\n")
-
-        # Run GA optimization for NeuralBoosted model (using NeuralBoosted fitness)
-        if has_neuralboosted_models:
-            print(f"Running {ga_preprocess_method.upper()} optimization for NeuralBoosted model (using NeuralBoosted fitness)...")
-            ga_result_neuralboosted = optimize_preprocessing(
-                X.values,  # Convert DataFrame to numpy
-                y.values,  # Convert Series to numpy
-                method=ga_preprocess_method,
-                population_size=ga_preprocess_population,
-                n_generations=ga_preprocess_generations,
-                cv_folds=folds,  # Use same CV folds as main search
-                n_components=safe_max_components,  # Match grid search components
-                task_type=task_type,
-                random_state=random_state,
-                verbose=1,
-                progress_callback=progress_callback,
-                fitness_model='neuralboosted',
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
-            )
-            print(f"\nNeuralBoosted Model GA Optimization Complete!")
-            print(f"  Best config: {ga_result_neuralboosted['best_config']}")
-            print(f"  Best RMSECV: {ga_result_neuralboosted['best_rmsecv']:.4f}\n")
-
-        # Helper function to decode GA genes into deriv/window values
-        def _decode_ga_genes(ga_genes):
-            """Extract actual deriv order and window size from GA genes.
-
-            Returns (deriv_order, window_size, polyorder) where:
-            - deriv_order: 1, 2, 3, 4 or None (for raw/snv)
-            - window_size: actual window size (5-51)
-            - polyorder: deriv_order - 1 (for SG) or None
+        # Helper function to extract first hyperparameter set for each model
+        def _extract_first_hyperparams(model_name: str, model_grids: dict) -> dict:
             """
-            preproc_idx = int(ga_genes[0])
-            window_idx = int(ga_genes[1])
-            preproc_type = PREPROC_TYPES[preproc_idx]
-            window_size = WINDOW_SIZES[window_idx]
+            Extract the first hyperparameter configuration for a given model.
 
-            # Extract derivative order from preprocessing type name
-            deriv_order = None
-            if 'deriv1' in preproc_type:
-                deriv_order = 1
-            elif 'deriv2' in preproc_type:
-                deriv_order = 2
-            elif 'deriv3' in preproc_type:
-                deriv_order = 3
-            elif 'deriv4' in preproc_type:
-                deriv_order = 4
+            This is used to create a representative model instance for GA fitness evaluation.
+            Using the first hyperparameter set ensures consistency and reproducibility.
 
-            # Polyorder for Savitzky-Golay = deriv_order - 1 (minimum 0)
-            polyorder = max(deriv_order - 1, 0) if deriv_order else None
+            Parameters
+            ----------
+            model_name : str
+                Name of the model (e.g., 'PLS', 'LightGBM')
+            model_grids : dict
+                Model grids dict from get_model_grids()
 
-            return deriv_order, window_size, polyorder
+            Returns
+            -------
+            params : dict
+                First hyperparameter configuration for the model
+            """
+            if model_name in model_grids and len(model_grids[model_name]) > 0:
+                return model_grids[model_name][0]
+            return {}
 
-        # Create preprocessing configs from GA results
-        # Create one config per model group that has selected models
+        # NEW: Run GA optimization per-model (not per-model-group)
+        # This ensures each model gets preprocessing optimized for its actual hyperparameters
+        print(f"Running {ga_preprocess_method.upper()} optimization per-model with actual hyperparameters...")
+        print(f"Models selected: {models_to_test}")
+        print(f"")
+
+        # Storage for GA results (one per model)
+        ga_results = {}
+
+        # Run GA optimization for each selected model
+        # GA uses PROXY fitness models (PLS, LightGBM, MLP) for speed
+        # After GA finds optimal preprocessing, Grid Search runs with user's full settings
+        for model_name in models_to_test:
+            print(f"Optimizing preprocessing for {model_name}...")
+
+            # Determine which proxy fitness model to use based on model type
+            if model_name.lower() in ['pls', 'ridge', 'lasso', 'elasticnet']:
+                fitness_model = 'pls'
+            elif model_name.lower() in ['lightgbm', 'xgboost', 'catboost', 'randomforest']:
+                fitness_model = 'lightgbm'
+            elif model_name.lower() in ['mlp', 'svr', 'svc']:
+                fitness_model = 'mlp'
+            elif model_name.lower() == 'neuralboosted':
+                fitness_model = 'neuralboosted'
+            else:
+                fitness_model = 'pls'  # Default
+
+            # Run GA/Exhaustive optimization with proxy fitness model
+            ga_result = optimize_preprocessing(
+                X.values,  # Convert DataFrame to numpy
+                y.values,  # Convert Series to numpy
+                method=ga_preprocess_method,
+                population_size=ga_preprocess_population,
+                n_generations=ga_preprocess_generations,
+                cv_folds=folds,  # Use same CV folds as main search
+                n_components=safe_max_components,  # Match grid search components
+                task_type=task_type,
+                random_state=random_state,
+                verbose=1,
+                progress_callback=progress_callback,
+                fitness_model=fitness_model,  # Use proxy model for fast evaluation
+                top_n=5,  # Return top 5 preprocessing configs
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
+            )
+
+            ga_results[model_name] = ga_result
+            print(f"  {model_name} optimization complete!")
+            print(f"  Best config: {ga_result['best_config']}")
+            print(f"  Best RMSECV: {ga_result['best_rmsecv']:.4f}")
+            print(f"  Returning top {len(ga_result.get('configs', []))} configs\n")
+
+        # Create preprocessing configs from all GA results
+        # Each model contributes its top-N preprocessing configs
         preprocess_configs = []
 
-        if ga_result_pls is not None:
-            deriv, window, polyorder = _decode_ga_genes(ga_result_pls['best_genes'])
-            preprocess_configs.append({
-                "name": ga_result_pls['best_name'] + "_pls",
-                "deriv": deriv,  # Actual derivative order for edge masking
-                "window": window,  # Actual window size for edge masking
-                "polyorder": polyorder,
-                "interference": interference_to_add,
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder,
-                "ga_transform": ga_result_pls['best_transform'],
-                "ga_config": ga_result_pls['best_config'],
-                "ga_model_type": "pls",  # Track which model group this is for
-                "ga_genes": ga_result_pls['best_genes'],  # Store genes for serialization
-            })
+        for model_name, ga_result in ga_results.items():
+            configs_list = ga_result.get('configs', [])
+            if not configs_list:
+                # Fallback for backward compatibility (shouldn't happen with new code)
+                configs_list = [{
+                    'genes': ga_result['best_genes'],
+                    'name': ga_result['best_name'],
+                    'transform': ga_result['best_transform'],
+                    'config': ga_result['best_config'],
+                    'deriv': None,
+                    'window': None,
+                    'polyorder': None
+                }]
 
-        if ga_result_neural_svm is not None:
-            deriv, window, polyorder = _decode_ga_genes(ga_result_neural_svm['best_genes'])
-            preprocess_configs.append({
-                "name": ga_result_neural_svm['best_name'] + "_neural_svm",
-                "deriv": deriv,  # Actual derivative order for edge masking
-                "window": window,  # Actual window size for edge masking
-                "polyorder": polyorder,
-                "interference": interference_to_add,
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder,
-                "ga_transform": ga_result_neural_svm['best_transform'],
-                "ga_config": ga_result_neural_svm['best_config'],
-                "ga_model_type": "neural_svm",  # Track which model group this is for
-                "ga_genes": ga_result_neural_svm['best_genes'],  # Store genes for serialization
-            })
+            # Add all top-N configs for this model
+            for i, cfg in enumerate(configs_list):
+                base_name = cfg.get('name', 'unknown')
+                preprocess_configs.append({
+                    "name": f"{base_name}_{model_name}_{i+1}",  # Display name with suffix
+                    "base_name": base_name,  # Base name for build_preprocessing_pipeline
+                    "deriv": cfg.get('deriv'),
+                    "window": cfg.get('window'),
+                    "polyorder": cfg.get('polyorder'),
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder,
+                    "ga_transform": cfg.get('transform'),
+                    "ga_config": cfg.get('config'),
+                    "ga_model_type": model_name,  # Track which model this was optimized for
+                    "ga_genes": cfg.get('genes'),
+                })
 
-        if ga_result_tree is not None:
-            deriv, window, polyorder = _decode_ga_genes(ga_result_tree['best_genes'])
-            preprocess_configs.append({
-                "name": ga_result_tree['best_name'] + "_tree",
-                "deriv": deriv,  # Actual derivative order for edge masking
-                "window": window,  # Actual window size for edge masking
-                "polyorder": polyorder,
-                "interference": interference_to_add,
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder,
-                "ga_transform": ga_result_tree['best_transform'],
-                "ga_config": ga_result_tree['best_config'],
-                "ga_model_type": "tree",  # Track which model group this is for
-                "ga_genes": ga_result_tree['best_genes'],  # Store genes for serialization
-            })
-
-        if ga_result_neuralboosted is not None:
-            deriv, window, polyorder = _decode_ga_genes(ga_result_neuralboosted['best_genes'])
-            preprocess_configs.append({
-                "name": ga_result_neuralboosted['best_name'] + "_neuralboosted",
-                "deriv": deriv,  # Actual derivative order for edge masking
-                "window": window,  # Actual window size for edge masking
-                "polyorder": polyorder,
-                "interference": interference_to_add,
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder,
-                "ga_transform": ga_result_neuralboosted['best_transform'],
-                "ga_config": ga_result_neuralboosted['best_config'],
-                "ga_model_type": "neuralboosted",  # Track which model group this is for
-                "ga_genes": ga_result_neuralboosted['best_genes'],  # Store genes for serialization
-            })
-
+        print(f"Total preprocessing configs: {len(preprocess_configs)}")
+        print(f"Breakdown: {len(models_to_test)} models × up to 5 configs each")
         print(f"{'='*70}\n")
 
         # Skip normal preprocessing config building
         skip_normal_preprocessing = True
-    else:
-        skip_normal_preprocessing = False
+    # Note: skip_normal_preprocessing is initialized to False before the blocks,
+    # so we don't need an else clause here - it's already False if neither
+    # smart_preprocess nor ga_preprocess set it to True
 
     if not skip_normal_preprocessing:
         preprocess_configs = []
@@ -1501,8 +1522,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             X_preprocessed = preprocess_cfg['ga_transform'](X_np)
         else:
             # Use standard preprocessing pipeline
+            # Use base_name if available (for GA configs), otherwise use name
+            preprocess_name = preprocess_cfg.get("base_name", preprocess_cfg["name"])
             prep_pipe_steps = build_preprocessing_pipeline(
-                preprocess_cfg["name"],
+                preprocess_name,
                 preprocess_cfg["deriv"],
                 preprocess_cfg["window"],
                 preprocess_cfg["polyorder"],
@@ -1660,7 +1683,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
                 # Progress update
                 prep_name = preprocess_cfg["name"]
-                if preprocess_cfg["deriv"]:
+                # Only add derivative suffix if name doesn't already include it
+                if preprocess_cfg["deriv"] and f"deriv{preprocess_cfg['deriv']}" not in prep_name:
                     prep_name += f"_d{preprocess_cfg['deriv']}"
 
                 # Show parameters being tested (more informative)
@@ -2585,8 +2609,10 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 X_preprocessed = preprocess_cfg['ga_transform'](X_np)
             else:
                 # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
+                # Use base_name if available (for GA configs), otherwise use name
+                preprocess_name = preprocess_cfg.get("base_name", preprocess_cfg["name"])
                 prep_pipe_steps = build_preprocessing_pipeline(
-                    preprocess_cfg["name"],
+                    preprocess_name,
                     preprocess_cfg["deriv"],
                     preprocess_cfg["window"],
                     preprocess_cfg["polyorder"],
@@ -2797,7 +2823,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
 
 def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
-                     all_classes=None, use_sample_weight_for_classification=False):
+                     use_sample_weight_for_classification=False):
     """
     Run a single CV fold in parallel.
 
@@ -2833,6 +2859,12 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
+    # Track whether we used manual fitting (to avoid Pipeline not fitted warning)
+    # These must be initialized BEFORE any sample weight handling blocks
+    manual_fit_used = False
+    fitted_steps = []  # Store fitted preprocessing steps for manual transform
+    final_model = None  # Store final model for manual predict
+
     # Check if pipeline has sample weighting transformer
     # This handles regression weighting methods (rare_boost, binning, balanced)
     sample_weight_train = None
@@ -2858,14 +2890,18 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             else:
                 # Model doesn't support sample_weight (e.g., PLS) - fit without it
                 final_model.fit(X_train_transformed, y_train)
+            # Note: manual_fit_used stays False here because pipe_clone.fit() was called,
+            # so the pipeline is officially fitted and predict() will work without warning
 
     # Handle classification sample weights (for models like Ridge that support sample_weight but not class_weight)
+
     if sample_weight_train is None and use_sample_weight_for_classification and task_type == 'classification':
         from sklearn.utils.class_weight import compute_sample_weight
         sample_weight_train = compute_sample_weight('balanced', y_train)
 
         # Get final model from pipeline
         if hasattr(pipe_clone, 'steps'):
+            manual_fit_used = True
             # Transform X through all steps except the model
             X_train_transformed = X_train
             for step_name, step in pipe_clone.steps[:-1]:
@@ -2874,9 +2910,11 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                     X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train)
                     # Recompute sample weights for resampled data
                     sample_weight_train = compute_sample_weight('balanced', y_train_for_model)
+                    fitted_steps.append((step_name, step, 'resample'))
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
+                    fitted_steps.append((step_name, step, 'transform'))
 
             # Fit the final model with sample weights (if supported)
             final_model = pipe_clone.steps[-1][1]
@@ -2896,18 +2934,43 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     if sample_weight_train is None:
         pipe_clone.fit(X_train, y_train)
 
+    # Helper function to transform and predict when manual fitting was used
+    def _manual_transform_predict(X_data):
+        """Transform X through manually fitted steps and predict with final model."""
+        X_transformed = X_data
+        for step_name, step, step_type in fitted_steps:
+            if step_type == 'transform' and hasattr(step, 'transform'):
+                X_transformed = step.transform(X_transformed)
+            # Skip resample steps for test data - they only apply to training
+        return final_model.predict(X_transformed), X_transformed
+
+    def _manual_transform_predict_proba(X_data):
+        """Transform X through manually fitted steps and predict_proba with final model."""
+        X_transformed = X_data
+        for step_name, step, step_type in fitted_steps:
+            if step_type == 'transform' and hasattr(step, 'transform'):
+                X_transformed = step.transform(X_transformed)
+        return final_model.predict_proba(X_transformed)
+
     if task_type == "regression":
-        y_pred = pipe_clone.predict(X_test)
+        if manual_fit_used:
+            y_pred, _ = _manual_transform_predict(X_test)
+        else:
+            y_pred = pipe_clone.predict(X_test)
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
         return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}
     else:  # classification
-        y_pred = pipe_clone.predict(X_test)
+        if manual_fit_used:
+            y_pred, _ = _manual_transform_predict(X_test)
+        else:
+            y_pred = pipe_clone.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
 
         # Use is_binary_classification flag (determined from full dataset) for consistent averaging
         # This avoids issues where a CV fold might have missing classes
-        average_method = 'binary' if is_binary_classification else 'weighted'
+        # Use 'macro' for multiclass to treat all classes equally (consistent with ROC_AUC)
+        average_method = 'binary' if is_binary_classification else 'macro'
 
         # F1, Precision, Recall
         try:
@@ -2923,19 +2986,30 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         except Exception:
             recall = np.nan
 
-        # ROC AUC
-        try:
-            if is_binary_classification:
-                y_proba = pipe_clone.predict_proba(X_test)[:, 1]
-                auc = roc_auc_score(y_test, y_proba)
-            else:
-                y_proba = pipe_clone.predict_proba(X_test)
-                # Use all_classes if provided, otherwise infer from full dataset
-                classes_to_use = all_classes if all_classes is not None else np.unique(y)
-                y_test_bin = label_binarize(y_test, classes=classes_to_use)
-                auc = roc_auc_score(y_test_bin, y_proba, average="macro", multi_class="ovr")
-        except Exception:
+        # ROC AUC (requires at least 2 classes in test fold)
+        n_classes_test = len(np.unique(y_test))
+        if n_classes_test < 2:
+            # Single class in this CV fold - ROC AUC undefined
             auc = np.nan
+        else:
+            try:
+                if manual_fit_used:
+                    y_proba = _manual_transform_predict_proba(X_test)
+                    model_classes = final_model.classes_ if hasattr(final_model, 'classes_') else None
+                else:
+                    y_proba = pipe_clone.predict_proba(X_test)
+                    model_classes = pipe_clone.classes_ if hasattr(pipe_clone, 'classes_') else None
+
+                if is_binary_classification:
+                    auc = roc_auc_score(y_test, y_proba[:, 1])
+                else:
+                    # Explicitly tell roc_auc_score the column order matches model's classes_
+                    if model_classes is not None:
+                        auc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro', labels=model_classes)
+                    else:
+                        auc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro')
+            except Exception:
+                auc = np.nan
 
         return {"Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall}
 
@@ -3022,8 +3096,10 @@ def _run_single_config(
             X.columns.astype(float).values if hasattr(X, 'columns') else None
         )
 
+        # Use base_name if available (for GA configs), otherwise use name
+        preprocess_name = preprocess_cfg.get("base_name", preprocess_cfg["name"])
         pipe_steps = build_preprocessing_pipeline(
-            preprocess_cfg["name"],
+            preprocess_name,
             preprocess_cfg["deriv"],
             preprocess_cfg["window"],
             preprocess_cfg["polyorder"],
@@ -3101,15 +3177,12 @@ def _run_single_config(
     else:
         pipe = model
 
-    # For multiclass classification, compute all classes for label_binarize
-    all_classes = np.unique(y) if task_type == "classification" and not is_binary_classification else None
-
     # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
     if n_jobs_cv == 1:
         # Serial execution for reproducibility (deterministic fold ordering)
         cv_metrics = [
             _run_single_fold(
-                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes,
+                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
                 use_sample_weight_for_classification
             )
             for train_idx, test_idx in cv_splitter.split(X, y)
@@ -3118,7 +3191,7 @@ def _run_single_config(
         # Parallel execution for speed
         cv_metrics = Parallel(n_jobs=n_jobs_cv, backend='loky')(
             delayed(_run_single_fold)(
-                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification, all_classes,
+                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
                 use_sample_weight_for_classification
             )
             for train_idx, test_idx in cv_splitter.split(X, y)
@@ -3236,11 +3309,16 @@ def _run_single_config(
         imbalance_display = imbalance_method
 
     # Build result dictionary AFTER capturing complete params
+    # Use base_name for Preprocess column (for validation compatibility)
+    # but store full display name for reference
+    preprocess_display = preprocess_cfg["name"]
+    preprocess_base = preprocess_cfg.get("base_name", preprocess_cfg["name"])
     result = {
         "Task": task_type,
         "Model": model_name,
         "Params": str(params),  # Now includes complete parameter set
-        "Preprocess": preprocess_cfg["name"],
+        "Preprocess": preprocess_base,  # Use base name for pipeline building
+        "PreprocessDisplay": preprocess_display,  # Full name for display
         "Deriv": preprocess_cfg["deriv"],
         "Window": preprocess_cfg["window"],
         "Poly": preprocess_cfg["polyorder"],

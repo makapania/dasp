@@ -1417,9 +1417,9 @@ class SpectralPredictApp:
         self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", "nsga2", "coupled", or "unified"
         self.n_bayesian_trials = tk.IntVar(value=100)  # Number of Bayesian optimization trials (default: 100)
         self.n_unified_trials = tk.IntVar(value=500)   # Number of Unified Bayesian trials (default: 500)
-        self.nsga2_population = tk.IntVar(value=50)   # NSGA-II population size
-        self.nsga2_generations = tk.IntVar(value=100)  # NSGA-II number of generations
-        self.nsga2_selection_bias = tk.IntVar(value=2)  # 0=min-error, 1=balanced, 2=knee point
+        self.nsga2_population = tk.IntVar(value=60)   # NSGA-II population size
+        self.nsga2_generations = tk.IntVar(value=120)  # NSGA-II number of generations
+        self.nsga2_selection_method = tk.StringVar(value="Min Error")  # "Min Error", "Balanced", "Knee Point"
 
         # Advanced preprocessing options (for coupled optimization)
         self.use_ensemble_preprocessing = tk.BooleanVar(value=False)  # Stacked preprocessing
@@ -1519,6 +1519,11 @@ class SpectralPredictApp:
         self.ga_preprocess_population = tk.IntVar(value=48)
         self.ga_preprocess_generations = tk.IntVar(value=30)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
+
+        # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
+        self.enable_smart_preprocessing = tk.BooleanVar(value=False)
+        self.smart_preprocess_importance = tk.StringVar(value="model_specific")
+        self.smart_preprocess_n_top = tk.IntVar(value=10)
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
@@ -5417,23 +5422,83 @@ class SpectralPredictApp:
         self.smoothing_options_frame.grid_remove()
 
         # === GA Preprocessing Optimization ===
-        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA Preprocessing Optimization (Experimental)",
-                                                                     subtitle="Use genetic algorithm to automatically find optimal preprocessing")
+        # ===== SMART PREPROCESSING DISCOVERY (NEW) =====
+        smart_preproc_card_outer, smart_preproc_card = self._create_card(content_frame, title="Smart Preprocessing Discovery",
+                                                                     subtitle="Automatically find optimal preprocessing + wavelengths using NSGA-II-style intelligence")
+        smart_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        smart_preproc_frame = tk.Frame(smart_preproc_card, bg=self.colors['card_bg'])
+        smart_preproc_frame.pack(fill='both', expand=True)
+
+        # Enable Smart Preprocessing checkbox
+        self.smart_preproc_checkbox = ttk.Checkbutton(smart_preproc_frame, text="Enable Smart Preprocessing Discovery",
+                                                    variable=self.enable_smart_preprocessing,
+                                                    command=self._toggle_smart_preprocessing_options)
+        self.smart_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+
+        # Help text
+        ttk.Label(smart_preproc_frame,
+                 text="Exhaustively tests 62 preprocessing combinations with importance-guided wavelength selection",
+                 style='Caption.TLabel').grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        # Smart preprocessing parameters frame (hidden when disabled)
+        self.smart_preproc_options_frame = ttk.Frame(smart_preproc_frame)
+        self.smart_preproc_options_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
+
+        # Importance method dropdown
+        ttk.Label(self.smart_preproc_options_frame, text="Importance Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        importance_combo = ttk.Combobox(self.smart_preproc_options_frame, textvariable=self.smart_preprocess_importance,
+                                     values=["cars_tree", "model_specific", "lightgbm", "vip"], state="readonly", width=14)
+        importance_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        # Importance method descriptions
+        self.importance_desc_label = ttk.Label(self.smart_preproc_options_frame,
+                  text="CARS-Tree: LightGBM hybrid importance (dense, stable)", style='Caption.TLabel')
+        self.importance_desc_label.grid(row=0, column=2, sticky=tk.W, padx=5)
+
+        # Bind to update description when selection changes
+        importance_combo.bind('<<ComboboxSelected>>', self._update_importance_description)
+
+        # Number of top configs
+        ttk.Label(self.smart_preproc_options_frame, text="Top Configs:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        n_top_spinbox = ttk.Spinbox(self.smart_preproc_options_frame, from_=3, to=20,
+                                      textvariable=self.smart_preprocess_n_top, width=8)
+        n_top_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        ttk.Label(self.smart_preproc_options_frame, text="Number of preprocessing configs to pass to grid search (default: 10)",
+                  style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=5, pady=(5, 0))
+
+        # Info about what smart preprocessing does
+        ttk.Label(smart_preproc_frame,
+                 text="Tests: 14 preprocessing types x 5 window sizes = 62 combinations",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        ttk.Label(smart_preproc_frame,
+                 text="Each config tested with 4 wavelength subset sizes: [50, 100, 200, 300]",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
+        ttk.Label(smart_preproc_frame,
+                 text="Runtime: ~3-4 minutes. Returns top N diverse preprocessing configs for grid search.",
+                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+
+        # Initially hide options
+        self.smart_preproc_options_frame.grid_remove()
+
+        # ===== LEGACY GA PREPROCESSING (kept for backward compatibility) =====
+        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="Legacy GA Preprocessing",
+                                                                     subtitle="Original genetic algorithm (deprecated - use Smart Preprocessing above)")
         ga_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         ga_preproc_frame = tk.Frame(ga_preproc_card, bg=self.colors['card_bg'])
         ga_preproc_frame.pack(fill='both', expand=True)
 
         # Enable GA Preprocessing checkbox
-        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA Preprocessing Optimization",
+        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable Legacy GA Preprocessing",
                                                     variable=self.enable_ga_preprocessing,
                                                     command=self._toggle_ga_preprocessing_options)
         self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
-        # Help text
+        # Warning about legacy status
         ttk.Label(ga_preproc_frame,
-                 text="When enabled, GA finds optimal preprocessing instead of testing all selected methods above",
-                 style='Caption.TLabel').grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+                 text="NOTE: This is deprecated and may not work correctly. Use Smart Preprocessing instead.",
+                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
 
         # GA parameters frame (hidden when disabled)
         self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
@@ -5444,34 +5509,16 @@ class SpectralPredictApp:
         method_combo = ttk.Combobox(self.ga_preproc_options_frame, textvariable=self.ga_preprocess_method,
                                      values=["ga", "exhaustive"], state="readonly", width=12)
         method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Label(self.ga_preproc_options_frame, text="(exhaustive = guaranteed optimal)",
-                  style='Caption.TLabel').grid(row=0, column=2, sticky=tk.W, padx=5)
 
         ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         ga_pop_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=16, to=128,
                                       textvariable=self.ga_preprocess_population, width=8)
         ga_pop_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-        ttk.Label(self.ga_preproc_options_frame, text="(GA only, default: 48)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=5, pady=(5, 0))
 
         ttk.Label(self.ga_preproc_options_frame, text="Generations:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         ga_gen_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=10, to=200,
                                       textvariable=self.ga_preprocess_generations, width=8)
         ga_gen_spinbox.grid(row=2, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-        ttk.Label(self.ga_preproc_options_frame, text="(GA only, default: 30)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=5, pady=(5, 0))
-
-        ttk.Label(self.ga_preproc_options_frame, text="CV Folds:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        ga_cv_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=3, to=10,
-                                     textvariable=self.ga_preprocess_cv_folds, width=8)
-        ga_cv_spinbox.grid(row=3, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-        ttk.Label(self.ga_preproc_options_frame, text="(default: 5)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=5, pady=(5, 0))
-
-        # Info about what GA optimizes (updated for simplified search space)
-        ttk.Label(ga_preproc_frame,
-                 text="Optimizes: preprocessing type (14) x S-G window (17) = 238 combinations",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
-        ttk.Label(ga_preproc_frame,
-                 text="Runs separate optimization for each model group (PLS, Trees, Neural/SVM)",
-                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         # Initially hide GA options
         self.ga_preproc_options_frame.grid_remove()
@@ -5743,8 +5790,11 @@ class SpectralPredictApp:
 
         ttk.Label(param_frame, text="Gens:", style='Normal.TLabel').grid(row=0, column=4, sticky=tk.W, padx=(0, 5))
         ttk.Entry(param_frame, textvariable=self.nsga2_generations, width=6).grid(row=0, column=5, sticky=tk.W, padx=(0, 10))
-        ttk.Label(param_frame, text="Bias:", style='Normal.TLabel').grid(row=0, column=6, sticky=tk.W, padx=(0, 2))
-        ttk.Entry(param_frame, textvariable=self.nsga2_selection_bias, width=4).grid(row=0, column=7, sticky=tk.W)
+        ttk.Label(param_frame, text="Selection:", style='Normal.TLabel').grid(row=0, column=6, sticky=tk.W, padx=(0, 2))
+        selection_combo = ttk.Combobox(param_frame, textvariable=self.nsga2_selection_method,
+                                       values=["Min Error", "Balanced", "Knee Point"],
+                                       state="readonly", width=10)
+        selection_combo.grid(row=0, column=7, sticky=tk.W)
 
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
@@ -13290,8 +13340,34 @@ class SpectralPredictApp:
         """Show/hide GA preprocessing options based on checkbox state."""
         if self.enable_ga_preprocessing.get():
             self.ga_preproc_options_frame.grid()
+            # Disable smart preprocessing if GA is enabled
+            if self.enable_smart_preprocessing.get():
+                self.enable_smart_preprocessing.set(False)
+                self._toggle_smart_preprocessing_options()
         else:
             self.ga_preproc_options_frame.grid_remove()
+
+    def _toggle_smart_preprocessing_options(self):
+        """Show/hide smart preprocessing options based on checkbox state."""
+        if self.enable_smart_preprocessing.get():
+            self.smart_preproc_options_frame.grid()
+            # Disable legacy GA if smart preprocessing is enabled
+            if self.enable_ga_preprocessing.get():
+                self.enable_ga_preprocessing.set(False)
+                self._toggle_ga_preprocessing_options()
+        else:
+            self.smart_preproc_options_frame.grid_remove()
+
+    def _update_importance_description(self, event=None):
+        """Update importance method description label based on selection."""
+        method = self.smart_preprocess_importance.get()
+        descriptions = {
+            'cars_tree': "CARS-Tree: LightGBM hybrid importance (dense, stable)",
+            'model_specific': "Model-Specific: VIP for PLS, tree importance for RF/LightGBM",
+            'lightgbm': "LightGBM: Native gain-based importance (fast, sparse)",
+            'vip': "PLS VIP: Variable Importance in Projection (chemometrics standard)"
+        }
+        self.importance_desc_label.config(text=descriptions.get(method, ""))
 
     def _update_coupled_options_state(self, *args):
         """Enable/disable Ensemble preprocessing checkbox based on optimization method.
@@ -16375,7 +16451,9 @@ class SpectralPredictApp:
                     progress_callback=self._progress_callback,
                     controller=self.search_controller,
                     models=selected_models,
-                    selection_bias=self.nsga2_selection_bias.get(),
+                    selection_bias={"Min Error": 0.0, "Balanced": 1.0, "Knee Point": 2.0}.get(
+                        self.nsga2_selection_method.get(), 0.0
+                    ),
                 )
 
                 # Convert to V1 format for results display
@@ -16552,12 +16630,16 @@ class SpectralPredictApp:
                 ga_generations=self.ga_generations.get(),
                 ga_n_runs=self.ga_n_runs.get(),
                 ga_quick_mode=self.ga_quick_mode.get(),
-                # GA preprocessing parameters
+                # GA preprocessing parameters (LEGACY)
                 ga_preprocess=self.enable_ga_preprocessing.get(),
                 ga_preprocess_method=self.ga_preprocess_method.get(),
                 ga_preprocess_population=self.ga_preprocess_population.get(),
                 ga_preprocess_generations=self.ga_preprocess_generations.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
+                # Smart preprocessing discovery parameters (NEW)
+                smart_preprocess=self.enable_smart_preprocessing.get(),
+                smart_preprocess_importance=self.smart_preprocess_importance.get(),
+                smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
@@ -21092,9 +21174,12 @@ F1 Score:  {f1:.4f}
 
             if is_coupled_result:
                 # Parse coupled preprocessing string
-                # CRITICAL: Pass Window from config for Unified Bayesian results
-                # Unified Bayesian stores window in 'Window' column, not in 'Params'
+                # CRITICAL: Pass Window from config for Unified Bayesian/NSGA-II results
+                # These store window in 'Window' column, not in 'Params'
+                # Must cast to int - pandas may load as float (e.g., 31.0 instead of 31)
                 window_from_config = self.selected_model_config.get('Window', None)
+                if window_from_config is not None and not pd.isna(window_from_config):
+                    window_from_config = int(window_from_config)
                 coupled_config = _parse_coupled_preprocessing(
                     self.selected_model_config.get('Preprocess', 'raw'),
                     self.selected_model_config.get('Params', ''),
