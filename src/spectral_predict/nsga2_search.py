@@ -2518,9 +2518,9 @@ def convert_nsga2_to_v1_format(
                 if d in preproc:
                     deriv_order = int(d[-1])
                     break
-            # Window size is in decoded
+            # Window size is in decoded - use actual WINDOW_SIZES array lookup
             window_idx = decoded.get('window_idx', 6)  # Default to index 6 = window 17
-            window_size = 5 + window_idx * 2  # Window sizes: 5, 7, 9, ..., 33
+            window_size = WINDOW_SIZES[min(window_idx, len(WINDOW_SIZES) - 1)]
 
         row = {
             'Task': task_type,
@@ -2600,7 +2600,7 @@ def convert_nsga2_to_v1_format(
                             deriv_order = int(d[-1])
                             break
                     window_idx = knee_sol.get('window_idx', 6)
-                    window_size = 5 + window_idx * 2
+                    window_size = WINDOW_SIZES[min(window_idx, len(WINDOW_SIZES) - 1)]
 
                 best_row = {
                     'Task': task_type,
