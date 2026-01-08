@@ -799,7 +799,9 @@ The original Bayesian optimization issues are now resolved by the new Unified Ba
   - Individual wavelengths: `"2000, 2050, 2100"`
   - iPLS warning dialog when used with discontinuous regions
   - Live preview showing selected wavelength count
+  - **Bug fix:** PLS n_components now capped to feature count when wavelength filtering creates small subsets
   - Files modified: `spectral_predict_gui_optimized.py`, `src/spectral_predict/search.py`
+  - Commits: `13a935c` (feature), `f24e5ff` (bug fix)
 
 ---
 

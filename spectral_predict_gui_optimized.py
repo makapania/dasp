@@ -5278,7 +5278,7 @@ class SpectralPredictApp:
         self.wl_custom_preview_label = ttk.Label(options_frame,
                  text="",
                  style='Caption.TLabel', foreground=self.colors['accent'])
-        self.wl_custom_preview_label.grid(row=13, column=0, columnspan=3, sticky=tk.W, pady=(3, 0), padx=(20, 0))
+        self.wl_custom_preview_label.grid(row=13, column=0, columnspan=3, sticky=tk.W, pady=(0, 0), padx=(20, 0))
 
         # Auto-check and update preview when custom field changes
         def on_custom_wl_change(*args):
@@ -5296,7 +5296,7 @@ class SpectralPredictApp:
         # Performance note
         ttk.Label(options_frame,
                  text="💡 Tip: Restricting wavelengths speeds up training (fewer features = faster models)",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=(0, 0), padx=(20, 0))
 
         ttk.Separator(options_frame, orient='horizontal').grid(row=15, column=0, columnspan=3, sticky='ew', pady=(15, 10))
 
