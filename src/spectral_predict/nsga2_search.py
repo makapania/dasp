@@ -2387,6 +2387,41 @@ def _indices_to_wavelength_str(indices: List[int], wavelengths: np.ndarray = Non
         return ','.join([str(i) for i in indices])
 
 
+def _normalize_preprocess_name(name: str) -> str:
+    """Convert NSGA-II preprocessing names to standard names for validation.
+
+    NSGA-II uses detailed names like 'deriv1_w17', 'snv_deriv2_w21', 'deriv3_snv_w15',
+    but build_preprocessing_pipeline() expects 'deriv', 'snv_deriv', 'deriv_snv'.
+
+    Parameters
+    ----------
+    name : str
+        NSGA-II preprocessing name (e.g., 'deriv1_w17', 'snv_deriv2_w21')
+
+    Returns
+    -------
+    str
+        Normalized name compatible with build_preprocessing_pipeline()
+    """
+    if name in ('raw', 'snv'):
+        return name
+
+    # Strip window suffix like '_w17', '_w43' first
+    import re
+    name_no_window = re.sub(r'_w\d+$', '', name)
+
+    # deriv1, deriv2, deriv3, deriv4 → deriv
+    if name_no_window.startswith('deriv') and '_' not in name_no_window:
+        return 'deriv'
+    # snv_deriv1, snv_deriv2, etc. → snv_deriv
+    if name_no_window.startswith('snv_deriv'):
+        return 'snv_deriv'
+    # deriv1_snv, deriv2_snv, etc. → deriv_snv
+    if name_no_window.startswith('deriv') and name_no_window.endswith('_snv'):
+        return 'deriv_snv'
+    return name  # fallback for unknown names
+
+
 def _compute_top_variables(
     X: np.ndarray,
     y: np.ndarray,
@@ -2542,7 +2577,7 @@ def convert_nsga2_to_v1_format(
             'Task': task_type,
             'Model': decoded['model'],
             'Preprocessing': decoded['preprocessing'],
-            'Preprocess': decoded['preprocessing'],  # Alias for compatibility
+            'Preprocess': _normalize_preprocess_name(decoded['preprocessing']),  # Normalized for validation
             'Folds': folds,
             'N_Calibration': n_calibration,
             'N_Excluded': excluded_count,
@@ -2558,7 +2593,7 @@ def convert_nsga2_to_v1_format(
             'n_vars': decoded['n_wavelengths'],
             'Deriv': deriv_order,
             'Window': window_size,
-            'Poly': 2 if deriv_order else None,  # Default polyorder for Savgol
+            'Poly': deriv_order + 1 if deriv_order else None,  # polyorder = deriv + 1
             'LVs': int(solution[3]) + 1 if decoded['model'] == 'PLS' else None,  # n_components for PLS
             'Complexity': objectives[2],
             'Is_Knee': i == result['knee_idx'],
@@ -2606,23 +2641,29 @@ def convert_nsga2_to_v1_format(
 
             # Only add if it's actually better than what's in the Pareto front
             if knee_error < pareto_min_error:
-                # Parse preprocessing info
+                # Use explicit values from knee_sol if available
                 preproc = knee_sol.get('preprocessing', 'raw')
-                deriv_order = None
-                window_size = None
-                if 'deriv1' in preproc or 'deriv2' in preproc or 'deriv3' in preproc or 'deriv4' in preproc:
+                deriv_order = knee_sol.get('deriv_order')
+                window_size = knee_sol.get('window')
+                polyorder = knee_sol.get('polyorder')
+
+                # Fallback to parsing if explicit values not available (backward compat)
+                if deriv_order is None and ('deriv' in preproc):
                     for d in ['deriv4', 'deriv3', 'deriv2', 'deriv1']:
                         if d in preproc:
                             deriv_order = int(d[-1])
                             break
+                if window_size is None and deriv_order is not None:
                     window_idx = knee_sol.get('window_idx', 6)
                     window_size = WINDOW_SIZES[min(window_idx, len(WINDOW_SIZES) - 1)]
+                if polyorder is None and deriv_order is not None:
+                    polyorder = deriv_order + 1
 
                 best_row = {
                     'Task': task_type,
                     'Model': knee_sol.get('model', 'Unknown'),
                     'Preprocessing': preproc,
-                    'Preprocess': preproc,
+                    'Preprocess': _normalize_preprocess_name(preproc),  # Normalized for validation
                     'Folds': folds,
                     'N_Calibration': n_calibration,
                     'N_Excluded': excluded_count,
@@ -2638,7 +2679,7 @@ def convert_nsga2_to_v1_format(
                     'n_vars': knee_sol.get('n_wavelengths', 0),
                     'Deriv': deriv_order,
                     'Window': window_size,
-                    'Poly': 2 if deriv_order else None,
+                    'Poly': polyorder,
                     'LVs': knee_sol.get('model_params', {}).get('n_components') if knee_sol.get('model') == 'PLS' else None,
                     'Complexity': knee_sol['objectives'].get('complexity', 0),
                     'Is_Knee': False,

@@ -380,6 +380,30 @@ Models with high accuracy were ranked poorly because ranking used ROC_AUC instea
 - LightGBM: ✅
 - CatBoost: ✅
 
+### ⚠️ NSGA-II and Unified Bayesian Validation Metrics (2026-01-08) - NEEDS TESTING
+
+**Status:** Added validation metrics calls for NSGA-II and Unified Bayesian in GUI. Appears to work but NOT thoroughly tested.
+
+**Implementation:**
+- Added validation block in GUI after NSGA-II results conversion (~line 16531)
+- Added validation block in GUI after Unified Bayesian results conversion (~line 16403)
+- Both call `compute_validation_metrics_for_top_models()` same as Grid Search
+- Preprocessing name normalization via `_normalize_preprocess_name()` converts NSGA-II names (e.g., 'deriv3_w43') to standard names ('deriv')
+
+**Known Issues Fixed:**
+1. Preprocessing name mismatch - NSGA-II uses 'deriv3_w43', validation expects 'deriv'
+2. Window suffix stripping - regex `_w\d+$` strips window from name
+
+**Testing Needed:**
+1. Run NSGA-II with validation enabled - verify val_R2/val_RMSE appear and are reasonable
+2. Run Unified Bayesian with validation - same verification
+3. Test with classification data - verify val_Accuracy, val_F1, etc.
+4. Verify Grid Search still works correctly (regression test)
+
+**Files Modified:**
+- `spectral_predict_gui_optimized.py` - Added validation blocks for NSGA-II and Unified Bayesian
+- `src/spectral_predict/nsga2_search.py` - Added `_normalize_preprocess_name()` function
+
 ---
 
 ## ✅ PLS DEFAULT FOR CLASSIFICATION FIX (2026-01-03)

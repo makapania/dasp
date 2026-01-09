@@ -69,6 +69,41 @@ SUBSET_SIZES = ['full', 10, 20, 50, 100, 250, 500, 1000]
 VAR_METHODS = ['importance', 'cars', 'region']
 
 
+def _normalize_preprocess_name(name: str) -> str:
+    """Convert detailed preprocessing names to standard names for validation.
+
+    Unified Bayesian uses names like 'deriv1', 'snv_deriv2', 'deriv3_snv',
+    but build_preprocessing_pipeline() expects 'deriv', 'snv_deriv', 'deriv_snv'.
+
+    Parameters
+    ----------
+    name : str
+        Preprocessing name (e.g., 'deriv1', 'snv_deriv2')
+
+    Returns
+    -------
+    str
+        Normalized name compatible with build_preprocessing_pipeline()
+    """
+    if name in ('raw', 'snv'):
+        return name
+
+    # Strip window suffix like '_w17', '_w43' if present (for consistency with NSGA-II)
+    import re
+    name_no_window = re.sub(r'_w\d+$', '', name)
+
+    # deriv1, deriv2, deriv3, deriv4 → deriv
+    if name_no_window.startswith('deriv') and '_' not in name_no_window:
+        return 'deriv'
+    # snv_deriv1, snv_deriv2, etc. → snv_deriv
+    if name_no_window.startswith('snv_deriv'):
+        return 'snv_deriv'
+    # deriv1_snv, deriv2_snv, etc. → deriv_snv
+    if name_no_window.startswith('deriv') and name_no_window.endswith('_snv'):
+        return 'deriv_snv'
+    return name  # fallback for unknown names
+
+
 def suggest_preprocessing(trial: Trial, n_features: int) -> Dict[str, Any]:
     """Suggest preprocessing configuration.
 
@@ -935,7 +970,7 @@ def convert_study_to_dataframe(
         row = {
             'Task': task_type,
             'Model': model_name,
-            'Preprocess': trial.user_attrs.get('preprocessing', 'unknown'),
+            'Preprocess': _normalize_preprocess_name(trial.user_attrs.get('preprocessing', 'unknown')),
             'Deriv': trial.user_attrs.get('deriv', 0),
             'Window': trial.user_attrs.get('window', 0),
             'Poly': trial.user_attrs.get('poly', 0),
