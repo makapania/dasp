@@ -79,9 +79,18 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, ra
 
     n_samples, n_features = X.shape
 
+    # Graceful degradation for small feature counts
+    # UVE doubles features with noise and builds PLS, so needs reasonable feature count
+    MIN_UVE_FEATURES = 3  # Minimum for meaningful UVE (need n_components >= 1 with n_features//2)
+    if n_features < MIN_UVE_FEATURES:
+        print(f"WARNING: UVE skipped - only {n_features} wavelengths available "
+              f"(minimum {MIN_UVE_FEATURES} required). Returning uniform importance.")
+        return np.ones(n_features)
+
     # Handle edge case: adjust cv_folds if n_samples is too small
     if n_samples < cv_folds:
         cv_folds = max(2, n_samples // 2)
+        print(f"Warning: UVE adjusted cv_folds to {cv_folds} due to small sample size")
 
     # Auto-select n_components if not provided
     if n_components is None:
@@ -348,9 +357,18 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
 
     n_samples, n_vars = X.shape
 
+    # Graceful degradation for very small feature counts
+    MIN_SPA_FEATURES = 3  # Minimum for meaningful SPA selection
+    if n_vars < MIN_SPA_FEATURES:
+        print(f"WARNING: SPA skipped - only {n_vars} wavelengths available "
+              f"(minimum {MIN_SPA_FEATURES} required for meaningful selection). "
+              f"Returning uniform importance for all wavelengths.")
+        return np.ones(n_vars)
+
     # Handle edge case: if requesting more features than available, use all
     if n_features > n_vars:
-        print(f"Warning: n_features ({n_features}) > n_vars ({n_vars}). Using all features.")
+        print(f"WARNING: SPA requested {n_features} features but only {n_vars} wavelengths available. "
+              f"Using all {n_vars} wavelengths.")
         n_features = n_vars
 
     # Handle edge case: reduce cv_folds if not enough samples
@@ -538,15 +556,31 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
 
     n_samples, n_features = X.shape
 
+    # Graceful degradation for small feature counts
+    # iPLS needs enough features for meaningful intervals (at least 2 features per interval)
+    MIN_IPLS_FEATURES = 6  # Minimum for meaningful iPLS (at least 2-3 intervals with 2+ features each)
+    if n_features < MIN_IPLS_FEATURES:
+        print(f"WARNING: iPLS skipped - only {n_features} wavelengths available "
+              f"(minimum {MIN_IPLS_FEATURES} required for meaningful interval selection). "
+              f"Returning uniform importance for all wavelengths.")
+        # Return uniform importance (all wavelengths equally important)
+        return np.ones(n_features)
+
     # Handle edge case: adjust cv_folds if n_samples is too small
     if n_samples < cv_folds:
         cv_folds = max(2, n_samples // 2)
         print(f"Warning: Insufficient samples. Reducing cv_folds to {cv_folds}")
 
-    # Handle edge case: if too many intervals requested, reduce to n_features
-    if n_intervals > n_features:
-        n_intervals = n_features
-        print(f"Warning: n_intervals > n_features. Reducing to {n_intervals} intervals")
+    # Auto-adjust n_intervals based on available features
+    # Goal: each interval should have at least 2-3 features for meaningful PLS
+    MIN_FEATURES_PER_INTERVAL = 2
+    max_sensible_intervals = n_features // MIN_FEATURES_PER_INTERVAL
+
+    if n_intervals > max_sensible_intervals:
+        original_intervals = n_intervals
+        n_intervals = max(2, max_sensible_intervals)  # At least 2 intervals
+        print(f"WARNING: Auto-adjusted n_intervals from {original_intervals} to {n_intervals} "
+              f"(only {n_features} wavelengths available, need at least {MIN_FEATURES_PER_INTERVAL} per interval)")
 
     # Handle edge case: ensure at least 1 interval
     n_intervals = max(1, n_intervals)
@@ -878,13 +912,31 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     if X.shape[0] != y.shape[0]:
         raise ValueError("X and y must have same number of samples")
 
+    # Graceful degradation for small feature counts
+    # CARS needs enough variables for sampling AND PLS/LightGBM model building
+    MIN_CARS_FEATURES = 7  # Minimum for meaningful CARS (pls_components=2 + buffer)
+    if n_variables < MIN_CARS_FEATURES:
+        print(f"WARNING: CARS skipped - only {n_variables} wavelengths available "
+              f"(minimum {MIN_CARS_FEATURES} required for meaningful selection). "
+              f"Returning uniform importance for all wavelengths.")
+        # Return uniform importance (all wavelengths equally important)
+        return np.ones(n_variables)
+
     # Handle None for pls_components (use default)
     if pls_components is None:
         pls_components = 5
 
+    # Auto-adjust pls_components for small datasets
     if pls_components > min(n_samples, n_variables):
         pls_components = min(n_samples // 2, n_variables // 2, 10)
         print(f"Warning: Adjusted pls_components to {pls_components}")
+
+    # Additional safeguard: ensure pls_components is at least 1 and leaves room for sampling
+    if pls_components < 1:
+        pls_components = 1
+    if pls_components >= n_variables:
+        pls_components = max(1, n_variables - 2)
+        print(f"Warning: Further adjusted pls_components to {pls_components} for small dataset")
 
     # Adjust cv_folds if needed
     if n_samples < cv_folds:

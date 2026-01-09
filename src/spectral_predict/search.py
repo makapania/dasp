@@ -820,30 +820,30 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         n_classes = len(np.unique(y_np))
         is_binary_classification = n_classes == 2
 
-    # Adjust max_n_components based on minimum CV fold size
-    # For REGRESSION: PLS requires n_components <= min(n_features, n_samples_in_fold)
+    # Adjust max_n_components based on CV training fold size
+    # For REGRESSION: PLS requires n_components <= min(n_features, n_samples_in_training_fold)
     # For CLASSIFICATION: PLS-DA uses PLS as dimensionality reduction before LR classifier,
     #                     so we can be less strict (LR can handle more components than samples)
-    min_fold_samples = n_samples // folds
+    # Use TRAINING fold size (not test fold) since PLS is fit on training data
+    min_train_samples = n_samples * (folds - 1) // folds
 
     if task_type == "regression":
-        # Strict constraint for PLS regression
-        # Use slightly lower bound to be safe (some folds might have fewer samples)
-        safe_max_components = min(max_n_components, min_fold_samples - 1, n_features)
+        # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)
+        safe_max_components = min(max_n_components, min_train_samples, n_features)
     else:
         # More relaxed constraint for PLS-DA classification
         # PLS transforms to latent space, then LR classifies
         # Allow more components since LR can handle high-dimensional input
         safe_max_components = min(max_n_components, n_features)
-        # Still warn if components exceed fold size (not recommended but allowed)
-        if max_n_components > min_fold_samples:
-            print(f"Note: Using {max_n_components} PLS components with min_fold_size~{min_fold_samples}. " +
+        # Still warn if components exceed training fold size (not recommended but allowed)
+        if max_n_components > min_train_samples:
+            print(f"Note: Using {max_n_components} PLS components with min_train_size~{min_train_samples}. " +
                   f"This is acceptable for PLS-DA (classification) but may cause instability.")
 
     if safe_max_components < max_n_components:
         print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
               f"due to dataset constraints (n_samples={n_samples}, n_features={n_features}, " +
-              f"min_fold_size~{min_fold_samples}, task={task_type})")
+              f"min_train_size~{min_train_samples}, task={task_type})")
 
     # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
     # rf_n_trees_list and rf_max_depth_list for RandomForest,
@@ -2447,6 +2447,26 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
     # Determine binary classification status
     is_binary_classification = (task_type == "classification" and len(np.unique(y_np)) == 2)
+
+    # Adjust max_n_components based on data constraints (same logic as run_search)
+    # For small wavelength subsets, PLS n_components must be capped
+    # Use TRAINING fold size (not test fold) since PLS is fit on training data
+    min_train_samples = n_samples * (folds - 1) // folds
+
+    if task_type == "regression":
+        # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)
+        safe_max_components = min(max_n_components, min_train_samples, n_features)
+    else:
+        # More relaxed for PLS-DA classification
+        safe_max_components = min(max_n_components, n_features)
+
+    if safe_max_components < max_n_components:
+        print(f"Note: Bayesian search reducing max PLS components from {max_n_components} to {safe_max_components} "
+              f"(n_features={n_features}, min_train_size~{min_train_samples})")
+        max_n_components = safe_max_components
+
+    # Ensure at least 1 component (edge case with very small datasets)
+    max_n_components = max(1, max_n_components)
 
     # Create results container
     df_results = create_results_dataframe(task_type)

@@ -90,14 +90,32 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
             polyorder_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
             polyorder = polyorder_map.get(self.deriv, self.deriv + 1)
 
-        # Validate
+        # Auto-adjust window if too large for feature count
+        n_features = X.shape[1]
+        original_window = window
+
+        if window > n_features:
+            # Find largest valid odd window <= n_features
+            max_valid_window = n_features if n_features % 2 == 1 else n_features - 1
+            min_valid_window = polyorder + 2
+            if min_valid_window % 2 == 0:
+                min_valid_window += 1  # Must be odd
+
+            if max_valid_window >= min_valid_window:
+                window = max_valid_window
+                print(f"WARNING: Auto-adjusted Savitzky-Golay window from {original_window} to {window} "
+                      f"(only {n_features} wavelengths available)")
+            else:
+                # Cannot satisfy constraints - raise helpful error
+                raise ValueError(
+                    f"Cannot apply derivative with polyorder={polyorder}: "
+                    f"requires minimum {min_valid_window} wavelengths, but only {n_features} available. "
+                    f"Consider using a lower derivative order or expanding the wavelength range."
+                )
+
+        # Validate polyorder constraint
         if window < polyorder + 2:
             raise ValueError(f"Window length ({window}) must be >= polyorder ({polyorder}) + 2")
-
-        if window > X.shape[1]:
-            raise ValueError(
-                f"Window length ({window}) must be <= number of features ({X.shape[1]})"
-            )
 
         # Apply along axis=1 (features)
         X_deriv = savgol_filter(
@@ -151,15 +169,34 @@ class SavgolSmooth(BaseEstimator, TransformerMixin):
         if window % 2 == 0:
             window = window + 1
 
-        # Validate
-        if window < self.polyorder + 2:
-            raise ValueError(
-                f"Window length ({window}) must be >= polyorder ({self.polyorder}) + 2"
-            )
+        # Auto-adjust window if too large for feature count
+        n_features = X.shape[1]
+        original_window = window
+        polyorder = self.polyorder
 
-        if window > X.shape[1]:
+        if window > n_features:
+            # Find largest valid odd window <= n_features
+            max_valid_window = n_features if n_features % 2 == 1 else n_features - 1
+            min_valid_window = polyorder + 2
+            if min_valid_window % 2 == 0:
+                min_valid_window += 1  # Must be odd
+
+            if max_valid_window >= min_valid_window:
+                window = max_valid_window
+                print(f"WARNING: Auto-adjusted smoothing window from {original_window} to {window} "
+                      f"(only {n_features} wavelengths available)")
+            else:
+                # Cannot satisfy constraints - raise helpful error
+                raise ValueError(
+                    f"Cannot apply smoothing with polyorder={polyorder}: "
+                    f"requires minimum {min_valid_window} wavelengths, but only {n_features} available. "
+                    f"Consider reducing smoothing polyorder or expanding the wavelength range."
+                )
+
+        # Validate polyorder constraint
+        if window < polyorder + 2:
             raise ValueError(
-                f"Window length ({window}) must be <= number of features ({X.shape[1]})"
+                f"Window length ({window}) must be >= polyorder ({polyorder}) + 2"
             )
 
         # Apply smoothing (deriv=0) along axis=1 (features)
