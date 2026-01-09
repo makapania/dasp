@@ -4118,17 +4118,19 @@ class SpectralPredictApp:
                                                 style='Caption.TLabel', foreground=self.colors['text_light'])
         self.data_type_status_label.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Radiobutton(data_type_subframe, text="Reflectance",
+        self.reflectance_radio = ttk.Radiobutton(data_type_subframe, text="Reflectance",
                        variable=self.current_data_type,
                        value="reflectance",
                        command=self._on_data_type_override,
-                       state='disabled').pack(side=tk.LEFT, padx=5)
+                       state='disabled')
+        self.reflectance_radio.pack(side=tk.LEFT, padx=5)
 
-        ttk.Radiobutton(data_type_subframe, text="Absorbance",
+        self.absorbance_radio = ttk.Radiobutton(data_type_subframe, text="Absorbance",
                        variable=self.current_data_type,
                        value="absorbance",
                        command=self._on_data_type_override,
-                       state='disabled').pack(side=tk.LEFT, padx=5)
+                       state='disabled')
+        self.absorbance_radio.pack(side=tk.LEFT, padx=5)
 
         self.convert_data_button = ttk.Button(data_type_subframe, text="Convert to Absorbance",
                                              command=self._convert_and_replot,
@@ -11108,12 +11110,9 @@ class SpectralPredictApp:
         opposite_type = "Absorbance" if data_type == "reflectance" else "Reflectance"
         self.convert_data_button.config(text=f"Convert to {opposite_type}", state='normal')
 
-        # Enable radio buttons
-        for widget in self.convert_data_button.master.winfo_children():
-            if isinstance(widget, ttk.Frame):  # radio_frame
-                for radio in widget.winfo_children():
-                    if isinstance(radio, ttk.Radiobutton):
-                        radio.config(state='normal')
+        # Enable radio buttons for manual override
+        self.reflectance_radio.config(state='normal')
+        self.absorbance_radio.config(state='normal')
 
     def _reset_exclusions(self):
         """Reset all spectrum exclusions."""
@@ -11614,6 +11613,9 @@ class SpectralPredictApp:
         This method is deprecated but kept for backwards compatibility.
         New code should use _convert_data_type() instead.
         """
+        # Don't double-convert if data was already converted via the new system
+        if self.data_has_been_converted:
+            return data
         if self.use_absorbance.get():
             return self._convert_reflectance_to_absorbance(data)
         else:
@@ -11635,15 +11637,34 @@ class SpectralPredictApp:
         numpy.ndarray or pandas.DataFrame
             Absorbance data
         """
-        # Add small epsilon to avoid log(0)
-        epsilon = 1e-10
+        # Use small epsilon only to avoid log(0) and extreme values
+        # 1e-6 (0.0001% reflectance) gives max absorbance of 6.0
+        # This preserves strong absorption bands while avoiding infinity
+        epsilon = 1e-6
+
+        # Count problematic values before clamping
+        n_zero_or_negative = np.sum(data <= 0)
+        n_very_low = np.sum((data > 0) & (data < epsilon))
+        n_above_one = np.sum(data > 1.0)
+
+        # Only clamp the lower bound to epsilon (avoid log of zero/negative)
+        # Allow values > 1.0 - they give small negative absorbance which is fine
         data_safe = np.maximum(data, epsilon)
 
-        # Warn if values seem problematic
-        if np.any(data > 1.2):
-            print("[!]  Warning: Some reflectance values > 1.2. Data may already be absorbance.")
+        # Warn about problematic values
+        if n_zero_or_negative > 0:
+            print(f"[!]  Warning: {n_zero_or_negative} zero/negative reflectance values clamped to {epsilon}.")
+        if n_very_low > 0:
+            print(f"[i]  Info: {n_very_low} very low reflectance values (< {epsilon}) - strong absorption bands.")
+        if n_above_one > 0:
+            print(f"[i]  Info: {n_above_one} reflectance values > 1.0 (will give small negative absorbance).")
 
-        return np.log10(1.0 / data_safe)
+        result = np.log10(1.0 / data_safe)
+
+        # Report absorbance range
+        print(f"[i]  Absorbance range after conversion: {np.min(result):.3f} to {np.max(result):.3f}")
+
+        return result
 
     def _convert_absorbance_to_reflectance(self, data):
         """
