@@ -2488,6 +2488,15 @@ def _compute_top_variables(
             # Fallback to first N indices
             return _indices_to_wavelength_str(selected_indices[:top_n], wavelengths)
 
+        # Cap n_components for PLS when X_subset has fewer features than expected
+        n_features_subset = X_subset.shape[1]
+        if hasattr(model, 'n_components') and model.n_components is not None:
+            if model.n_components >= n_features_subset:
+                from sklearn.base import clone
+                model = clone(model)
+                capped = max(1, n_features_subset - 1)
+                model.set_params(n_components=capped)
+
         model.fit(X_subset, y)
 
         # Get feature importances using the same function as Grid Search

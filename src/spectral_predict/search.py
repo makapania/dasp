@@ -1819,6 +1819,17 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     else:
                         print(f"  -> Computing feature importances for {model_name} subset analysis...")
 
+                        # Cap n_components for PLS when fitting on filtered data
+                        # (model was created with n_components based on original feature count,
+                        # but X_for_models may have fewer features after wavelength filtering)
+                        n_features_filtered = X_for_models.shape[1]
+                        if hasattr(model, 'n_components') and model.n_components is not None:
+                            if model.n_components >= n_features_filtered:
+                                model = clone(model)
+                                capped = max(1, n_features_filtered - 1)
+                                model.set_params(n_components=capped)
+                                print(f"     Note: Capped PLS n_components to {capped} for importance computation (only {n_features_filtered} features)")
+
                         # Build model-only pipeline (data is already preprocessed and filtered)
                         pipe_steps = []
                         pipe_steps.append(("model", model))
