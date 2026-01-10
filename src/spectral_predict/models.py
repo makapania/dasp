@@ -747,10 +747,10 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
 
     grids = {}
 
-    # PLS components grid - test ALL integer values from 2 to max allowed
+    # PLS components grid - test ALL integer values from 1 to max allowed
     # Max is limited by both n_features and max_n_components (which is adjusted for CV fold size)
     pls_max = min(n_features, max_n_components)
-    pls_components = list(range(2, pls_max + 1)) if pls_max >= 2 else [2]
+    pls_components = list(range(1, pls_max + 1)) if pls_max >= 1 else [1]
 
     # PLS additional hyperparameters (tier-aware)
     if pls_max_iter_list is None:

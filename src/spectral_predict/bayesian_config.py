@@ -114,13 +114,13 @@ def _get_pls_space(trial: optuna.Trial, max_n_components: int = 12) -> Dict:
     different n_components work best with different variable subsets, and TPE
     with suggest_int may miss optimal values.
     """
-    # Start from 2 components (1 component is rarely useful for spectral data)
-    min_components = 2
-    max_components = max(2, max_n_components)  # Ensure at least 2
+    # Start from 1 component (allows simple univariate models)
+    min_components = 1
+    max_components = max(1, max_n_components)  # Ensure at least 1
 
-    # If max_components is 2, use exactly 2 components (no range to suggest)
-    if max_components <= 2:
-        n_components = 2
+    # If max_components is 1, use exactly 1 component (no range to suggest)
+    if max_components <= 1:
+        n_components = 1
     else:
         # Use CATEGORICAL to guarantee all n_components values get tested equally
         # This ensures TPE explores 2, 3, 4, ..., max like grid search does

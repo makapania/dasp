@@ -1621,6 +1621,85 @@ With < 20 validation samples across 3+ classes, metrics may appear perfect (1.0)
 
 ---
 
+## 🔴 NEW PENDING ITEMS (2026-01-08)
+
+### 1. Manually Choose Validation Set
+**Status:** NOT IMPLEMENTED
+
+**Request:** Allow users to manually select which samples go into the validation set, rather than relying on automatic splitting.
+
+**TODO:**
+- Add UI option to manually specify validation sample IDs
+- Support loading validation samples from separate file
+- Support selecting rows from loaded data as validation
+
+---
+
+### 2. SMOGN Results and Model Development R² Mismatch
+**Status:** NEEDS INVESTIGATION
+
+**Problem:** When using SMOGN (imbalance handling for regression), the R² shown in Results tab does not match R² computed in Model Development tab.
+
+**Likely Cause:** SMOGN augments the training data with synthetic samples. The Results tab R² is computed on augmented data (more samples), but Model Development may:
+1. Not apply SMOGN to training data
+2. Apply SMOGN differently
+3. Use different random seed for SMOGN
+
+**TODO:**
+- Verify if SMOGN is applied in Model Development tab
+- Check if SMOGN parameters (k, pert, samp_method) are preserved
+- Ensure same random seed for reproducible synthetic samples
+
+---
+
+### 3. PLS n_components Error with Small Wavelength Ranges
+**Status:** ✅ FIXED (2026-01-09)
+
+**Problem:** When restricting analysis to very small wavelength ranges (e.g., 2030-2060nm = ~31 wavelengths), PLS fails with:
+```
+ValueError: `n_components` upper bound is 1. Got 2 instead. Reduce `n_components`.
+```
+
+**Fixes Applied:**
+
+1. **Graceful handling for restricted wavelengths** (commit `da26e4e`):
+   - Variable selection graceful degradation (CARS, iPLS, SPA, UVE return uniform importance when too few wavelengths)
+   - Fixed PLS fold size calculation (uses training fold size, not test fold)
+   - Added n_components capping in multiple locations
+
+2. **Missing n_components cap in feature importance** (commit `0d89627`):
+   - Added capping in `search.py` lines 1822-1831 (feature importance computation)
+   - Added capping in `nsga2_search.py` lines 2491-2498 (NSGA-II wavelength ranking)
+
+3. **Allow PLS n_components=1** (2026-01-09, uncommitted):
+   - Changed `models.py` line 753: Grid search now tests n_components starting from 1 (was 2)
+   - Changed `bayesian_config.py` lines 117-123: Bayesian search now allows n_components=1 (was minimum 2)
+   - PLS with 1 component is mathematically valid and sometimes optimal for simple linear relationships
+
+---
+
+### 4. Fix Absorbance Conversion in Main GUI
+**Status:** NOT IMPLEMENTED IN MAIN WORKFLOW
+
+**Problem:** Reflectance-to-absorbance conversion (A = log₁₀(1/R)) is critical for matching paper results but is NOT available in the main GUI preprocessing pipeline.
+
+**Current State:**
+- ✅ Available in interactive CLI mode (`interactive.py`)
+- ✅ Available in interactive GUI mode (`interactive_gui.py`)
+- ❌ **NOT available in main GUI** (`spectral_predict_gui_optimized.py`)
+
+**Impact:** Users working with reflectance data cannot properly replicate results from papers (like Ryder et al. 2026) that use absorbance-converted spectra.
+
+**TODO:**
+1. Add `ReflectanceToAbsorbance` transformer to `preprocess.py`
+2. Add checkbox in main GUI preprocessing options
+3. Ensure absorbance conversion happens BEFORE Savitzky-Golay derivatives
+4. Store absorbance conversion state in results for Model Development reconstruction
+
+**Reference:** See `PLS_DISCREPANCY_ANALYSIS.md` for full analysis of this issue.
+
+---
+
 ## ✅ MINOR CHANGES (2026-01-05)
 
 ### Regional Subset Analysis Default Changed
