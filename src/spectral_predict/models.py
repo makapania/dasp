@@ -1448,33 +1448,39 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                             for colsample in xgb_colsample_bytree:
                                 for reg_alpha in xgb_reg_alpha:
                                     for reg_lambda in xgb_reg_lambda:
-                                        xgb_configs.append(
-                                            (
-                                                XGBClassifier(
-                                                    n_estimators=n_est,
-                                                    learning_rate=lr,
-                                                    max_depth=max_depth,
-                                                    subsample=subsample,
-                                                    colsample_bytree=colsample,
-                                                    reg_alpha=reg_alpha,
-                                                    reg_lambda=reg_lambda,
-                                                    tree_method='hist',  # Faster for high-dimensional data
-                                                    random_state=42,
-                                                    n_jobs=n_jobs,
-                                                    verbosity=0
-                                                ),
-                                                {
-                                                    "n_estimators": n_est,
-                                                    "learning_rate": lr,
-                                                    "max_depth": max_depth,
-                                                    "subsample": subsample,
-                                                    "colsample_bytree": colsample,
-                                                    "reg_alpha": reg_alpha,
-                                                    "reg_lambda": reg_lambda,
-                                                    "tree_method": "hist"
-                                                }
-                                            )
-                                        )
+                                        for min_child_weight in xgb_min_child_weight_list:
+                                            for gamma in xgb_gamma_list:
+                                                xgb_configs.append(
+                                                    (
+                                                        XGBClassifier(
+                                                            n_estimators=n_est,
+                                                            learning_rate=lr,
+                                                            max_depth=max_depth,
+                                                            subsample=subsample,
+                                                            colsample_bytree=colsample,
+                                                            reg_alpha=reg_alpha,
+                                                            reg_lambda=reg_lambda,
+                                                            min_child_weight=min_child_weight,
+                                                            gamma=gamma,
+                                                            tree_method='hist',
+                                                            random_state=42,
+                                                            n_jobs=n_jobs,
+                                                            verbosity=0
+                                                        ),
+                                                        {
+                                                            "n_estimators": n_est,
+                                                            "learning_rate": lr,
+                                                            "max_depth": max_depth,
+                                                            "subsample": subsample,
+                                                            "colsample_bytree": colsample,
+                                                            "reg_alpha": reg_alpha,
+                                                            "reg_lambda": reg_lambda,
+                                                            "min_child_weight": min_child_weight,
+                                                            "gamma": gamma,
+                                                            "tree_method": "hist"
+                                                        }
+                                                    )
+                                                )
             grids["XGBoost"] = xgb_configs
 
         # LightGBM Classification - tier-aware with UI overrides

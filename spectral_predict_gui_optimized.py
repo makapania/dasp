@@ -19197,6 +19197,7 @@ class SpectralPredictApp:
             params['reg_lambda'] = self.refine_xgb_reg_lambda.get()
             params['min_child_weight'] = self.refine_xgb_min_child_weight.get()
             params['gamma'] = self.refine_xgb_gamma.get()
+            params['tree_method'] = 'hist'  # Must match grid search setting
 
         # ========== LightGBM ==========
         elif model_name == 'LightGBM':
@@ -19908,6 +19909,7 @@ Performance (Classification):
 
         # Set window size - use custom field for non-standard window sizes
         window = config.get('Window', 17)
+        print(f"DEBUG [WINDOW LOAD]: config.get('Window') = {config.get('Window')}, type = {type(config.get('Window'))}")
         if not pd.isna(window):
             window = int(window)
             if window in [7, 11, 17, 19]:
@@ -21293,26 +21295,16 @@ F1 Score:  {f1:.4f}
 
             # CRITICAL FIX: Use stored wavelength order if available (from double-click load)
             # This bypasses the fragile format→parse round-trip that was causing R² mismatches
+            # NOTE: We trust the _on_wavelength_spec_changed callback to clear
+            # _original_wavelength_order when user manually edits (line 23701-23703)
+            # Removed fragile string comparison that could fail due to formatting differences
             if self._original_wavelength_order is not None and len(self._original_wavelength_order) > 0:
-                # Check if user manually modified the wavelength spec
-                wl_spec_text_clean = wl_spec_text.strip()
-                expected_spec = self._format_wavelengths_as_spec(
-                    self._original_wavelength_order,
-                    preserve_order=True
-                )
-
-                if wl_spec_text_clean == expected_spec.strip():
-                    # User hasn't modified - use stored order directly
-                    print(f"DEBUG: Using stored wavelength order directly (bypassing parse)")
-                    print(f"DEBUG: This ensures exact wavelength order match with Results tab")
-                    selected_wl = [float(wl) for wl in self._original_wavelength_order]
-                else:
-                    # User modified the spec - parse as usual
-                    print(f"DEBUG: User modified wavelength spec - parsing as usual")
-                    selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
-                    self._original_wavelength_order = None  # Clear since manual edit
+                # Use stored wavelength order directly - this ensures exact match with Results tab
+                print(f"DEBUG: Using stored wavelength order directly (n={len(self._original_wavelength_order)})")
+                print(f"DEBUG: This ensures exact wavelength order match with Results tab")
+                selected_wl = [float(wl) for wl in self._original_wavelength_order]
             else:
-                # No stored order - parse as usual
+                # No stored order (user edited manually or full spectrum) - parse as usual
                 print(f"DEBUG: No stored wavelength order - parsing spec text")
                 selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
 
@@ -21563,7 +21555,7 @@ F1 Score:  {f1:.4f}
                     # For any higher derivative, use deriv + 1
                     return max(2, deriv_value + 1)
 
-            def _parse_coupled_preprocessing(preprocess_str: str, params_str: str, window_config=None) -> dict:
+            def _parse_coupled_preprocessing(preprocess_str: str, params_str: str, window_config=None, poly_config=None) -> dict:
                 """
                 Parse coupled optimization preprocessing string into components.
 
@@ -21576,8 +21568,9 @@ F1 Score:  {f1:.4f}
                 Returns dict with: baseline, snv, deriv, snv_first, window, polyorder
                 """
                 # Use window from config if provided (Unified Bayesian stores it in Window column)
-                # Otherwise default to 11 (for old results or coupled optimization)
-                default_window = window_config if window_config is not None else 11
+                # Otherwise default to 17 (changed from 11 to avoid masking bugs when window=11 fails to load)
+                default_window = window_config if window_config is not None else 17
+                print(f"DEBUG [_parse_coupled_preprocessing]: window_config={window_config}, default_window={default_window}")
 
                 result = {
                     'baseline': None,
@@ -21615,7 +21608,8 @@ F1 Score:  {f1:.4f}
                     deriv_match = re.search(r'deriv(\d)', preproc)
                     if deriv_match:
                         result['deriv'] = int(deriv_match.group(1))
-                        result['polyorder'] = result['deriv'] + 1
+                        # Use poly_config if available, otherwise fallback to deriv + 1
+                        result['polyorder'] = poly_config if (poly_config is not None and not pd.isna(poly_config)) else (result['deriv'] + 1)
 
                     # Check SNV position (snv_deriv vs deriv_snv)
                     if 'deriv' in preproc and 'snv' in preproc:
@@ -21682,12 +21676,27 @@ F1 Score:  {f1:.4f}
                 # These store window in 'Window' column, not in 'Params'
                 # Must cast to int - pandas may load as float (e.g., 31.0 instead of 31)
                 window_from_config = self.selected_model_config.get('Window', None)
+                print(f"DEBUG [WINDOW_FROM_CONFIG]: raw value = {window_from_config}, type = {type(window_from_config)}")
                 if window_from_config is not None and not pd.isna(window_from_config):
                     window_from_config = int(window_from_config)
+                    print(f"DEBUG [WINDOW_FROM_CONFIG]: after int() = {window_from_config}")
+                else:
+                    print(f"DEBUG [WINDOW_FROM_CONFIG]: WILL USE DEFAULT 11 (window_from_config is None or NaN)")
+
+                # Read Poly from config (if available)
+                poly_from_config = self.selected_model_config.get('Poly', None)
+                print(f"DEBUG [POLY_FROM_CONFIG]: Read from config = {poly_from_config}")
+                if poly_from_config is not None and not pd.isna(poly_from_config):
+                    poly_from_config = int(poly_from_config)
+                    print(f"DEBUG [POLY_FROM_CONFIG]: after int() = {poly_from_config}")
+                else:
+                    print(f"DEBUG [POLY_FROM_CONFIG]: WILL USE FALLBACK deriv+1 (poly_from_config is None or NaN)")
+
                 coupled_config = _parse_coupled_preprocessing(
                     self.selected_model_config.get('Preprocess', 'raw'),
                     self.selected_model_config.get('Params', ''),
-                    window_config=window_from_config
+                    window_config=window_from_config,
+                    poly_config=poly_from_config
                 )
 
                 deriv = coupled_config['deriv']
@@ -21879,7 +21888,8 @@ F1 Score:  {f1:.4f}
 
                             # Check for critical params based on model type
                             critical_params_by_model = {
-                                "XGBoost": ['n_estimators', 'learning_rate', 'max_depth', 'random_state', 'tree_method'],
+                                "XGBoost": ['n_estimators', 'learning_rate', 'max_depth', 'subsample', 'colsample_bytree',
+                                           'reg_alpha', 'reg_lambda', 'min_child_weight', 'gamma', 'tree_method'],
                                 "LightGBM": ['n_estimators', 'learning_rate', 'num_leaves', 'random_state', 'verbose'],
                                 "CatBoost": ['iterations', 'learning_rate', 'depth', 'random_state'],
                                 "Ridge": ['alpha', 'solver', 'tol', 'max_iter'],
@@ -22012,7 +22022,8 @@ F1 Score:  {f1:.4f}
                         'Lasso': ['alpha', 'selection', 'tol', 'max_iter'],
                         'ElasticNet': ['alpha', 'l1_ratio', 'selection', 'tol', 'max_iter'],
                         'RandomForest': ['n_estimators', 'max_depth', 'min_samples_split', 'min_samples_leaf', 'max_features'],
-                        'XGBoost': ['n_estimators', 'learning_rate', 'max_depth', 'subsample', 'colsample_bytree'],
+                        'XGBoost': ['n_estimators', 'learning_rate', 'max_depth', 'subsample', 'colsample_bytree',
+                                   'reg_alpha', 'reg_lambda', 'min_child_weight', 'gamma', 'tree_method'],
                         'LightGBM': ['n_estimators', 'learning_rate', 'num_leaves', 'max_depth'],
                         'CatBoost': ['iterations', 'learning_rate', 'depth'],
                         'MLP': ['hidden_layer_sizes', 'alpha', 'learning_rate_init', 'max_iter'],
