@@ -7785,10 +7785,10 @@ class SpectralPredictApp:
         ttk.Label(preprocess_frame, text="Preprocessing Method:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         self.refine_preprocess = tk.StringVar(value='raw')
         preprocess_combo = ttk.Combobox(preprocess_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
-        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'ga_optimized']
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'sg3', 'sg4', 'snv_sg1', 'snv_sg2', 'snv_sg3', 'snv_sg4', 'deriv_snv', 'ga_optimized']
         preprocess_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
 
-        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives | GA: Genetic Algorithm",
+        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1-SG4: Savitzky-Golay derivatives | GA: Genetic Algorithm",
                   style='Caption.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(5, 10))
 
         # Window size (for derivatives)
@@ -7836,10 +7836,10 @@ class SpectralPredictApp:
         ttk.Label(preprocess_frame, text="Preprocessing Method:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         self.refine_preprocess = tk.StringVar(value='raw')
         preprocess_combo = ttk.Combobox(preprocess_frame, textvariable=self.refine_preprocess, width=25, state='readonly')
-        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'ga_optimized']
+        preprocess_combo['values'] = ['raw', 'snv', 'sg1', 'sg2', 'sg3', 'sg4', 'snv_sg1', 'snv_sg2', 'snv_sg3', 'snv_sg4', 'deriv_snv', 'ga_optimized']
         preprocess_combo.grid(row=1, column=0, sticky=tk.W, pady=5)
 
-        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1/SG2: Savitzky-Golay derivatives | GA: Genetic Algorithm",
+        ttk.Label(preprocess_frame, text="Raw: No preprocessing | SNV: Standard Normal Variate | SG1-SG4: Savitzky-Golay derivatives | GA: Genetic Algorithm",
                   style='Caption.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(5, 10))
 
         # Window size (for derivatives)
@@ -19974,9 +19974,22 @@ Performance (Classification):
             gui_preprocess = 'sg1'
         elif preprocess == 'deriv' and deriv == 2:
             gui_preprocess = 'sg2'
+        elif preprocess == 'deriv' and deriv == 3:
+            gui_preprocess = 'sg3'
+        elif preprocess == 'deriv' and deriv == 4:
+            gui_preprocess = 'sg4'
         elif preprocess == 'snv_deriv':
             # SNV then derivative - NOW PROPERLY SUPPORTED!
-            gui_preprocess = 'snv_sg1' if deriv == 1 else 'snv_sg2'
+            if deriv == 1:
+                gui_preprocess = 'snv_sg1'
+            elif deriv == 2:
+                gui_preprocess = 'snv_sg2'
+            elif deriv == 3:
+                gui_preprocess = 'snv_sg3'
+            elif deriv == 4:
+                gui_preprocess = 'snv_sg4'
+            else:
+                gui_preprocess = 'snv_sg2'  # Fallback
         elif preprocess == 'deriv_snv':
             gui_preprocess = 'deriv_snv'
         elif preprocess in ['raw', 'snv']:
@@ -19987,8 +20000,14 @@ Performance (Classification):
                 # SNV then derivative
                 if 'deriv1' in preprocess:
                     gui_preprocess = 'snv_sg1'
-                else:
+                elif 'deriv2' in preprocess:
                     gui_preprocess = 'snv_sg2'
+                elif 'deriv3' in preprocess:
+                    gui_preprocess = 'snv_sg3'
+                elif 'deriv4' in preprocess:
+                    gui_preprocess = 'snv_sg4'
+                else:
+                    gui_preprocess = 'snv_sg2'  # Fallback
             elif 'deriv' in preprocess and 'snv' in preprocess:
                 # Derivative then SNV (e.g., deriv1_snv_w17)
                 gui_preprocess = 'deriv_snv'
@@ -19996,13 +20015,17 @@ Performance (Classification):
                 gui_preprocess = 'sg1'
             elif 'deriv2' in preprocess:
                 gui_preprocess = 'sg2'
+            elif 'deriv3' in preprocess:
+                gui_preprocess = 'sg3'
+            elif 'deriv4' in preprocess:
+                gui_preprocess = 'sg4'
             else:
-                # deriv3, deriv4 have no GUI equivalent - fallback to sg2
+                # Unknown derivative - fallback to sg2
                 gui_preprocess = 'sg2'
         else:
             gui_preprocess = 'raw'  # Fallback
 
-        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'snv_sg1', 'snv_sg2', 'deriv_snv', 'ga_optimized']:
+        if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'sg3', 'sg4', 'snv_sg1', 'snv_sg2', 'snv_sg3', 'snv_sg4', 'deriv_snv', 'ga_optimized']:
             self.refine_preprocess.set(gui_preprocess)
 
         # Detect and load GA preprocessing if present
@@ -21555,7 +21578,7 @@ F1 Score:  {f1:.4f}
                     # For any higher derivative, use deriv + 1
                     return max(2, deriv_value + 1)
 
-            def _parse_coupled_preprocessing(preprocess_str: str, params_str: str, window_config=None, poly_config=None) -> dict:
+            def _parse_coupled_preprocessing(preprocess_str: str, params_str: str, window_config=None) -> dict:
                 """
                 Parse coupled optimization preprocessing string into components.
 
@@ -21608,8 +21631,8 @@ F1 Score:  {f1:.4f}
                     deriv_match = re.search(r'deriv(\d)', preproc)
                     if deriv_match:
                         result['deriv'] = int(deriv_match.group(1))
-                        # Use poly_config if available, otherwise fallback to deriv + 1
-                        result['polyorder'] = poly_config if (poly_config is not None and not pd.isna(poly_config)) else (result['deriv'] + 1)
+                        # polyorder = deriv + 1 is the correct formula for all SG derivatives
+                        result['polyorder'] = result['deriv'] + 1
 
                     # Check SNV position (snv_deriv vs deriv_snv)
                     if 'deriv' in preproc and 'snv' in preproc:
@@ -21683,20 +21706,10 @@ F1 Score:  {f1:.4f}
                 else:
                     print(f"DEBUG [WINDOW_FROM_CONFIG]: WILL USE DEFAULT 11 (window_from_config is None or NaN)")
 
-                # Read Poly from config (if available)
-                poly_from_config = self.selected_model_config.get('Poly', None)
-                print(f"DEBUG [POLY_FROM_CONFIG]: Read from config = {poly_from_config}")
-                if poly_from_config is not None and not pd.isna(poly_from_config):
-                    poly_from_config = int(poly_from_config)
-                    print(f"DEBUG [POLY_FROM_CONFIG]: after int() = {poly_from_config}")
-                else:
-                    print(f"DEBUG [POLY_FROM_CONFIG]: WILL USE FALLBACK deriv+1 (poly_from_config is None or NaN)")
-
                 coupled_config = _parse_coupled_preprocessing(
                     self.selected_model_config.get('Preprocess', 'raw'),
                     self.selected_model_config.get('Params', ''),
-                    window_config=window_from_config,
-                    poly_config=poly_from_config
+                    window_config=window_from_config
                 )
 
                 deriv = coupled_config['deriv']

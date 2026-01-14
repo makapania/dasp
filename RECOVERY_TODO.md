@@ -6,6 +6,34 @@
 
 ---
 
+## 🔄 PARTIAL FIX: 3rd/4th Derivative R2 Mismatch (2026-01-13)
+
+**Problem:** 3rd and 4th derivative models had significant R2 mismatch between Results and Model Development. 1st and 2nd derivatives worked fine.
+
+**Root Cause Found:**
+When loading 3rd/4th derivative results, the GUI dropdown was incorrectly set to 'sg2' (2nd derivative) because sg3/sg4 weren't in the allowed GUI options. This caused Model Development to apply 2nd derivative preprocessing instead of the correct 3rd or 4th derivative.
+
+**Fixes Applied (2026-01-13):**
+1. Added sg3, sg4, snv_sg3, snv_sg4 to GUI combobox dropdown values
+2. Added proper sg3/sg4 mapping for deriv3/deriv4 in all code paths:
+   - `preprocess == 'deriv'` with deriv 3/4
+   - `preprocess == 'snv_deriv'` with deriv 3/4
+   - NSGA-style patterns like `snv_deriv3_w17`
+3. Updated allowed list for GUI preprocess values
+
+**Also fixed (same session):**
+- XGBoost `tree_method='hist'` was missing from `_collect_refine_hyperparams()`, causing ~0.02 R2 mismatch when user modified any hyperparameter
+- Added `min_child_weight` and `gamma` to XGBClassifier grid search (matching regression)
+- Updated critical params tracking for XGBoost
+
+**Status:** PARTIAL - Still seeing ~0.02 R2 mismatch in some cases. The derivative order fix was applied but there may be another issue (polyorder, window, or edge masking differences). Needs further investigation.
+
+**Files modified:**
+- `spectral_predict_gui_optimized.py` - GUI dropdown, derivative mapping, XGBoost params
+- `src/spectral_predict/models.py` - XGBClassifier grid search
+
+---
+
 ## ✅ FIXED: NSGA-II Result Discrepancy (2026-01-06)
 
 **Problem:** Optimization reports one RMSE but results display shows different value.
@@ -1618,6 +1646,45 @@ Multiple bugs causing NaN validation metrics:
 
 ### Note on Small Validation Sets
 With < 20 validation samples across 3+ classes, metrics may appear perfect (1.0) or jump dramatically (0.25). This is expected behavior with small samples, not a bug. Recommend 10-20+ samples per class for meaningful validation metrics.
+
+---
+
+## ✅ FIXED: Derivative Preprocessing R² Mismatch in Model Development (2026-01-09)
+
+**Problem:** When loading grid search results with derivative preprocessing + wavelength subset into Model Development tab, R² did NOT match Results tab. Issue was:
+- Only affected derivative preprocessing (not SNV_deriv which worked correctly)
+- Got worse with more variables (50 vars → slight mismatch, 100+ vars → larger mismatch)
+- Initially appeared to be a "window 11" bug, but changing default from 11→17 moved the problem to window 17
+
+**Root Cause Found:**
+The code at lines 21297-21318 had a fragile string comparison to detect if user manually edited wavelengths:
+```python
+if wl_spec_text_clean == expected_spec.strip():
+    selected_wl = [float(wl) for wl in self._original_wavelength_order]
+else:
+    # Falls through to parse with SORTED order!
+    selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+```
+
+When this string comparison failed (due to minor formatting differences), wavelengths were returned in **SORTED ORDER** instead of the original order from Results.
+
+For Savitzky-Golay derivatives, wavelength ORDER MATTERS because it uses neighboring points. Sorted order works for SNV (order-independent normalization) but breaks derivatives.
+
+**Fix Applied:**
+Removed the fragile string comparison. Now directly uses `_original_wavelength_order` when available:
+```python
+if self._original_wavelength_order is not None and len(self._original_wavelength_order) > 0:
+    selected_wl = [float(wl) for wl in self._original_wavelength_order]
+else:
+    selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+```
+
+The `_on_wavelength_spec_changed` callback at line 23701-23703 already handles clearing `_original_wavelength_order` when user manually edits, so the string comparison was redundant.
+
+**Files Modified:**
+- `spectral_predict_gui_optimized.py` lines 21295-21308
+
+**Related:** This is different from the previous R² mismatch fix (2026-01-01, commits 89fe683, 9212f02). That fix addressed ElasticNet/LightGBM mismatches caused by wavelength order corruption during format→text_widget→parse round-trip. This fix addresses the specific case where the string comparison fallback was triggered.
 
 ---
 
