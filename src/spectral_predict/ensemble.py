@@ -9,10 +9,73 @@ This module implements advanced ensemble strategies that go beyond simple averag
 """
 
 import numpy as np
+import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.model_selection import cross_val_predict
 import warnings
+
+from .preprocessing_wrapper import PreprocessorConfig
+
+
+class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):
+    """
+    Simple averaging ensemble.
+
+    Averages predictions from multiple base models with optional
+    per-model preprocessing.
+    """
+
+    def __init__(self, models, model_names=None, preprocessors=None, preprocessor_configs=None):
+        """
+        Parameters
+        ----------
+        models : list of fitted models
+            The base models to ensemble
+        model_names : list of str, optional
+            Names for the models. If None, generates "Model_0", "Model_1", etc.
+        preprocessors : list of preprocessors, optional
+            Individual fitted preprocessor for each base model. If None, assumes
+            models receive raw data directly.
+        preprocessor_configs : list of PreprocessorConfig, optional
+            Configuration objects for reconstructing preprocessing per model.
+            Used when preprocessors aren't available directly.
+        """
+        self.models = models
+        self.model_names = model_names if model_names else [f"Model_{i}" for i in range(len(models))]
+        self.preprocessors = preprocessors
+        self.preprocessor_configs = preprocessor_configs
+
+    def _get_preprocessor(self, idx):
+        """
+        Get preprocessor for model at index idx.
+
+        Returns fitted preprocessor object or PreprocessorConfig,
+        preferring preprocessor_configs if available.
+        """
+        if self.preprocessor_configs and idx < len(self.preprocessor_configs):
+            return self.preprocessor_configs[idx]
+        elif self.preprocessors and idx < len(self.preprocessors):
+            return self.preprocessors[idx]
+        else:
+            return None
+
+    def fit(self, X, y):
+        """Fit method (no-op for simple average since models are pre-fitted)."""
+        return self
+
+    def predict(self, X):
+        """Predict using simple average of all models."""
+        # Apply individual preprocessors if provided
+        predictions = []
+        for i, model in enumerate(self.models):
+            preprocessor = self._get_preprocessor(i)
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X)
+            else:
+                X_processed = X
+            predictions.append(model.predict(X_processed))
+        return np.mean(predictions, axis=0)
 
 
 class RegionBasedAnalyzer:
@@ -135,7 +198,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
     that varies based on the predicted value.
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None):
+    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None):
         """
         Parameters
         ----------
@@ -150,12 +213,16 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         preprocessors : list of preprocessors, optional
             Individual preprocessor for each base model. If None, assumes
             models receive raw data directly.
+        preprocessor_configs : list of PreprocessorConfig, optional
+            Configuration objects for reconstructing preprocessing per model.
+            Used when preprocessors aren't available directly.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
         self.n_regions = n_regions
         self.cv = cv
         self.preprocessors = preprocessors
+        self.preprocessor_configs = preprocessor_configs
         self.regional_weights_ = None
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
 
@@ -170,6 +237,20 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
     @weights_.setter
     def weights_(self, value):
         self.regional_weights_ = value
+
+    def _get_preprocessor(self, idx):
+        """
+        Get preprocessor for model at index idx.
+
+        Returns fitted preprocessor object or PreprocessorConfig,
+        preferring preprocessor_configs if available.
+        """
+        if self.preprocessor_configs and idx < len(self.preprocessor_configs):
+            return self.preprocessor_configs[idx]
+        elif self.preprocessors and idx < len(self.preprocessors):
+            return self.preprocessors[idx]
+        else:
+            return None
 
     def fit(self, X, y):
         """
@@ -224,8 +305,9 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         # Get predictions from all models, applying individual preprocessors
         predictions = []
         for i, model in enumerate(self.models):
-            if self.preprocessors and self.preprocessors[i] is not None:
-                X_processed = self.preprocessors[i].transform(X)
+            preprocessor = self._get_preprocessor(i)
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
             predictions.append(model.predict(X_processed))
@@ -290,7 +372,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
     Optionally uses soft gating (weighted combination).
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, preprocessors=None):
+    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, preprocessors=None, preprocessor_configs=None):
         """
         Parameters
         ----------
@@ -302,12 +384,16 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         preprocessors : list of preprocessors, optional
             Individual preprocessor for each base model. If None, assumes
             models receive raw data directly.
+        preprocessor_configs : list of PreprocessorConfig, optional
+            Configuration objects for reconstructing preprocessing per model.
+            Used when preprocessors aren't available directly.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
         self.n_regions = n_regions
         self.soft_gating = soft_gating
         self.preprocessors = preprocessors
+        self.preprocessor_configs = preprocessor_configs
         self.expert_assignment_ = None  # Which model is best for each region
         self.expert_weights_ = None  # Soft weights if soft_gating=True
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
@@ -323,6 +409,20 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
     @weights_.setter
     def weights_(self, value):
         self.expert_weights_ = value
+
+    def _get_preprocessor(self, idx):
+        """
+        Get preprocessor for model at index idx.
+
+        Returns fitted preprocessor object or PreprocessorConfig,
+        preferring preprocessor_configs if available.
+        """
+        if self.preprocessor_configs and idx < len(self.preprocessor_configs):
+            return self.preprocessor_configs[idx]
+        elif self.preprocessors and idx < len(self.preprocessors):
+            return self.preprocessors[idx]
+        else:
+            return None
 
     def fit(self, X, y):
         """Fit by determining which expert handles which region."""
@@ -382,8 +482,9 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         # Get predictions from all models, applying individual preprocessors
         predictions = []
         for i, model in enumerate(self.models):
-            if self.preprocessors and self.preprocessors[i] is not None:
-                X_processed = self.preprocessors[i].transform(X)
+            preprocessor = self._get_preprocessor(i)
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
             predictions.append(model.predict(X_processed))
@@ -425,7 +526,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
     """
 
     def __init__(self, models, model_names=None, meta_model=None,
-                 region_aware=True, n_regions=5, cv=5, preprocessors=None):
+                 region_aware=True, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None):
         """
         Parameters
         ----------
@@ -441,6 +542,9 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         preprocessors : list of preprocessors, optional
             Individual preprocessor for each base model. If None, assumes
             models receive raw data directly.
+        preprocessor_configs : list of PreprocessorConfig, optional
+            Configuration objects for reconstructing preprocessing per model.
+            Used when preprocessors aren't available directly.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -449,6 +553,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         self.n_regions = n_regions
         self.cv = cv
         self.preprocessors = preprocessors
+        self.preprocessor_configs = preprocessor_configs
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions) if region_aware else None
 
     @property
@@ -462,6 +567,20 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
     @meta_model_.setter
     def meta_model_(self, value):
         self.meta_model = value
+
+    def _get_preprocessor(self, idx):
+        """
+        Get preprocessor for model at index idx.
+
+        Returns fitted preprocessor object or PreprocessorConfig,
+        preferring preprocessor_configs if available.
+        """
+        if self.preprocessor_configs and idx < len(self.preprocessor_configs):
+            return self.preprocessor_configs[idx]
+        elif self.preprocessors and idx < len(self.preprocessors):
+            return self.preprocessors[idx]
+        else:
+            return None
 
     def fit(self, X, y):
         """Fit the stacking ensemble."""
@@ -510,8 +629,9 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         # Get predictions from base models, applying individual preprocessors
         predictions = []
         for i, model in enumerate(self.models):
-            if self.preprocessors and self.preprocessors[i] is not None:
-                X_processed = self.preprocessors[i].transform(X)
+            preprocessor = self._get_preprocessor(i)
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
             predictions.append(model.predict(X_processed))
@@ -535,6 +655,62 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             ])
 
         return self.meta_model.predict(meta_features)
+
+
+def extract_preprocessor_config(row, all_wavelengths):
+    """
+    Extract preprocessing configuration from a results DataFrame row.
+
+    This function parses the Preprocess, Deriv, Window, Poly, and all_vars
+    columns to create a PreprocessorConfig object that can reconstruct
+    the preprocessing pipeline.
+
+    Parameters
+    ----------
+    row : pd.Series or dict
+        Row from results DataFrame containing:
+        - 'Preprocess': preprocessing method name
+        - 'Deriv': derivative order (0, 1, or 2)
+        - 'Window': Savitzky-Golay window size
+        - 'Poly': Savitzky-Golay polynomial order
+        - 'all_vars': comma-separated wavelengths or 'N/A'
+    all_wavelengths : list or array
+        Full wavelength array from the dataset
+
+    Returns
+    -------
+    PreprocessorConfig
+        Configuration object for preprocessing reconstruction
+    """
+    # Extract preprocessing parameters
+    preprocess_name = row.get('Preprocess', 'raw')
+    deriv = row.get('Deriv', 0)
+    window = row.get('Window', 15)
+    polyorder = row.get('Poly', 2)
+
+    # Parse wavelength subset from all_vars column
+    all_vars_str = row.get('all_vars', 'N/A')
+    wavelengths = None
+
+    if all_vars_str and all_vars_str != 'N/A' and not pd.isna(all_vars_str):
+        try:
+            # Parse comma-separated wavelengths
+            wavelengths = [float(w.strip()) for w in str(all_vars_str).split(',')]
+        except (ValueError, AttributeError):
+            # If parsing fails, use all wavelengths
+            wavelengths = None
+
+    # Create PreprocessorConfig
+    config = PreprocessorConfig(
+        preprocess_name=preprocess_name,
+        deriv=deriv,
+        window=window,
+        polyorder=polyorder,
+        wavelengths=wavelengths,
+        all_wavelengths=list(all_wavelengths) if wavelengths is not None else None
+    )
+
+    return config
 
 
 def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
@@ -566,25 +742,12 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
     """
     if ensemble_type == 'simple_average':
         # Simple averaging ensemble (baseline)
-        class SimpleAverage(BaseEstimator, RegressorMixin):
-            def __init__(self, models, model_names=None, preprocessors=None):
-                self.models = models
-                self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
-                self.preprocessors = preprocessors
-            def fit(self, X, y):
-                return self
-            def predict(self, X):
-                # Apply individual preprocessors if provided
-                predictions = []
-                for i, model in enumerate(self.models):
-                    if self.preprocessors and self.preprocessors[i] is not None:
-                        X_processed = self.preprocessors[i].transform(X)
-                    else:
-                        X_processed = X
-                    predictions.append(model.predict(X_processed))
-                return np.mean(predictions, axis=0)
-
-        ensemble = SimpleAverage(models, model_names=model_names, preprocessors=kwargs.get('preprocessors'))
+        ensemble = SimpleAverageEnsemble(
+            models,
+            model_names=model_names,
+            preprocessors=kwargs.get('preprocessors'),
+            preprocessor_configs=kwargs.get('preprocessor_configs')
+        )
         ensemble.fit(X, y)
 
     elif ensemble_type == 'region_weighted':

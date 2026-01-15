@@ -14487,6 +14487,18 @@ class SpectralPredictApp:
             models = [m[0] for m in reconstructed]
             model_names = [m[1] for m in reconstructed]
 
+            # Extract preprocessing configurations for each model
+            # This allows ensembles to apply per-model preprocessing during prediction
+            from spectral_predict.ensemble import extract_preprocessor_config
+            all_wavelengths = X_filtered.columns.tolist()
+            preprocessor_configs = []
+
+            for idx, row in top_models_df.iterrows():
+                config = extract_preprocessor_config(row, all_wavelengths)
+                preprocessor_configs.append(config)
+
+            self._log_progress(f"> Extracted preprocessing configs for {len(preprocessor_configs)} models")
+
             # Collect ensemble methods to run
             ensemble_methods = []
             if self.ensemble_simple_average.get():
@@ -14524,7 +14536,8 @@ class SpectralPredictApp:
                         y=y_filtered,
                         ensemble_type=ensemble_type,
                         n_regions=n_regions,
-                        cv=min(5, len(y_filtered))  # Use 5-fold or less if small dataset
+                        cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
+                        preprocessor_configs=preprocessor_configs
                     )
 
                     # Make predictions

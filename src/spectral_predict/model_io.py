@@ -1083,6 +1083,21 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
 
     filepath = Path(filepath)
 
+    # Validate ensemble attributes
+    if not hasattr(ensemble, 'models'):
+        raise ValueError("Ensemble must have 'models' attribute containing list of base models")
+
+    if not hasattr(ensemble, 'model_names') or ensemble.model_names is None:
+        # Auto-generate model names if missing
+        ensemble.model_names = [f"Model_{i}" for i in range(len(ensemble.models))]
+        print(f"Warning: ensemble.model_names was missing, auto-generated {len(ensemble.models)} names")
+
+    if len(ensemble.models) != len(ensemble.model_names):
+        raise ValueError(
+            f"Ensemble models and model_names length mismatch: "
+            f"{len(ensemble.models)} models but {len(ensemble.model_names)} names"
+        )
+
     # Extract optional training data for applicability domain
     X_train = metadata.pop('X_train', None)
     cv_residuals = metadata.pop('cv_residuals', None)
@@ -1253,6 +1268,7 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
 
         # Reconstruct ensemble object
         from spectral_predict.ensemble import (
+            SimpleAverageEnsemble,
             RegionAwareWeightedEnsemble,
             MixtureOfExpertsEnsemble,
             StackingEnsemble
@@ -1303,25 +1319,12 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
                 ensemble.analyzer_ = ensemble_state['analyzer']
 
         elif ensemble_type == 'simple_average':
-            # Simple average - just store models
-            class SimpleAverageEnsemble:
-                def __init__(self, models, model_names, preprocessors=None):
-                    self.models = models
-                    self.model_names = model_names
-                    self.preprocessors = preprocessors
-
-                def predict(self, X):
-                    # Apply individual preprocessors if provided
-                    predictions = []
-                    for i, model in enumerate(self.models):
-                        if self.preprocessors and self.preprocessors[i] is not None:
-                            X_processed = self.preprocessors[i].transform(X)
-                        else:
-                            X_processed = X
-                        predictions.append(model.predict(X_processed))
-                    return np.mean(predictions, axis=0)
-
-            ensemble = SimpleAverageEnsemble(base_models, model_names, base_preprocessors)
+            # Simple average - use imported class from ensemble.py
+            ensemble = SimpleAverageEnsemble(
+                models=base_models,
+                model_names=model_names,
+                preprocessors=base_preprocessors
+            )
         else:
             raise ValueError(f"Unknown ensemble type: {ensemble_type}")
 
