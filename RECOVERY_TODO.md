@@ -1767,6 +1767,44 @@ ValueError: `n_components` upper bound is 1. Got 2 instead. Reduce `n_components
 
 ---
 
+### 5. Add Calibration Metrics and Clarify Column Names
+**Status:** NOT IMPLEMENTED
+
+**Issue:** Current Results tab shows R² and RMSE but these are actually **cross-validation metrics** (R²CV, RMSECV), not pure calibration metrics. This can be confusing.
+
+**Current state:**
+- R² = average R² across CV folds (R²CV)
+- RMSE = average RMSE across CV folds (RMSECV)
+- No pure calibration metrics (fit on all data, predict on same data)
+
+**Proposed changes:**
+
+1. **Add calibration metrics** (RMSEC, R²c):
+   - Train model on ALL data (already done at line 3358 in search.py)
+   - Predict on same data
+   - Compute RMSEC and R²c
+   - ~10 lines of code, almost zero performance impact
+
+2. **Optionally rename columns** to be explicit:
+   - R² → R²CV (or keep R² but add R²c)
+   - RMSE → RMSECV (or keep RMSE but add RMSEC)
+
+**Why useful:**
+- If R²c >> R²CV → model is overfitting
+- If R²c ≈ R²CV → model generalizes well
+- Standard in chemometrics literature (RMSEC vs RMSECV comparison)
+
+**Implementation location:** `src/spectral_predict/search.py` after line 3358 (`pipe.fit(X, y)`):
+```python
+y_pred_cal = pipe.predict(X)
+cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))
+cal_r2 = r2_score(y, y_pred_cal)
+result["RMSEC"] = cal_rmse
+result["R2c"] = cal_r2
+```
+
+---
+
 ## ✅ MINOR CHANGES (2026-01-05)
 
 ### Regional Subset Analysis Default Changed

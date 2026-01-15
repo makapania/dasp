@@ -1644,14 +1644,24 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         # End of wavelength filtering block
 
+        # Track if wavelength restriction is active
+        # When active, skip edge masking because:
+        # 1. Preprocessing (derivatives) was applied to FULL spectrum first
+        # 2. Edge artifacts only exist at edges of ORIGINAL spectrum
+        # 3. Restricted wavelengths are from MIDDLE of spectrum, not SG boundaries
+        wavelength_restriction_active = bool(
+            analysis_wl_regions or analysis_wl_min is not None or analysis_wl_max is not None
+        )
+
         # ═══════════════════════════════════════════════════════════════════════════
         # EDGE MASKING FOR DERIVATIVE PREPROCESSING
         # Savitzky-Golay derivatives create boundary artifacts at spectrum edges.
         # Edge zone = window // 2 on each side (unreliable due to SG interpolation).
         # This matches NSGA-II behavior for consistent R2 values across methods.
+        # SKIP when wavelength restriction is active - those are middle wavelengths.
         # ═══════════════════════════════════════════════════════════════════════════
         edge_zone_applied = 0
-        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window") and not wavelength_restriction_active:
             X_for_models, wavelengths_for_models, edge_zone_applied = _apply_edge_mask_to_data(
                 X_for_models, wavelengths_for_models, preprocess_cfg
             )
@@ -1790,6 +1800,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     folds=folds,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=n_jobs,
+                    wavelength_restriction_active=wavelength_restriction_active,
                 )
                 df_results = add_result(df_results, result)
 
@@ -2085,7 +2096,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 print(f"  [DEBUG] {varsel_method} importances: min={np.min(importances):.4f}, max={np.max(importances):.4f}, std={np.std(importances):.4f}")
 
                                 # Apply edge masking for Savitzky-Golay derivatives
-                                importances = _apply_edge_mask(importances, preprocess_cfg)
+                                # SKIP when wavelength restriction is active - restricted wavelengths
+                                # are from middle of spectrum, not SG boundary edges
+                                if not wavelength_restriction_active:
+                                    importances = _apply_edge_mask(importances, preprocess_cfg)
 
                                 # Run subsets with user-selected counts
                                 results_added_for_method = 0
@@ -2130,6 +2144,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
+                                            wavelength_restriction_active=wavelength_restriction_active,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -2158,6 +2173,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
+                                            wavelength_restriction_active=wavelength_restriction_active,
                                         )
 
                                     # Track if uniform fallback was used for this result
@@ -2224,6 +2240,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
                             n_jobs_cv=n_jobs,
+                            wavelength_restriction_active=wavelength_restriction_active,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -3121,6 +3138,7 @@ def _run_single_config(
     imbalance_params=None,
     full_vars_original=None,
     n_jobs_cv=1,
+    wavelength_restriction_active=False,
 ):
     """
     Run a single model configuration with CV.
@@ -3130,6 +3148,9 @@ def _run_single_config(
     skip_preprocessing : bool, default=False
         If True, skip building preprocessing pipeline (data is already preprocessed).
         Used for derivative subsets where preprocessing was already applied.
+    wavelength_restriction_active : bool, default=False
+        If True, skip edge masking for importance calculation. Used when wavelengths
+        are restricted to a subset of the spectrum (from middle, not edges).
 
     Returns
     -------
@@ -3489,7 +3510,10 @@ def _run_single_config(
             )
 
             # Apply edge masking for Savitzky-Golay derivatives (consistent with variable selection)
-            importances = _apply_edge_mask(importances, preprocess_cfg)
+            # SKIP when wavelength restriction is active - restricted wavelengths
+            # are from middle of spectrum, not SG boundary edges
+            if not wavelength_restriction_active:
+                importances = _apply_edge_mask(importances, preprocess_cfg)
 
             # Get top N features for display purposes (always top 30)
             n_to_select = min(top_n_vars, len(importances))
