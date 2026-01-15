@@ -30,6 +30,13 @@ def _auto_scale_figure(n_models, n_regions, base_width=14, base_height=10):
     return (width, height)
 
 
+def _truncate_name(name, max_len=20):
+    """Truncate model name to prevent text overflow."""
+    if len(name) <= max_len:
+        return name
+    return name[:max_len-3] + '...'
+
+
 def _add_title_block(ax, title, description_lines, y_start=0.98):
     """Add a title block with description text at the top of the figure."""
     # Main title
@@ -171,14 +178,15 @@ def plot_regional_performance(analyzer, y_true, predictions_dict, metric='rmse',
                    fontsize=12, fontweight='bold')
 
     # Set tick labels
-    # Y-axis: Model names with rank and overall score
+    # Y-axis: Model names with rank and overall score (truncated to prevent overflow)
     y_labels = []
     for i, model_name in enumerate(sorted_models):
         overall = results[model_name]['overall']
-        y_labels.append(f"{i+1}. {model_name} ({metric.upper()}: {overall:.3f})")
+        short_name = _truncate_name(model_name, max_len=18)
+        y_labels.append(f"{i+1}. {short_name} ({metric.upper()}: {overall:.3f})")
 
     ax_main.set_yticks(range(n_models))
-    ax_main.set_yticklabels(y_labels, fontsize=11)
+    ax_main.set_yticklabels(y_labels, fontsize=10)
 
     # X-axis: Region labels with boundaries and sample counts
     x_labels = []
@@ -241,6 +249,8 @@ def plot_regional_performance(analyzer, y_true, predictions_dict, metric='rmse',
     ]
     _add_interpretation_box(ax_legend, interpretation_lines, position='top')
 
+    # Add margins before tight_layout to prevent text clipping
+    plt.subplots_adjust(left=0.22, right=0.95, top=0.95, bottom=0.08)
     plt.tight_layout()
 
     if save_path:
@@ -309,11 +319,12 @@ def plot_ensemble_weights(ensemble, figsize=None, save_path=None):
     # Color palette
     colors = plt.cm.Set3(np.linspace(0, 1, n_models))
 
-    # Plot bars for each model
+    # Plot bars for each model (truncate names for legend readability)
     for i, (model_name, color) in enumerate(zip(model_names, colors)):
         offset = (i - n_models/2 + 0.5) * bar_width
+        short_name = _truncate_name(model_name, max_len=15)
         bars = ax_bars.bar(x + offset, weights[i], bar_width,
-                          label=model_name, color=color, edgecolor='black', linewidth=0.5)
+                          label=short_name, color=color, edgecolor='black', linewidth=0.5)
 
         # Add value labels on bars (if not too many models)
         if n_models <= 8:
@@ -327,7 +338,9 @@ def plot_ensemble_weights(ensemble, figsize=None, save_path=None):
     ax_bars.set_xticks(x)
     ax_bars.set_xticklabels([f'Region {i+1}' for i in range(n_regions)], fontsize=11)
     ax_bars.set_ylim(0, min(1.1, weights.max() * 1.3))
-    ax_bars.legend(loc='upper right', fontsize=9, ncol=min(3, (n_models + 2) // 3))
+    # Place legend below the plot to avoid overlapping bar data
+    ax_bars.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12),
+                   fontsize=8, ncol=min(4, n_models), framealpha=0.9)
     ax_bars.grid(axis='y', alpha=0.3)
     ax_bars.set_title('Model Weights by Region', fontsize=13, fontweight='bold', pad=10)
 
@@ -392,6 +405,8 @@ def plot_ensemble_weights(ensemble, figsize=None, save_path=None):
                     bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgreen',
                              edgecolor='darkgreen', alpha=0.8))
 
+    # Add margins to accommodate legend below plot
+    plt.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.12)
     plt.tight_layout()
 
     if save_path:
@@ -471,10 +486,12 @@ def plot_model_specialization_profile(ensemble, figsize=None, save_path=None):
         gen_text = ""
         if i < len(specialists):
             name, var = specialists[i]
-            spec_text = f"{i+1}. {name[:12]:<12} (var={var:.3f})"
+            short_name = _truncate_name(name, max_len=12)
+            spec_text = f"{i+1}. {short_name:<12} (var={var:.3f})"
         if i < len(generalists):
             name, var = generalists[i]
-            gen_text = f"{i+1}. {name[:12]:<12} (var={var:.3f})"
+            short_name = _truncate_name(name, max_len=12)
+            gen_text = f"{i+1}. {short_name:<12} (var={var:.3f})"
         summary_text += f"{spec_text:<30} {gen_text}\n"
 
     ax_summary.text(0.02, 0.95, summary_text, transform=ax_summary.transAxes,
@@ -525,13 +542,16 @@ def plot_model_specialization_profile(ensemble, figsize=None, save_path=None):
         # Rank indicator
         rank = idx + 1
 
-        # Model label with full info
+        # Model label with full info (truncate name to prevent overflow)
+        short_name = _truncate_name(model_name, max_len=20)
         best_str = ','.join([f'R{r+1}' for r in best_regions]) if len(best_regions) > 0 else 'None'
-        title = f"#{rank} {model_name} - {spec_type} - Best: {best_str} - Variance: {variance:.3f}"
-        ax.set_title(title, fontsize=11, fontweight='bold', loc='left')
+        # Split into two lines to prevent horizontal overflow
+        title = f"#{rank} {short_name} ({spec_type})\nBest: {best_str} | Var: {variance:.3f}"
+        ax.set_title(title, fontsize=10, fontweight='bold', loc='left')
 
-        # Only show y-label for leftmost
-        ax.set_ylabel('Weight', fontsize=10)
+        # Only show y-label for first subplot to reduce clutter
+        if idx == 0:
+            ax.set_ylabel('Weight', fontsize=10)
 
         # Grid
         ax.grid(axis='y', alpha=0.3)
@@ -543,6 +563,8 @@ def plot_model_specialization_profile(ensemble, figsize=None, save_path=None):
     # Add x-label to bottom plot only
     ax.set_xlabel('Prediction Region', fontsize=12, fontweight='bold')
 
+    # Add margins to prevent text clipping
+    plt.subplots_adjust(left=0.08, right=0.95, top=0.95, bottom=0.08)
     plt.tight_layout()
 
     if save_path:
@@ -615,8 +637,9 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
 
     for i, (name, rmse) in enumerate(sorted_models[:max_show]):
         pred = predictions_dict[name]
+        short_name = _truncate_name(name, max_len=15)
         ax_left.scatter(y_true, pred, alpha=0.5, s=30,
-                       label=f'{name} (RMSE={rmse:.3f})',
+                       label=f'{short_name} (RMSE={rmse:.3f})',
                        color=colors[i], edgecolors='white', linewidth=0.3)
 
     if n_models > max_show:
@@ -634,7 +657,8 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
     ax_left.set_xlabel('Actual Values', fontsize=12, fontweight='bold')
     ax_left.set_ylabel('Predicted Values', fontsize=12, fontweight='bold')
     ax_left.set_title('Individual Model Predictions', fontsize=13, fontweight='bold')
-    ax_left.legend(loc='upper left', fontsize=9)
+    # Place legend outside plot area to avoid obscuring data
+    ax_left.legend(loc='upper left', bbox_to_anchor=(0, -0.12), fontsize=8, ncol=2, framealpha=0.9)
     ax_left.grid(alpha=0.3)
 
     # === RIGHT PLOT: Ensemble vs Best ===
@@ -647,11 +671,12 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
                         label=f'Ensemble (RMSE={ensemble_rmse:.3f})',
                         color='red', edgecolors='darkred', linewidth=0.5)
 
-        # Best individual
+        # Best individual (truncate name for legend)
         best_name, best_rmse = sorted_models[0]
         best_pred = predictions_dict[best_name]
+        short_best = _truncate_name(best_name, max_len=15)
         ax_right.scatter(y_true, best_pred, alpha=0.4, s=30,
-                        label=f'Best: {best_name} (RMSE={best_rmse:.3f})',
+                        label=f'Best: {short_best} (RMSE={best_rmse:.3f})',
                         color='blue', edgecolors='darkblue', linewidth=0.5)
 
         # Diagonal
@@ -660,11 +685,12 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
 
         ax_right.set_title('Ensemble vs Best Individual', fontsize=13, fontweight='bold')
     else:
-        # Just show best model
+        # Just show best model (truncate name for legend)
         best_name, best_rmse = sorted_models[0]
         best_pred = predictions_dict[best_name]
+        short_best = _truncate_name(best_name, max_len=15)
         ax_right.scatter(y_true, best_pred, alpha=0.6, s=40,
-                        label=f'{best_name} (RMSE={best_rmse:.3f})',
+                        label=f'{short_best} (RMSE={best_rmse:.3f})',
                         color='blue', edgecolors='darkblue', linewidth=0.5)
         ax_right.plot([min_val, max_val], [min_val, max_val], 'k--',
                      linewidth=2, label='Perfect prediction')
@@ -672,7 +698,8 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
 
     ax_right.set_xlabel('Actual Values', fontsize=12, fontweight='bold')
     ax_right.set_ylabel('Predicted Values', fontsize=12, fontweight='bold')
-    ax_right.legend(loc='upper left', fontsize=10)
+    # Place legend below plot to avoid obscuring data
+    ax_right.legend(loc='upper left', bbox_to_anchor=(0, -0.12), fontsize=9, framealpha=0.9)
     ax_right.grid(alpha=0.3)
 
     # === SUMMARY STATS ===
@@ -680,8 +707,10 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
     ax_summary.axis('off')
 
     summary_lines = ["SUMMARY STATISTICS:"]
-    summary_lines.append(f"  - Best individual model: {sorted_models[0][0]} (RMSE = {sorted_models[0][1]:.4f})")
-    summary_lines.append(f"  - Worst individual model: {sorted_models[-1][0]} (RMSE = {sorted_models[-1][1]:.4f})")
+    best_model_name = _truncate_name(sorted_models[0][0], max_len=25)
+    worst_model_name = _truncate_name(sorted_models[-1][0], max_len=25)
+    summary_lines.append(f"  - Best individual model: {best_model_name} (RMSE = {sorted_models[0][1]:.4f})")
+    summary_lines.append(f"  - Worst individual model: {worst_model_name} (RMSE = {sorted_models[-1][1]:.4f})")
 
     if ensemble_pred is not None:
         improvement = (best_rmse - ensemble_rmse) / best_rmse * 100
@@ -699,6 +728,8 @@ def plot_prediction_comparison(y_true, predictions_dict, ensemble_pred=None,
                    bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue',
                             edgecolor='blue', alpha=0.8))
 
+    # Add margins to accommodate legends below plots
+    plt.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
     plt.tight_layout()
 
     if save_path:
