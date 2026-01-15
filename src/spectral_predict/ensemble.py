@@ -262,10 +262,18 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         self.analyzer_.fit(y)
 
         # Get cross-validated predictions for each model
+        # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
         cv_predictions = []
-        for model in self.models:
+        for i, model in enumerate(self.models):
             try:
-                cv_pred = cross_val_predict(model, X, y, cv=self.cv)
+                # Apply preprocessing for this model (must match predict behavior)
+                preprocessor = self._get_preprocessor(i)
+                if preprocessor is not None:
+                    X_processed = preprocessor.transform(X)
+                else:
+                    X_processed = X
+
+                cv_pred = cross_val_predict(model, X_processed, y, cv=self.cv)
                 cv_predictions.append(cv_pred)
             except Exception as e:
                 warnings.warn(f"Model {self.model_names[len(cv_predictions)]} failed in CV: {e}")
@@ -430,11 +438,19 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
 
         # Get cross-validated predictions from all models to avoid data leakage
         # This ensures we evaluate model performance on out-of-fold predictions
+        # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
         predictions = []
-        for model in self.models:
+        for i, model in enumerate(self.models):
+            # Apply preprocessing for this model (must match predict behavior)
+            preprocessor = self._get_preprocessor(i)
+            if preprocessor is not None:
+                X_processed = preprocessor.transform(X)
+            else:
+                X_processed = X
+
             # Use cross_val_predict to get out-of-fold predictions
             # This prevents overfitting and gives realistic performance estimates
-            cv_pred = cross_val_predict(model, X, y, cv=5)
+            cv_pred = cross_val_predict(model, X_processed, y, cv=5)
             predictions.append(cv_pred)
         predictions = np.array(predictions)
 
@@ -585,11 +601,19 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
     def fit(self, X, y):
         """Fit the stacking ensemble."""
         # Get cross-validated predictions for meta-features
+        # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
         meta_features = []
 
-        for model in self.models:
+        for i, model in enumerate(self.models):
             try:
-                cv_pred = cross_val_predict(model, X, y, cv=self.cv)
+                # Apply preprocessing for this model (must match predict behavior)
+                preprocessor = self._get_preprocessor(i)
+                if preprocessor is not None:
+                    X_processed = preprocessor.transform(X)
+                else:
+                    X_processed = X
+
+                cv_pred = cross_val_predict(model, X_processed, y, cv=self.cv)
                 meta_features.append(cv_pred)
             except Exception as e:
                 warnings.warn(f"Model failed in CV: {e}")
