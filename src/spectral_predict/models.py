@@ -174,9 +174,16 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 learning_rate=0.1,
                 max_depth=6,  # XGBoost default (original working value)
                 subsample=0.8,  # Original working value for spectroscopy
-                colsample_bytree=0.8,  # Original working value for high-dim data
-                reg_alpha=0.1,  # Light L1 regularization for feature selection
-                reg_lambda=1.0,  # XGBoost default L2 regularization
+                # 2026-01-15: Changed from 0.8 to 0.6 for better feature diversity (matches grid search midpoint)
+                colsample_bytree=0.6,  # Lower sampling for high-dim spectral data
+                # 2026-01-15: Changed from 0.1 to 0.2 for stronger L1 regularization (matches grid search upper)
+                reg_alpha=0.2,  # L1 regularization for feature selection
+                # 2026-01-15: Changed from 1.0 to 1.5 for stronger L2 regularization (matches grid search midpoint)
+                reg_lambda=1.5,  # L2 regularization to prevent overfitting
+                # 2026-01-15: Added min_child_weight (from grid search) to prevent overfitting on small leaves
+                min_child_weight=1,  # Minimum sum of instance weight in a child
+                # 2026-01-15: Added gamma (from grid search) to control tree growth
+                gamma=0.0,  # Minimum loss reduction required to make a split
                 tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
                 n_jobs=n_jobs,
@@ -187,14 +194,18 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return LGBMRegressor(
                 n_estimators=100,
                 learning_rate=0.1,
-                num_leaves=31,  # LightGBM default
-                max_depth=-1,  # No depth limit (controlled by num_leaves)
+                # 2026-01-15: Changed from 31 to 15 to prevent overfitting (matches grid search lower bound)
+                num_leaves=15,  # Reduced for better generalization on spectral data
+                # 2026-01-15: Changed from -1 to 10 to limit tree depth (matches grid search middle)
+                max_depth=10,  # Explicit depth limit for more conservative trees
                 min_child_samples=5,  # Reduced for small datasets (was 20 - caused negative R2)
                 subsample=0.8,  # Row sampling to prevent overfitting (like XGBoost)
                 bagging_freq=1,  # Required when subsample < 1.0
                 colsample_bytree=0.8,  # Feature sampling for high-dim data (like XGBoost)
-                reg_alpha=0.1,  # L1 regularization for feature selection (like XGBoost)
-                reg_lambda=1.0,  # L2 regularization to prevent overfitting (like XGBoost)
+                # 2026-01-15: Changed from 0.1 to 0.3 for stronger L1 regularization (matches grid search midpoint)
+                reg_alpha=0.3,  # L1 regularization for feature selection
+                # 2026-01-15: Changed from 1.0 to 1.5 for stronger L2 regularization (matches grid search midpoint)
+                reg_lambda=1.5,  # L2 regularization to prevent overfitting
                 random_state=42,
                 n_jobs=n_jobs,
                 verbosity=-1
@@ -204,7 +215,14 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return CatBoostRegressor(
                 iterations=100,
                 learning_rate=0.1,
-                depth=6,
+                # 2026-01-15: Changed from 6 to 5 (matches grid search middle value)
+                depth=5,  # Moderate depth for better generalization
+                # 2026-01-15: Added l2_leaf_reg for L2 regularization (matches grid search midpoint)
+                l2_leaf_reg=4.0,  # L2 regularization on leaf weights
+                # 2026-01-15: Added min_data_in_leaf to prevent overfitting on small leaves
+                min_data_in_leaf=1,  # Minimum samples per leaf (lower for small datasets)
+                # 2026-01-15: Added bootstrap_type to control sampling strategy
+                bootstrap_type='Bayesian',  # Bayesian bootstrap (default, works well for regression)
                 random_state=42,
                 verbose=False
             )
@@ -261,8 +279,16 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 learning_rate=0.1,
                 max_depth=6,
                 subsample=0.8,  # Better default for spectroscopy (correlated samples)
-                colsample_bytree=0.8,  # Better default for 2000+ features (tree diversity)
-                reg_alpha=0.1,  # L1 regularization for implicit feature selection
+                # 2026-01-15: Changed from 0.8 to 0.7 for better feature diversity in classification
+                colsample_bytree=0.7,  # Higher sampling than regression (more conservative)
+                # 2026-01-15: Changed from 0.1 to 0.15 for moderate L1 regularization in classification
+                reg_alpha=0.15,  # L1 regularization for implicit feature selection
+                # 2026-01-15: Added reg_lambda for stronger L2 regularization in classification
+                reg_lambda=1.5,  # L2 regularization to prevent overfitting
+                # 2026-01-15: Added min_child_weight (higher than regression for classification)
+                min_child_weight=3,  # Prevent overfitting on small leaf nodes
+                # 2026-01-15: Added gamma to control tree growth in classification
+                gamma=0.05,  # Slightly positive to prevent excessive splitting
                 tree_method='hist',  # Faster for high-dimensional data
                 random_state=42,
                 n_jobs=n_jobs,
@@ -273,14 +299,17 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return LGBMClassifier(
                 n_estimators=100,
                 learning_rate=0.1,
-                num_leaves=15,  # Reduced for small datasets (was 31)
-                max_depth=-1,  # No limit (controlled by num_leaves)
+                num_leaves=15,  # Already conservative (matches grid search lower bound)
+                # 2026-01-15: Changed from -1 to 5 for more conservative classification trees
+                max_depth=5,  # Shallower than regression to prevent overfitting
                 min_child_samples=5,  # Reduced for small datasets (was 20)
                 subsample=0.8,  # Row sampling like XGBoost
                 bagging_freq=1,  # Required when subsample < 1.0
                 colsample_bytree=0.8,  # Feature sampling for high-dimensional data
-                reg_alpha=0.1,  # L1 regularization
-                reg_lambda=1.0,  # L2 regularization
+                # 2026-01-15: Changed from 0.1 to 0.5 for much stronger L1 regularization in classification
+                reg_alpha=0.5,  # Strong L1 regularization (matches grid search upper)
+                # 2026-01-15: Changed from 1.0 to 2.0 for stronger L2 regularization in classification
+                reg_lambda=2.0,  # Strong L2 regularization (matches grid search upper)
                 random_state=42,
                 n_jobs=n_jobs,
                 verbosity=-1
@@ -290,7 +319,14 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
             return CatBoostClassifier(
                 iterations=100,
                 learning_rate=0.1,
-                depth=6,
+                # 2026-01-15: Changed from 6 to 4 (shallower for classification to prevent overfitting)
+                depth=4,  # Shallow trees for better generalization in classification
+                # 2026-01-15: Added l2_leaf_reg with stronger regularization for classification
+                l2_leaf_reg=5.0,  # Stronger L2 regularization (matches grid search upper)
+                # 2026-01-15: Added min_data_in_leaf with higher value for classification
+                min_data_in_leaf=5,  # Higher minimum to prevent overfitting (matches grid search upper)
+                # 2026-01-15: Added bootstrap_type - Bernoulli often works better for classification
+                bootstrap_type='Bernoulli',  # Bernoulli bootstrap for classification
                 random_state=42,
                 verbose=False
             )

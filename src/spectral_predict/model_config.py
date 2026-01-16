@@ -229,33 +229,51 @@ def get_hyperparameters(model_name: str, tier: str = 'standard') -> dict:
                 'learning_rate': [0.05, 0.1],
                 'max_depth': [3, 6],
                 'subsample': [0.8],
-                'colsample_bytree': [0.8],
-                'reg_alpha': [0.0],
-                'reg_lambda': [1.0]
+                # 2026-01-15: Reduced from [0.8] to [0.6, 0.8] for better feature diversity in high-dim spectral data
+                'colsample_bytree': [0.6, 0.8],
+                # 2026-01-15: Changed from [0.0] to [0.1, 0.2] for L1 regularization (feature selection)
+                'reg_alpha': [0.1, 0.2],
+                # 2026-01-15: Changed from [1.0] to [1.0, 2.0] for stronger L2 regularization
+                'reg_lambda': [1.0, 2.0],
+                # 2026-01-15: Added min_child_weight to prevent overfitting on small leaf nodes
+                'min_child_weight': [1, 3],
+                # 2026-01-15: Added gamma for minimum loss reduction (controls tree growth)
+                'gamma': [0, 0.1]
             }
         },
         'LightGBM': {
             'standard': {
                 'n_estimators': [100, 200],
                 'learning_rate': [0.05, 0.1],
-                'num_leaves': [31, 63],
-                'max_depth': [-1],
+                # 2026-01-15: Reduced from [31, 63] to [15, 31] to prevent overfitting on spectral data
+                'num_leaves': [15, 31],
+                # 2026-01-15: Changed from [-1] to [5, 10, -1] to limit tree depth (more conservative)
+                'max_depth': [5, 10, -1],
                 'min_child_samples': [5],
                 'subsample': [0.8],
                 'colsample_bytree': [0.8],
-                'reg_alpha': [0.1],
-                'reg_lambda': [1.0]
+                # 2026-01-15: Changed from [0.1] to [0.1, 0.5] for stronger L1 regularization
+                'reg_alpha': [0.1, 0.5],
+                # 2026-01-15: Changed from [1.0] to [1.0, 2.0] for stronger L2 regularization
+                'reg_lambda': [1.0, 2.0]
             }
         },
         'CatBoost': {
             'standard': {
                 'iterations': [100, 200],
                 'learning_rate': [0.05, 0.1],
-                'depth': [6],
-                'l2_leaf_reg': [3.0],
+                # 2026-01-15: MAJOR FIX - Changed from [6] to [4, 5, 6] to actually test depth variation
+                # This was severely under-testing CatBoost (only 1 depth vs XGBoost/LightGBM testing multiple)
+                'depth': [4, 5, 6],
+                # 2026-01-15: Changed from [3.0] to [3.0, 5.0] for stronger L2 regularization
+                'l2_leaf_reg': [3.0, 5.0],
                 'border_count': [128],
                 'bagging_temperature': [1.0],
-                'random_strength': [1.0]
+                'random_strength': [1.0],
+                # 2026-01-15: Added min_data_in_leaf to prevent overfitting on small leaf nodes
+                'min_data_in_leaf': [1, 5],
+                # 2026-01-15: Added bootstrap_type to test different sampling strategies
+                'bootstrap_type': ['Bayesian', 'Bernoulli']
             }
         },
         'SVR': {
