@@ -700,14 +700,28 @@ def convert_optuna_result_to_dasp_format(
 
             # Add task-specific metrics
             if task_type == 'regression':
+                # Calibration metrics
                 result['RMSE'] = config_result.get('RMSE', np.nan)
                 result['R2'] = config_result.get('R2', np.nan)
-                # Bayesian optimization doesn't compute regional RMSE (would need all predictions)
+                # Cross-validation metrics
+                result['RMSEcv'] = config_result.get('RMSEcv', np.nan)
+                result['R2cv'] = config_result.get('R2cv', np.nan)
+                # Regional performance
                 result['regional_rmse'] = config_result.get('regional_rmse', None)
                 result['y_quartiles'] = config_result.get('y_quartiles', None)
             else:
+                # Calibration metrics
                 result['Accuracy'] = config_result.get('Accuracy', np.nan)
                 result['ROC_AUC'] = config_result.get('ROC_AUC', np.nan)
+                result['F1'] = config_result.get('F1', np.nan)
+                result['Precision'] = config_result.get('Precision', np.nan)
+                result['Recall'] = config_result.get('Recall', np.nan)
+                # Cross-validation metrics
+                result['Accuracycv'] = config_result.get('Accuracycv', np.nan)
+                result['ROC_AUCcv'] = config_result.get('ROC_AUCcv', np.nan)
+                result['F1cv'] = config_result.get('F1cv', np.nan)
+                result['Precisioncv'] = config_result.get('Precisioncv', np.nan)
+                result['Recallcv'] = config_result.get('Recallcv', np.nan)
 
             all_results.append(result)
 

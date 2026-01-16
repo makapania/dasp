@@ -62,42 +62,44 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
     use_zscore = (variable_penalty > 0) or (complexity_penalty > 0)
 
     # Compute performance score (combining multiple metrics)
+    # CRITICAL: Use CV metrics for ranking (not calibration metrics)
+    # CV metrics are unbiased estimates of generalization performance
     if task_type == "regression":
         if use_zscore:
-            # Z-score for RMSE (lower is better, positive z = bad)
-            z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
+            # Z-score for RMSEcv (lower is better, positive z = bad)
+            z_rmse = (df["RMSEcv"] - df["RMSEcv"].mean()) / df["RMSEcv"].std()
             z_rmse = z_rmse.fillna(0)
 
-            # Z-score for R2 (higher is better, negative z = bad)
-            z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
+            # Z-score for R2cv (higher is better, negative z = bad)
+            z_r2 = (df["R2cv"] - df["R2cv"].mean()) / df["R2cv"].std()
             z_r2 = z_r2.fillna(0)
 
             # Combined performance score (lower is better)
-            # Weight RMSE and R2 equally, but negate R2 since higher is better
+            # Weight RMSEcv and R2cv equally, but negate R2cv since higher is better
             performance_score = 0.5 * z_rmse - 0.5 * z_r2
         else:
             # Direct metric ranking (no z-score normalization)
-            # Use negative R2 so lower is better (consistent with other scores)
-            performance_score = -df["R2"]
+            # Use negative R2cv so lower is better (consistent with other scores)
+            performance_score = -df["R2cv"]
 
     else:  # classification
         if use_zscore:
-            # Z-score for Accuracy (higher is better)
-            z_acc = (df["Accuracy"] - df["Accuracy"].mean()) / df["Accuracy"].std()
+            # Z-score for Accuracycv (higher is better)
+            z_acc = (df["Accuracycv"] - df["Accuracycv"].mean()) / df["Accuracycv"].std()
             z_acc = z_acc.fillna(0)
 
-            # Z-score for F1 (higher is better)
-            z_f1 = (df["F1"] - df["F1"].mean()) / df["F1"].std()
+            # Z-score for F1cv (higher is better)
+            z_f1 = (df["F1cv"] - df["F1cv"].mean()) / df["F1cv"].std()
             z_f1 = z_f1.fillna(0)
 
             # Combined performance score (lower is better, so negate)
-            # Primary: Accuracy, Secondary: F1 (30% weight)
+            # Primary: Accuracycv, Secondary: F1cv (30% weight)
             performance_score = -z_acc - 0.3 * z_f1
         else:
             # Direct metric ranking (no z-score normalization)
-            # Primary: Accuracy, Secondary: F1 as tiebreaker
+            # Primary: Accuracycv, Secondary: F1cv as tiebreaker
             # Use negative so lower is better (consistent with other scores)
-            performance_score = -df["Accuracy"] - 0.0001 * df["F1"]
+            performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
     # NEW: User-friendly penalty system (0-10 scale)
     # Performance z-scores typically range ±3, so we scale penalties to be meaningful but not overwhelming
@@ -213,10 +215,10 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
         top20 = df.head(20).copy()
 
         if task_type == "regression":
-            display_cols = ["Rank", "Model", "R2", "RMSE", "n_vars", "LVs",
+            display_cols = ["Rank", "Model", "R2", "RMSE", "R2cv", "RMSEcv", "n_vars", "LVs",
                            "PerformanceScore", "VarPenalty", "CompPenalty", "CompositeScore"]
         else:
-            display_cols = ["Rank", "Model", "ROC_AUC", "Accuracy", "n_vars", "LVs",
+            display_cols = ["Rank", "Model", "ROC_AUC", "Accuracy", "ROC_AUCcv", "Accuracycv", "n_vars", "LVs",
                            "PerformanceScore", "VarPenalty", "CompPenalty", "CompositeScore"]
 
         # Filter to available columns
@@ -346,9 +348,12 @@ def create_results_dataframe(task_type):
     ]
 
     if task_type == "regression":
-        metric_cols = ["RMSE", "R2"]
+        # Calibration metrics first, then CV metrics
+        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv"]
     else:
-        metric_cols = ["Accuracy", "ROC_AUC", "F1", "Precision", "Recall"]
+        # Calibration metrics first, then CV metrics
+        metric_cols = ["Accuracy", "ROC_AUC", "F1", "Precision", "Recall",
+                      "Accuracycv", "ROC_AUCcv", "F1cv", "Precisioncv", "Recallcv"]
 
     all_cols = common_cols + metric_cols + ["top_vars", "all_vars", "CompositeScore", "Rank"]
 

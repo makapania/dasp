@@ -6,6 +6,42 @@
 
 ---
 
+## ✅ CALIBRATION METRICS IN RESULTS (2026-01-14)
+
+**Problem:** R2 and RMSE in results were cross-validation metrics only. Users couldn't see calibration (training) metrics to assess overfitting.
+
+**Solution:** Added both calibration and CV metrics to all search methods:
+- `R2`, `RMSE` = Calibration (training data performance)
+- `R2cv`, `RMSEcv` = Cross-validation (test fold averages)
+- Same pattern for classification: `Accuracy` vs `Accuracycv`, etc.
+
+**Column order:** Calibration first, then CV.
+
+**Why this matters:** Comparing cal vs CV metrics reveals overfitting:
+- If `R2` >> `R2cv`: model is overfitting
+- If `R2` ≈ `R2cv`: model generalizes well
+
+**Files modified:**
+- `src/spectral_predict/search.py` - Core calibration computation in `_run_single_config()`
+- `src/spectral_predict/scoring.py` - Schema update + ranking uses CV metrics
+- `src/spectral_predict/bayesian_utils.py` - Bayesian results conversion
+- `src/spectral_predict/nsga2_search.py` - NSGA2 results conversion + `_compute_calibration_metrics()` helper
+
+**Test created:** `test_calibration_metrics.py` - 4 tests, all passing
+
+**Verified behavior:**
+- Calibration RMSE <= CV RMSE (as expected)
+- Calibration R2 >= CV R2 (as expected)
+- Ranking still uses CV metrics (unbiased)
+
+**Follow-up fix (same session):**
+- `spectral_predict_gui_optimized.py` lines 22498-22499, 17709
+- Model Development was comparing calibration R2 from Results to CV R2 computed locally
+- Fixed to use `R2cv` for both sides (CV to CV comparison)
+- Also updated logging to show `R2cv`/`Accuracycv` when loading results row
+
+---
+
 ## 🔄 PARTIAL FIX: 3rd/4th Derivative R2 Mismatch (2026-01-13)
 
 **Problem:** 3rd and 4th derivative models had significant R2 mismatch between Results and Model Development. 1st and 2nd derivatives worked fine.
@@ -223,29 +259,55 @@ window_size = WINDOW_SIZES[min(window_idx, len(WINDOW_SIZES) - 1)]
 
 ---
 
-## ⚠️ NSGA-II Ensemble Fix (2026-01-08) - NOT THOROUGHLY TESTED
+## ✅ FIXED: Ensemble Model Construction and Saving (2026-01-14)
 
-**Problem:** Ensemble models built from NSGA-II results had MUCH higher RMSE than individual models.
+**Problem:** Ensemble models built from NSGA-II results had MUCH higher RMSE than individual models. Also, ensemble models could not be saved (AttributeError on model_names).
 
-**Root Cause:** `_reconstruct_models_from_results()` was ignoring:
-1. **Wavelength subsets** - NSGA-II stores selected wavelengths in `all_vars` column, but ensemble training used FULL spectrum
-2. **NSGA-II preprocessing** - Preprocessing names like 'deriv1', 'snv_deriv2' weren't being applied
+**Root Causes Found:**
+1. **Wavelength subsets ignored** - NSGA-II stores selected wavelengths in `all_vars` column, but ensemble training used FULL spectrum
+2. **Preprocessing not preserved** - Search results store config (deriv, window, poly) but NOT fitted preprocessor objects. Ensembles expected `self.preprocessors[i]` to be fitted transformers but got None.
+3. **SimpleAverage class broken** - Defined inside `create_ensemble()` function, missing `model_names` attribute required by `save_ensemble()`
+4. **Duplicate class definitions** - SimpleAverage defined in both ensemble.py and model_io.py
+
+**Comprehensive Fix Applied (2026-01-14):**
+1. Created `PreprocessorConfig` class in new `preprocessing_wrapper.py` - reconstructs preprocessing from stored config
+2. Added `extract_preprocessor_config()` helper to parse results DataFrame rows
+3. Updated all ensemble classes to support `preprocessor_configs` parameter
+4. Moved `SimpleAverageEnsemble` to module level with proper attributes
+5. Added validation to `save_ensemble()` with auto-generation of model_names if missing
+6. Updated GUI `_train_ensembles()` to extract and pass preprocessing configs
+
+**Files Modified:**
+- `src/spectral_predict/preprocessing_wrapper.py` (NEW) - PreprocessorConfig class
+- `src/spectral_predict/ensemble.py` - SimpleAverageEnsemble, extract_preprocessor_config(), updated all ensemble classes
+- `src/spectral_predict/model_io.py` - validation in save_ensemble(), updated load_ensemble()
+- `spectral_predict_gui_optimized.py` - _train_ensembles() passes preprocessor_configs
+
+**Tests Added:**
+- `tests/test_ensemble_preprocessing.py` - 14 unit tests
+- `tests/test_ensemble_integration.py` - 6 integration tests
+- All 19 tests pass
+
+**Commits:** `8973067`, `1c0b12c`
+
+---
+
+## ✅ FIXED: Ensemble Visualization Text Overlap (2026-01-14)
+
+**Problem:** Ensemble visualization graphs had text overlapping figure content, making them unreadable. Long model names caused legends, axis labels, and titles to overflow.
 
 **Fix Applied:**
-1. Added `parse_wavelength_subset()` helper to extract wavelengths from `all_vars`
-2. Added `WavelengthSubsetWrapper` class to apply wavelength subsetting during predict
-3. Added `CombinedPreprocessWrapper` for preprocessing + wavelength subsetting together
-4. Added NSGA-II preprocessing recognition (`NSGA_PREPROCESS_TYPES` list)
+1. Added `_truncate_name()` helper function to limit model names with "..." suffix
+2. Moved legends below plots using `bbox_to_anchor` to avoid obscuring data
+3. Truncated model names in: y-axis labels (18 chars), legends (15 chars), titles (20 chars), summary tables (12-25 chars)
+4. Split long per-model titles into two lines in specialization profile
+5. Added `subplots_adjust()` margins before `tight_layout()` in all functions
+6. Fixed y-label duplication (only show on first subplot)
 
-**Files:** `spectral_predict_gui_optimized.py` lines 13684-14021
+**Files Modified:**
+- `src/spectral_predict/ensemble_viz.py` - All 4 main visualization functions
 
-**Status:** Code implemented, syntax verified, **NOT YET TESTED with real NSGA-II results**
-
-**Testing Needed:**
-1. Run NSGA-II optimization
-2. Select multiple models from results
-3. Click "Train Ensemble"
-4. Verify ensemble RMSE is comparable to or better than individual model RMSE
+**Commit:** `1c0b12c`
 
 ---
 

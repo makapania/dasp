@@ -2520,6 +2520,113 @@ def _compute_top_variables(
         return _indices_to_wavelength_str(selected_indices[:top_n], wavelengths) if selected_indices else 'N/A'
 
 
+def _compute_calibration_metrics(
+    X: np.ndarray,
+    y: np.ndarray,
+    solution: np.ndarray,
+    n_wavelengths: int,
+    model_types: List[str],
+    task_type: str,
+) -> Dict[str, float]:
+    """
+    Compute calibration (training set) metrics for a single NSGA-II solution.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data (n_samples, n_wavelengths)
+    y : np.ndarray
+        Target values
+    solution : np.ndarray
+        Chromosome encoding the solution
+    n_wavelengths : int
+        Total number of wavelengths
+    model_types : list of str
+        List of model types used in optimization
+    task_type : str
+        'regression' or 'classification'
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with calibration metrics (RMSE, R2 for regression; Accuracy, etc. for classification)
+    """
+    from sklearn.metrics import (
+        mean_squared_error, r2_score, accuracy_score,
+        roc_auc_score, f1_score, precision_score, recall_score
+    )
+
+    try:
+        # Decode solution
+        decoded = decode_solution(solution, n_wavelengths, model_types, task_type)
+        selected_indices = decoded['selected_indices']
+
+        if not selected_indices:
+            return {}
+
+        # Get wavelength subset
+        X_subset = X[:, selected_indices]
+
+        # Apply preprocessing
+        preproc_idx = int(solution[0])
+        window_idx = int(solution[1])
+        transform = _get_preprocessing_transform(preproc_idx, window_idx)
+        if transform is not None:
+            X_proc = transform(X_subset)
+        else:
+            X_proc = X_subset.copy()
+
+        # Get model
+        from .models import get_model
+        model_type = decoded['model']
+        model_params = decoded.get('model_params', {})
+        model = get_model(model_type, task_type, **model_params)
+
+        # Fit on full training data
+        model.fit(X_proc, y)
+
+        # Predict on training data
+        y_pred = model.predict(X_proc)
+
+        # Compute metrics
+        metrics = {}
+        if task_type == 'regression':
+            metrics['RMSE'] = np.sqrt(mean_squared_error(y, y_pred))
+            metrics['R2'] = r2_score(y, y_pred)
+        else:
+            metrics['Accuracy'] = accuracy_score(y, y_pred)
+
+            # ROC AUC if probabilities available
+            try:
+                if hasattr(model, 'predict_proba'):
+                    y_proba = model.predict_proba(X_proc)
+                    n_classes = len(np.unique(y))
+                    if n_classes == 2:
+                        metrics['ROC_AUC'] = roc_auc_score(y, y_proba[:, 1])
+                    else:
+                        metrics['ROC_AUC'] = roc_auc_score(y, y_proba, multi_class='ovr', average='macro')
+                else:
+                    metrics['ROC_AUC'] = np.nan
+            except Exception:
+                metrics['ROC_AUC'] = np.nan
+
+            # F1, Precision, Recall
+            try:
+                metrics['F1'] = f1_score(y, y_pred, average='weighted', zero_division=0)
+                metrics['Precision'] = precision_score(y, y_pred, average='weighted', zero_division=0)
+                metrics['Recall'] = recall_score(y, y_pred, average='weighted', zero_division=0)
+            except Exception:
+                metrics['F1'] = np.nan
+                metrics['Precision'] = np.nan
+                metrics['Recall'] = np.nan
+
+        return metrics
+
+    except Exception as e:
+        # Return empty dict on failure
+        return {}
+
+
 def convert_nsga2_to_v1_format(
     result: Dict[str, Any],
     n_wavelengths: int,
@@ -2609,30 +2716,63 @@ def convert_nsga2_to_v1_format(
         }
 
         if task_type == 'regression':
-            # Compute display RMSE using mean(sqrt(MSE)) to match Model Development
-            # NSGA optimization uses sqrt(mean(MSE)) for better Pareto trade-offs,
-            # but displayed values should match what Model Development shows
+            # Compute calibration metrics (training data)
+            if X is not None and y is not None:
+                cal_metrics = _compute_calibration_metrics(
+                    X, y, solution, n_wavelengths, model_types, task_type
+                )
+                row['RMSE'] = cal_metrics.get('RMSE', np.nan)
+                row['R2'] = cal_metrics.get('R2', np.nan)
+            else:
+                row['RMSE'] = np.nan
+                row['R2'] = np.nan
+
+            # Compute CV metrics (cross-validation)
             if X is not None and y is not None:
                 display_rmse = _compute_display_rmse(
                     X, y, solution, n_wavelengths, model_types, task_type, folds, 42
                 )
-                row['RMSE'] = display_rmse if display_rmse is not None else objectives[0]
-            else:
-                row['RMSE'] = objectives[0]  # Fallback to optimization RMSE
+                row['RMSEcv'] = display_rmse if display_rmse is not None else objectives[0]
 
-            # Compute R2 if X and y are provided
-            if compute_r2 and X is not None and y is not None:
-                r2 = _compute_solution_r2(
-                    X, y, solution, n_wavelengths, model_types, task_type, folds, 42
-                )
-                row['R2'] = r2
+                if compute_r2:
+                    r2_cv = _compute_solution_r2(
+                        X, y, solution, n_wavelengths, model_types, task_type, folds, 42
+                    )
+                    row['R2cv'] = r2_cv
+                else:
+                    row['R2cv'] = None
             else:
-                row['R2'] = None
-            row['CompositeScore'] = row['RMSE']  # Use display RMSE as composite
+                row['RMSEcv'] = objectives[0]  # Fallback to optimization RMSE
+                row['R2cv'] = None
+
+            row['CompositeScore'] = row['RMSEcv']  # Use CV RMSE as composite
         else:
-            row['Accuracy'] = 1.0 - objectives[0]
-            row['ROC_AUC'] = None
-            row['CompositeScore'] = 1.0 - objectives[0]  # Use accuracy as composite
+            # Classification: compute calibration and CV metrics
+            if X is not None and y is not None:
+                cal_metrics = _compute_calibration_metrics(
+                    X, y, solution, n_wavelengths, model_types, task_type
+                )
+                row['Accuracy'] = cal_metrics.get('Accuracy', np.nan)
+                row['ROC_AUC'] = cal_metrics.get('ROC_AUC', np.nan)
+                row['F1'] = cal_metrics.get('F1', np.nan)
+                row['Precision'] = cal_metrics.get('Precision', np.nan)
+                row['Recall'] = cal_metrics.get('Recall', np.nan)
+            else:
+                row['Accuracy'] = np.nan
+                row['ROC_AUC'] = np.nan
+                row['F1'] = np.nan
+                row['Precision'] = np.nan
+                row['Recall'] = np.nan
+
+            # CV metrics (for now, use the optimization objectives)
+            # TODO: Could add proper CV metrics for classification if needed
+            row['Accuracycv'] = 1.0 - objectives[0]
+            row['ROC_AUCcv'] = None
+            row['F1cv'] = None
+            row['Precisioncv'] = None
+            row['Recallcv'] = None
+
+            row['CompositeScore'] = row['Accuracycv']  # Use CV accuracy as composite
 
         rows.append(row)
 
@@ -2696,15 +2836,47 @@ def convert_nsga2_to_v1_format(
                 }
 
                 if task_type == 'regression':
-                    best_row['RMSE'] = knee_error
-                    # Compute R2 for this solution if X and y are provided
-                    if compute_r2 and X is not None and y is not None:
-                        # Re-fit the model to get R2
+                    # Compute calibration metrics
+                    if X is not None and y is not None:
+                        # Reconstruct solution array from knee_sol for calibration metrics
+                        # This is a simplified version - may not work for all cases
+                        # But provides basic calibration metrics
                         try:
-                            from sklearn.model_selection import cross_val_predict
+                            from .models import get_model
+                            from sklearn.metrics import mean_squared_error, r2_score
+
+                            selected_indices = knee_sol.get('selected_indices', [])
+                            if selected_indices:
+                                X_selected = X[:, selected_indices]
+                                preproc_idx = knee_sol.get('preproc_idx', 0)
+                                window_idx = knee_sol.get('window_idx', 6)
+                                transform = _get_preprocessing_transform(preproc_idx, window_idx)
+                                X_proc = transform(X_selected) if transform else X_selected
+
+                                model = get_model(knee_sol.get('model', 'PLS'), task_type, knee_sol.get('stored_params', {}))
+                                model.fit(X_proc, y)
+                                y_pred_cal = model.predict(X_proc)
+
+                                best_row['RMSE'] = np.sqrt(mean_squared_error(y, y_pred_cal))
+                                best_row['R2'] = r2_score(y, y_pred_cal)
+                            else:
+                                best_row['RMSE'] = np.nan
+                                best_row['R2'] = np.nan
+                        except Exception:
+                            best_row['RMSE'] = np.nan
+                            best_row['R2'] = np.nan
+                    else:
+                        best_row['RMSE'] = np.nan
+                        best_row['R2'] = np.nan
+
+                    # CV metrics
+                    best_row['RMSEcv'] = knee_error
+                    if compute_r2 and X is not None and y is not None:
+                        # Compute R2cv via cross-validation
+                        try:
+                            from sklearn.model_selection import cross_val_predict, KFold
                             from .models import get_model
 
-                            # Get wavelength mask
                             selected_indices = knee_sol.get('selected_indices', [])
                             if selected_indices:
                                 X_selected = X[:, selected_indices]
@@ -2721,34 +2893,43 @@ def convert_nsga2_to_v1_format(
                             model = get_model(knee_sol.get('model', 'PLS'), task_type, knee_sol.get('stored_params', {}))
 
                             # Cross-val predict
-                            from sklearn.model_selection import KFold
                             kf = KFold(n_splits=folds, shuffle=True, random_state=42)
                             y_pred = cross_val_predict(model, X_proc, y, cv=kf)
 
-                            # Compute R2
+                            # Compute R2cv
                             ss_res = np.sum((y - y_pred) ** 2)
                             ss_tot = np.sum((y - np.mean(y)) ** 2)
-                            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-                            best_row['R2'] = r2
+                            r2_cv = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+                            best_row['R2cv'] = r2_cv
                         except Exception:
-                            best_row['R2'] = None
+                            best_row['R2cv'] = None
                     else:
-                        best_row['R2'] = None
+                        best_row['R2cv'] = None
                     best_row['CompositeScore'] = knee_error
                 else:
-                    best_row['Accuracy'] = 1.0 - knee_error
-                    best_row['ROC_AUC'] = None
+                    # Classification calibration metrics
+                    best_row['Accuracy'] = np.nan
+                    best_row['ROC_AUC'] = np.nan
+                    best_row['F1'] = np.nan
+                    best_row['Precision'] = np.nan
+                    best_row['Recall'] = np.nan
+                    # Classification CV metrics
+                    best_row['Accuracycv'] = 1.0 - knee_error
+                    best_row['ROC_AUCcv'] = None
+                    best_row['F1cv'] = None
+                    best_row['Precisioncv'] = None
+                    best_row['Recallcv'] = None
                     best_row['CompositeScore'] = 1.0 - knee_error
 
                 rows.append(best_row)
 
     df = pd.DataFrame(rows)
 
-    # Sort and rank
+    # Sort and rank using CV metrics (unbiased performance estimates)
     if task_type == 'regression':
-        df = df.sort_values('RMSE', ascending=True).reset_index(drop=True)
+        df = df.sort_values('RMSEcv', ascending=True).reset_index(drop=True)
     else:
-        df = df.sort_values('Accuracy', ascending=False).reset_index(drop=True)
+        df = df.sort_values('Accuracycv', ascending=False).reset_index(drop=True)
 
     df['Rank'] = range(1, len(df) + 1)
 
@@ -2759,15 +2940,16 @@ def convert_nsga2_to_v1_format(
         df = df.drop(columns=['Preprocessing'])
 
     # Reorder columns to match Grid Search format
-    # Rank first, then standard columns, RMSE/R2/Accuracy after Imbalance, NSGA-specific columns at end
+    # Rank first, then standard columns, calibration metrics, CV metrics, NSGA-specific columns at end
     base_cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'Variables', 'full_vars',
                  'SubsetTag', 'Imbalance']
 
-    # Performance metrics after Imbalance
+    # Performance metrics after Imbalance (calibration first, then CV)
     if task_type == 'regression':
-        perf_cols = ['RMSE', 'R2', 'CompositeScore']
+        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'CompositeScore']
     else:
-        perf_cols = ['Accuracy', 'ROC_AUC', 'CompositeScore']
+        perf_cols = ['Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall',
+                    'Accuracycv', 'ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv', 'CompositeScore']
 
     # Other standard columns
     other_cols = ['top_vars', 'all_vars', 'n_vars', 'Deriv', 'Window', 'Poly', 'LVs']

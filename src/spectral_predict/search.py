@@ -3353,6 +3353,15 @@ def _run_single_config(
 
     # Capture complete parameters for ALL models (not just those with feature importance)
     # This fixes R² reproducibility issue for Ridge, Lasso, ElasticNet, PLS, etc.
+    # Also compute calibration metrics on training data
+    cal_rmse = None
+    cal_r2 = None
+    cal_acc = None
+    cal_auc = None
+    cal_f1 = None
+    cal_precision = None
+    cal_recall = None
+
     try:
         # Refit the pipeline on full data to get final fitted parameters
         pipe.fit(X, y)
@@ -3361,6 +3370,41 @@ def _run_single_config(
         fitted_model = (
             pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
         )
+
+        # Compute calibration metrics (training data performance)
+        y_pred_cal = pipe.predict(X)
+
+        if task_type == "regression":
+            cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))
+            cal_r2 = r2_score(y, y_pred_cal)
+        else:
+            # Classification metrics
+            cal_acc = accuracy_score(y, y_pred_cal)
+
+            # Compute ROC AUC if probabilities available
+            try:
+                if hasattr(pipe, "predict_proba"):
+                    y_pred_proba_cal = pipe.predict_proba(X)
+                    n_classes = len(np.unique(y))
+                    if n_classes == 2:
+                        cal_auc = roc_auc_score(y, y_pred_proba_cal[:, 1])
+                    else:
+                        cal_auc = roc_auc_score(y, y_pred_proba_cal,
+                                               multi_class='ovr', average='macro')
+                else:
+                    cal_auc = np.nan
+            except Exception:
+                cal_auc = np.nan
+
+            # Compute F1, Precision, Recall
+            try:
+                cal_f1 = f1_score(y, y_pred_cal, average='weighted', zero_division=0)
+                cal_precision = precision_score(y, y_pred_cal, average='weighted', zero_division=0)
+                cal_recall = recall_score(y, y_pred_cal, average='weighted', zero_division=0)
+            except Exception:
+                cal_f1 = np.nan
+                cal_precision = np.nan
+                cal_recall = np.nan
 
         # Capture ALL parameters
         print(f"\n{'='*80}")
@@ -3375,19 +3419,33 @@ def _run_single_config(
             print(f"  {params}")
 
             # CRITICAL FIX: Replace params with complete parameter set
-            # Filter out non-serializable parameters
+            # Filter out non-serializable parameters and convert numpy types
             filtered_params = {}
             for key, value in all_params.items():
                 # Skip callables and complex objects
                 if callable(value) or hasattr(value, '__dict__'):
                     continue
-                # Include all serializable values (including None, bool, int, float, str, etc.)
+
+                # Convert value to Python-native type for reliable serialization
                 try:
-                    # Test if value can be converted to string and back
-                    str(value)
+                    # Handle numpy scalar types (np.int64, np.float64, etc.)
+                    if hasattr(value, 'item'):
+                        value = value.item()
+
+                    # Skip nan values - they can't be serialized with ast.literal_eval
+                    # and XGBoost will use its default (nan) anyway
+                    if isinstance(value, float) and np.isnan(value):
+                        continue
+
+                    # Test if value can be round-tripped through str() -> ast.literal_eval()
+                    test_str = str({key: value})
+                    import ast
+                    ast.literal_eval(test_str)
+
+                    # Value passed the test, include it
                     filtered_params[key] = value
                 except:
-                    # Skip non-serializable values
+                    # Skip values that can't be serialized/deserialized
                     continue
 
             params = filtered_params  # Replace params with complete set
@@ -3459,17 +3517,28 @@ def _run_single_config(
         result["ga_config"] = preprocess_cfg.get("ga_config", "")
 
     if task_type == "regression":
-        result["RMSE"] = mean_rmse
-        result["R2"] = mean_r2
+        # Calibration metrics (training data)
+        result["RMSE"] = cal_rmse if cal_rmse is not None else np.nan
+        result["R2"] = cal_r2 if cal_r2 is not None else np.nan
+        # Cross-validation metrics (test fold averages)
+        result["RMSEcv"] = mean_rmse
+        result["R2cv"] = mean_r2
         # Add regional performance for consensus predictions
         result["regional_rmse"] = regional_rmse
         result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds
     else:
-        result["Accuracy"] = mean_acc
-        result["ROC_AUC"] = mean_auc
-        result["F1"] = mean_f1
-        result["Precision"] = mean_precision
-        result["Recall"] = mean_recall
+        # Calibration metrics (training data)
+        result["Accuracy"] = cal_acc if cal_acc is not None else np.nan
+        result["ROC_AUC"] = cal_auc if cal_auc is not None else np.nan
+        result["F1"] = cal_f1 if cal_f1 is not None else np.nan
+        result["Precision"] = cal_precision if cal_precision is not None else np.nan
+        result["Recall"] = cal_recall if cal_recall is not None else np.nan
+        # Cross-validation metrics (test fold averages)
+        result["Accuracycv"] = mean_acc
+        result["ROC_AUCcv"] = mean_auc
+        result["F1cv"] = mean_f1
+        result["Precisioncv"] = mean_precision
+        result["Recallcv"] = mean_recall
 
     # Save all_vars for ALL models (including full spectrum)
     # This ensures Model Development can reconstruct the exact wavelengths used

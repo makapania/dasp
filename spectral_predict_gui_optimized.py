@@ -7325,23 +7325,41 @@ class SpectralPredictApp:
         ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, pady=3)
 
+        ttk.Radiobutton(algo_frame, text="Manual",
+                       variable=self.validation_algorithm, value="Manual").grid(row=4, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Select samples manually from Data Viewer tab",
+                 style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, pady=3)
+
+        # Manual selection button (initially hidden)
+        self.manual_validation_button_frame = ttk.Frame(validation_frame)
+        self.manual_validation_button_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(10, 5))
+        self.manual_validation_button_frame.grid_remove()  # Hidden by default
+
+        ttk.Button(self.manual_validation_button_frame, text="📋 Use Selected Rows from Data Viewer",
+                  command=self._create_manual_validation_set, style='Modern.TButton').pack(side=tk.LEFT)
+        ttk.Label(self.manual_validation_button_frame, text="(Select rows in Data Viewer tab, then click here)",
+                 style='Caption.TLabel').pack(side=tk.LEFT, padx=(10, 0))
+
+        # Add trace to show/hide manual button based on algorithm selection
+        self.validation_algorithm.trace_add('write', self._on_validation_algorithm_changed)
+
         # Buttons
         button_frame = ttk.Frame(validation_frame)
-        button_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(15, 5))
+        button_frame.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(15, 5))
 
         ttk.Button(button_frame, text="Create Validation Set", command=self._create_validation_set, style='Modern.TButton').pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(button_frame, text="Reset", command=self._reset_validation_set, style='Modern.TButton').pack(side=tk.LEFT)
 
         # Status label
         self.validation_status_label = ttk.Label(validation_frame, text="No validation set created", style='Caption.TLabel')
-        self.validation_status_label.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        self.validation_status_label.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         ttk.Label(validation_frame, text="💡 Validation set will be held out during model training and used for independent testing",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # === Results Metrics Configuration ===
         metrics_frame = tk.Frame(validation_frame, bg=self.colors['card_bg'])
-        metrics_frame.grid(row=8, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(20, 0))
+        metrics_frame.grid(row=9, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(20, 0))
 
         ttk.Label(metrics_frame, text="Results Metrics", style='Subheading.TLabel').pack(anchor='w', pady=(0, 5))
 
@@ -11350,7 +11368,12 @@ class SpectralPredictApp:
             # Select validation samples based on algorithm
             algorithm = self.validation_algorithm.get()
 
-            if algorithm == "Kennard-Stone":
+            if algorithm == "Manual":
+                # For manual selection, use the dedicated method
+                messagebox.showinfo("Manual Selection",
+                                  "Please use the '📋 Use Selected Rows from Data Viewer' button to create a manual validation set.")
+                return
+            elif algorithm == "Kennard-Stone":
                 selected_indices = self._validation_kennard_stone(X_available, n_val)
             elif algorithm == "SPXY":
                 selected_indices = self._validation_spxy(X_available, y_available, n_val)
@@ -11402,6 +11425,127 @@ class SpectralPredictApp:
             self.validation_metrics_checkbox.config(state='disabled')
         if hasattr(self, 'validation_top_n_spinbox'):
             self.validation_top_n_spinbox.config(state='disabled')
+
+    def _on_validation_algorithm_changed(self, *args):
+        """Show/hide manual selection button when validation algorithm changes."""
+        algorithm = self.validation_algorithm.get()
+        if algorithm == "Manual":
+            self.manual_validation_button_frame.grid()
+        else:
+            self.manual_validation_button_frame.grid_remove()
+
+    def _create_manual_validation_set(self):
+        """Create validation set from manually selected rows in Data Viewer."""
+        # Check if data is loaded
+        if self.X is None or self.y is None:
+            messagebox.showwarning("No Data", "Please load data first")
+            return
+
+        # Check if tksheet exists
+        if not hasattr(self, 'data_viewer_sheet'):
+            messagebox.showwarning("Data Viewer Not Ready",
+                                 "Please go to the Data Viewer tab to select rows")
+            return
+
+        try:
+            # Get selected rows from tksheet
+            selected_rows = self.data_viewer_sheet.get_selected_rows()
+
+            if not selected_rows:
+                messagebox.showwarning("No Selection",
+                                     "Please select rows in the Data Viewer tab first.\n\n"
+                                     "Instructions:\n"
+                                     "1. Go to Data Viewer tab\n"
+                                     "2. Click on row numbers to select samples\n"
+                                     "3. Use Ctrl+Click to select multiple rows\n"
+                                     "4. Return here and click this button")
+                return
+
+            # Recreate the same display_df logic from _populate_data_viewer
+            show_excluded = self.show_excluded_data_viewer.get()
+
+            if show_excluded:
+                display_df = self.X.copy()
+                display_y = self.y.copy()
+            else:
+                # Filter out excluded samples
+                mask = ~self.X.index.isin(self.excluded_spectra)
+                display_df = self.X[mask].copy()
+                display_y = self.y[mask].copy()
+
+            # Map selected tksheet row indices to actual DataFrame indices
+            selected_indices = []
+            excluded_in_selection = []
+
+            for row_idx in selected_rows:
+                if row_idx < len(display_df):
+                    # Get the actual DataFrame index for this display row
+                    actual_idx = display_df.index[row_idx]
+
+                    # Check if this sample is excluded
+                    if actual_idx in self.excluded_spectra:
+                        excluded_in_selection.append(actual_idx)
+                    else:
+                        selected_indices.append(actual_idx)
+
+            # Warn if excluded samples were selected
+            if excluded_in_selection:
+                messagebox.showwarning("Excluded Samples in Selection",
+                                     f"{len(excluded_in_selection)} excluded samples were in your selection and have been filtered out.\n\n"
+                                     f"Excluded samples cannot be used in the validation set.\n\n"
+                                     f"Proceeding with {len(selected_indices)} valid samples.")
+
+            # Validate selection size
+            if len(selected_indices) < 3:
+                messagebox.showwarning("Too Few Samples",
+                                     f"Validation set must have at least 3 samples.\n"
+                                     f"You selected {len(selected_indices)} valid samples (after filtering excluded).\n\n"
+                                     "Please select more rows.")
+                return
+
+            # Get available samples (non-excluded)
+            X_available = self.X[~self.X.index.isin(self.excluded_spectra)]
+
+            # Check percentage
+            pct_of_data = len(selected_indices) / len(X_available) * 100
+
+            if pct_of_data > 40:
+                result = messagebox.askyesno("Large Validation Set",
+                                            f"Your selection is {len(selected_indices)} samples ({pct_of_data:.1f}% of available data).\n\n"
+                                            f"Validation sets larger than 40% are generally not recommended.\n\n"
+                                            f"Do you want to proceed anyway?")
+                if not result:
+                    return
+
+            # Store validation set
+            self.validation_indices = set(selected_indices)
+            self.validation_X = self.X.loc[selected_indices]
+            self.validation_y = self.y.loc[selected_indices]
+            self.validation_enabled.set(True)
+
+            # Update status label
+            n_cal = len(X_available) - len(selected_indices)
+            if hasattr(self, 'validation_status_label'):
+                self.validation_status_label.config(
+                    text=f"✓ {len(selected_indices)} validation samples selected manually ({pct_of_data:.1f}% of data)\n"
+                         f"Calibration: {n_cal} samples | Validation: {len(selected_indices)} samples"
+                )
+
+            # Enable validation metrics controls
+            if hasattr(self, 'validation_metrics_checkbox'):
+                self.validation_metrics_checkbox.config(state='normal')
+            if hasattr(self, 'validation_top_n_spinbox'):
+                self.validation_top_n_spinbox.config(state='normal')
+
+            messagebox.showinfo("Manual Validation Set Created",
+                              f"Successfully created validation set with {len(selected_indices)} samples.\n\n"
+                              f"Calibration: {n_cal} samples\n"
+                              f"Validation: {len(selected_indices)} samples ({pct_of_data:.1f}% of data)")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create manual validation set:\n{e}")
+            import traceback
+            traceback.print_exc()
 
     # ==================== End Validation Set Methods ====================
 
@@ -17706,7 +17850,7 @@ class SpectralPredictApp:
 
         # Validation logging
         rank = model_config.get('Rank', 'N/A')
-        r2_or_acc = model_config.get('R2', model_config.get('Accuracy', 'N/A'))
+        r2_or_acc = model_config.get('R2cv', model_config.get('Accuracycv', 'N/A'))
         model_name = model_config.get('Model', 'N/A')
         print(f"> Loading Rank {rank}: {model_name} (R²/Acc={r2_or_acc}, n_vars={model_config.get('n_vars', 'N/A')})")
 
@@ -22495,8 +22639,8 @@ F1 Score:  {f1:.4f}
                 # Add comparison to loaded model if available
                 loaded_r2 = "N/A"
                 r2_diff = "N/A"
-                if self.selected_model_config is not None and 'R2' in self.selected_model_config:
-                    loaded_r2_value = self.selected_model_config.get('R2')
+                if self.selected_model_config is not None and 'R2cv' in self.selected_model_config:
+                    loaded_r2_value = self.selected_model_config.get('R2cv')
                     if not pd.isna(loaded_r2_value):
                         loaded_r2 = f"{loaded_r2_value:.4f}"
                         r2_diff_value = results['r2_mean'] - loaded_r2_value
