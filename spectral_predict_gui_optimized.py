@@ -22591,16 +22591,19 @@ F1 Score:  {f1:.4f}
             # Compute mean and std across folds
             results = {}
             if task_type == "regression":
+                # Convert to arrays first (needed for aggregated R² calculation)
+                all_y_true_arr = np.array(all_y_true)
+                all_y_pred_arr = np.array(all_y_pred)
+
                 results['rmse_mean'] = np.mean([m['rmse'] for m in fold_metrics])
                 results['rmse_std'] = np.std([m['rmse'] for m in fold_metrics])
-                results['r2_mean'] = np.mean([m['r2'] for m in fold_metrics])
+                # Compute R² from aggregated predictions (matches grid search method)
+                results['r2_mean'] = r2_score(all_y_true_arr, all_y_pred_arr)
                 results['r2_std'] = np.std([m['r2'] for m in fold_metrics])
                 results['mae_mean'] = np.mean([m['mae'] for m in fold_metrics])
                 results['mae_std'] = np.std([m['mae'] for m in fold_metrics])
 
                 # Compute regional performance (quartile-based) for consensus predictions
-                all_y_true_arr = np.array(all_y_true)
-                all_y_pred_arr = np.array(all_y_pred)
 
                 # Compute quartiles based on true values
                 quartiles = np.percentile(all_y_true_arr, [25, 50, 75])
