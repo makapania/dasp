@@ -4822,6 +4822,8 @@ class SpectralPredictApp:
             "single_select",
             "row_select",
             "column_select",
+            "drag_select",         # Enable drag-to-select multiple rows
+            "ctrl_click_select",   # Enable Ctrl+click non-contiguous selection
             "column_width_resize",
             "double_click_column_resize",
             "arrowkeys",
@@ -11461,32 +11463,25 @@ class SpectralPredictApp:
                                      "4. Return here and click this button")
                 return
 
-            # Recreate the same display_df logic from _populate_data_viewer
-            show_excluded = self.show_excluded_data_viewer.get()
+            # CORRECT APPROACH: Extract Sample IDs from cell data (column 0)
+            # This matches the pattern used by _delete_data_viewer_rows() and _exclude_selected_rows()
+            data = self.data_viewer_sheet.get_sheet_data()
+            sample_ids = [data[row][0] for row in selected_rows if row < len(data)]
 
-            if show_excluded:
-                display_df = self.X.copy()
-                display_y = self.y.copy()
-            else:
-                # Filter out excluded samples
-                mask = ~self.X.index.isin(self.excluded_spectra)
-                display_df = self.X[mask].copy()
-                display_y = self.y[mask].copy()
-
-            # Map selected tksheet row indices to actual DataFrame indices
+            # Map Sample IDs to actual DataFrame indices
             selected_indices = []
             excluded_in_selection = []
 
-            for row_idx in selected_rows:
-                if row_idx < len(display_df):
-                    # Get the actual DataFrame index for this display row
-                    actual_idx = display_df.index[row_idx]
-
-                    # Check if this sample is excluded
-                    if actual_idx in self.excluded_spectra:
-                        excluded_in_selection.append(actual_idx)
-                    else:
-                        selected_indices.append(actual_idx)
+            for sample_id in sample_ids:
+                # Find matching index in self.X (handle type differences)
+                for idx in self.X.index:
+                    if str(idx) == str(sample_id):
+                        # Check if this sample is excluded
+                        if idx in self.excluded_spectra:
+                            excluded_in_selection.append(idx)
+                        else:
+                            selected_indices.append(idx)
+                        break
 
             # Warn if excluded samples were selected
             if excluded_in_selection:
@@ -18483,8 +18478,9 @@ class SpectralPredictApp:
             self.data_viewer_sheet.headers(headers)
 
             # Reset all row backgrounds to default (clear any previous highlighting)
+            # Use None instead of "" - empty string causes tksheet color parsing errors on selection
             for row_idx in range(len(formatted_data)):
-                self.data_viewer_sheet[row_idx].bg = ""
+                self.data_viewer_sheet[row_idx].bg = None
 
             # Highlight excluded samples in pink
             if show_excluded and len(excluded_indices) > 0:
@@ -18962,6 +18958,45 @@ class SpectralPredictApp:
 
             # Remove from excluded set
             self.excluded_spectra = self.excluded_spectra - set(indices_to_delete)
+
+            # Remove deleted samples from validation set if any
+            if hasattr(self, 'validation_indices') and self.validation_indices:
+                deleted_set = set(str(idx) for idx in indices_to_delete)
+                deleted_from_validation = set()
+                for val_idx in list(self.validation_indices):
+                    if str(val_idx) in deleted_set:
+                        deleted_from_validation.add(val_idx)
+
+                if deleted_from_validation:
+                    self.validation_indices = self.validation_indices - deleted_from_validation
+                    # Update stored validation data
+                    if self.validation_X is not None:
+                        remaining = [idx for idx in self.validation_X.index if idx not in deleted_from_validation]
+                        if remaining:
+                            self.validation_X = self.validation_X.loc[remaining]
+                            self.validation_y = self.validation_y.loc[remaining]
+                        else:
+                            self.validation_X = None
+                            self.validation_y = None
+                    # Update status label
+                    if hasattr(self, 'validation_status_label'):
+                        if len(self.validation_indices) >= 3:
+                            X_available = self.X[~self.X.index.isin(self.excluded_spectra)]
+                            pct = len(self.validation_indices) / len(X_available) * 100 if len(X_available) > 0 else 0
+                            n_cal = len(X_available) - len(self.validation_indices)
+                            self.validation_status_label.config(
+                                text=f"! {len(self.validation_indices)} validation samples ({len(deleted_from_validation)} deleted)\n"
+                                     f"Calibration: {n_cal} samples | Validation: {len(self.validation_indices)} samples"
+                            )
+                        else:
+                            self.validation_status_label.config(text="Validation set invalid - recreate")
+                    # Warn user if validation set is now too small
+                    if len(self.validation_indices) < 3:
+                        self.validation_enabled.set(False)
+                        messagebox.showwarning("Validation Set Invalid",
+                            f"Deleted samples were in validation set.\n"
+                            f"Only {len(self.validation_indices)} samples remain.\n"
+                            f"Please recreate the validation set.")
 
             # Refresh display
             self._populate_data_viewer()
@@ -23069,26 +23104,37 @@ Configuration:
         format_frame = tk.Frame(options_frame, bg=self.colors['panel'])
         format_frame.pack(fill='x', pady=5)
 
-        tk.Label(format_frame, text="Output Format:", bg=self.colors['panel'],
-                 fg=self.colors['text']).pack(side='left')
+        tk.Label(format_frame, text="Export Format:", bg=self.colors['panel'],
+                 fg=self.colors['text'], font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
 
-        format_var = tk.StringVar(value='script')
-        ttk.Radiobutton(format_frame, text="Python Script (.py)", variable=format_var,
-                        value='script').pack(side='left', padx=(10, 5))
-        ttk.Radiobutton(format_frame, text="Jupyter Notebook (.ipynb)", variable=format_var,
-                        value='notebook').pack(side='left', padx=5)
+        format_var = tk.StringVar(value='bundle')
+        ttk.Radiobutton(format_frame, text="📦 Complete Bundle (.zip) - Python + R + Data [Recommended]",
+                        variable=format_var, value='bundle').pack(anchor='w', padx=(10, 5))
+        ttk.Radiobutton(format_frame, text="☁️ Cloud-Ready Notebook (.ipynb) - Opens in Google Colab",
+                        variable=format_var, value='colab').pack(anchor='w', padx=(10, 5))
+        ttk.Radiobutton(format_frame, text="🐍 Python Script (.py) - Standalone with embedded data",
+                        variable=format_var, value='python_embedded').pack(anchor='w', padx=(10, 5))
+        ttk.Radiobutton(format_frame, text="📊 R Script (.R) - Standalone with embedded data",
+                        variable=format_var, value='r_embedded').pack(anchor='w', padx=(10, 5))
+        ttk.Radiobutton(format_frame, text="📝 Python Script (.py) - Basic (no data)",
+                        variable=format_var, value='script').pack(anchor='w', padx=(10, 5))
+        ttk.Radiobutton(format_frame, text="📓 Jupyter Notebook (.ipynb) - Basic (no data)",
+                        variable=format_var, value='notebook').pack(anchor='w', padx=(10, 5))
 
         # Include options
         include_frame = tk.Frame(options_frame, bg=self.colors['panel'])
-        include_frame.pack(fill='x', pady=5)
+        include_frame.pack(fill='x', pady=10)
+
+        tk.Label(include_frame, text="Additional Options:", bg=self.colors['panel'],
+                 fg=self.colors['text'], font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
 
         include_viz_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(include_frame, text="Include visualization code (matplotlib)",
-                        variable=include_viz_var).pack(anchor='w')
+                        variable=include_viz_var).pack(anchor='w', padx=(10, 0))
 
         include_pred_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(include_frame, text="Include prediction template for new data",
-                        variable=include_pred_var).pack(anchor='w')
+                        variable=include_pred_var).pack(anchor='w', padx=(10, 0))
 
         # Preview frame
         preview_frame = ttk.LabelFrame(main_frame, text="Code Preview", padding="10")
@@ -23205,56 +23251,196 @@ Configuration:
             """Export code to file."""
             try:
                 from spectral_predict.code_generator import CodeGenerator, ExportOptions
+                from spectral_predict.r_code_generator import RCodeGenerator
+                from spectral_predict.export_bundle import create_export_bundle
                 from datetime import datetime
+                import numpy as np
 
+                # Get format
+                export_format = format_var.get()
+
+                # Build model config
                 model_config = {
                     'model_name': self.refined_config['model_name'],
                     'preprocessing': self.refined_config['preprocessing'],
                     'target_name': self.refined_config.get('target_name', 'target'),
                     'task_type': self.refined_config['task_type'],
                     'params': self.refined_config.get('params', {}),
-                    'metrics': {},
+                    'metrics': {
+                        'RMSE': self.refined_performance.get('rmse_mean'),
+                        'R2': self.refined_performance.get('r2_mean'),
+                    } if self.refined_config['task_type'] == 'regression' else {
+                        'Accuracy': self.refined_performance.get('accuracy_mean'),
+                        'F1': self.refined_performance.get('f1_mean'),
+                    },
                     'wavelengths': self.refined_wavelengths,
                     'cv_folds': self.refined_config.get('cv_folds', 5),
                 }
 
-                options = ExportOptions(
-                    include_visualization=include_viz_var.get(),
-                    include_prediction_template=include_pred_var.get(),
-                    format=format_var.get(),
-                    target_column=self.refined_config.get('target_name', 'target')
-                )
+                # Get data arrays (if available)
+                data_X = getattr(self, 'refined_X_train', None)
+                data_y = getattr(self, 'refined_y_train', None)
+                wavelengths = self.refined_wavelengths
 
-                generator = CodeGenerator(model_config, options)
+                # Handle different export formats
+                if export_format == 'bundle':
+                    # Complete ZIP bundle
+                    default_name = f"analysis_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.zip',
+                        filetypes=[('ZIP Archive', '*.zip'), ('All files', '*.*')],
+                        initialfile=default_name,
+                        title="Export Complete Bundle"
+                    )
+                    if not filepath:
+                        return
 
-                # Determine file extension and default name
-                if format_var.get() == 'notebook':
-                    ext = '.ipynb'
-                    filetypes = [('Jupyter Notebook', '*.ipynb'), ('All files', '*.*')]
-                else:
-                    ext = '.py'
-                    filetypes = [('Python Script', '*.py'), ('All files', '*.*')]
+                    status_label.config(text="Creating bundle...", fg='blue')
+                    dialog.update()
 
-                default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+                    create_export_bundle(
+                        model_config=model_config,
+                        output_path=filepath,
+                        include_data=(data_X is not None and data_y is not None),
+                        data_X=data_X,
+                        data_y=data_y,
+                        wavelengths=wavelengths
+                    )
+                    status_label.config(text=f"Bundle saved: {Path(filepath).name}", fg=self.colors['accent'])
 
-                filepath = filedialog.asksaveasfilename(
-                    defaultextension=ext,
-                    filetypes=filetypes,
-                    initialfile=default_name,
-                    title="Export Analysis Code"
-                )
+                elif export_format == 'colab':
+                    # Colab-ready notebook with embedded data
+                    options = ExportOptions(
+                        include_visualization=include_viz_var.get(),
+                        include_prediction_template=include_pred_var.get(),
+                        format='notebook',
+                        include_data=(data_X is not None and data_y is not None),
+                        data_X=data_X,
+                        data_y=data_y,
+                        wavelengths=wavelengths,
+                        colab_ready=True,
+                        target_column=self.refined_config.get('target_name', 'target')
+                    )
+                    generator = CodeGenerator(model_config, options)
 
-                if not filepath:
-                    return
+                    default_name = f"colab_analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.ipynb',
+                        filetypes=[('Jupyter Notebook', '*.ipynb'), ('All files', '*.*')],
+                        initialfile=default_name,
+                        title="Export Colab Notebook"
+                    )
+                    if not filepath:
+                        return
 
-                if format_var.get() == 'notebook':
                     generator.save_notebook(filepath)
-                else:
+                    status_label.config(text=f"Colab notebook saved: {Path(filepath).name}", fg=self.colors['accent'])
+
+                elif export_format == 'python_embedded':
+                    # Python script with embedded data
+                    options = ExportOptions(
+                        include_visualization=include_viz_var.get(),
+                        include_prediction_template=include_pred_var.get(),
+                        format='script',
+                        include_data=(data_X is not None and data_y is not None),
+                        data_X=data_X,
+                        data_y=data_y,
+                        wavelengths=wavelengths,
+                        target_column=self.refined_config.get('target_name', 'target')
+                    )
+                    generator = CodeGenerator(model_config, options)
+
+                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.py',
+                        filetypes=[('Python Script', '*.py'), ('All files', '*.*')],
+                        initialfile=default_name,
+                        title="Export Python Script"
+                    )
+                    if not filepath:
+                        return
+
                     generator.save_script(filepath)
+                    status_label.config(text=f"Python script saved: {Path(filepath).name}", fg=self.colors['accent'])
 
-                status_label.config(text=f"Saved: {Path(filepath).name}", fg=self.colors['accent'])
+                elif export_format == 'r_embedded':
+                    # R script with embedded data
+                    r_generator = RCodeGenerator(
+                        model_config=model_config,
+                        include_data=(data_X is not None and data_y is not None),
+                        data_X=data_X,
+                        data_y=data_y,
+                        wavelengths=wavelengths
+                    )
 
+                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.R"
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.R',
+                        filetypes=[('R Script', '*.R'), ('All files', '*.*')],
+                        initialfile=default_name,
+                        title="Export R Script"
+                    )
+                    if not filepath:
+                        return
+
+                    r_generator.save_script(filepath)
+                    status_label.config(text=f"R script saved: {Path(filepath).name}", fg=self.colors['accent'])
+
+                elif export_format == 'notebook':
+                    # Basic Jupyter notebook (no embedded data)
+                    options = ExportOptions(
+                        include_visualization=include_viz_var.get(),
+                        include_prediction_template=include_pred_var.get(),
+                        format='notebook',
+                        include_data=False,
+                        target_column=self.refined_config.get('target_name', 'target')
+                    )
+                    generator = CodeGenerator(model_config, options)
+
+                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.ipynb',
+                        filetypes=[('Jupyter Notebook', '*.ipynb'), ('All files', '*.*')],
+                        initialfile=default_name,
+                        title="Export Jupyter Notebook"
+                    )
+                    if not filepath:
+                        return
+
+                    generator.save_notebook(filepath)
+                    status_label.config(text=f"Notebook saved: {Path(filepath).name}", fg=self.colors['accent'])
+
+                else:  # 'script' - Basic Python script (no embedded data)
+                    options = ExportOptions(
+                        include_visualization=include_viz_var.get(),
+                        include_prediction_template=include_pred_var.get(),
+                        format='script',
+                        include_data=False,
+                        target_column=self.refined_config.get('target_name', 'target')
+                    )
+                    generator = CodeGenerator(model_config, options)
+
+                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.py',
+                        filetypes=[('Python Script', '*.py'), ('All files', '*.*')],
+                        initialfile=default_name,
+                        title="Export Python Script"
+                    )
+                    if not filepath:
+                        return
+
+                    generator.save_script(filepath)
+                    status_label.config(text=f"Script saved: {Path(filepath).name}", fg=self.colors['accent'])
+
+            except ValueError as e:
+                # Handle data size limit errors gracefully
+                messagebox.showwarning("Export Warning", str(e))
+                status_label.config(text=f"Warning: {str(e)}", fg='orange')
             except Exception as e:
+                import traceback
+                error_msg = traceback.format_exc()
+                print(f"Export Error: {error_msg}")
                 messagebox.showerror("Export Error", f"Failed to export:\n\n{str(e)}")
                 status_label.config(text=f"Error: {str(e)}", fg='red')
 

@@ -1753,14 +1753,20 @@ The `_on_wavelength_spec_changed` callback at line 23701-23703 already handles c
 ## 🔴 NEW PENDING ITEMS (2026-01-08)
 
 ### 1. Manually Choose Validation Set
-**Status:** NOT IMPLEMENTED
+**Status:** ✅ FIXED (2026-01-16)
 
 **Request:** Allow users to manually select which samples go into the validation set, rather than relying on automatic splitting.
 
-**TODO:**
-- Add UI option to manually specify validation sample IDs
-- Support loading validation samples from separate file
-- Support selecting rows from loaded data as validation
+**Implementation (2026-01-15/16):**
+- Added "Manual" option to validation algorithm selection in Build tab
+- Users select rows in Data Viewer tab, then click "Create Manual Validation Set" button
+- Fixed multi-select support: added `drag_select` and `ctrl_click_select` bindings to tksheet
+- Fixed row disappearance bug: changed `.bg = ""` to `.bg = None` (empty string caused tksheet color parsing crash)
+- Fixed index mapping: now extracts Sample IDs from cell data instead of trusting row indices
+- Added validation state cleanup when samples are deleted from Data Viewer
+
+**Files modified:**
+- `spectral_predict_gui_optimized.py` - UI, bindings, index mapping, background color fix
 
 ---
 
