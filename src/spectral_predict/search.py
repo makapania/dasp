@@ -338,12 +338,12 @@ def compute_validation_metrics_for_top_models(
     Returns
     -------
     pd.DataFrame
-        Results with val_RMSE, val_R2 (or val_Accuracy) columns added
+        Results with RMSEP, Q2 (or val_Accuracy) columns added
     """
     # Initialize columns
     if task_type == 'regression':
-        df_results['val_RMSE'] = np.nan
-        df_results['val_R2'] = np.nan
+        df_results['RMSEP'] = np.nan
+        df_results['Q2'] = np.nan
     else:
         df_results['val_Accuracy'] = np.nan
         df_results['val_ROC_AUC'] = np.nan
@@ -454,13 +454,14 @@ def compute_validation_metrics_for_top_models(
 
             # Predict on validation data
             y_pred = model.predict(X_val_final)
+            y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
 
             # === STEP 5: Calculate metrics ===
             if task_type == 'regression':
-                val_rmse = np.sqrt(mean_squared_error(y_val, y_pred))
-                val_r2 = r2_score(y_val, y_pred)
-                df_results.loc[idx, 'val_RMSE'] = val_rmse
-                df_results.loc[idx, 'val_R2'] = val_r2
+                rmsep = np.sqrt(mean_squared_error(y_val, y_pred))
+                q2 = r2_score(y_val, y_pred)
+                df_results.loc[idx, 'RMSEP'] = rmsep
+                df_results.loc[idx, 'Q2'] = q2
             else:
                 # Accuracy
                 val_acc = accuracy_score(y_val, y_pred)
@@ -562,13 +563,13 @@ def compute_validation_metrics_for_top_models(
     # Reorder columns to place metrics in logical order:
     # Calibration metrics first, then validation metrics
     cols = list(df_results.columns)
-    if task_type == 'regression' and 'val_RMSE' in cols and 'R2' in cols:
-        # Move val_RMSE and val_R2 after R2
-        cols.remove('val_RMSE')
-        cols.remove('val_R2')
+    if task_type == 'regression' and 'RMSEP' in cols and 'R2' in cols:
+        # Move RMSEP and Q2 after R2
+        cols.remove('RMSEP')
+        cols.remove('Q2')
         r2_idx = cols.index('R2')
-        cols.insert(r2_idx + 1, 'val_RMSE')
-        cols.insert(r2_idx + 2, 'val_R2')
+        cols.insert(r2_idx + 1, 'RMSEP')
+        cols.insert(r2_idx + 2, 'Q2')
         df_results = df_results[cols]
     elif task_type == 'classification':
         # Order: Accuracy, ROC_AUC, F1, Precision, Recall (calibration)
@@ -3057,6 +3058,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             y_pred, _ = _manual_transform_predict(X_test)
         else:
             y_pred = pipe_clone.predict(X_test)
+        y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
         return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}
@@ -3065,6 +3067,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             y_pred, _ = _manual_transform_predict(X_test)
         else:
             y_pred = pipe_clone.predict(X_test)
+        y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
         acc = accuracy_score(y_test, y_pred)
 
         # Use is_binary_classification flag (determined from full dataset) for consistent averaging
@@ -3318,12 +3321,15 @@ def _run_single_config(
     # Average metrics
     if task_type == "regression":
         mean_rmse = np.mean([m["RMSE"] for m in cv_metrics])
-        mean_r2 = np.mean([m["R2"] for m in cv_metrics])
 
         # Compute regional performance (quartile-based) for consensus predictions
         # Collect all CV predictions and true values
         all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
         all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+
+        # Compute R² from aggregated predictions (not per-fold averages)
+        # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
+        mean_r2 = r2_score(all_y_test, all_y_pred)
 
         # Compute quartiles based on true values
         quartiles = np.percentile(all_y_test, [25, 50, 75])
@@ -3373,6 +3379,7 @@ def _run_single_config(
 
         # Compute calibration metrics (training data performance)
         y_pred_cal = pipe.predict(X)
+        y_pred_cal = np.ravel(y_pred_cal)  # Ensure 1D for metrics
 
         if task_type == "regression":
             cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))

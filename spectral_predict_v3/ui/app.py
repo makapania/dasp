@@ -7199,9 +7199,9 @@ class SpectralPredictApp:
 
             # Calculate metrics
             if is_regression:
-                val_rmse = np.sqrt(mean_squared_error(y_val, y_pred))
-                val_r2 = r2_score(y_val, y_pred)
-                metrics_text = f"Validation RMSE: {val_rmse:.4f} | R2: {val_r2:.3f}"
+                rmsep = np.sqrt(mean_squared_error(y_val, y_pred))
+                q2 = r2_score(y_val, y_pred)
+                metrics_text = f"RMSEP: {rmsep:.4f} | Q²: {q2:.3f}"
             else:
                 val_acc = accuracy_score(y_val, y_pred)
                 metrics_text = f"Validation Accuracy: {val_acc:.3f}"
@@ -7508,11 +7508,11 @@ class SpectralPredictApp:
             task_type = self._current_dataset.metadata.get('target_type', 'regression') if self._current_dataset else 'regression'
 
             if task_type == 'regression':
-                val_rmse = np.sqrt(mean_squared_error(y_val, y_pred))
-                val_r2 = r2_score(y_val, y_pred)
+                rmsep = np.sqrt(mean_squared_error(y_val, y_pred))
+                q2 = r2_score(y_val, y_pred)
                 dpg.set_value(
                     "ensemble_status_text",
-                    f"Validation: RMSE={val_rmse:.4f}, R²={val_r2:.3f} ({len(y_val)} samples)"
+                    f"Validation: RMSEP={rmsep:.4f}, Q²={q2:.3f} ({len(y_val)} samples)"
                 )
             else:
                 from sklearn.metrics import accuracy_score
