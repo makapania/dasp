@@ -8,9 +8,10 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
-    f1_score, precision_score, recall_score
+    f1_score, precision_score, recall_score, classification_report
 )
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.base import clone
 from joblib import Parallel, delayed
 
@@ -50,6 +51,10 @@ TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
 
 # Neural-boosted hybrid model (single specialized model)
 NEURALBOOSTED_MODELS = {'NeuralBoosted'}
+
+# Scale-sensitive models: These use gradient descent or kernel methods
+# that are sensitive to feature scale and benefit from StandardScaler
+SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
 
 # Backward compatibility: LINEAR_MODELS is union of PLS + Neural/SVM
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
@@ -291,9 +296,20 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str):
         from sklearn.linear_model import LogisticRegression
         pls_lr_pipeline = Pipeline([
             ('pls', model),
+            ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
             ('lr', LogisticRegression(max_iter=1000, random_state=42))
         ])
         return pls_lr_pipeline
+
+    # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
+    # These use gradient descent or kernel methods that are sensitive to feature scale
+    if model_name in SCALE_SENSITIVE_MODELS:
+        from sklearn.pipeline import Pipeline
+        scaled_pipeline = Pipeline([
+            ('scaler', StandardScaler()),
+            ('model', model)
+        ])
+        return scaled_pipeline
 
     return model
 
@@ -799,7 +815,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga']
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # Warn about unimplemented methods
@@ -3176,6 +3192,23 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         else:
             y_pred = pipe_clone.predict(X_test)
         y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
+
+        # PLS-DA Debug logging - diagnose all-same-class predictions
+        if hasattr(pipe_clone, 'named_steps') and 'pls' in pipe_clone.named_steps:
+            pls = pipe_clone.named_steps['pls']
+            lr = pipe_clone.named_steps['lr']
+            X_scores_test = pls.transform(X_test)
+            y_train_int = y_train.astype(int) if hasattr(y_train, 'astype') else np.array(y_train).astype(int)
+            print(f"[PLS-DA DEBUG]")
+            print(f"  y_train unique: {np.unique(y_train)}, counts: {np.bincount(y_train_int)}")
+            print(f"  PLS scores shape: {X_scores_test.shape}")
+            print(f"  PLS scores mean per sample (first 5): {X_scores_test.mean(axis=1)[:5]}")
+            print(f"  PLS scores std: {X_scores_test.std():.6f}")
+            print(f"  LR classes_: {lr.classes_}")
+            print(f"  LR coef_ sum: {np.abs(lr.coef_).sum():.6f}")
+            print(f"  LR intercept_: {lr.intercept_}")
+            print(f"  y_pred unique: {np.unique(y_pred)}, counts: {np.bincount(y_pred.astype(int))}")
+
         acc = accuracy_score(y_test, y_pred)
 
         # Use is_binary_classification flag (determined from full dataset) for consistent averaging
@@ -3222,7 +3255,8 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             except Exception:
                 auc = np.nan
 
-        return {"Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall}
+        return {"Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall,
+                "y_test": y_test, "y_pred": y_pred}
 
 
 def _run_single_config(
@@ -3375,14 +3409,21 @@ def _run_single_config(
                         UserWarning
                     )
 
-    # For PLS-DA, we need PLS + LogisticRegression
+    # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
+    # StandardScaler normalizes PLS scores to fix numerical instability with derivatives
     if model_name == "PLS-DA":
         pipe_steps.append(("pls", model))
+        pipe_steps.append(("scaler", StandardScaler()))  # Scale PLS scores for LogisticRegression
         # Apply class_weight to LogisticRegression if requested
         if imbalance_method == 'class_weight' and task_type == 'classification':
             pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=random_state, class_weight='balanced')))
         else:
             pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=random_state)))
+    # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler before model
+    # These use gradient descent or kernel methods that are sensitive to feature scale
+    elif model_name in SCALE_SENSITIVE_MODELS:
+        pipe_steps.append(("scaler", StandardScaler()))
+        pipe_steps.append(("model", model))
     else:
         pipe_steps.append(("model", model))
 
@@ -3466,6 +3507,32 @@ def _run_single_config(
         mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
         mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
         regional_rmse = None  # Not applicable for classification
+
+        # Collect all CV predictions and true values (same as regression)
+        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+
+        # Compute per-class metrics for classification (analogous to regional RMSE for regression)
+        per_class_metrics = {}
+        class_labels = None
+        try:
+            # Get per-class metrics from aggregated CV predictions
+            report = classification_report(all_y_test, all_y_pred, output_dict=True, zero_division=0)
+            class_labels = sorted([k for k in report.keys()
+                                   if k not in ['accuracy', 'macro avg', 'weighted avg']])
+            for class_label in class_labels:
+                class_key = str(class_label)
+                if class_key in report:
+                    per_class_metrics[class_key] = {
+                        'F1': report[class_key]['f1-score'],
+                        'Precision': report[class_key]['precision'],
+                        'Recall': report[class_key]['recall'],
+                        'Support': int(report[class_key]['support'])
+                    }
+        except Exception as e:
+            print(f"Warning: Could not compute per-class metrics: {e}")
+            per_class_metrics = {}
+            class_labels = None
 
     # Capture complete parameters for ALL models (not just those with feature importance)
     # This fixes R² reproducibility issue for Ridge, Lasso, ElasticNet, PLS, etc.
@@ -3660,6 +3727,13 @@ def _run_single_config(
         result["F1cv"] = mean_f1
         result["Precisioncv"] = mean_precision
         result["Recallcv"] = mean_recall
+        # Per-class metrics for regional analysis (analogous to regional_rmse for regression)
+        result["per_class_metrics"] = per_class_metrics if per_class_metrics else None
+        result["class_labels"] = class_labels
+        # Add individual class F1 columns for display/sorting (like RMSE_Q1 for regression)
+        if per_class_metrics:
+            for class_label, metrics in per_class_metrics.items():
+                result[f'F1_Class{class_label}'] = metrics['F1']
 
     # Save all_vars for ALL models (including full spectrum)
     # This ensures Model Development can reconstruct the exact wavelengths used

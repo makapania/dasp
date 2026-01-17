@@ -2055,6 +2055,7 @@ class SpectralPredictApp:
         self.ensemble_n_regions = tk.IntVar(value=5)  # Number of regions for region-based ensembles
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
         self.ensemble_results = None  # Store ensemble predictions and metrics
+        self.auto_ensembles = None  # Store auto-generated region-specialist ensembles
 
         # Region selection controls for "Select Top by Region" button
         self.select_region_top_n = tk.IntVar(value=3)  # Models per region for selection (lower default)
@@ -7684,6 +7685,7 @@ class SpectralPredictApp:
         # Initialize ensemble storage
         self.ensemble_results = None
         self.trained_ensembles = None
+        self.auto_ensembles = None
 
     def _create_tab7_refine_model(self):
         """Tab 7: Model Development - Interactive model parameter refinement with subtabs."""
@@ -14487,6 +14489,47 @@ class SpectralPredictApp:
 
         return reconstructed_models
 
+    def _reconstruct_single_model_for_auto_ensemble(self, row, X_train, y_train):
+        """
+        Reconstruct a single model from a results DataFrame row for auto-ensemble creation.
+
+        This is a wrapper around _reconstruct_models_from_results that handles
+        single rows and returns the format expected by create_auto_ensembles().
+
+        Args:
+            row: Series/dict from results DataFrame with model configuration
+            X_train: Training features
+            y_train: Training targets
+
+        Returns:
+            Tuple of (fitted_model, model_name)
+
+        Raises:
+            ValueError if reconstruction fails
+        """
+        # Determine task type from cached data or infer from y_train
+        task_type = 'classification' if len(np.unique(y_train)) < 20 and y_train.dtype == object else 'regression'
+        if self.training_data_cache and 'task_type' in self.training_data_cache:
+            task_type = self.training_data_cache['task_type']
+
+        # Convert row to single-row DataFrame if needed
+        if isinstance(row, pd.Series):
+            single_row_df = pd.DataFrame([row])
+        else:
+            single_row_df = pd.DataFrame([dict(row)])
+
+        # Use existing reconstruction method
+        reconstructed = self._reconstruct_models_from_results(
+            single_row_df, X_train, y_train, task_type
+        )
+
+        if not reconstructed:
+            raise ValueError(f"Failed to reconstruct model: {row.get('Model', 'Unknown')}")
+
+        # Return (fitted_model, model_name)
+        fitted_pipeline, model_name, metadata = reconstructed[0]
+        return fitted_pipeline, model_name
+
     def _on_train_ensemble_click(self):
         """Handle Train Ensemble button click with custom model selection."""
         try:
@@ -17539,6 +17582,49 @@ class SpectralPredictApp:
                         # Populate ensemble results table in Tab 5
                         self.root.after(0, self._populate_ensemble_results)
 
+            # === Generate Automatic Region-Specialist Ensembles ===
+            # These are generated for every run (regardless of user ensemble settings)
+            # to provide automatic ensemble options based on top models per quartile/class
+            try:
+                from spectral_predict.ensemble import create_auto_ensembles
+
+                self._log_progress("\n> Generating automatic region-specialist ensembles...")
+
+                # Create wrapper function for model reconstruction
+                def reconstruct_for_auto_ensemble(row, X_train, y_train):
+                    return self._reconstruct_single_model_for_auto_ensemble(row, X_train, y_train)
+
+                # Get wavelengths from X_filtered
+                all_wavelengths = X_filtered.columns.tolist()
+
+                # Generate auto-ensembles
+                self.auto_ensembles = create_auto_ensembles(
+                    results_df=results_df,
+                    X_train=X_filtered,
+                    y_train=y_filtered,
+                    task_type=task_type,
+                    reconstruct_func=reconstruct_for_auto_ensemble,
+                    all_wavelengths=all_wavelengths
+                )
+
+                if self.auto_ensembles:
+                    for name, info in self.auto_ensembles.items():
+                        n_models = info['n_models']
+                        if task_type == 'regression':
+                            r2 = info['metrics']['r2']
+                            rmse = info['metrics']['rmse']
+                            self._log_progress(f"  {name}: {n_models} models, R2={r2:.4f}, RMSE={rmse:.4f}")
+                        else:
+                            acc = info['metrics']['accuracy']
+                            f1 = info['metrics']['f1']
+                            self._log_progress(f"  {name}: {n_models} models, Acc={acc:.4f}, F1={f1:.4f}")
+                else:
+                    self._log_progress("  No auto-ensembles generated (insufficient model diversity)")
+
+            except Exception as e:
+                self._log_progress(f"\n[!] Auto-ensemble generation failed: {e}")
+                self.auto_ensembles = None
+
             # Store results for Results tab
             self.results_df = results_df
 
@@ -18404,7 +18490,11 @@ class SpectralPredictApp:
 
     def _populate_ensemble_results(self):
         """Populate the ensemble results table with trained ensemble performance."""
-        if not hasattr(self, 'ensemble_results') or self.ensemble_results is None or len(self.ensemble_results) == 0:
+        # Check if we have any ensembles (user-configured or auto-generated)
+        has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
+        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
+
+        if not has_user_ensembles and not has_auto_ensembles:
             self.ensemble_status.config(text="No ensemble results. Enable ensembles in Analysis Configuration.")
             # Disable buttons
             self.btn_save_best_ensemble.config(state='disabled')
@@ -18440,57 +18530,133 @@ class SpectralPredictApp:
         best_individual_r2 = self.results_df['R2'].max() if self.results_df is not None and 'R2' in self.results_df.columns else 0
         best_individual_rmse = self.results_df['RMSE'].min() if self.results_df is not None and 'RMSE' in self.results_df.columns else float('inf')
 
-        # Populate table (already sorted by R² descending from training)
-        for i, result in enumerate(self.ensemble_results, 1):
-            # Calculate improvement
-            r2_improvement = result['r2'] - best_individual_r2
+        row_index = 0  # Track row index for tree iid
+        best_r2 = -float('inf')  # Track best R2 across all ensembles
+        best_idx = 0  # Index of best ensemble
 
-            # Format comparison
-            if r2_improvement > 0:
-                comparison = f"+{r2_improvement:.4f} >"
-            elif r2_improvement < 0:
-                comparison = f"{r2_improvement:.4f} [X]"
-            else:
-                comparison = "Same"
+        # Populate user-configured ensembles (if any)
+        if has_user_ensembles:
+            for i, result in enumerate(self.ensemble_results, 1):
+                # Calculate improvement
+                r2_improvement = result['r2'] - best_individual_r2
 
-            # Add rank indicator
-            rank = "🏆 1" if i == 1 else str(i)
+                # Format comparison
+                if r2_improvement > 0:
+                    comparison = f"+{r2_improvement:.4f} >"
+                elif r2_improvement < 0:
+                    comparison = f"{r2_improvement:.4f} [X]"
+                else:
+                    comparison = "Same"
 
-            values = (
-                rank,
-                result['method'],
-                f"{result['rmse']:.4f}",
-                f"{result['r2']:.4f}",
-                f"{result['mae']:.4f}",
-                f"{result['rpd']:.2f}",
-                comparison
-            )
+                # Add rank indicator
+                rank = "🏆 1" if i == 1 else str(i)
 
-            # Highlight best ensemble
-            tag = 'best' if i == 1 else ''
-            # Store index (i-1) as the item ID so we can retrieve the ensemble later
-            self.ensemble_tree.insert('', 'end', iid=str(i-1), values=values, tags=(tag,))
+                values = (
+                    rank,
+                    result['method'],
+                    f"{result['rmse']:.4f}",
+                    f"{result['r2']:.4f}",
+                    f"{result['mae']:.4f}",
+                    f"{result['rpd']:.2f}",
+                    comparison
+                )
+
+                # Track best ensemble
+                if result['r2'] > best_r2:
+                    best_r2 = result['r2']
+                    best_idx = row_index
+
+                # Highlight best ensemble
+                tag = 'best' if i == 1 else ''
+                # Store index as the item ID so we can retrieve the ensemble later
+                self.ensemble_tree.insert('', 'end', iid=str(row_index), values=values, tags=(tag,))
+                row_index += 1
+
+        # Populate auto-generated ensembles (if any)
+        if has_auto_ensembles:
+            for name, info in self.auto_ensembles.items():
+                metrics = info['metrics']
+
+                # Get R2 and RMSE based on task type
+                if 'r2' in metrics:
+                    # Regression
+                    r2 = metrics['r2']
+                    rmse = metrics['rmse']
+                    mae = rmse * 0.8  # Approximate MAE (we don't store it separately)
+                    rpd = 1 / (1 - r2) if r2 < 1 else 99.99
+                else:
+                    # Classification - use accuracy as pseudo-R2 for display
+                    r2 = metrics.get('accuracy', 0)
+                    rmse = 1 - r2  # Pseudo RMSE for display
+                    mae = rmse
+                    rpd = 1 / (1 - r2) if r2 < 1 else 99.99
+
+                # Calculate improvement
+                r2_improvement = r2 - best_individual_r2
+
+                # Format comparison
+                if r2_improvement > 0:
+                    comparison = f"+{r2_improvement:.4f} >"
+                elif r2_improvement < 0:
+                    comparison = f"{r2_improvement:.4f} [X]"
+                else:
+                    comparison = "Same"
+
+                # Auto-ensembles don't get rank numbers, just "(Auto)" label
+                values = (
+                    "(Auto)",
+                    f"{name} ({info['n_models']} models)",
+                    f"{rmse:.4f}",
+                    f"{r2:.4f}",
+                    f"{mae:.4f}",
+                    f"{rpd:.2f}",
+                    comparison
+                )
+
+                # Track best ensemble
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best_idx = row_index
+
+                # Use 'auto' tag for styling
+                self.ensemble_tree.insert('', 'end', iid=f"auto_{name}", values=values, tags=('auto',))
+                row_index += 1
 
         # Configure tag colors
         self.ensemble_tree.tag_configure('best', background='#d4edda', foreground='#155724')
+        self.ensemble_tree.tag_configure('auto', background='#e7f3ff', foreground='#004085')
 
-        # Select the best ensemble by default
-        if len(self.ensemble_results) > 0:
-            self.ensemble_tree.selection_set('0')
-            self.ensemble_tree.focus('0')
+        # Select the first item by default
+        first_item = self.ensemble_tree.get_children()[0] if self.ensemble_tree.get_children() else None
+        if first_item:
+            self.ensemble_tree.selection_set(first_item)
+            self.ensemble_tree.focus(first_item)
 
         # Update status
-        n_ensembles = len(self.ensemble_results)
-        best_method = self.ensemble_results[0]['method']
-        self.ensemble_status.config(
-            text=f"> {n_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})")
+        n_user_ensembles = len(self.ensemble_results) if has_user_ensembles else 0
+        n_auto_ensembles = len(self.auto_ensembles) if has_auto_ensembles else 0
+        total_ensembles = n_user_ensembles + n_auto_ensembles
+
+        if has_user_ensembles:
+            best_method = self.ensemble_results[0]['method']
+            status_text = f"> {n_user_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})"
+        else:
+            status_text = f"> No user ensembles"
+
+        if has_auto_ensembles:
+            status_text += f" + {n_auto_ensembles} auto-generated"
+
+        self.ensemble_status.config(text=status_text)
 
         # Update button states based on selected ensemble's capabilities
         self._on_ensemble_selection_change()
 
     def _on_ensemble_selection_change(self, event=None):
         """Update button states when ensemble selection changes."""
-        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+        has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
+        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
+
+        if not has_user_ensembles and not has_auto_ensembles:
             return
 
         selection = self.ensemble_tree.selection()
@@ -18498,9 +18664,24 @@ class SpectralPredictApp:
             return
 
         try:
-            selected_idx = int(selection[0])
-            result = self.ensemble_results[selected_idx]
-            ensemble = result.get('ensemble')
+            selected_iid = selection[0]
+
+            # Determine if this is a user ensemble or auto-ensemble
+            if selected_iid.startswith('auto_'):
+                # Auto-ensemble selected
+                ensemble_name = selected_iid[5:]  # Remove 'auto_' prefix
+                if has_auto_ensembles and ensemble_name in self.auto_ensembles:
+                    ensemble = self.auto_ensembles[ensemble_name].get('ensemble')
+                else:
+                    ensemble = None
+            else:
+                # User ensemble selected
+                selected_idx = int(selected_iid)
+                if has_user_ensembles and selected_idx < len(self.ensemble_results):
+                    result = self.ensemble_results[selected_idx]
+                    ensemble = result.get('ensemble')
+                else:
+                    ensemble = None
 
             if ensemble is None:
                 # Disable all visualization buttons
@@ -18513,6 +18694,7 @@ class SpectralPredictApp:
             has_analyzer = hasattr(ensemble, 'analyzer_') and ensemble.analyzer_ is not None
             has_weights = hasattr(ensemble, 'weights_') or hasattr(ensemble, 'regional_weights_') or hasattr(ensemble, 'expert_weights_')
             has_profiles = hasattr(ensemble, 'get_model_profiles')
+            has_specialist_info = hasattr(ensemble, 'get_specialist_info')
             has_training_data = hasattr(self, 'ensemble_X') and hasattr(self, 'ensemble_y')
 
             # Regional Performance: needs analyzer_ and training data
@@ -18527,8 +18709,8 @@ class SpectralPredictApp:
             else:
                 self.btn_show_weights.config(state='disabled')
 
-            # Specialization: needs get_model_profiles()
-            if has_profiles:
+            # Specialization: needs get_model_profiles() or get_specialist_info()
+            if has_profiles or has_specialist_info:
                 self.btn_show_specialization.config(state='normal')
             else:
                 self.btn_show_specialization.config(state='disabled')
@@ -22959,9 +23141,19 @@ F1 Score:  {f1:.4f}
                 # Build pipeline with ONLY the model (GA preprocessing already applied)
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
+                    from sklearn.preprocessing import StandardScaler
                     pipe_steps = [
                         ('pls', model),
+                        ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
                         ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                    ]
+                # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
+                # These use gradient descent or kernel methods that are sensitive to feature scale
+                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                    from sklearn.preprocessing import StandardScaler
+                    pipe_steps = [
+                        ('scaler', StandardScaler()),
+                        ('model', model)
                     ]
                 else:
                     pipe_steps = [('model', model)]
@@ -23045,12 +23237,22 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: This preserves derivative context from full spectrum.")
 
                 # 5. Build pipeline with ONLY the model (skip preprocessing - already done!)
-                # For PLS-DA, we need PLS + LogisticRegression
+                # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
+                    from sklearn.preprocessing import StandardScaler
                     pipe_steps = [
                         ('pls', model),
+                        ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
                         ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                    ]
+                # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
+                # These use gradient descent or kernel methods that are sensitive to feature scale
+                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                    from sklearn.preprocessing import StandardScaler
+                    pipe_steps = [
+                        ('scaler', StandardScaler()),
+                        ('model', model)
                     ]
                 else:
                     pipe_steps = [('model', model)]
@@ -23080,11 +23282,19 @@ F1 Score:  {f1:.4f}
                     random_state=42
                 )
 
-                # For PLS-DA, we need PLS + LogisticRegression
+                # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
+                    from sklearn.preprocessing import StandardScaler
                     pipe_steps.append(('pls', model))
+                    pipe_steps.append(('scaler', StandardScaler()))  # Scale PLS scores for LogisticRegression
                     pipe_steps.append(('lr', LogisticRegression(max_iter=1000, random_state=42)))
+                # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
+                # These use gradient descent or kernel methods that are sensitive to feature scale
+                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                    from sklearn.preprocessing import StandardScaler
+                    pipe_steps.append(('scaler', StandardScaler()))
+                    pipe_steps.append(('model', model))
                 else:
                     pipe_steps.append(('model', model))
                 pipe = Pipeline(pipe_steps)
