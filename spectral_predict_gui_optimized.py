@@ -1410,6 +1410,9 @@ class SpectralPredictApp:
         self.show_validation_metrics = tk.BooleanVar(value=True)  # Show val metrics in results
         self.validation_top_n = tk.IntVar(value=100)  # Number of top models for validation
 
+        # Result display options
+        self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors
+
         # Tier selection
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
@@ -2052,6 +2055,10 @@ class SpectralPredictApp:
         self.ensemble_n_regions = tk.IntVar(value=5)  # Number of regions for region-based ensembles
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
         self.ensemble_results = None  # Store ensemble predictions and metrics
+
+        # Region selection controls for "Select Top by Region" button
+        self.select_region_top_n = tk.IntVar(value=3)  # Models per region for selection (lower default)
+        self.select_region_filter = tk.StringVar(value="All")  # "All", "Q1", "Q2", etc. or "C0", "C1", etc.
         self.training_data_cache = None  # Cache for manual ensemble retraining
 
         # Search control (pause/resume/stop)
@@ -7557,9 +7564,29 @@ class SpectralPredictApp:
                                                         command=self._export_results_table, style='secondary')
         export_btn.pack(side='left', padx=5)
 
+        # Frame for "Select Top by Region" button and its controls
+        select_controls_frame = ttk.Frame(button_frame)
+        select_controls_frame.pack(side='left', padx=5)
+
+        # Models per region spinbox
+        ttk.Label(select_controls_frame, text="Top:").pack(side='left')
+        self.select_region_spinbox = ttk.Spinbox(
+            select_controls_frame, from_=1, to=15, width=3,
+            textvariable=self.select_region_top_n
+        )
+        self.select_region_spinbox.pack(side='left', padx=(2, 8))
+
+        # Region/Class filter combobox
+        ttk.Label(select_controls_frame, text="From:").pack(side='left')
+        self.select_region_combo = ttk.Combobox(
+            select_controls_frame, textvariable=self.select_region_filter,
+            values=["All"], width=6, state='readonly'
+        )
+        self.select_region_combo.pack(side='left', padx=(2, 5))
+
         # Button to auto-select top models by region (for ensemble selection)
         self.btn_select_by_region = self._create_button_with_gradient(
-            button_frame, text="Select Top by Region",
+            select_controls_frame, text="Select Top by Region",
             command=self._auto_select_top_by_region, style='secondary')
         self.btn_select_by_region.pack(side='left', padx=5)
         self.btn_select_by_region.config(state='disabled')  # Enable when results are loaded
@@ -17828,17 +17855,17 @@ class SpectralPredictApp:
                         for idx in results_df.index:
                             if idx in self._class_rankings.get('best_class', {}):
                                 best_c, rank, other_count = self._class_rankings['best_class'][idx]
-                                # Find all classes where this model is in top N
+                                # Find all classes where this model is in top N (store as (class_name, rank) tuples)
                                 all_top_classes = []
                                 for c in class_labels:
                                     for (row_idx, f1, rk) in self._class_rankings['rankings'].get(c, []):
                                         if row_idx == idx and rk <= top_n:
-                                            all_top_classes.append(f"C{c}")
+                                            all_top_classes.append((f"C{c}", rk))
                                             break
-                                # Format: best class with rank, then others
+                                # Format: best class with rank first, then others with their ranks
                                 if len(all_top_classes) > 1:
-                                    other_classes = [c for c in all_top_classes if c != f"C{best_c}"]
-                                    best_classes.append(f"C{best_c} (#{rank}), {', '.join(other_classes)}")
+                                    other_class_strs = [f"{cls} (#{rk})" for cls, rk in all_top_classes if cls != f"C{best_c}"]
+                                    best_classes.append(f"C{best_c} (#{rank}), {', '.join(other_class_strs)}")
                                 else:
                                     best_classes.append(f"C{best_c} (#{rank})")
                             else:
@@ -17863,17 +17890,17 @@ class SpectralPredictApp:
                     for idx in results_df.index:
                         if self._regional_rankings and idx in self._regional_rankings['best_region']:
                             region, rank, other_count = self._regional_rankings['best_region'][idx]
-                            # Find all regions where this model is in top N
+                            # Find all regions where this model is in top N (store as (region, rank) tuples)
                             all_top_regions = []
                             for r in ['Q1', 'Q2', 'Q3', 'Q4']:
                                 for (row_idx, rmse, rk) in self._regional_rankings['rankings'][r]:
                                     if row_idx == idx and rk <= top_n:
-                                        all_top_regions.append(r)
+                                        all_top_regions.append((r, rk))
                                         break
-                            # Format: best region with rank, then others
+                            # Format: best region with rank first, then others with their ranks
                             if len(all_top_regions) > 1:
-                                other_regions = [r for r in all_top_regions if r != region]
-                                best_regions.append(f"{region} (#{rank}), {', '.join(other_regions)}")
+                                other_region_strs = [f"{r} (#{rk})" for r, rk in all_top_regions if r != region]
+                                best_regions.append(f"{region} (#{rank}), {', '.join(other_region_strs)}")
                             else:
                                 best_regions.append(f"{region} (#{rank})")
                         else:
@@ -17938,24 +17965,8 @@ class SpectralPredictApp:
 
             # Determine tag for highlighting based on best region (regression) or best class (classification)
             tag = ()
-            if hasattr(self, '_class_rankings') and self._class_rankings:
-                # Classification: highlight by best class
-                if idx in self._class_rankings.get('best_class', {}):
-                    best_c, rank, _ = self._class_rankings['best_class'][idx]
-                    # Map class label to index for tag color
-                    class_labels = self._class_rankings.get('class_labels', [])
-                    try:
-                        class_idx = class_labels.index(str(best_c))
-                        tag_name = f"top_class{class_idx}"  # e.g., "top_class0"
-                        tag = (tag_name,)
-                    except (ValueError, IndexError):
-                        pass
-            elif hasattr(self, '_regional_rankings') and self._regional_rankings:
-                # Regression: highlight by best region (quartile)
-                if idx in self._regional_rankings.get('best_region', {}):
-                    region, rank, _ = self._regional_rankings['best_region'][idx]
-                    tag_name = f"top_{region.lower()}"  # e.g., "top_q1"
-                    tag = (tag_name,)
+            if hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get():
+                tag = self._get_highlight_tag_for_row(idx)
 
             self.results_tree.insert('', 'end', iid=str(idx), values=values, tags=tag)
 
@@ -17988,6 +17999,7 @@ class SpectralPredictApp:
             )
             if has_rankings:
                 self.btn_select_by_region.config(state='normal')
+                self._update_region_filter_options()
             else:
                 self.btn_select_by_region.config(state='disabled')
 
@@ -18044,6 +18056,15 @@ class SpectralPredictApp:
         legend_label.pack(side='left', padx=5)
         self._legend_header = legend_label
 
+        # Add Color toggle checkbox
+        color_checkbox = ttk.Checkbutton(
+            self.region_legend_frame,
+            text="Color",
+            variable=self.highlight_colors_enabled,
+            command=self._on_color_toggle_changed
+        )
+        color_checkbox.pack(side='left', padx=(0, 10))
+
         # Color swatches for quartiles
         colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
         for color, label in colors:
@@ -18074,6 +18095,15 @@ class SpectralPredictApp:
         legend_label = ttk.Label(self.region_legend_frame, text="Class Legend:", font=('Segoe UI', 9, 'bold'))
         legend_label.pack(side='left', padx=5)
 
+        # Add Color toggle checkbox
+        color_checkbox = ttk.Checkbutton(
+            self.region_legend_frame,
+            text="Color",
+            variable=self.highlight_colors_enabled,
+            command=self._on_color_toggle_changed
+        )
+        color_checkbox.pack(side='left', padx=(0, 10))
+
         # Get class labels
         class_labels = self._class_rankings.get('class_labels', []) if self._class_rankings else []
         if not class_labels:
@@ -18095,34 +18125,160 @@ class SpectralPredictApp:
             swatch_label = ttk.Label(swatch_frame, text=f"Class {class_label}", font=('Segoe UI', 8))
             swatch_label.pack(side='left', padx=2)
 
+        # Add class values description label (maps C0, C1, etc. to original Y values)
+        # Use label_encoder to get original text labels if available
+        encoder = getattr(self, 'label_encoder', None)
+        if encoder is not None and hasattr(encoder, 'classes_'):
+            # Map encoded values back to original labels
+            class_value_parts = []
+            for i, encoded_label in enumerate(class_labels):
+                try:
+                    # encoded_label is the numeric class (0, 1, 2...)
+                    # encoder.classes_[encoded_label] gives original text
+                    original_name = encoder.classes_[int(encoded_label)]
+                    class_value_parts.append(f"C{encoded_label}={original_name}")
+                except (IndexError, ValueError):
+                    class_value_parts.append(f"C{i}={encoded_label}")
+        else:
+            # No encoder - just show class labels as-is
+            class_value_parts = [f"C{i}={label}" for i, label in enumerate(class_labels)]
+
+        if class_value_parts:
+            values_text = "Values: " + ", ".join(class_value_parts)
+            values_label = ttk.Label(self.region_legend_frame, text=values_text,
+                                    font=('Segoe UI', 8), foreground='#666')
+            values_label.pack(side='left', padx=10)
+
+    def _on_color_toggle_changed(self):
+        """Handle color toggle - refresh row highlighting without re-running analysis."""
+        if self.results_df is None:
+            return
+
+        for row_id in self.results_tree.get_children():
+            idx = int(row_id)
+            if self.highlight_colors_enabled.get():
+                # Re-apply appropriate tag based on rankings
+                tag = self._get_highlight_tag_for_row(idx)
+                self.results_tree.item(row_id, tags=tag)
+            else:
+                # Remove all tags
+                self.results_tree.item(row_id, tags=())
+
+    def _get_highlight_tag_for_row(self, idx: int) -> tuple:
+        """Get the appropriate highlight tag for a row based on rankings.
+
+        Args:
+            idx: Row index in results_df
+
+        Returns:
+            Tuple with tag name or empty tuple if no highlight
+        """
+        # Check classification rankings first
+        if hasattr(self, '_class_rankings') and self._class_rankings:
+            if idx in self._class_rankings.get('best_class', {}):
+                best_c, rank, _ = self._class_rankings['best_class'][idx]
+                class_labels = self._class_rankings.get('class_labels', [])
+                try:
+                    class_idx = class_labels.index(str(best_c))
+                    return (f"top_class{class_idx}",)
+                except (ValueError, IndexError):
+                    pass
+        # Check regression rankings
+        elif hasattr(self, '_regional_rankings') and self._regional_rankings:
+            if idx in self._regional_rankings.get('best_region', {}):
+                region, rank, _ = self._regional_rankings['best_region'][idx]
+                return (f"top_{region.lower()}",)
+        return ()
+
+    def _update_region_filter_options(self):
+        """Update the region/class filter combobox options based on task type.
+
+        For regression: ["All", "Q1", "Q2", "Q3", "Q4"]
+        For classification: ["All", "C0", "C1", ...] based on class labels
+        """
+        if not hasattr(self, 'select_region_combo'):
+            return
+
+        # Determine task type and set appropriate options
+        if hasattr(self, '_class_rankings') and self._class_rankings and self._class_rankings.get('class_labels'):
+            # Classification: use class labels
+            class_labels = self._class_rankings['class_labels']
+            options = ["All"] + [f"C{c}" for c in class_labels]
+        elif hasattr(self, '_regional_rankings') and self._regional_rankings:
+            # Regression: use quartile regions
+            options = ["All", "Q1", "Q2", "Q3", "Q4"]
+        else:
+            # No ranking data available
+            options = ["All"]
+
+        # Update combobox values
+        self.select_region_combo['values'] = options
+
+        # Reset to "All" if current selection is no longer valid
+        current_value = self.select_region_filter.get()
+        if current_value not in options:
+            self.select_region_filter.set("All")
+
     def _auto_select_top_by_region(self):
         """Auto-select top N models from each Y-value region (quartile) or class.
 
         This helps users build diverse ensembles by selecting models that
         excel in different ranges of the target variable (regression) or
         different classes (classification).
+
+        Uses self.select_region_top_n for how many models per region/class.
+        Uses self.select_region_filter to filter to specific region/class or "All".
         """
         if self.results_df is None:
             return
+
+        # Get user-specified parameters
+        top_n = self.select_region_top_n.get() if hasattr(self, 'select_region_top_n') else 3
+        region_filter = self.select_region_filter.get() if hasattr(self, 'select_region_filter') else "All"
 
         # Check for classification rankings first, then regression
         is_classification = hasattr(self, '_class_rankings') and self._class_rankings
         is_regression = hasattr(self, '_regional_rankings') and self._regional_rankings
 
         if is_classification:
-            top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
-            top_models = self._class_rankings.get('top_models', set())
+            class_labels = self._class_rankings.get('class_labels', [])
 
-            if not top_models:
+            # Determine which classes to include based on filter
+            if region_filter == "All":
+                target_classes = class_labels
+            else:
+                # Filter is like "C0", "C1", etc. - extract the class label
+                class_str = region_filter[1:]  # Remove "C" prefix
+                # Try to match against class labels (could be int or str)
+                target_classes = []
+                for c in class_labels:
+                    if str(c) == class_str:
+                        target_classes.append(c)
+                        break
+                if not target_classes:
+                    messagebox.showwarning("Invalid Filter",
+                                          f"Class '{region_filter}' not found in rankings.")
+                    return
+
+            # Build set of models to select (top N from each target class)
+            models_to_select = set()
+            class_info = []
+            for class_label in target_classes:
+                class_rankings = self._class_rankings['rankings'].get(class_label, [])
+                class_top = [idx for idx, f1, rank in class_rankings if rank <= top_n]
+                models_to_select.update(class_top)
+                class_info.append(f"Class {class_label}: {len(class_top)} models")
+
+            if not models_to_select:
                 messagebox.showinfo("No Top Models",
-                                  "No models were found in the top rankings.\n"
-                                  "Try running analysis with more models.")
+                                  f"No models were found in the top {top_n} rankings for selected class(es).\n"
+                                  "Try increasing 'Top' or running analysis with more models.")
                 return
 
-            # Select all models in top N of any class
+            # Select the models
             selected_count = 0
             for idx in self.results_df.index:
-                if idx in top_models:
+                if idx in models_to_select:
                     self.results_df.loc[idx, 'Select'] = True
                     selected_count += 1
                 else:
@@ -18132,31 +18288,44 @@ class SpectralPredictApp:
             self._populate_results_table(self.results_df, is_sorted=True)
 
             # Show summary
-            class_labels = self._class_rankings.get('class_labels', [])
-            class_info = []
-            for class_label in class_labels:
-                class_top = [idx for idx, f1, rank in self._class_rankings['rankings'].get(class_label, []) if rank <= top_n]
-                class_info.append(f"Class {class_label}: {len(class_top)} models")
-
+            filter_desc = "any class" if region_filter == "All" else region_filter
             messagebox.showinfo("Class Selection Complete",
-                              f"Selected {selected_count} unique models in top {top_n} of any class.\n\n"
+                              f"Selected {selected_count} unique models in top {top_n} of {filter_desc}.\n\n"
                               f"Coverage by class:\n" + "\n".join(class_info) +
                               f"\n\nHighlighted rows show which class each model excels at.")
 
         elif is_regression:
-            top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
-            top_models = self._regional_rankings.get('top_models', set())
+            all_regions = ['Q1', 'Q2', 'Q3', 'Q4']
 
-            if not top_models:
-                messagebox.showinfo("No Top Models",
-                                  "No models were found in the top rankings.\n"
-                                  "Try running analysis with more models.")
+            # Determine which regions to include based on filter
+            if region_filter == "All":
+                target_regions = all_regions
+            elif region_filter in all_regions:
+                target_regions = [region_filter]
+            else:
+                messagebox.showwarning("Invalid Filter",
+                                      f"Region '{region_filter}' not found. Valid: All, Q1, Q2, Q3, Q4")
                 return
 
-            # Select all models in top N of any region
+            # Build set of models to select (top N from each target region)
+            models_to_select = set()
+            regions_info = []
+            for region in target_regions:
+                region_rankings = self._regional_rankings['rankings'].get(region, [])
+                region_top = [idx for idx, rmse, rank in region_rankings if rank <= top_n]
+                models_to_select.update(region_top)
+                regions_info.append(f"{region}: {len(region_top)} models")
+
+            if not models_to_select:
+                messagebox.showinfo("No Top Models",
+                                  f"No models were found in the top {top_n} rankings for selected region(s).\n"
+                                  "Try increasing 'Top' or running analysis with more models.")
+                return
+
+            # Select the models
             selected_count = 0
             for idx in self.results_df.index:
-                if idx in top_models:
+                if idx in models_to_select:
                     self.results_df.loc[idx, 'Select'] = True
                     selected_count += 1
                 else:
@@ -18166,13 +18335,9 @@ class SpectralPredictApp:
             self._populate_results_table(self.results_df, is_sorted=True)
 
             # Show summary
-            regions_info = []
-            for region in ['Q1', 'Q2', 'Q3', 'Q4']:
-                region_top = [idx for idx, rmse, rank in self._regional_rankings['rankings'][region] if rank <= top_n]
-                regions_info.append(f"{region}: {len(region_top)} models")
-
+            filter_desc = "any region" if region_filter == "All" else region_filter
             messagebox.showinfo("Regional Selection Complete",
-                              f"Selected {selected_count} unique models in top {top_n} of any region.\n\n"
+                              f"Selected {selected_count} unique models in top {top_n} of {filter_desc}.\n\n"
                               f"Coverage by region:\n" + "\n".join(regions_info) +
                               f"\n\nHighlighted rows show which region each model excels in.")
         else:
