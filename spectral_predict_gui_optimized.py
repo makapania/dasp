@@ -7529,6 +7529,25 @@ class SpectralPredictApp:
         self.results_tree.tag_configure('top_q3', background='#fff3e0')  # Light orange
         self.results_tree.tag_configure('top_q4', background='#fce4ec')  # Light pink - high Y values
 
+        # Configure tags for class-based highlighting (top models per class - classification)
+        # Extended color palette to support up to 10 classes
+        class_colors = [
+            '#e3f2fd',  # Light blue - Class 0
+            '#e8f5e9',  # Light green - Class 1
+            '#fff3e0',  # Light orange - Class 2
+            '#fce4ec',  # Light pink - Class 3
+            '#f3e5f5',  # Light purple - Class 4
+            '#e0f7fa',  # Light cyan - Class 5
+            '#fff8e1',  # Light amber - Class 6
+            '#f1f8e9',  # Light lime - Class 7
+            '#fbe9e7',  # Light deep orange - Class 8
+            '#eceff1',  # Light blue grey - Class 9
+        ]
+        for i, color in enumerate(class_colors):
+            self.results_tree.tag_configure(f'top_class{i}', background=color)
+        # Store for legend creation
+        self._class_highlight_colors = class_colors
+
         # Button frame for actions (inside card)
         button_frame = ttk.Frame(results_card)
         button_frame.pack(pady=10, fill='x')
@@ -17788,9 +17807,52 @@ class SpectralPredictApp:
             self.results_sort_column = None
             self.results_sort_reverse = False
 
-            # Compute regional rankings for top model highlighting (regression only)
+            # Initialize rankings
             self._regional_rankings = None
-            if 'regional_rmse' in results_df.columns:
+            self._class_rankings = None
+
+            # Determine task type (regression vs classification)
+            is_classification = 'per_class_metrics' in results_df.columns
+
+            if is_classification:
+                # Compute class rankings for top model highlighting (classification)
+                try:
+                    from spectral_predict.ensemble import compute_class_rankings
+                    top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
+                    self._class_rankings = compute_class_rankings(results_df, top_n=top_n)
+
+                    # Add BestClass column showing where each model excels
+                    if self._class_rankings and self._class_rankings.get('class_labels'):
+                        best_classes = []
+                        class_labels = self._class_rankings['class_labels']
+                        for idx in results_df.index:
+                            if idx in self._class_rankings.get('best_class', {}):
+                                best_c, rank, other_count = self._class_rankings['best_class'][idx]
+                                # Find all classes where this model is in top N
+                                all_top_classes = []
+                                for c in class_labels:
+                                    for (row_idx, f1, rk) in self._class_rankings['rankings'].get(c, []):
+                                        if row_idx == idx and rk <= top_n:
+                                            all_top_classes.append(f"C{c}")
+                                            break
+                                # Format: best class with rank, then others
+                                if len(all_top_classes) > 1:
+                                    other_classes = [c for c in all_top_classes if c != f"C{best_c}"]
+                                    best_classes.append(f"C{best_c} (#{rank}), {', '.join(other_classes)}")
+                                else:
+                                    best_classes.append(f"C{best_c} (#{rank})")
+                            else:
+                                best_classes.append("")
+                        results_df = results_df.copy()
+                        results_df['BestClass'] = best_classes
+                        self.results_df = results_df
+                except Exception as e:
+                    print(f"Warning: Could not compute class rankings: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            elif 'regional_rmse' in results_df.columns:
+                # Compute regional rankings for top model highlighting (regression)
                 try:
                     from spectral_predict.ensemble import compute_regional_rankings
                     top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
@@ -17842,10 +17904,10 @@ class SpectralPredictApp:
                     width = 120
                 elif col in ['top_vars']:
                     width = 200
-                elif col == 'BestRegion':
+                elif col in ['BestRegion', 'BestClass']:
                     width = 100
-                elif col.startswith('RMSE_'):
-                    width = 70  # Quartile RMSE columns
+                elif col.startswith('RMSE_') or col.startswith('F1_Class'):
+                    width = 70  # Quartile RMSE or Class F1 columns
                 else:
                     width = 80
                 self.results_tree.column(col, width=width, anchor='center')
@@ -17864,7 +17926,7 @@ class SpectralPredictApp:
             self.results_tree.heading(col, text=header_text,
                                      command=lambda c=col: self._sort_results_by_column(c))
 
-        # Insert data rows with regional highlighting
+        # Insert data rows with regional/class highlighting
         for idx, row in results_df.iterrows():
             values = []
             for col in columns:
@@ -17874,9 +17936,22 @@ class SpectralPredictApp:
                 else:
                     values.append(row[col])
 
-            # Determine tag for highlighting based on best region
+            # Determine tag for highlighting based on best region (regression) or best class (classification)
             tag = ()
-            if hasattr(self, '_regional_rankings') and self._regional_rankings:
+            if hasattr(self, '_class_rankings') and self._class_rankings:
+                # Classification: highlight by best class
+                if idx in self._class_rankings.get('best_class', {}):
+                    best_c, rank, _ = self._class_rankings['best_class'][idx]
+                    # Map class label to index for tag color
+                    class_labels = self._class_rankings.get('class_labels', [])
+                    try:
+                        class_idx = class_labels.index(str(best_c))
+                        tag_name = f"top_class{class_idx}"  # e.g., "top_class0"
+                        tag = (tag_name,)
+                    except (ValueError, IndexError):
+                        pass
+            elif hasattr(self, '_regional_rankings') and self._regional_rankings:
+                # Regression: highlight by best region (quartile)
                 if idx in self._regional_rankings.get('best_region', {}):
                     region, rank, _ = self._regional_rankings['best_region'][idx]
                     tag_name = f"top_{region.lower()}"  # e.g., "top_q1"
@@ -17884,10 +17959,18 @@ class SpectralPredictApp:
 
             self.results_tree.insert('', 'end', iid=str(idx), values=values, tags=tag)
 
-        # Update status
-        highlighted_count = len(self._regional_rankings.get('top_models', set())) if hasattr(self, '_regional_rankings') and self._regional_rankings else 0
+        # Update status based on task type
+        highlighted_count = 0
+        status_suffix = ""
+        if hasattr(self, '_class_rankings') and self._class_rankings:
+            highlighted_count = len(self._class_rankings.get('top_models', set()))
+            status_suffix = "highlighted as top performers by class"
+        elif hasattr(self, '_regional_rankings') and self._regional_rankings:
+            highlighted_count = len(self._regional_rankings.get('top_models', set()))
+            status_suffix = "highlighted as top performers by Y-value region"
+
         if highlighted_count > 0:
-            self.results_status.config(text=f"Displaying {len(results_df)} results. {highlighted_count} highlighted as top performers by Y-value region.")
+            self.results_status.config(text=f"Displaying {len(results_df)} results. {highlighted_count} {status_suffix}.")
         else:
             self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
 
@@ -17897,23 +17980,27 @@ class SpectralPredictApp:
         else:
             self.btn_train_ensemble.config(state='disabled')
 
-        # Enable Select Top by Region button if regional data is available
+        # Enable Select Top by Region/Class button if ranking data is available
         if hasattr(self, 'btn_select_by_region'):
-            if hasattr(self, '_regional_rankings') and self._regional_rankings and self._regional_rankings.get('top_models'):
+            has_rankings = (
+                (hasattr(self, '_class_rankings') and self._class_rankings and self._class_rankings.get('top_models')) or
+                (hasattr(self, '_regional_rankings') and self._regional_rankings and self._regional_rankings.get('top_models'))
+            )
+            if has_rankings:
                 self.btn_select_by_region.config(state='normal')
             else:
                 self.btn_select_by_region.config(state='disabled')
 
-        # Show/hide region legend based on whether regional data is available
+        # Show/hide legend based on task type and whether ranking data is available
         if hasattr(self, 'region_legend_frame'):
-            if hasattr(self, '_regional_rankings') and self._regional_rankings and self._regional_rankings.get('top_models'):
+            if hasattr(self, '_class_rankings') and self._class_rankings and self._class_rankings.get('top_models'):
+                # Classification: show class legend
+                self._update_class_legend()
                 self.region_legend_frame.pack(pady=5, fill='x')
-                # Update quartile ranges if available
-                y_quartiles = self._regional_rankings.get('y_quartiles')
-                if y_quartiles and len(y_quartiles) >= 3:
-                    ranges_text = f"Ranges: Q1 (<{y_quartiles[0]:.2f}), Q2 ({y_quartiles[0]:.2f}-{y_quartiles[1]:.2f}), Q3 ({y_quartiles[1]:.2f}-{y_quartiles[2]:.2f}), Q4 (>{y_quartiles[2]:.2f})"
-                    if hasattr(self, 'quartile_ranges_label'):
-                        self.quartile_ranges_label.config(text=ranges_text)
+            elif hasattr(self, '_regional_rankings') and self._regional_rankings and self._regional_rankings.get('top_models'):
+                # Regression: show quartile legend
+                self._update_quartile_legend()
+                self.region_legend_frame.pack(pady=5, fill='x')
             else:
                 self.region_legend_frame.pack_forget()
 
@@ -17945,52 +18032,153 @@ class SpectralPredictApp:
             current_values[0] = '☑' if self.results_df.loc[row_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
 
+    def _update_quartile_legend(self):
+        """Update the legend for regression (quartile-based) results."""
+        # Clear existing legend items (except the header label)
+        for widget in self.region_legend_frame.winfo_children():
+            if widget != getattr(self, '_legend_header', None):
+                widget.destroy()
+
+        # Add header
+        legend_label = ttk.Label(self.region_legend_frame, text="Region Legend:", font=('Segoe UI', 9, 'bold'))
+        legend_label.pack(side='left', padx=5)
+        self._legend_header = legend_label
+
+        # Color swatches for quartiles
+        colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
+        for color, label in colors:
+            swatch_frame = ttk.Frame(self.region_legend_frame)
+            swatch_frame.pack(side='left', padx=3)
+            swatch = tk.Canvas(swatch_frame, width=14, height=14, bg=color, highlightthickness=1, highlightbackground='#999')
+            swatch.pack(side='left')
+            swatch_label = ttk.Label(swatch_frame, text=label, font=('Segoe UI', 8))
+            swatch_label.pack(side='left', padx=2)
+
+        # Add quartile ranges label
+        self.quartile_ranges_label = ttk.Label(self.region_legend_frame, text="", font=('Segoe UI', 8), foreground='#666')
+        self.quartile_ranges_label.pack(side='left', padx=10)
+
+        # Update quartile ranges if available
+        y_quartiles = self._regional_rankings.get('y_quartiles') if self._regional_rankings else None
+        if y_quartiles and len(y_quartiles) >= 3:
+            ranges_text = f"Ranges: Q1 (<{y_quartiles[0]:.2f}), Q2 ({y_quartiles[0]:.2f}-{y_quartiles[1]:.2f}), Q3 ({y_quartiles[1]:.2f}-{y_quartiles[2]:.2f}), Q4 (>{y_quartiles[2]:.2f})"
+            self.quartile_ranges_label.config(text=ranges_text)
+
+    def _update_class_legend(self):
+        """Update the legend for classification (class-based) results."""
+        # Clear existing legend items
+        for widget in self.region_legend_frame.winfo_children():
+            widget.destroy()
+
+        # Add header
+        legend_label = ttk.Label(self.region_legend_frame, text="Class Legend:", font=('Segoe UI', 9, 'bold'))
+        legend_label.pack(side='left', padx=5)
+
+        # Get class labels
+        class_labels = self._class_rankings.get('class_labels', []) if self._class_rankings else []
+        if not class_labels:
+            return
+
+        # Color swatches for each class
+        colors = getattr(self, '_class_highlight_colors', [
+            '#e3f2fd', '#e8f5e9', '#fff3e0', '#fce4ec',
+            '#f3e5f5', '#e0f7fa', '#fff8e1', '#f1f8e9',
+            '#fbe9e7', '#eceff1'
+        ])
+
+        for i, class_label in enumerate(class_labels):
+            color = colors[i % len(colors)]
+            swatch_frame = ttk.Frame(self.region_legend_frame)
+            swatch_frame.pack(side='left', padx=3)
+            swatch = tk.Canvas(swatch_frame, width=14, height=14, bg=color, highlightthickness=1, highlightbackground='#999')
+            swatch.pack(side='left')
+            swatch_label = ttk.Label(swatch_frame, text=f"Class {class_label}", font=('Segoe UI', 8))
+            swatch_label.pack(side='left', padx=2)
+
     def _auto_select_top_by_region(self):
-        """Auto-select top N models from each Y-value region (quartile).
+        """Auto-select top N models from each Y-value region (quartile) or class.
 
         This helps users build diverse ensembles by selecting models that
-        excel in different ranges of the target variable.
+        excel in different ranges of the target variable (regression) or
+        different classes (classification).
         """
-        if self.results_df is None or not hasattr(self, '_regional_rankings'):
+        if self.results_df is None:
             return
 
-        if self._regional_rankings is None:
-            messagebox.showinfo("No Regional Data",
-                              "Regional performance data is not available.\n"
-                              "This feature requires regression results with regional RMSE.")
-            return
+        # Check for classification rankings first, then regression
+        is_classification = hasattr(self, '_class_rankings') and self._class_rankings
+        is_regression = hasattr(self, '_regional_rankings') and self._regional_rankings
 
-        top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
-        top_models = self._regional_rankings.get('top_models', set())
+        if is_classification:
+            top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
+            top_models = self._class_rankings.get('top_models', set())
 
-        if not top_models:
-            messagebox.showinfo("No Top Models",
-                              "No models were found in the top rankings.\n"
-                              "Try running analysis with more models.")
-            return
+            if not top_models:
+                messagebox.showinfo("No Top Models",
+                                  "No models were found in the top rankings.\n"
+                                  "Try running analysis with more models.")
+                return
 
-        # Select all models in top N of any region
-        selected_count = 0
-        for idx in self.results_df.index:
-            if idx in top_models:
-                self.results_df.loc[idx, 'Select'] = True
-                selected_count += 1
-            else:
-                self.results_df.loc[idx, 'Select'] = False
+            # Select all models in top N of any class
+            selected_count = 0
+            for idx in self.results_df.index:
+                if idx in top_models:
+                    self.results_df.loc[idx, 'Select'] = True
+                    selected_count += 1
+                else:
+                    self.results_df.loc[idx, 'Select'] = False
 
-        # Refresh the display
-        self._populate_results_table(self.results_df, is_sorted=True)
+            # Refresh the display
+            self._populate_results_table(self.results_df, is_sorted=True)
 
-        # Show summary
-        regions_info = []
-        for region in ['Q1', 'Q2', 'Q3', 'Q4']:
-            region_top = [idx for idx, rmse, rank in self._regional_rankings['rankings'][region] if rank <= top_n]
-            regions_info.append(f"{region}: {len(region_top)} models")
+            # Show summary
+            class_labels = self._class_rankings.get('class_labels', [])
+            class_info = []
+            for class_label in class_labels:
+                class_top = [idx for idx, f1, rank in self._class_rankings['rankings'].get(class_label, []) if rank <= top_n]
+                class_info.append(f"Class {class_label}: {len(class_top)} models")
 
-        messagebox.showinfo("Regional Selection Complete",
-                          f"Selected {selected_count} unique models in top {top_n} of any region.\n\n"
-                          f"Coverage by region:\n" + "\n".join(regions_info) +
-                          f"\n\nHighlighted rows show which region each model excels in.")
+            messagebox.showinfo("Class Selection Complete",
+                              f"Selected {selected_count} unique models in top {top_n} of any class.\n\n"
+                              f"Coverage by class:\n" + "\n".join(class_info) +
+                              f"\n\nHighlighted rows show which class each model excels at.")
+
+        elif is_regression:
+            top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
+            top_models = self._regional_rankings.get('top_models', set())
+
+            if not top_models:
+                messagebox.showinfo("No Top Models",
+                                  "No models were found in the top rankings.\n"
+                                  "Try running analysis with more models.")
+                return
+
+            # Select all models in top N of any region
+            selected_count = 0
+            for idx in self.results_df.index:
+                if idx in top_models:
+                    self.results_df.loc[idx, 'Select'] = True
+                    selected_count += 1
+                else:
+                    self.results_df.loc[idx, 'Select'] = False
+
+            # Refresh the display
+            self._populate_results_table(self.results_df, is_sorted=True)
+
+            # Show summary
+            regions_info = []
+            for region in ['Q1', 'Q2', 'Q3', 'Q4']:
+                region_top = [idx for idx, rmse, rank in self._regional_rankings['rankings'][region] if rank <= top_n]
+                regions_info.append(f"{region}: {len(region_top)} models")
+
+            messagebox.showinfo("Regional Selection Complete",
+                              f"Selected {selected_count} unique models in top {top_n} of any region.\n\n"
+                              f"Coverage by region:\n" + "\n".join(regions_info) +
+                              f"\n\nHighlighted rows show which region each model excels in.")
+        else:
+            messagebox.showinfo("No Ranking Data",
+                              "Performance ranking data is not available.\n"
+                              "This feature requires analysis results with regional (regression) or per-class (classification) metrics.")
 
     def _on_result_double_click(self, event):
         """Handle double-click on a result row."""
@@ -23010,6 +23198,7 @@ Configuration:
             self.refined_performance = results
             self.refined_label_encoder = local_label_encoder  # Store for decoding predictions
             self.refined_X_train = X_raw  # Store training data for applicability domain
+            self.refined_y_train = y_array  # Store target values for export
             self.refined_config = {
                 'model_name': model_name,
                 'task_type': task_type,

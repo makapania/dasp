@@ -19,6 +19,9 @@ MODEL_IMPORTS = {
     'CatBoostClassifier': 'from catboost import CatBoostClassifier',
     'SVR': 'from sklearn.svm import SVR',
     'SVC': 'from sklearn.svm import SVC',
+    'MLP': 'from sklearn.neural_network import MLPRegressor',
+    'MLPRegressor': 'from sklearn.neural_network import MLPRegressor',
+    'MLPClassifier': 'from sklearn.neural_network import MLPClassifier',
 }
 
 # Model instantiation templates
@@ -183,6 +186,48 @@ model = SVC(
     probability=True
 )
 ''',
+
+    'MLP': '''
+# Multi-Layer Perceptron Regressor
+model = MLPRegressor(
+    hidden_layer_sizes={hidden_layer_sizes},
+    activation='{activation}',
+    solver='{solver}',
+    alpha={alpha},
+    learning_rate='{learning_rate}',
+    max_iter={max_iter},
+    random_state={random_state},
+    early_stopping={early_stopping}
+)
+''',
+
+    'MLPRegressor': '''
+# Multi-Layer Perceptron Regressor
+model = MLPRegressor(
+    hidden_layer_sizes={hidden_layer_sizes},
+    activation='{activation}',
+    solver='{solver}',
+    alpha={alpha},
+    learning_rate='{learning_rate}',
+    max_iter={max_iter},
+    random_state={random_state},
+    early_stopping={early_stopping}
+)
+''',
+
+    'MLPClassifier': '''
+# Multi-Layer Perceptron Classifier
+model = MLPClassifier(
+    hidden_layer_sizes={hidden_layer_sizes},
+    activation='{activation}',
+    solver='{solver}',
+    alpha={alpha},
+    learning_rate='{learning_rate}',
+    max_iter={max_iter},
+    random_state={random_state},
+    early_stopping={early_stopping}
+)
+''',
 }
 
 # Default parameters for each model
@@ -202,6 +247,9 @@ DEFAULT_PARAMS = {
     'CatBoostClassifier': {'n_estimators': 100, 'max_depth': 6, 'learning_rate': 0.1, 'random_state': 42},
     'SVR': {'C': 1.0, 'epsilon': 0.1, 'kernel': 'rbf', 'gamma': 'scale'},
     'SVC': {'C': 1.0, 'kernel': 'rbf', 'gamma': 'scale'},
+    'MLP': {'hidden_layer_sizes': (100,), 'activation': 'relu', 'solver': 'adam', 'alpha': 0.0001, 'learning_rate': 'constant', 'max_iter': 200, 'random_state': 42, 'early_stopping': True},
+    'MLPRegressor': {'hidden_layer_sizes': (100,), 'activation': 'relu', 'solver': 'adam', 'alpha': 0.0001, 'learning_rate': 'constant', 'max_iter': 200, 'random_state': 42, 'early_stopping': True},
+    'MLPClassifier': {'hidden_layer_sizes': (100,), 'activation': 'relu', 'solver': 'adam', 'alpha': 0.0001, 'learning_rate': 'constant', 'max_iter': 200, 'random_state': 42, 'early_stopping': True},
 }
 
 
@@ -229,6 +277,7 @@ def get_model_imports(model_name: str) -> str:
         'XGB': 'XGBoost',
         'CB': 'CatBoost',
         'SVM': 'SVR',
+        'NN': 'MLP',
     }
 
     if normalized.upper() in aliases:
@@ -265,6 +314,7 @@ def get_model_template(model_name: str, params: dict = None, task_type: str = 'r
         'XGB': 'XGBoost',
         'CB': 'CatBoost',
         'SVM': 'SVR',
+        'NN': 'MLP',
     }
 
     if normalized.upper() in aliases:
@@ -284,6 +334,8 @@ def get_model_template(model_name: str, params: dict = None, task_type: str = 'r
             normalized = 'SVC'
         elif normalized == 'PLS':
             normalized = 'PLSDA'
+        elif normalized == 'MLP':
+            normalized = 'MLPClassifier'
 
     # Get template
     template = MODEL_TEMPLATES.get(normalized, '')
