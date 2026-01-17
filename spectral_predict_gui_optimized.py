@@ -1979,6 +1979,8 @@ class SpectralPredictApp:
         self.refine_catboost_border_count = tk.IntVar(value=128)  # Number of splits for numerical features
         self.refine_catboost_bagging_temperature = tk.DoubleVar(value=1.0)  # Bayesian bootstrap intensity
         self.refine_catboost_random_strength = tk.DoubleVar(value=1.0)  # Randomness for scoring splits
+        self.refine_catboost_min_data_in_leaf = tk.IntVar(value=1)  # Min samples in leaf
+        self.refine_catboost_bootstrap_type = tk.StringVar(value="Bayesian")  # Bootstrap sampling method
 
         # SVR Hyperparameters
         self.refine_svr_kernel = tk.StringVar(value="rbf")  # Kernel type
@@ -2018,6 +2020,8 @@ class SpectralPredictApp:
         self.varsel_uve = tk.BooleanVar(value=False)
         self.varsel_uve_spa = tk.BooleanVar(value=False)
         self.varsel_ipls = tk.BooleanVar(value=False)
+        self.varsel_ipls_forward = tk.BooleanVar(value=False)  # Forward iPLS
+        self.varsel_ipls_backward = tk.BooleanVar(value=False)  # Backward iPLS
         self.varsel_cars = tk.BooleanVar(value=False)
         self.varsel_cars_tree = tk.BooleanVar(value=False)  # CARS-Tree for tree models
         self.varsel_vcpa = tk.BooleanVar(value=False)
@@ -2027,6 +2031,8 @@ class SpectralPredictApp:
         self.uve_n_components = tk.StringVar(value="")  # PLS components for UVE (empty = auto)
         self.spa_n_random_starts = tk.IntVar(value=10)  # Random starts for SPA
         self.ipls_n_intervals = tk.IntVar(value=20)  # Number of intervals for iPLS
+        self.ipls_max_combine = tk.IntVar(value=5)  # Max intervals to combine in forward iPLS
+        self.ipls_subset_limit = tk.StringVar(value="Top 10")  # Dropdown: Top 5, Top 10, Top 20, All
         # GA parameters
         self.ga_population_size = tk.IntVar(value=64)
         self.ga_generations = tk.IntVar(value=100)
@@ -5673,39 +5679,49 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
-                       variable=self.varsel_cars).grid(row=6, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
+        ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
+                       variable=self.varsel_ipls_forward).grid(row=6, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Tests individual intervals + best combinations",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
-                       variable=self.varsel_cars_tree).grid(row=7, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
+        ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
+                       variable=self.varsel_ipls_backward).grid(row=7, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Progressively removes worst intervals",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
-                       variable=self.varsel_vcpa).grid(row=8, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
+                       variable=self.varsel_cars).grid(row=8, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
                  style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
+        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
+                       variable=self.varsel_cars_tree).grid(row=9, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
+                 style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
+                       variable=self.varsel_vcpa).grid(row=10, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+                 style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
+
         ga_row_frame = ttk.Frame(varsel_frame)
-        ga_row_frame.grid(row=9, column=0, sticky=tk.W, pady=2)
+        ga_row_frame.grid(row=11, column=0, sticky=tk.W, pady=2)
         ttk.Checkbutton(ga_row_frame, text="GA (Genetic Algorithm)",
                        variable=self.varsel_ga).pack(side=tk.LEFT)
         ttk.Checkbutton(ga_row_frame, text="Quick",
                        variable=self.ga_quick_mode).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(varsel_frame, text="Evolutionary optimization (Quick: ~10× faster)",
-                 style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
+                 style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
 
         # UVE Prefilter option
         ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
-                       variable=self.apply_uve_prefilter).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+                       variable=self.apply_uve_prefilter).grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
 
         # Method parameters
-        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
+        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=13, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
 
         params_frame = ttk.Frame(varsel_frame)
-        params_frame.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=5)
+        params_frame.grid(row=14, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # UVE parameters
         ttk.Label(params_frame, text="UVE Cutoff:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -5724,18 +5740,28 @@ class SpectralPredictApp:
         ttk.Spinbox(params_frame, from_=5, to=50, textvariable=self.ipls_n_intervals, width=8).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Label(params_frame, text="(default: 20)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
 
+        ttk.Label(params_frame, text="Fwd iPLS Max Combine:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=10, textvariable=self.ipls_max_combine, width=8).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 5)", style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="iPLS Subsets to Test:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Combobox(params_frame, textvariable=self.ipls_subset_limit,
+                     values=["Top 5", "Top 10", "Top 20", "All"],
+                     state='readonly', width=10).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(limit subsets tested)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
+
         # GA parameters
-        ttk.Label(params_frame, text="GA Population:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Population:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="GA Generations:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Generations:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="GA Runs:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Runs:").grid(row=8, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=8, column=2, sticky=tk.W, padx=10)
 
     def _create_tab4c_model_configuration(self):
         """Subtab 4C: Model Configuration - Model selection and advanced model options."""
@@ -7497,6 +7523,12 @@ class SpectralPredictApp:
         # Bind single-click event for checkbox toggling
         self.results_tree.bind('<Button-1>', self._on_result_click)
 
+        # Configure tags for quartile-based highlighting (top models per Y-value region)
+        self.results_tree.tag_configure('top_q1', background='#e3f2fd')  # Light blue - low Y values
+        self.results_tree.tag_configure('top_q2', background='#e8f5e9')  # Light green
+        self.results_tree.tag_configure('top_q3', background='#fff3e0')  # Light orange
+        self.results_tree.tag_configure('top_q4', background='#fce4ec')  # Light pink - high Y values
+
         # Button frame for actions (inside card)
         button_frame = ttk.Frame(results_card)
         button_frame.pack(pady=10, fill='x')
@@ -7506,10 +7538,39 @@ class SpectralPredictApp:
                                                         command=self._export_results_table, style='secondary')
         export_btn.pack(side='left', padx=5)
 
+        # Button to auto-select top models by region (for ensemble selection)
+        self.btn_select_by_region = self._create_button_with_gradient(
+            button_frame, text="Select Top by Region",
+            command=self._auto_select_top_by_region, style='secondary')
+        self.btn_select_by_region.pack(side='left', padx=5)
+        self.btn_select_by_region.config(state='disabled')  # Enable when results are loaded
+
         # Status label (inside card)
         self.results_status = ttk.Label(results_card, text="No results yet. Run an analysis to see results here.",
                                        style='Caption.TLabel')
         self.results_status.pack(pady=5)
+
+        # Legend frame for regional highlighting (hidden until results are loaded)
+        self.region_legend_frame = ttk.Frame(results_card)
+        # Don't pack initially - will be shown when regional data is available
+
+        legend_label = ttk.Label(self.region_legend_frame, text="Region Legend:", font=('Segoe UI', 9, 'bold'))
+        legend_label.pack(side='left', padx=5)
+
+        # Color swatches with labels
+        colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
+        for color, label in colors:
+            swatch_frame = ttk.Frame(self.region_legend_frame)
+            swatch_frame.pack(side='left', padx=3)
+            # Use a Canvas for the color swatch
+            swatch = tk.Canvas(swatch_frame, width=14, height=14, bg=color, highlightthickness=1, highlightbackground='#999')
+            swatch.pack(side='left')
+            swatch_label = ttk.Label(swatch_frame, text=label, font=('Segoe UI', 8))
+            swatch_label.pack(side='left', padx=2)
+
+        # Quartile ranges label (updated dynamically)
+        self.quartile_ranges_label = ttk.Label(self.region_legend_frame, text="", font=('Segoe UI', 8), foreground='#666')
+        self.quartile_ranges_label.pack(side='left', padx=10)
 
         # === Ensemble Results Section ===
         ensemble_separator = ttk.Separator(content_frame, orient='horizontal')
@@ -8120,6 +8181,14 @@ class SpectralPredictApp:
 
         ttk.Label(catboost_frame, text="Random Strength:", style='Subheading.TLabel').grid(row=12, column=0, sticky=tk.W, pady=(15, 5))
         ttk.Spinbox(catboost_frame, from_=0.0, to=10.0, increment=0.1, textvariable=self.refine_catboost_random_strength, width=12, format="%.1f").grid(row=13, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Min Data in Leaf:", style='Subheading.TLabel').grid(row=14, column=0, sticky=tk.W, pady=(15, 5))
+        ttk.Spinbox(catboost_frame, from_=1, to=100, increment=1, textvariable=self.refine_catboost_min_data_in_leaf, width=12).grid(row=15, column=0, sticky=tk.W, pady=5)
+
+        ttk.Label(catboost_frame, text="Bootstrap Type:", style='Subheading.TLabel').grid(row=16, column=0, sticky=tk.W, pady=(15, 5))
+        bootstrap_combo = ttk.Combobox(catboost_frame, textvariable=self.refine_catboost_bootstrap_type, width=12, state='readonly')
+        bootstrap_combo['values'] = ['Bayesian', 'Bernoulli']
+        bootstrap_combo.grid(row=17, column=0, sticky=tk.W, pady=5)
 
         # === SVR Hyperparameters ===
         self.refine_hyperparam_frames['SVR'] = ttk.Frame(hyperparams_outer_frame)
@@ -9143,6 +9212,9 @@ class SpectralPredictApp:
         self.refine_catboost_l2_leaf_reg.trace_add('write', self._on_hyperparam_modified)
         self.refine_catboost_border_count.trace_add('write', self._on_hyperparam_modified)
         self.refine_catboost_bagging_temperature.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_random_strength.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_min_data_in_leaf.trace_add('write', self._on_hyperparam_modified)
+        self.refine_catboost_bootstrap_type.trace_add('write', self._on_hyperparam_modified)
 
         # MLP hyperparameters
         self.refine_mlp_hidden_layer_sizes.trace_add('write', self._on_hyperparam_modified)
@@ -14626,17 +14698,11 @@ class SpectralPredictApp:
             models = [m[0] for m in reconstructed]
             model_names = [m[1] for m in reconstructed]
 
-            # Extract preprocessing configurations for each model
-            # This allows ensembles to apply per-model preprocessing during prediction
-            from spectral_predict.ensemble import extract_preprocessor_config
-            all_wavelengths = X_filtered.columns.tolist()
-            preprocessor_configs = []
-
-            for idx, row in top_models_df.iterrows():
-                config = extract_preprocessor_config(row, all_wavelengths)
-                preprocessor_configs.append(config)
-
-            self._log_progress(f"> Extracted preprocessing configs for {len(preprocessor_configs)} models")
+            # NOTE: We do NOT extract preprocessor_configs here because the reconstructed
+            # models are already wrapped with preprocessing (GAPreprocessWrapper,
+            # CombinedPreprocessWrapper, WavelengthSubsetWrapper). Passing preprocessor_configs
+            # to the ensemble would cause DOUBLE PREPROCESSING, leading to garbage predictions.
+            # The wrapped models handle all preprocessing internally during predict().
 
             # Collect ensemble methods to run
             ensemble_methods = []
@@ -14668,6 +14734,7 @@ class SpectralPredictApp:
                     self._log_progress(f"\n--- Training {ensemble_name} ---")
 
                     # Create ensemble
+                    # NOTE: No preprocessor_configs - models already have preprocessing built-in
                     ensemble = create_ensemble(
                         models=models,
                         model_names=model_names,
@@ -14676,7 +14743,6 @@ class SpectralPredictApp:
                         ensemble_type=ensemble_type,
                         n_regions=n_regions,
                         cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
-                        preprocessor_configs=preprocessor_configs
                     )
 
                     # Make predictions
@@ -16432,6 +16498,10 @@ class SpectralPredictApp:
                 selected_varsel_methods.append('uve_spa')
             if self.varsel_ipls.get():
                 selected_varsel_methods.append('ipls')
+            if self.varsel_ipls_forward.get():
+                selected_varsel_methods.append('ipls_forward')
+            if self.varsel_ipls_backward.get():
+                selected_varsel_methods.append('ipls_backward')
             if self.varsel_cars.get():
                 selected_varsel_methods.append('cars')
             if self.varsel_cars_tree.get():
@@ -16450,7 +16520,8 @@ class SpectralPredictApp:
             self._log_progress(f"  Variable selection methods: {selected_varsel_methods}")
 
             # Check for iPLS with discontinuous regions warning
-            if 'ipls' in selected_varsel_methods and analysis_wl_regions_value and len(analysis_wl_regions_value) > 1:
+            ipls_methods_selected = [m for m in selected_varsel_methods if m in ['ipls', 'ipls_forward', 'ipls_backward']]
+            if ipls_methods_selected and analysis_wl_regions_value and len(analysis_wl_regions_value) > 1:
                 # Check if regions are discontinuous (have gaps)
                 sorted_regions = sorted(analysis_wl_regions_value, key=lambda r: r[0])
                 has_gaps = False
@@ -16463,17 +16534,17 @@ class SpectralPredictApp:
                 if has_gaps:
                     result = messagebox.askyesno(
                         "iPLS with Discontinuous Regions",
-                        "You have selected iPLS (Interval PLS) with discontinuous wavelength regions.\n\n"
+                        "You have selected iPLS methods with discontinuous wavelength regions.\n\n"
                         "iPLS normally divides the spectrum into contiguous intervals. With discontinuous "
                         "regions, each region will be analyzed separately.\n\n"
                         "This may reduce iPLS effectiveness as it cannot find intervals spanning multiple regions.\n\n"
-                        "Continue with iPLS enabled?",
+                        "Continue with iPLS methods enabled?",
                         icon='warning'
                     )
                     if not result:
-                        # User chose not to continue - remove iPLS from methods
-                        selected_varsel_methods = [m for m in selected_varsel_methods if m != 'ipls']
-                        self._log_progress("[!] iPLS removed from variable selection methods due to discontinuous regions")
+                        # User chose not to continue - remove all iPLS methods
+                        selected_varsel_methods = [m for m in selected_varsel_methods if m not in ['ipls', 'ipls_forward', 'ipls_backward']]
+                        self._log_progress("[!] iPLS methods removed from variable selection due to discontinuous regions")
 
             # SAFETY CHECK: Ensure X and y are properly aligned
             if len(X_filtered) != len(y_filtered):
@@ -17280,6 +17351,8 @@ class SpectralPredictApp:
                 uve_n_components=uve_n_comp,
                 spa_n_random_starts=self.spa_n_random_starts.get(),
                 ipls_n_intervals=self.ipls_n_intervals.get(),
+                ipls_max_combine=self.ipls_max_combine.get(),
+                ipls_subset_limit=self.ipls_subset_limit.get(),
                 # GA variable selection parameters
                 ga_population_size=self.ga_population_size.get(),
                 ga_generations=self.ga_generations.get(),
@@ -17715,6 +17788,40 @@ class SpectralPredictApp:
             self.results_sort_column = None
             self.results_sort_reverse = False
 
+            # Compute regional rankings for top model highlighting (regression only)
+            self._regional_rankings = None
+            if 'regional_rmse' in results_df.columns:
+                try:
+                    from spectral_predict.ensemble import compute_regional_rankings
+                    top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
+                    self._regional_rankings = compute_regional_rankings(results_df, top_n=top_n)
+
+                    # Add BestRegion column showing where each model excels
+                    best_regions = []
+                    for idx in results_df.index:
+                        if self._regional_rankings and idx in self._regional_rankings['best_region']:
+                            region, rank, other_count = self._regional_rankings['best_region'][idx]
+                            # Find all regions where this model is in top N
+                            all_top_regions = []
+                            for r in ['Q1', 'Q2', 'Q3', 'Q4']:
+                                for (row_idx, rmse, rk) in self._regional_rankings['rankings'][r]:
+                                    if row_idx == idx and rk <= top_n:
+                                        all_top_regions.append(r)
+                                        break
+                            # Format: best region with rank, then others
+                            if len(all_top_regions) > 1:
+                                other_regions = [r for r in all_top_regions if r != region]
+                                best_regions.append(f"{region} (#{rank}), {', '.join(other_regions)}")
+                            else:
+                                best_regions.append(f"{region} (#{rank})")
+                        else:
+                            best_regions.append("")
+                    results_df = results_df.copy()
+                    results_df['BestRegion'] = best_regions
+                    self.results_df = results_df
+                except Exception as e:
+                    print(f"Warning: Could not compute regional rankings: {e}")
+
         # Clear existing items
         for item in self.results_tree.get_children():
             self.results_tree.delete(item)
@@ -17735,6 +17842,10 @@ class SpectralPredictApp:
                     width = 120
                 elif col in ['top_vars']:
                     width = 200
+                elif col == 'BestRegion':
+                    width = 100
+                elif col.startswith('RMSE_'):
+                    width = 70  # Quartile RMSE columns
                 else:
                     width = 80
                 self.results_tree.column(col, width=width, anchor='center')
@@ -17753,7 +17864,7 @@ class SpectralPredictApp:
             self.results_tree.heading(col, text=header_text,
                                      command=lambda c=col: self._sort_results_by_column(c))
 
-        # Insert data rows
+        # Insert data rows with regional highlighting
         for idx, row in results_df.iterrows():
             values = []
             for col in columns:
@@ -17762,16 +17873,49 @@ class SpectralPredictApp:
                     values.append('☑' if row[col] else '☐')
                 else:
                     values.append(row[col])
-            self.results_tree.insert('', 'end', iid=str(idx), values=values)
+
+            # Determine tag for highlighting based on best region
+            tag = ()
+            if hasattr(self, '_regional_rankings') and self._regional_rankings:
+                if idx in self._regional_rankings.get('best_region', {}):
+                    region, rank, _ = self._regional_rankings['best_region'][idx]
+                    tag_name = f"top_{region.lower()}"  # e.g., "top_q1"
+                    tag = (tag_name,)
+
+            self.results_tree.insert('', 'end', iid=str(idx), values=values, tags=tag)
 
         # Update status
-        self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
+        highlighted_count = len(self._regional_rankings.get('top_models', set())) if hasattr(self, '_regional_rankings') and self._regional_rankings else 0
+        if highlighted_count > 0:
+            self.results_status.config(text=f"Displaying {len(results_df)} results. {highlighted_count} highlighted as top performers by Y-value region.")
+        else:
+            self.results_status.config(text=f"Displaying {len(results_df)} results. Double-click a row to refine the model.")
 
         # Enable Train Ensemble button if conditions are met
         if len(results_df) >= 2 and self.training_data_cache is not None:
             self.btn_train_ensemble.config(state='normal')
         else:
             self.btn_train_ensemble.config(state='disabled')
+
+        # Enable Select Top by Region button if regional data is available
+        if hasattr(self, 'btn_select_by_region'):
+            if hasattr(self, '_regional_rankings') and self._regional_rankings and self._regional_rankings.get('top_models'):
+                self.btn_select_by_region.config(state='normal')
+            else:
+                self.btn_select_by_region.config(state='disabled')
+
+        # Show/hide region legend based on whether regional data is available
+        if hasattr(self, 'region_legend_frame'):
+            if hasattr(self, '_regional_rankings') and self._regional_rankings and self._regional_rankings.get('top_models'):
+                self.region_legend_frame.pack(pady=5, fill='x')
+                # Update quartile ranges if available
+                y_quartiles = self._regional_rankings.get('y_quartiles')
+                if y_quartiles and len(y_quartiles) >= 3:
+                    ranges_text = f"Ranges: Q1 (<{y_quartiles[0]:.2f}), Q2 ({y_quartiles[0]:.2f}-{y_quartiles[1]:.2f}), Q3 ({y_quartiles[1]:.2f}-{y_quartiles[2]:.2f}), Q4 (>{y_quartiles[2]:.2f})"
+                    if hasattr(self, 'quartile_ranges_label'):
+                        self.quartile_ranges_label.config(text=ranges_text)
+            else:
+                self.region_legend_frame.pack_forget()
 
     def _on_result_click(self, event):
         """Handle single-click on results table to toggle checkbox selection."""
@@ -17800,6 +17944,53 @@ class SpectralPredictApp:
             current_values = list(self.results_tree.item(row_id, 'values'))
             current_values[0] = '☑' if self.results_df.loc[row_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
+
+    def _auto_select_top_by_region(self):
+        """Auto-select top N models from each Y-value region (quartile).
+
+        This helps users build diverse ensembles by selecting models that
+        excel in different ranges of the target variable.
+        """
+        if self.results_df is None or not hasattr(self, '_regional_rankings'):
+            return
+
+        if self._regional_rankings is None:
+            messagebox.showinfo("No Regional Data",
+                              "Regional performance data is not available.\n"
+                              "This feature requires regression results with regional RMSE.")
+            return
+
+        top_n = self.ensemble_top_n.get() if hasattr(self, 'ensemble_top_n') else 10
+        top_models = self._regional_rankings.get('top_models', set())
+
+        if not top_models:
+            messagebox.showinfo("No Top Models",
+                              "No models were found in the top rankings.\n"
+                              "Try running analysis with more models.")
+            return
+
+        # Select all models in top N of any region
+        selected_count = 0
+        for idx in self.results_df.index:
+            if idx in top_models:
+                self.results_df.loc[idx, 'Select'] = True
+                selected_count += 1
+            else:
+                self.results_df.loc[idx, 'Select'] = False
+
+        # Refresh the display
+        self._populate_results_table(self.results_df, is_sorted=True)
+
+        # Show summary
+        regions_info = []
+        for region in ['Q1', 'Q2', 'Q3', 'Q4']:
+            region_top = [idx for idx, rmse, rank in self._regional_rankings['rankings'][region] if rank <= top_n]
+            regions_info.append(f"{region}: {len(region_top)} models")
+
+        messagebox.showinfo("Regional Selection Complete",
+                          f"Selected {selected_count} unique models in top {top_n} of any region.\n\n"
+                          f"Coverage by region:\n" + "\n".join(regions_info) +
+                          f"\n\nHighlighted rows show which region each model excels in.")
 
     def _on_result_double_click(self, event):
         """Handle double-click on a result row."""
@@ -19413,6 +19604,8 @@ class SpectralPredictApp:
             params['border_count'] = self.refine_catboost_border_count.get()
             params['bagging_temperature'] = self.refine_catboost_bagging_temperature.get()
             params['random_strength'] = self.refine_catboost_random_strength.get()
+            params['min_data_in_leaf'] = self.refine_catboost_min_data_in_leaf.get()
+            params['bootstrap_type'] = self.refine_catboost_bootstrap_type.get()
 
         # ========== SVR / SVM ==========
         elif model_name == 'SVR' or model_name == 'SVM':
@@ -19788,6 +19981,10 @@ class SpectralPredictApp:
                     self.refine_catboost_bagging_temperature.set(float(params_dict['bagging_temperature']))
                 if 'random_strength' in params_dict:
                     self.refine_catboost_random_strength.set(float(params_dict['random_strength']))
+                if 'min_data_in_leaf' in params_dict:
+                    self.refine_catboost_min_data_in_leaf.set(int(params_dict['min_data_in_leaf']))
+                if 'bootstrap_type' in params_dict:
+                    self.refine_catboost_bootstrap_type.set(str(params_dict['bootstrap_type']))
 
             # ========== SVR / SVM ==========
             elif model_name == 'SVR' or model_name == 'SVM':
@@ -23053,7 +23250,7 @@ Configuration:
             print(f"Error saving model:\n{error_msg}")
 
     def _export_for_publication(self):
-        """Export analysis code for publication/reviewers."""
+        """Export analysis code for publication/reviewers - SIMPLE VERSION."""
         # Check if model has been trained
         if self.refined_model is None:
             messagebox.showerror(
@@ -23063,7 +23260,6 @@ Configuration:
             )
             return
 
-        # Additional check for config (in case of partial state)
         if self.refined_config is None or self.refined_performance is None:
             messagebox.showerror(
                 "Model Configuration Missing",
@@ -23072,192 +23268,65 @@ Configuration:
             )
             return
 
-        # Create export dialog
+        # Simple dialog - just ask for format and export directly
         dialog = tk.Toplevel(self.root)
-        dialog.title("Export for Publication")
-        dialog.geometry("900x700")
-        dialog.configure(bg=self.colors['bg'])
+        dialog.title("Export Code")
+        dialog.geometry("550x520")
+        dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
-        dialog.grab_set()
+        dialog.resizable(True, True)
 
-        # Main frame
-        main_frame = tk.Frame(dialog, bg=self.colors['bg'], padx=20, pady=20)
-        main_frame.pack(fill='both', expand=True)
+        # Force dialog to be visible and on top
+        dialog.update()
+        dialog.deiconify()
+        dialog.lift()
+        dialog.focus_force()
 
-        # Header
-        header_label = tk.Label(main_frame, text="Export Analysis Code",
-                                font=('Segoe UI', 14, 'bold'),
-                                bg=self.colors['bg'], fg=self.colors['text'])
-        header_label.pack(anchor='w')
+        # Simple layout with standard tk widgets (no ttk to avoid theme issues)
+        tk.Label(dialog, text="Export Analysis Code", font=('Arial', 16, 'bold'),
+                 bg='#f0f0f0').pack(pady=(20, 10))
 
-        desc_label = tk.Label(main_frame,
-                              text="Generate standalone Python code for reviewers and reproducibility.",
-                              font=('Segoe UI', 10),
-                              bg=self.colors['bg'], fg=self.colors['text_muted'])
-        desc_label.pack(anchor='w', pady=(0, 15))
+        tk.Label(dialog, text=f"Model: {self.refined_config['model_name']} | "
+                 f"Preprocessing: {self.refined_config['preprocessing']}",
+                 font=('Arial', 10), bg='#f0f0f0').pack(pady=(0, 20))
 
-        # Options frame
-        options_frame = ttk.LabelFrame(main_frame, text="Export Options", padding="10")
-        options_frame.pack(fill='x', pady=(0, 10))
-
-        # Format selection
-        format_frame = tk.Frame(options_frame, bg=self.colors['panel'])
-        format_frame.pack(fill='x', pady=5)
-
-        tk.Label(format_frame, text="Export Format:", bg=self.colors['panel'],
-                 fg=self.colors['text'], font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        # Format selection frame
+        format_frame = tk.LabelFrame(dialog, text="Select Export Format", bg='#f0f0f0',
+                                     padx=15, pady=15, font=('Arial', 10, 'bold'))
+        format_frame.pack(fill='x', padx=30, pady=10)
 
         format_var = tk.StringVar(value='bundle')
-        ttk.Radiobutton(format_frame, text="📦 Complete Bundle (.zip) - Python + R + Data [Recommended]",
-                        variable=format_var, value='bundle').pack(anchor='w', padx=(10, 5))
-        ttk.Radiobutton(format_frame, text="☁️ Cloud-Ready Notebook (.ipynb) - Opens in Google Colab",
-                        variable=format_var, value='colab').pack(anchor='w', padx=(10, 5))
-        ttk.Radiobutton(format_frame, text="🐍 Python Script (.py) - Standalone with embedded data",
-                        variable=format_var, value='python_embedded').pack(anchor='w', padx=(10, 5))
-        ttk.Radiobutton(format_frame, text="📊 R Script (.R) - Standalone with embedded data",
-                        variable=format_var, value='r_embedded').pack(anchor='w', padx=(10, 5))
-        ttk.Radiobutton(format_frame, text="📝 Python Script (.py) - Basic (no data)",
-                        variable=format_var, value='script').pack(anchor='w', padx=(10, 5))
-        ttk.Radiobutton(format_frame, text="📓 Jupyter Notebook (.ipynb) - Basic (no data)",
-                        variable=format_var, value='notebook').pack(anchor='w', padx=(10, 5))
 
-        # Include options
-        include_frame = tk.Frame(options_frame, bg=self.colors['panel'])
-        include_frame.pack(fill='x', pady=10)
+        formats = [
+            ('bundle', 'Complete Bundle (.zip) - Python + R + Data'),
+            ('python_embedded', 'Python Script (.py) - With embedded data'),
+            ('r_embedded', 'R Script (.R) - With embedded data'),
+            ('colab', 'Colab Notebook (.ipynb) - With embedded data'),
+            ('script', 'Python Script (.py) - Basic (no data)'),
+            ('notebook', 'Jupyter Notebook (.ipynb) - Basic (no data)'),
+        ]
 
-        tk.Label(include_frame, text="Additional Options:", bg=self.colors['panel'],
-                 fg=self.colors['text'], font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-
-        include_viz_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(include_frame, text="Include visualization code (matplotlib)",
-                        variable=include_viz_var).pack(anchor='w', padx=(10, 0))
-
-        include_pred_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(include_frame, text="Include prediction template for new data",
-                        variable=include_pred_var).pack(anchor='w', padx=(10, 0))
-
-        # Preview frame
-        preview_frame = ttk.LabelFrame(main_frame, text="Code Preview", padding="10")
-        preview_frame.pack(fill='both', expand=True, pady=(0, 10))
-
-        preview_text = tk.Text(preview_frame, height=20, width=100, font=('Consolas', 9),
-                               bg=self.colors['panel'], fg=self.colors['text'],
-                               wrap=tk.NONE, relief='flat', borderwidth=0)
-        preview_scrollbar_y = ttk.Scrollbar(preview_frame, orient='vertical', command=preview_text.yview)
-        preview_scrollbar_x = ttk.Scrollbar(preview_frame, orient='horizontal', command=preview_text.xview)
-        preview_text.configure(yscrollcommand=preview_scrollbar_y.set, xscrollcommand=preview_scrollbar_x.set)
-
-        preview_scrollbar_y.pack(side='right', fill='y')
-        preview_scrollbar_x.pack(side='bottom', fill='x')
-        preview_text.pack(fill='both', expand=True)
+        for value, text in formats:
+            tk.Radiobutton(format_frame, text=text, variable=format_var, value=value,
+                          bg='#f0f0f0', anchor='w', font=('Arial', 10)).pack(fill='x', pady=3)
 
         # Status label
-        status_label = tk.Label(main_frame, text="", font=('Segoe UI', 9),
-                                bg=self.colors['bg'], fg=self.colors['accent'])
-        status_label.pack(anchor='w', pady=(0, 5))
+        status_var = tk.StringVar(value="Select format and click Export")
+        status_label = tk.Label(dialog, textvariable=status_var, font=('Arial', 10),
+                                bg='#f0f0f0', fg='#666666')
+        status_label.pack(pady=15)
 
-        def generate_preview():
-            """Generate code preview."""
-            print("Export Code: generate_preview() CALLED", flush=True)
-            # Show immediate feedback
-            status_label.config(text="Generating preview...", fg='blue')
-            dialog.update()  # Force complete UI refresh (not just idletasks)
+        def do_export():
+            """Perform the export."""
+            export_format = format_var.get()
+            status_var.set(f"Exporting {export_format}...")
+            dialog.update()
 
-            try:
-                print("Export Code: Importing CodeGenerator...", flush=True)
-                from spectral_predict.code_generator import CodeGenerator, ExportOptions
-                print("Export Code: Import successful", flush=True)
-
-                if self.refined_config is None:
-                    print("Export Code ERROR: refined_config is None!")
-                    preview_text.config(state='normal')
-                    preview_text.delete('1.0', tk.END)
-                    preview_text.insert('1.0', "# Error: No model configuration available.\n# Please train a model first.")
-                    preview_text.see('1.0')
-                    preview_text.config(state='disabled')
-                    status_label.config(text="Error: No model configured", fg='red')
-                    dialog.update_idletasks()
-                    return
-
-                print(f"Export Code: Building config for {self.refined_config.get('model_name', 'Unknown')}", flush=True)
-                # Build model config from refined model data
-                model_config = {
-                    'model_name': self.refined_config['model_name'],
-                    'preprocessing': self.refined_config['preprocessing'],
-                    'target_name': self.refined_config.get('target_name', 'target'),
-                    'task_type': self.refined_config['task_type'],
-                    'params': self.refined_config.get('params', {}),
-                    'metrics': {
-                        'RMSE': self.refined_performance.get('rmse_mean'),
-                        'R2': self.refined_performance.get('r2_mean'),
-                    } if self.refined_config['task_type'] == 'regression' else {
-                        'Accuracy': self.refined_performance.get('accuracy_mean'),
-                        'F1': self.refined_performance.get('f1_mean'),
-                    },
-                    'variable_indices': None,  # TODO: Add variable selection support
-                    'wavelengths': self.refined_wavelengths,
-                    'cv_folds': self.refined_config.get('cv_folds', 5),
-                }
-                print("Export Code: Config built, creating generator...", flush=True)
-
-                options = ExportOptions(
-                    include_visualization=include_viz_var.get(),
-                    include_prediction_template=include_pred_var.get(),
-                    format=format_var.get(),
-                    target_column=self.refined_config.get('target_name', 'target')
-                )
-
-                generator = CodeGenerator(model_config, options)
-                print("Export Code: Generator created, generating code...", flush=True)
-
-                if format_var.get() == 'notebook':
-                    notebook = generator.generate_notebook()
-                    n_cells = len(notebook['cells'])
-                    code = f"# Jupyter Notebook Generated\n# Cells: {n_cells}\n\n"
-                    for i, cell in enumerate(notebook['cells'][:8]):
-                        cell_type = cell['cell_type']
-                        source = ''.join(cell.get('source', ['']))[:80]
-                        code += f"# [{i+1}] {cell_type}: {source}...\n"
-                    if n_cells > 8:
-                        code += f"# ... and {n_cells - 8} more cells\n"
-                    code += "\n# Click 'Export to File' to save the complete notebook"
-                else:
-                    code = generator.generate_script()
-
-                print(f"Export Code: Code generated ({len(code)} chars), updating preview...", flush=True)
-                preview_text.config(state='normal')
-                preview_text.delete('1.0', tk.END)
-                preview_text.insert('1.0', code)
-                preview_text.see('1.0')  # Scroll to top
-                preview_text.config(state='disabled')
-                status_label.config(text=f"Preview generated ({len(code)} characters)", fg=self.colors['accent'])
-                print("Export Code: SUCCESS - Preview updated", flush=True)
-
-            except Exception as e:
-                import traceback
-                error_msg = traceback.format_exc()
-                print(f"Export Code ERROR: {e}\n{error_msg}", flush=True)
-                preview_text.config(state='normal')
-                preview_text.delete('1.0', tk.END)
-                preview_text.insert('1.0', f"# Error generating code:\n# {str(e)}\n\n{error_msg}")
-                preview_text.see('1.0')
-                preview_text.config(state='disabled')
-                status_label.config(text=f"Error: {str(e)}", fg='red')
-
-            finally:
-                dialog.update_idletasks()  # Ensure final UI refresh
-
-        def export_to_file():
-            """Export code to file."""
             try:
                 from spectral_predict.code_generator import CodeGenerator, ExportOptions
                 from spectral_predict.r_code_generator import RCodeGenerator
                 from spectral_predict.export_bundle import create_export_bundle
                 from datetime import datetime
-                import numpy as np
-
-                # Get format
-                export_format = format_var.get()
 
                 # Build model config
                 model_config = {
@@ -23277,209 +23346,102 @@ Configuration:
                     'cv_folds': self.refined_config.get('cv_folds', 5),
                 }
 
-                # Get data arrays (if available)
+                # Get data
                 data_X = getattr(self, 'refined_X_train', None)
                 data_y = getattr(self, 'refined_y_train', None)
                 wavelengths = self.refined_wavelengths
+                has_data = data_X is not None and data_y is not None
 
-                # Handle different export formats
+                # File dialog based on format
                 if export_format == 'bundle':
-                    # Complete ZIP bundle
-                    default_name = f"analysis_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
                     filepath = filedialog.asksaveasfilename(
                         defaultextension='.zip',
-                        filetypes=[('ZIP Archive', '*.zip'), ('All files', '*.*')],
-                        initialfile=default_name,
-                        title="Export Complete Bundle"
+                        filetypes=[('ZIP Archive', '*.zip')],
+                        initialfile=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
                     )
-                    if not filepath:
-                        return
-
-                    status_label.config(text="Creating bundle...", fg='blue')
-                    dialog.update()
-
-                    create_export_bundle(
-                        model_config=model_config,
-                        output_path=filepath,
-                        include_data=(data_X is not None and data_y is not None),
-                        data_X=data_X,
-                        data_y=data_y,
-                        wavelengths=wavelengths
-                    )
-                    status_label.config(text=f"Bundle saved: {Path(filepath).name}", fg=self.colors['accent'])
-
-                elif export_format == 'colab':
-                    # Colab-ready notebook with embedded data
-                    options = ExportOptions(
-                        include_visualization=include_viz_var.get(),
-                        include_prediction_template=include_pred_var.get(),
-                        format='notebook',
-                        include_data=(data_X is not None and data_y is not None),
-                        data_X=data_X,
-                        data_y=data_y,
-                        wavelengths=wavelengths,
-                        colab_ready=True,
-                        target_column=self.refined_config.get('target_name', 'target')
-                    )
-                    generator = CodeGenerator(model_config, options)
-
-                    default_name = f"colab_analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
-                    filepath = filedialog.asksaveasfilename(
-                        defaultextension='.ipynb',
-                        filetypes=[('Jupyter Notebook', '*.ipynb'), ('All files', '*.*')],
-                        initialfile=default_name,
-                        title="Export Colab Notebook"
-                    )
-                    if not filepath:
-                        return
-
-                    generator.save_notebook(filepath)
-                    status_label.config(text=f"Colab notebook saved: {Path(filepath).name}", fg=self.colors['accent'])
+                    if filepath:
+                        create_export_bundle(model_config, filepath, has_data, data_X, data_y, wavelengths)
+                        status_var.set(f"Saved: {Path(filepath).name}")
 
                 elif export_format == 'python_embedded':
-                    # Python script with embedded data
-                    options = ExportOptions(
-                        include_visualization=include_viz_var.get(),
-                        include_prediction_template=include_pred_var.get(),
-                        format='script',
-                        include_data=(data_X is not None and data_y is not None),
-                        data_X=data_X,
-                        data_y=data_y,
-                        wavelengths=wavelengths,
-                        target_column=self.refined_config.get('target_name', 'target')
-                    )
-                    generator = CodeGenerator(model_config, options)
-
-                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
                     filepath = filedialog.asksaveasfilename(
                         defaultextension='.py',
-                        filetypes=[('Python Script', '*.py'), ('All files', '*.*')],
-                        initialfile=default_name,
-                        title="Export Python Script"
+                        filetypes=[('Python Script', '*.py')],
+                        initialfile=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
                     )
-                    if not filepath:
-                        return
-
-                    generator.save_script(filepath)
-                    status_label.config(text=f"Python script saved: {Path(filepath).name}", fg=self.colors['accent'])
+                    if filepath:
+                        options = ExportOptions(format='script', include_data=has_data,
+                                               data_X=data_X, data_y=data_y, wavelengths=wavelengths)
+                        gen = CodeGenerator(model_config, options)
+                        gen.save_script(filepath)
+                        status_var.set(f"Saved: {Path(filepath).name}")
 
                 elif export_format == 'r_embedded':
-                    # R script with embedded data
-                    r_generator = RCodeGenerator(
-                        model_config=model_config,
-                        include_data=(data_X is not None and data_y is not None),
-                        data_X=data_X,
-                        data_y=data_y,
-                        wavelengths=wavelengths
-                    )
-
-                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.R"
                     filepath = filedialog.asksaveasfilename(
                         defaultextension='.R',
-                        filetypes=[('R Script', '*.R'), ('All files', '*.*')],
-                        initialfile=default_name,
-                        title="Export R Script"
+                        filetypes=[('R Script', '*.R')],
+                        initialfile=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.R"
                     )
-                    if not filepath:
-                        return
+                    if filepath:
+                        gen = RCodeGenerator(model_config, has_data, data_X, data_y, wavelengths)
+                        gen.save_script(filepath)
+                        status_var.set(f"Saved: {Path(filepath).name}")
 
-                    r_generator.save_script(filepath)
-                    status_label.config(text=f"R script saved: {Path(filepath).name}", fg=self.colors['accent'])
-
-                elif export_format == 'notebook':
-                    # Basic Jupyter notebook (no embedded data)
-                    options = ExportOptions(
-                        include_visualization=include_viz_var.get(),
-                        include_prediction_template=include_pred_var.get(),
-                        format='notebook',
-                        include_data=False,
-                        target_column=self.refined_config.get('target_name', 'target')
-                    )
-                    generator = CodeGenerator(model_config, options)
-
-                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
+                elif export_format == 'colab':
                     filepath = filedialog.asksaveasfilename(
                         defaultextension='.ipynb',
-                        filetypes=[('Jupyter Notebook', '*.ipynb'), ('All files', '*.*')],
-                        initialfile=default_name,
-                        title="Export Jupyter Notebook"
+                        filetypes=[('Jupyter Notebook', '*.ipynb')],
+                        initialfile=f"colab_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
                     )
-                    if not filepath:
-                        return
+                    if filepath:
+                        options = ExportOptions(format='notebook', include_data=has_data,
+                                               data_X=data_X, data_y=data_y, wavelengths=wavelengths,
+                                               colab_ready=True)
+                        gen = CodeGenerator(model_config, options)
+                        gen.save_notebook(filepath)
+                        status_var.set(f"Saved: {Path(filepath).name}")
 
-                    generator.save_notebook(filepath)
-                    status_label.config(text=f"Notebook saved: {Path(filepath).name}", fg=self.colors['accent'])
-
-                else:  # 'script' - Basic Python script (no embedded data)
-                    options = ExportOptions(
-                        include_visualization=include_viz_var.get(),
-                        include_prediction_template=include_pred_var.get(),
-                        format='script',
-                        include_data=False,
-                        target_column=self.refined_config.get('target_name', 'target')
-                    )
-                    generator = CodeGenerator(model_config, options)
-
-                    default_name = f"analysis_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
+                elif export_format == 'script':
                     filepath = filedialog.asksaveasfilename(
                         defaultextension='.py',
-                        filetypes=[('Python Script', '*.py'), ('All files', '*.*')],
-                        initialfile=default_name,
-                        title="Export Python Script"
+                        filetypes=[('Python Script', '*.py')],
+                        initialfile=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py"
                     )
-                    if not filepath:
-                        return
+                    if filepath:
+                        options = ExportOptions(format='script', include_data=False)
+                        gen = CodeGenerator(model_config, options)
+                        gen.save_script(filepath)
+                        status_var.set(f"Saved: {Path(filepath).name}")
 
-                    generator.save_script(filepath)
-                    status_label.config(text=f"Script saved: {Path(filepath).name}", fg=self.colors['accent'])
+                elif export_format == 'notebook':
+                    filepath = filedialog.asksaveasfilename(
+                        defaultextension='.ipynb',
+                        filetypes=[('Jupyter Notebook', '*.ipynb')],
+                        initialfile=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
+                    )
+                    if filepath:
+                        options = ExportOptions(format='notebook', include_data=False)
+                        gen = CodeGenerator(model_config, options)
+                        gen.save_notebook(filepath)
+                        status_var.set(f"Saved: {Path(filepath).name}")
 
-            except ValueError as e:
-                # Handle data size limit errors gracefully
-                messagebox.showwarning("Export Warning", str(e))
-                status_label.config(text=f"Warning: {str(e)}", fg='orange')
             except Exception as e:
                 import traceback
-                error_msg = traceback.format_exc()
-                print(f"Export Error: {error_msg}")
-                messagebox.showerror("Export Error", f"Failed to export:\n\n{str(e)}")
-                status_label.config(text=f"Error: {str(e)}", fg='red')
+                print(f"Export error: {traceback.format_exc()}")
+                status_var.set(f"Error: {str(e)}")
+                messagebox.showerror("Export Error", str(e))
 
-        def copy_to_clipboard():
-            """Copy code to clipboard."""
-            code = preview_text.get('1.0', tk.END)
-            if code.strip():
-                dialog.clipboard_clear()
-                dialog.clipboard_append(code)
-                status_label.config(text="Copied to clipboard!", fg=self.colors['accent'])
-            else:
-                status_label.config(text="Nothing to copy - generate preview first", fg='orange')
+        # Buttons - use standard tk.Button with larger size for visibility
+        btn_frame = tk.Frame(dialog, bg='#f0f0f0')
+        btn_frame.pack(pady=30)
 
-        # Button frame
-        button_frame = tk.Frame(main_frame, bg=self.colors['bg'])
-        button_frame.pack(fill='x')
+        export_btn = tk.Button(btn_frame, text="  EXPORT  ", command=do_export,
+                               font=('Arial', 12, 'bold'), padx=20, pady=10)
+        export_btn.pack(side='left', padx=20)
 
-        generate_btn = self._create_accent_button(button_frame, text="Generate Preview",
-                                                   command=generate_preview)
-        generate_btn.pack(side='left', padx=(0, 10))
-
-        export_btn = self._create_accent_button(button_frame, text="Export to File",
-                                                 command=export_to_file)
-        export_btn.pack(side='left', padx=(0, 10))
-
-        copy_btn = ttk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard)
-        copy_btn.pack(side='left', padx=(0, 10))
-
-        close_btn = ttk.Button(button_frame, text="Close", command=dialog.destroy)
-        close_btn.pack(side='right')
-
-        # Ensure dialog is fully visible before generating preview
-        dialog.deiconify()  # Make sure window is shown
-        dialog.lift()  # Bring to front
-        dialog.update()  # Process all pending events
-
-        # Generate initial preview with slight delay to ensure window is rendered
-        # Using after(50) allows the window to fully appear before starting work
-        dialog.after(50, generate_preview)
+        close_btn = tk.Button(btn_frame, text="  Close  ", command=dialog.destroy,
+                              font=('Arial', 11), padx=15, pady=8)
+        close_btn.pack(side='left', padx=20)
 
     def _format_wavelengths_as_spec(self, wavelengths, available_wavelengths=None, preserve_order=False):
         """

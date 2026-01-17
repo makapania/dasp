@@ -256,14 +256,17 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         """
         Fit the ensemble by computing regional performance weights.
 
-        Uses cross-validation to avoid overfitting on the same data
-        used to compute weights.
-        """
-        self.analyzer_.fit(y)
+        Uses direct predictions from already-fitted models (not cross_val_predict)
+        to ensure weights match what predict() will actually produce.
 
-        # Get cross-validated predictions for each model
+        Note: Models passed to ensembles are typically already fitted with
+        preprocessing wrappers. cross_val_predict would clone these models
+        and refit from scratch, creating a mismatch between weight calculation
+        and actual prediction behavior.
+        """
+        # Get direct predictions from fitted models
         # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
-        cv_predictions = []
+        predictions = []
         for i, model in enumerate(self.models):
             try:
                 # Apply preprocessing for this model (must match predict behavior)
@@ -273,20 +276,29 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
                 else:
                     X_processed = X
 
-                cv_pred = cross_val_predict(model, X_processed, y, cv=self.cv)
-                cv_predictions.append(cv_pred)
+                # Use direct prediction from fitted model (NOT cross_val_predict)
+                # This ensures weights match what predict() will produce
+                pred = model.predict(X_processed)
+                pred = np.asarray(pred).ravel()
+                predictions.append(pred)
             except Exception as e:
-                warnings.warn(f"Model {self.model_names[len(cv_predictions)]} failed in CV: {e}")
-                cv_predictions.append(np.zeros_like(y))
+                warnings.warn(f"Model {self.model_names[len(predictions)]} failed: {e}")
+                predictions.append(np.zeros_like(y))
 
-        cv_predictions = np.array(cv_predictions)  # (n_models, n_samples)
+        predictions = np.array(predictions)  # (n_models, n_samples)
+
+        # Define region boundaries from average predictions
+        # This ensures consistency with predict(), which assigns regions
+        # based on average predictions
+        avg_pred = np.mean(predictions, axis=0)
+        self.analyzer_.fit(avg_pred)
 
         # Compute regional performance for each model
         regional_errors = np.zeros((len(self.models), self.n_regions))
 
         for model_idx in range(len(self.models)):
             analysis = self.analyzer_.analyze_model_performance(
-                y, cv_predictions[model_idx], metric='rmse'
+                y, predictions[model_idx], metric='rmse'
             )
             regional_errors[model_idx] = analysis['by_region']
 
@@ -433,11 +445,13 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
             return None
 
     def fit(self, X, y):
-        """Fit by determining which expert handles which region."""
-        self.analyzer_.fit(y)
+        """
+        Fit by determining which expert handles which region.
 
-        # Get cross-validated predictions from all models to avoid data leakage
-        # This ensures we evaluate model performance on out-of-fold predictions
+        Uses direct predictions from already-fitted models (not cross_val_predict)
+        to ensure weights match what predict() will actually produce.
+        """
+        # Get direct predictions from all fitted models
         # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
         predictions = []
         for i, model in enumerate(self.models):
@@ -448,17 +462,25 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
             else:
                 X_processed = X
 
-            # Use cross_val_predict to get out-of-fold predictions
-            # This prevents overfitting and gives realistic performance estimates
-            cv_pred = cross_val_predict(model, X_processed, y, cv=5)
-            predictions.append(cv_pred)
+            # Use direct prediction from fitted model (NOT cross_val_predict)
+            # This ensures weights match what predict() will produce
+            pred = model.predict(X_processed)
+            pred = np.asarray(pred).ravel()
+            predictions.append(pred)
         predictions = np.array(predictions)
+
+        # Define region boundaries from average predictions
+        # This ensures consistency with predict(), which assigns regions
+        # based on average predictions
+        avg_pred = np.mean(predictions, axis=0)
+        self.analyzer_.fit(avg_pred)
 
         # For each region, find the best model
         self.expert_assignment_ = np.zeros(self.n_regions, dtype=int)
         self.expert_weights_ = np.zeros((len(self.models), self.n_regions))
 
-        regions = self.analyzer_.assign_regions(y)
+        # Assign regions based on average predictions (matches predict behavior)
+        regions = self.analyzer_.assign_regions(avg_pred)
 
         for region_idx in range(self.n_regions):
             mask = regions == region_idx
@@ -599,8 +621,13 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             return None
 
     def fit(self, X, y):
-        """Fit the stacking ensemble."""
-        # Get cross-validated predictions for meta-features
+        """
+        Fit the stacking ensemble.
+
+        Uses direct predictions from already-fitted models (not cross_val_predict)
+        to ensure meta-features match what predict() will actually produce.
+        """
+        # Get direct predictions for meta-features
         # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
         meta_features = []
 
@@ -613,20 +640,25 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
                 else:
                     X_processed = X
 
-                cv_pred = cross_val_predict(model, X_processed, y, cv=self.cv)
-                meta_features.append(cv_pred)
+                # Use direct prediction from fitted model (NOT cross_val_predict)
+                # This ensures meta-features match what predict() will produce
+                pred = model.predict(X_processed)
+                pred = np.asarray(pred).ravel()
+                meta_features.append(pred)
             except Exception as e:
-                warnings.warn(f"Model failed in CV: {e}")
+                warnings.warn(f"Model failed: {e}")
                 meta_features.append(np.zeros_like(y))
 
         meta_features = np.column_stack(meta_features)  # (n_samples, n_models)
 
         # Add region-aware features if enabled
         if self.region_aware:
-            self.analyzer_.fit(y)
+            # Define region boundaries from average predictions
+            # This ensures consistency with predict()
+            avg_pred = np.mean(meta_features, axis=1)
+            self.analyzer_.fit(avg_pred)
 
             # Add one-hot encoded region features
-            avg_pred = np.mean(meta_features, axis=1)
             regions = self.analyzer_.assign_regions(avg_pred)
 
             # One-hot encode regions
@@ -804,3 +836,89 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
         raise ValueError(f"Unknown ensemble type: {ensemble_type}")
 
     return ensemble
+
+
+def compute_regional_rankings(results_df, top_n=10):
+    """
+    Rank models by performance in each Y-value region (quartile).
+
+    Uses the 'regional_rmse' column computed during grid search, which contains
+    a dict with keys 'Q1', 'Q2', 'Q3', 'Q4' for each quartile's RMSE.
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Results DataFrame containing 'regional_rmse' column
+    top_n : int, default=10
+        Number of top models to identify per region
+
+    Returns
+    -------
+    dict with keys:
+        'rankings': dict mapping region -> list of (row_idx, rmse, rank) tuples
+        'best_region': dict mapping row_idx -> (best_region, rank, other_regions_count)
+        'top_models': set of row indices that are in top N of any region
+        'y_quartiles': list of quartile boundaries if available
+    """
+    regions = ['Q1', 'Q2', 'Q3', 'Q4']
+    rankings = {r: [] for r in regions}
+    best_region = {}
+    top_models = set()
+
+    # Check if regional_rmse column exists
+    if 'regional_rmse' not in results_df.columns:
+        return {
+            'rankings': rankings,
+            'best_region': best_region,
+            'top_models': top_models,
+            'y_quartiles': None
+        }
+
+    # Extract y_quartiles from first row if available
+    y_quartiles = None
+    if 'y_quartiles' in results_df.columns:
+        first_quartiles = results_df['y_quartiles'].iloc[0]
+        if first_quartiles is not None:
+            y_quartiles = first_quartiles
+
+    # Collect RMSE values for each region
+    for region in regions:
+        region_data = []
+        for idx, row in results_df.iterrows():
+            regional_rmse = row.get('regional_rmse')
+            if regional_rmse is not None and isinstance(regional_rmse, dict):
+                rmse = regional_rmse.get(region)
+                if rmse is not None and not np.isnan(rmse):
+                    region_data.append((idx, rmse))
+
+        # Sort by RMSE (ascending - lower is better)
+        region_data.sort(key=lambda x: x[1])
+
+        # Assign ranks
+        for rank, (idx, rmse) in enumerate(region_data, start=1):
+            rankings[region].append((idx, rmse, rank))
+            if rank <= top_n:
+                top_models.add(idx)
+
+    # Determine best region for each model in top_models
+    for idx in top_models:
+        model_ranks = {}
+        for region in regions:
+            for (row_idx, rmse, rank) in rankings[region]:
+                if row_idx == idx and rank <= top_n:
+                    model_ranks[region] = rank
+                    break
+
+        if model_ranks:
+            # Find region with best (lowest) rank
+            best_r = min(model_ranks.keys(), key=lambda r: model_ranks[r])
+            best_rank = model_ranks[best_r]
+            other_count = len(model_ranks) - 1
+            best_region[idx] = (best_r, best_rank, other_count)
+
+    return {
+        'rankings': rankings,
+        'best_region': best_region,
+        'top_models': top_models,
+        'y_quartiles': y_quartiles
+    }

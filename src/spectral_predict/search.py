@@ -20,7 +20,10 @@ from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result
 from .regions import create_region_subsets, format_region_report
-from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
+from .variable_selection import (
+    spa_selection, uve_selection, uve_spa_selection,
+    ipls_selection, ipls_forward, ipls_backward, cars_selection
+)
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
 from .ga_lightgbm import ga_lightgbm_selection
@@ -641,6 +644,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
+               ipls_max_combine=5, ipls_subset_limit="Top 10",
                tier='standard', enabled_models=None,
                analysis_wl_min=None, analysis_wl_max=None,
                analysis_wl_regions=None,  # List of (min, max) tuples for multi-region support
@@ -1867,6 +1871,110 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             if controller and not controller.check_and_wait():
                                 break
 
+                            # ===== NEW BRANCH: Forward/Backward iPLS (subset-returning methods) =====
+                            if varsel_method in ('ipls_forward', 'ipls_backward'):
+                                print(f"  -> Running {varsel_method}...")
+
+                                # Call appropriate function
+                                if varsel_method == 'ipls_forward':
+                                    subsets = ipls_forward(
+                                        X_transformed_varsel,
+                                        y_np,
+                                        wavelengths=wavelengths_varsel,
+                                        n_intervals=ipls_n_intervals,
+                                        max_combine=ipls_max_combine,
+                                        cv_folds=folds,
+                                        random_state=random_state
+                                    )
+                                else:  # ipls_backward
+                                    subsets = ipls_backward(
+                                        X_transformed_varsel,
+                                        y_np,
+                                        wavelengths=wavelengths_varsel,
+                                        n_intervals=ipls_n_intervals,
+                                        cv_folds=folds,
+                                        random_state=random_state
+                                    )
+
+                                if subsets is None or len(subsets) == 0:
+                                    print(f"  -> {varsel_method} returned no subsets, skipping")
+                                    continue
+
+                                # Sort by rmsecv (best first) and apply limit
+                                subsets_sorted = sorted(subsets, key=lambda s: s.get('rmsecv', float('inf')))
+
+                                # Apply subset limit from dropdown
+                                if ipls_subset_limit == "Top 5":
+                                    subsets_to_test = subsets_sorted[:5]
+                                elif ipls_subset_limit == "Top 10":
+                                    subsets_to_test = subsets_sorted[:10]
+                                elif ipls_subset_limit == "Top 20":
+                                    subsets_to_test = subsets_sorted[:20]
+                                else:  # "All"
+                                    subsets_to_test = subsets_sorted
+
+                                print(f"  -> Testing {len(subsets_to_test)} of {len(subsets)} subsets...")
+
+                                # Test each subset
+                                for subset_dict in subsets_to_test:
+                                    if controller and not controller.check_and_wait():
+                                        break
+
+                                    subset_indices = subset_dict['indices']
+                                    subset_tag = subset_dict['tag']
+
+                                    # Use existing _run_single_config (same as top-N path)
+                                    if preprocess_cfg["deriv"] is not None:
+                                        subset_result = _run_single_config(
+                                            X_transformed_varsel, y_np, wavelengths_varsel,
+                                            model, model_name, params, preprocess_cfg,
+                                            cv_splitter, task_type, is_binary_classification,
+                                            subset_indices=subset_indices,
+                                            subset_tag=subset_tag,
+                                            top_n_vars=len(subset_indices),
+                                            skip_preprocessing=False,
+                                            skip_spectral_preprocessing=True,
+                                            excluded_count=excluded_count,
+                                            imbalance_method=imbalance_method,
+                                            imbalance_params=imbalance_params,
+                                            validation_count=validation_count,
+                                            total_samples_original=total_samples_original,
+                                            folds=folds,
+                                            full_vars_original=n_original_wavelengths,
+                                            n_jobs_cv=n_jobs,
+                                            wavelength_restriction_active=wavelength_restriction_active,
+                                        )
+                                    else:
+                                        subset_result = _run_single_config(
+                                            X_transformed_varsel, y_np, wavelengths_varsel,
+                                            model, model_name, params, preprocess_cfg,
+                                            cv_splitter, task_type, is_binary_classification,
+                                            subset_indices=subset_indices,
+                                            subset_tag=subset_tag,
+                                            top_n_vars=len(subset_indices),
+                                            skip_preprocessing=False,
+                                            skip_spectral_preprocessing=True,
+                                            excluded_count=excluded_count,
+                                            imbalance_method=imbalance_method,
+                                            imbalance_params=imbalance_params,
+                                            validation_count=validation_count,
+                                            total_samples_original=total_samples_original,
+                                            folds=folds,
+                                            full_vars_original=n_original_wavelengths,
+                                            n_jobs_cv=n_jobs,
+                                            wavelength_restriction_active=wavelength_restriction_active,
+                                        )
+
+                                    df_results = add_result(df_results, subset_result)
+
+                                    if task_type == "regression":
+                                        print(f"    {subset_tag}: R²={subset_result['R2']:.3f}")
+                                    else:
+                                        print(f"    {subset_tag}: AUC={subset_result.get('ROC_AUC', 0):.3f}")
+
+                                continue  # Skip to next method (don't fall through to importance path)
+
+                            # ===== EXISTING CODE: Standard importance-returning methods =====
                             # Get importances computed on preprocessed data
                             try:
                                 if varsel_method == 'importance':
@@ -3335,6 +3443,8 @@ def _run_single_config(
         quartiles = np.percentile(all_y_test, [25, 50, 75])
 
         # Compute RMSE for each quartile region
+        # Note: Regional R² is not computed because it's mathematically misleading
+        # when Y values are restricted to a narrow range (low variance → negative R²)
         regional_rmse = {}
         for i, (lower, upper) in enumerate([
             (-np.inf, quartiles[0]),  # Q1
@@ -3530,9 +3640,13 @@ def _run_single_config(
         # Cross-validation metrics (test fold averages)
         result["RMSEcv"] = mean_rmse
         result["R2cv"] = mean_r2
-        # Add regional performance for consensus predictions
+        # Add regional performance for consensus predictions (dict format for ensemble)
         result["regional_rmse"] = regional_rmse
         result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds
+        # Add individual quartile columns for display/sorting
+        if regional_rmse is not None:
+            for q in ['Q1', 'Q2', 'Q3', 'Q4']:
+                result[f'RMSE_{q}'] = regional_rmse.get(q, np.nan)
     else:
         # Calibration metrics (training data)
         result["Accuracy"] = cal_acc if cal_acc is not None else np.nan

@@ -709,6 +709,9 @@ def convert_optuna_result_to_dasp_format(
                 # Regional performance
                 result['regional_rmse'] = config_result.get('regional_rmse', None)
                 result['y_quartiles'] = config_result.get('y_quartiles', None)
+                # Individual quartile columns for display/sorting
+                for q in ['Q1', 'Q2', 'Q3', 'Q4']:
+                    result[f'RMSE_{q}'] = config_result.get(f'RMSE_{q}', np.nan)
             else:
                 # Calibration metrics
                 result['Accuracy'] = config_result.get('Accuracy', np.nan)
