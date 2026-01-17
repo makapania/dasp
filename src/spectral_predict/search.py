@@ -2,6 +2,7 @@
 
 import os
 import inspect
+import logging
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -36,6 +37,8 @@ from .preprocessing_discovery import discover_preprocessing, IMPORTANCE_METHODS
 
 # NSGA-II import
 from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
+
+logger = logging.getLogger(__name__)
 
 # Model categories for GA preprocessing (4 specialized groups)
 # Each group uses a fitness model that best represents its characteristics
@@ -3549,10 +3552,19 @@ def _run_single_config(
         # Refit the pipeline on full data to get final fitted parameters
         pipe.fit(X, y)
 
-        # Get the fitted model from pipeline
-        fitted_model = (
-            pipe.named_steps["model"] if hasattr(pipe, "named_steps") else pipe
-        )
+        # Get the fitted model from pipeline for parameter capture
+        # IMPORTANT: For PLS-DA and other multi-step pipelines without "model" step,
+        # we need the FULL pipeline to capture all parameters (including n_components).
+        # Only extract specific model step if it's a standard "model" named step.
+        if hasattr(pipe, "named_steps"):
+            if "model" in pipe.named_steps:
+                fitted_model = pipe.named_steps["model"]
+            else:
+                # For PLS-DA and other pipelines without "model" step,
+                # use full pipeline to capture ALL parameters (pls__n_components, etc.)
+                fitted_model = pipe
+        else:
+            fitted_model = pipe
 
         # Compute calibration metrics (training data performance)
         y_pred_cal = pipe.predict(X)
@@ -3577,7 +3589,8 @@ def _run_single_config(
                                                multi_class='ovr', average='macro')
                 else:
                     cal_auc = np.nan
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration ROC AUC: {e}")
                 cal_auc = np.nan
 
             # Compute F1, Precision, Recall
@@ -3585,7 +3598,8 @@ def _run_single_config(
                 cal_f1 = f1_score(y, y_pred_cal, average='weighted', zero_division=0)
                 cal_precision = precision_score(y, y_pred_cal, average='weighted', zero_division=0)
                 cal_recall = recall_score(y, y_pred_cal, average='weighted', zero_division=0)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration F1/Precision/Recall: {e}")
                 cal_f1 = np.nan
                 cal_precision = np.nan
                 cal_recall = np.nan
@@ -3650,7 +3664,8 @@ def _run_single_config(
 
     # Extract LVs (for PLS models) - must be done before building result dict
     # Use int to avoid decimal display, None for non-PLS models
-    n_comp = params.get("n_components")
+    # CRITICAL FIX: Also check for pls__n_components (PLS-DA pipeline prefixed params)
+    n_comp = params.get("n_components") or params.get("pls__n_components")
     lvs = int(n_comp) if n_comp is not None else None
 
     # Format imbalance handling indicator for display

@@ -14364,21 +14364,36 @@ class SpectralPredictApp:
                             deriv=deriv_order
                         )))
 
-                # Add scaler for models that need it
-                if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
+                # SPECIAL CASE: PLS-DA needs pls -> scaler -> lr pipeline
+                # PLS-DA uses PLSTransformer to reduce dimensions, then LogisticRegression to classify
+                if model_name == "PLS-DA" and task_type == "classification":
+                    from sklearn.linear_model import LogisticRegression
+                    from spectral_predict.models import PLSTransformer
+
+                    # Extract n_components from params (may be stored with different keys)
+                    n_components = params_dict.get('n_components', params_dict.get('pls__n_components', 5))
+
+                    pls = PLSTransformer(n_components=n_components, scale=False)
+                    steps.append(('pls', pls))
                     steps.append(('scaler', StandardScaler()))
-
-                # Create model with exact parameters
-                # Filter params_dict to only include parameters that get_model() accepts
-                allowed_params = {'n_components', 'max_n_components', 'max_iter'}
-                filtered_params = {k: v for k, v in params_dict.items() if k in allowed_params}
-
-                if filtered_params:
-                    model = get_model(model_name, task_type=task_type, **filtered_params)
+                    steps.append(('lr', LogisticRegression(max_iter=1000, random_state=42)))
                 else:
-                    model = get_model(model_name, task_type=task_type)
+                    # Generic model building for all other models
+                    # Add scaler for models that need it
+                    if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
+                        steps.append(('scaler', StandardScaler()))
 
-                steps.append(('model', model))
+                    # Create model with exact parameters
+                    # Filter params_dict to only include parameters that get_model() accepts
+                    allowed_params = {'n_components', 'max_n_components', 'max_iter'}
+                    filtered_params = {k: v for k, v in params_dict.items() if k in allowed_params}
+
+                    if filtered_params:
+                        model = get_model(model_name, task_type=task_type, **filtered_params)
+                    else:
+                        model = get_model(model_name, task_type=task_type)
+
+                    steps.append(('model', model))
 
                 # Create pipeline
                 if len(steps) > 1:
@@ -14489,7 +14504,7 @@ class SpectralPredictApp:
 
         return reconstructed_models
 
-    def _reconstruct_single_model_for_auto_ensemble(self, row, X_train, y_train):
+    def _reconstruct_single_model_for_auto_ensemble(self, row, X_train, y_train, task_type=None):
         """
         Reconstruct a single model from a results DataFrame row for auto-ensemble creation.
 
@@ -14500,6 +14515,8 @@ class SpectralPredictApp:
             row: Series/dict from results DataFrame with model configuration
             X_train: Training features
             y_train: Training targets
+            task_type: Optional task type ('classification' or 'regression'). If not provided,
+                      will try to get from training_data_cache or infer from y_train.
 
         Returns:
             Tuple of (fitted_model, model_name)
@@ -14507,10 +14524,12 @@ class SpectralPredictApp:
         Raises:
             ValueError if reconstruction fails
         """
-        # Determine task type from cached data or infer from y_train
-        task_type = 'classification' if len(np.unique(y_train)) < 20 and y_train.dtype == object else 'regression'
-        if self.training_data_cache and 'task_type' in self.training_data_cache:
-            task_type = self.training_data_cache['task_type']
+        # Use provided task_type, or get from cache, or infer from y_train
+        if task_type is None:
+            if self.training_data_cache and 'task_type' in self.training_data_cache:
+                task_type = self.training_data_cache['task_type']
+            else:
+                task_type = 'classification' if len(np.unique(y_train)) < 20 and y_train.dtype == object else 'regression'
 
         # Convert row to single-row DataFrame if needed
         if isinstance(row, pd.Series):
@@ -17591,17 +17610,26 @@ class SpectralPredictApp:
                 self._log_progress("\n> Generating automatic region-specialist ensembles...")
 
                 # Create wrapper function for model reconstruction
-                def reconstruct_for_auto_ensemble(row, X_train, y_train):
-                    return self._reconstruct_single_model_for_auto_ensemble(row, X_train, y_train)
+                # Capture task_type in closure to ensure correct model types are used
+                def reconstruct_for_auto_ensemble(row, X_train, y_train, _task_type=task_type):
+                    return self._reconstruct_single_model_for_auto_ensemble(row, X_train, y_train, task_type=_task_type)
 
                 # Get wavelengths from X_filtered
                 all_wavelengths = X_filtered.columns.tolist()
+
+                # For classification with string labels, encode y_filtered to match what models were trained with
+                y_for_auto_ensemble = y_filtered
+                if task_type == 'classification' and label_encoder is not None:
+                    try:
+                        y_for_auto_ensemble = label_encoder.transform(y_filtered)
+                    except Exception as e:
+                        self._log_progress(f"  [!] Label encoding failed: {e}")
 
                 # Generate auto-ensembles
                 self.auto_ensembles = create_auto_ensembles(
                     results_df=results_df,
                     X_train=X_filtered,
-                    y_train=y_filtered,
+                    y_train=y_for_auto_ensemble,
                     task_type=task_type,
                     reconstruct_func=reconstruct_for_auto_ensemble,
                     all_wavelengths=all_wavelengths
@@ -17624,6 +17652,9 @@ class SpectralPredictApp:
             except Exception as e:
                 self._log_progress(f"\n[!] Auto-ensemble generation failed: {e}")
                 self.auto_ensembles = None
+
+            # Populate auto-ensembles in Ensemble Model Results
+            self.root.after(0, self._populate_ensemble_results)
 
             # Store results for Results tab
             self.results_df = results_df
@@ -18728,13 +18759,45 @@ class SpectralPredictApp:
             messagebox.showwarning("No Selection", "Please select an ensemble from the table first.")
             return None
 
-        # Get the index from the item ID
-        selected_idx = int(selection[0])
-        return self.ensemble_results[selected_idx]
+        selected_iid = selection[0]
+
+        # Determine if this is a user ensemble or auto-ensemble
+        if selected_iid.startswith('auto_'):
+            # Auto-ensemble selected
+            ensemble_name = selected_iid[5:]  # Remove 'auto_' prefix
+            if hasattr(self, 'auto_ensembles') and self.auto_ensembles and ensemble_name in self.auto_ensembles:
+                auto_info = self.auto_ensembles[ensemble_name]
+                # Return in same format as user ensemble results for compatibility
+                metrics = auto_info['metrics']
+                return {
+                    'ensemble': auto_info['ensemble'],
+                    'method': f"{ensemble_name} (Auto)",
+                    'r2': metrics.get('r2', metrics.get('accuracy', 0)),
+                    'rmse': metrics.get('rmse', 1 - metrics.get('accuracy', 0)),
+                    'mae': metrics.get('rmse', 0) * 0.8,  # Approximate
+                    'rpd': 1 / (1 - metrics.get('r2', metrics.get('accuracy', 0.99))) if metrics.get('r2', metrics.get('accuracy', 0)) < 1 else 99.99,
+                    'is_auto': True,
+                    'base_models': auto_info['base_models'],
+                    'specialist_info': auto_info['specialist_info']
+                }
+            else:
+                messagebox.showwarning("Ensemble Not Found", f"Auto-ensemble '{ensemble_name}' not found.")
+                return None
+        else:
+            # User ensemble selected
+            has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None
+            if has_user_ensembles:
+                selected_idx = int(selected_iid)
+                if selected_idx < len(self.ensemble_results):
+                    return self.ensemble_results[selected_idx]
+            messagebox.showwarning("Ensemble Not Found", "Selected ensemble not found.")
+            return None
 
     def _show_regional_performance(self):
         """Show regional performance heatmap for all models in the selected ensemble."""
-        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+        has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
+        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
+        if not has_user_ensembles and not has_auto_ensembles:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
 
@@ -18787,7 +18850,9 @@ class SpectralPredictApp:
 
     def _show_ensemble_weights(self):
         """Show ensemble weights visualization for selected ensemble."""
-        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+        has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
+        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
+        if not has_user_ensembles and not has_auto_ensembles:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
 
@@ -18826,7 +18891,9 @@ class SpectralPredictApp:
 
     def _show_specialization_profile(self):
         """Show model specialization profiles for selected ensemble."""
-        if not hasattr(self, 'ensemble_results') or not self.ensemble_results:
+        has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
+        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
+        if not has_user_ensembles and not has_auto_ensembles:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
 
@@ -22748,24 +22815,48 @@ F1 Score:  {f1:.4f}
             # Extract hyperparameters from loaded model config (if available)
             # This ensures we reproduce the exact same model that was selected from results
             n_components = 10  # Default fallback
+
+            # First try LVs from config
             if self.selected_model_config is not None and 'LVs' in self.selected_model_config:
                 lvs_value = self.selected_model_config.get('LVs')
-                if not pd.isna(lvs_value):
+                if lvs_value is not None and not pd.isna(lvs_value):
                     n_components = int(lvs_value)
-                    print(f"DEBUG: Using n_components={n_components} from loaded model config")
+                    print(f"DEBUG: Using n_components={n_components} from loaded model config (LVs)")
+
+            # Fallback: try to extract from Params (handles pls__n_components case for PLS-DA)
+            if n_components == 10 and self.selected_model_config is not None:
+                raw_params = self.selected_model_config.get('Params')
+                if isinstance(raw_params, str) and raw_params.strip():
+                    try:
+                        parsed = ast.literal_eval(raw_params)
+                        if isinstance(parsed, dict):
+                            n_comp = parsed.get('n_components') or parsed.get('pls__n_components')
+                            if n_comp is not None:
+                                n_components = int(n_comp)
+                                print(f"DEBUG: Using n_components={n_components} from Params (fallback)")
+                    except (ValueError, SyntaxError):
+                        pass
 
             # CRITICAL: Use n_components as max to prevent clipping
             # When reproducing a model, we must use the EXACT n_components from training
             # Otherwise get_model clips n_components to max_n_components and results won't match
             effective_max_n_components = max(n_components, self.max_n_components.get())
 
-            model = get_model(
-                model_name,
-                task_type=task_type,
-                n_components=n_components,  # Use exact n_components from original model
-                max_n_components=effective_max_n_components,  # Prevent clipping
-                max_iter=self.refine_max_iter.get()
-            )
+            # CRITICAL FIX: For PLS-DA, create PLSTransformer with correct n_components
+            # The code below (lines ~23344, ~23389) will wrap this in a full pipeline with scaler + LR
+            # Don't create a full pipeline here - that would cause nesting
+            if model_name == "PLS-DA" and task_type == "classification":
+                from spectral_predict.models import PLSTransformer
+                model = PLSTransformer(n_components=n_components, scale=False)
+                print(f"DEBUG: Created PLSTransformer with n_components={n_components} for PLS-DA")
+            else:
+                model = get_model(
+                    model_name,
+                    task_type=task_type,
+                    n_components=n_components,  # Use exact n_components from original model
+                    max_n_components=effective_max_n_components,  # Prevent clipping
+                    max_iter=self.refine_max_iter.get()
+                )
 
             # Reapply tuned hyperparameters from the search results when available
             params_from_search = {}
@@ -22795,8 +22886,28 @@ F1 Score:  {f1:.4f}
                             print(f"ERROR capturing before params: {e}")
                         print(f"{'='*80}\n")
 
-                    model.set_params(**params_from_search)
-                    print(f"DEBUG: Applied saved search parameters: {params_from_search}")
+                    # CRITICAL FIX: Handle PLS-DA prefixed params specially
+                    # PLS-DA params are prefixed (pls__n_components, lr__max_iter) but model is just PLSTransformer
+                    # Strip pls__ prefix and only apply params that PLSTransformer understands
+                    if model_name == "PLS-DA" and task_type == "classification":
+                        pls_params = {}
+                        for key, val in params_from_search.items():
+                            if key.startswith('pls__'):
+                                # Strip prefix and apply to PLSTransformer
+                                unprefixed = key[5:]  # Remove 'pls__' prefix
+                                pls_params[unprefixed] = val
+                            elif not any(key.startswith(p) for p in ['lr__', 'scaler__']):
+                                # Also apply unprefixed params (fallback for older data)
+                                pls_params[key] = val
+                        if pls_params:
+                            model.set_params(**pls_params)
+                            print(f"DEBUG: Applied PLS-DA params (unprefixed): {pls_params}")
+                        else:
+                            print(f"DEBUG: No applicable PLS params found in: {params_from_search}")
+                    else:
+                        # For other models, params are unprefixed and apply directly
+                        model.set_params(**params_from_search)
+                        print(f"DEBUG: Applied saved search parameters: {params_from_search}")
 
                     # DIAGNOSTIC: Capture parameters AFTER set_params for ALL models
                     if True:  # Apply to ALL models including PLS
