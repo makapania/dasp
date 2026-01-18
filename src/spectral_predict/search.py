@@ -3483,8 +3483,10 @@ def _run_single_config(
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
         mean_r2 = r2_score(all_y_test, all_y_pred)
 
-        # Compute quartiles based on true values
-        quartiles = np.percentile(all_y_test, [25, 50, 75])
+        # Compute quartiles based on PREDICTIONS (not true values)
+        # This ensures alignment with auto-ensemble routing which uses predicted values
+        # to determine which regional specialist handles each sample
+        quartiles = np.percentile(all_y_pred, [25, 50, 75])
 
         # Compute RMSE for each quartile region
         # Note: Regional R² is not computed because it's mathematically misleading
@@ -3496,7 +3498,8 @@ def _run_single_config(
             (quartiles[1], quartiles[2]),  # Q3
             (quartiles[2], np.inf)  # Q4
         ]):
-            mask = (all_y_test >= lower) & (all_y_test < upper if i < 3 else all_y_test >= lower)
+            # Use predictions for mask to align with auto-ensemble routing logic
+            mask = (all_y_pred >= lower) & (all_y_pred < upper if i < 3 else all_y_pred >= lower)
             if mask.sum() > 0:
                 regional_rmse[f'Q{i+1}'] = np.sqrt(mean_squared_error(
                     all_y_test[mask], all_y_pred[mask]
