@@ -1412,6 +1412,8 @@ class SpectralPredictApp:
 
         # Result display options
         self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors
+        self.overfit_filter_enabled = tk.BooleanVar(value=False)   # Toggle overfit marking
+        self.overfit_threshold = tk.DoubleVar(value=3.0)           # Overfit threshold in percent
 
         # Tier selection
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
@@ -7555,6 +7557,37 @@ class SpectralPredictApp:
             self.results_tree.tag_configure(f'top_class{i}', background=color)
         # Store for legend creation
         self._class_highlight_colors = class_colors
+
+        # Configure overfit tag (gray text + overstrike for models where calibration >> CV)
+        try:
+            # Create overstrike font for overfit indicator
+            import tkinter.font as tkfont
+            default_font = tkfont.nametofont('TkDefaultFont')
+            overfit_font = tkfont.Font(
+                family=default_font.cget('family'),
+                size=default_font.cget('size'),
+                overstrike=True
+            )
+            self.results_tree.tag_configure('overfit', foreground='#888888', font=overfit_font)
+            # Combined tags: overfit + quartile background
+            quartile_colors = ['#e3f2fd', '#e8f5e9', '#fff3e0', '#fce4ec']
+            for i, color in enumerate(quartile_colors):
+                self.results_tree.tag_configure(f'overfit_q{i+1}', foreground='#888888',
+                                                background=color, font=overfit_font)
+            # Combined tags: overfit + class background
+            for i, color in enumerate(class_colors):
+                self.results_tree.tag_configure(f'overfit_class{i}', foreground='#888888',
+                                                background=color, font=overfit_font)
+        except Exception:
+            # Fallback: just gray text without overstrike
+            self.results_tree.tag_configure('overfit', foreground='#888888')
+            quartile_colors = ['#e3f2fd', '#e8f5e9', '#fff3e0', '#fce4ec']
+            for i, color in enumerate(quartile_colors):
+                self.results_tree.tag_configure(f'overfit_q{i+1}', foreground='#888888',
+                                                background=color)
+            for i, color in enumerate(class_colors):
+                self.results_tree.tag_configure(f'overfit_class{i}', foreground='#888888',
+                                                background=color)
 
         # Button frame for actions (inside card)
         button_frame = ttk.Frame(results_card)
@@ -14343,24 +14376,42 @@ class SpectralPredictApp:
                     self._log_progress(f"    [NSGA] Reconstructed preprocessing: {nsga_config['type']} w={nsga_config['window']}")
 
                 # Add derivative/SNV preprocessing if applicable (Grid Search format)
-                elif preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv']:
+                # FIX: Properly apply SNV preprocessing (was previously just 'pass')
+                elif preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv', 'snv_deriv']:
                     if preprocess == 'snv':
-                        # SNV only - no derivative
-                        pass  # Will add scaler below
+                        # SNV only - apply actual SNV transformation
+                        steps.append(('snv', SNV()))
                     elif preprocess in ['sg1', 'sg2']:
                         # Savitzky-Golay derivative
                         deriv_order = 1 if preprocess == 'sg1' else 2
+                        # Safe conversion with NaN checks
+                        safe_window = int(window) if window and not pd.isna(window) else 15
+                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
                         steps.append(('derivative', SavgolDerivative(
-                            window=int(window),
-                            polyorder=int(polyorder),
+                            window=safe_window,
+                            polyorder=safe_polyorder,
                             deriv=deriv_order
                         )))
                     elif preprocess == 'deriv_snv':
-                        # Derivative then SNV
-                        deriv_order = int(deriv)
+                        # Derivative then SNV (order matters!)
+                        deriv_order = int(deriv) if deriv and not pd.isna(deriv) else 1
+                        safe_window = int(window) if window and not pd.isna(window) else 15
+                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
                         steps.append(('derivative', SavgolDerivative(
-                            window=int(window),
-                            polyorder=int(polyorder),
+                            window=safe_window,
+                            polyorder=safe_polyorder,
+                            deriv=deriv_order
+                        )))
+                        steps.append(('snv', SNV()))
+                    elif preprocess == 'snv_deriv':
+                        # SNV then derivative
+                        deriv_order = int(deriv) if deriv and not pd.isna(deriv) else 1
+                        safe_window = int(window) if window and not pd.isna(window) else 15
+                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
+                        steps.append(('snv', SNV()))
+                        steps.append(('derivative', SavgolDerivative(
+                            window=safe_window,
+                            polyorder=safe_polyorder,
                             deriv=deriv_order
                         )))
 
@@ -14383,15 +14434,32 @@ class SpectralPredictApp:
                     if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
                         steps.append(('scaler', StandardScaler()))
 
-                    # Create model with exact parameters
-                    # Filter params_dict to only include parameters that get_model() accepts
-                    allowed_params = {'n_components', 'max_n_components', 'max_iter'}
-                    filtered_params = {k: v for k, v in params_dict.items() if k in allowed_params}
+                    # Create model with exact parameters from search results
+                    # FIX: Pass ALL hyperparameters, not just a whitelist
+                    # get_model() creates a base model; we then apply all params via set_params()
 
-                    if filtered_params:
-                        model = get_model(model_name, task_type=task_type, **filtered_params)
-                    else:
-                        model = get_model(model_name, task_type=task_type)
+                    # Extract params that get_model() signature accepts
+                    get_model_params = {}
+                    if 'n_components' in params_dict:
+                        get_model_params['n_components'] = params_dict['n_components']
+                    if 'max_n_components' in params_dict:
+                        get_model_params['max_n_components'] = params_dict['max_n_components']
+                    if 'max_iter' in params_dict:
+                        get_model_params['max_iter'] = params_dict['max_iter']
+
+                    model = get_model(model_name, task_type=task_type, **get_model_params)
+
+                    # Apply ALL remaining hyperparameters via set_params()
+                    # This ensures tuned values like alpha, n_estimators, max_depth, etc. are used
+                    remaining_params = {k: v for k, v in params_dict.items()
+                                       if k not in {'n_components', 'max_n_components', 'max_iter'}}
+                    if remaining_params:
+                        try:
+                            model.set_params(**remaining_params)
+                        except Exception as e:
+                            # Some params may not apply (e.g., nested pipeline params)
+                            # Log but continue with base model
+                            self._log_progress(f"    [WARN] Could not set params {remaining_params}: {e}")
 
                     steps.append(('model', model))
 
@@ -14418,6 +14486,8 @@ class SpectralPredictApp:
                 if ga_transform is not None and wavelength_subset is not None:
                     # NSGA-II case: preprocessing + wavelength selection
                     # Create combined wrapper that does both
+                    # FIX: Wrapper should apply transform during both fit() and predict()
+                    # to avoid double-preprocessing bug
                     class CombinedPreprocessWrapper:
                         def __init__(self, pipeline, transform, wavelength_cols, all_columns):
                             self.pipeline = pipeline
@@ -14441,20 +14511,16 @@ class SpectralPredictApp:
                             X_processed = self._preprocess_and_subset(X)
                             return self.pipeline.predict(X_processed)
 
-                    # Fit on preprocessed + subsetted data
-                    X_preproc = ga_transform(X_train.values if hasattr(X_train, 'values') else X_train)
-                    col_indices = [list(X_train.columns).index(c) for c in wavelength_subset]
-                    X_train_final = X_preproc[:, col_indices]
-                    pipeline.fit(X_train_final, y_train)
+                    # FIX: Fit on RAW data, let wrapper handle preprocessing
+                    # Previous bug: fitted on transformed data, then wrapper transformed AGAIN during predict
                     pipeline = CombinedPreprocessWrapper(pipeline, ga_transform, wavelength_subset, X_train.columns)
+                    pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
                     self._log_progress(f"    [Combined] Preprocessing + {len(wavelength_subset)} wavelength subset")
 
                 elif ga_transform is not None:
                     # GA/NSGA preprocessing only (no wavelength subset)
-                    X_train_preprocessed = ga_transform(X_train.values if hasattr(X_train, 'values') else X_train)
-                    pipeline.fit(X_train_preprocessed, y_train)
-
-                    # Wrap pipeline in a class that applies preprocessing during predict
+                    # FIX: Fit on RAW data, let wrapper handle preprocessing
+                    # Previous bug: fitted on transformed data, then wrapper transformed AGAIN during predict
                     class GAPreprocessWrapper:
                         def __init__(self, pipeline, transform):
                             self.pipeline = pipeline
@@ -14469,6 +14535,7 @@ class SpectralPredictApp:
                             return self.pipeline.fit(X_preproc, y)
 
                     pipeline = GAPreprocessWrapper(pipeline, ga_transform)
+                    pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
                 elif wavelength_subset is not None:
                     # NSGA-II or other method with wavelength selection
@@ -18080,9 +18147,11 @@ class SpectralPredictApp:
                 else:
                     values.append(row[col])
 
-            # Determine tag for highlighting based on best region (regression) or best class (classification)
+            # Determine tag for highlighting based on best region (regression), best class (classification), or overfit
             tag = ()
-            if hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get():
+            color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
+            overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
+            if color_enabled or overfit_enabled:
                 tag = self._get_highlight_tag_for_row(idx)
 
             self.results_tree.insert('', 'end', iid=str(idx), values=values, tags=tag)
@@ -18182,6 +18251,24 @@ class SpectralPredictApp:
         )
         color_checkbox.pack(side='left', padx=(0, 10))
 
+        # Add Overfit Filter controls
+        overfit_frame = ttk.Frame(self.region_legend_frame)
+        overfit_frame.pack(side='left', padx=(0, 10))
+        overfit_checkbox = ttk.Checkbutton(
+            overfit_frame,
+            text="Overfit Filter (>",
+            variable=self.overfit_filter_enabled,
+            command=self._on_overfit_toggle_changed
+        )
+        overfit_checkbox.pack(side='left')
+        overfit_spinbox = ttk.Spinbox(
+            overfit_frame, from_=1.0, to=20.0, increment=0.5, width=4,
+            textvariable=self.overfit_threshold,
+            command=self._on_overfit_toggle_changed
+        )
+        overfit_spinbox.pack(side='left', padx=2)
+        ttk.Label(overfit_frame, text="%)").pack(side='left')
+
         # Color swatches for quartiles
         colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
         for color, label in colors:
@@ -18220,6 +18307,24 @@ class SpectralPredictApp:
             command=self._on_color_toggle_changed
         )
         color_checkbox.pack(side='left', padx=(0, 10))
+
+        # Add Overfit Filter controls
+        overfit_frame = ttk.Frame(self.region_legend_frame)
+        overfit_frame.pack(side='left', padx=(0, 10))
+        overfit_checkbox = ttk.Checkbutton(
+            overfit_frame,
+            text="Overfit Filter (>",
+            variable=self.overfit_filter_enabled,
+            command=self._on_overfit_toggle_changed
+        )
+        overfit_checkbox.pack(side='left')
+        overfit_spinbox = ttk.Spinbox(
+            overfit_frame, from_=1.0, to=20.0, increment=0.5, width=4,
+            textvariable=self.overfit_threshold,
+            command=self._on_overfit_toggle_changed
+        )
+        overfit_spinbox.pack(side='left', padx=2)
+        ttk.Label(overfit_frame, text="%)").pack(side='left')
 
         # Get class labels
         class_labels = self._class_rankings.get('class_labels', []) if self._class_rankings else []
@@ -18268,13 +18373,24 @@ class SpectralPredictApp:
 
     def _on_color_toggle_changed(self):
         """Handle color toggle - refresh row highlighting without re-running analysis."""
+        self._refresh_row_tags()
+
+    def _on_overfit_toggle_changed(self):
+        """Handle overfit filter toggle - refresh row styling."""
+        self._refresh_row_tags()
+
+    def _refresh_row_tags(self):
+        """Refresh all row tags based on current color and overfit filter settings."""
         if self.results_df is None:
             return
 
+        color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
+        overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
+
         for row_id in self.results_tree.get_children():
             idx = int(row_id)
-            if self.highlight_colors_enabled.get():
-                # Re-apply appropriate tag based on rankings
+            if color_enabled or overfit_enabled:
+                # Re-apply appropriate tag based on rankings and overfit state
                 tag = self._get_highlight_tag_for_row(idx)
                 self.results_tree.item(row_id, tags=tag)
             else:
@@ -18282,7 +18398,7 @@ class SpectralPredictApp:
                 self.results_tree.item(row_id, tags=())
 
     def _get_highlight_tag_for_row(self, idx: int) -> tuple:
-        """Get the appropriate highlight tag for a row based on rankings.
+        """Get the appropriate highlight tag for a row based on rankings and overfit filter.
 
         Args:
             idx: Row index in results_df
@@ -18290,6 +18406,10 @@ class SpectralPredictApp:
         Returns:
             Tuple with tag name or empty tuple if no highlight
         """
+        is_overfit = self._is_model_overfit(idx)
+        overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
+        color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
+
         # Check classification rankings first
         if hasattr(self, '_class_rankings') and self._class_rankings:
             if idx in self._class_rankings.get('best_class', {}):
@@ -18297,15 +18417,77 @@ class SpectralPredictApp:
                 class_labels = self._class_rankings.get('class_labels', [])
                 try:
                     class_idx = class_labels.index(str(best_c))
-                    return (f"top_class{class_idx}",)
+                    if color_enabled and overfit_enabled and is_overfit:
+                        return (f"overfit_class{class_idx}",)
+                    elif color_enabled:
+                        return (f"top_class{class_idx}",)
+                    elif overfit_enabled and is_overfit:
+                        return ("overfit",)
+                    return ()
                 except (ValueError, IndexError):
                     pass
         # Check regression rankings
         elif hasattr(self, '_regional_rankings') and self._regional_rankings:
             if idx in self._regional_rankings.get('best_region', {}):
                 region, rank, _ = self._regional_rankings['best_region'][idx]
-                return (f"top_{region.lower()}",)
+                # Map region name to quartile number (Q1, Q2, Q3, Q4)
+                quartile_map = {'q1': 1, 'q2': 2, 'q3': 3, 'q4': 4}
+                q_num = quartile_map.get(region.lower(), 0)
+                if color_enabled and overfit_enabled and is_overfit and q_num > 0:
+                    return (f"overfit_q{q_num}",)
+                elif color_enabled:
+                    return (f"top_{region.lower()}",)
+                elif overfit_enabled and is_overfit:
+                    return ("overfit",)
+                return ()
+
+        # No color highlighting, but check for overfit-only marking
+        if overfit_enabled and is_overfit:
+            return ("overfit",)
         return ()
+
+    def _is_model_overfit(self, idx: int) -> bool:
+        """Check if a model's calibration metric exceeds its CV metric by threshold.
+
+        For regression: Checks if R2 - R2cv > threshold
+        For classification: Checks if Accuracy - Accuracycv > threshold
+
+        Args:
+            idx: Row index in results_df
+
+        Returns:
+            True if model appears overfit, False otherwise
+        """
+        if self.results_df is None or idx not in self.results_df.index:
+            return False
+
+        try:
+            row = self.results_df.loc[idx]
+            threshold = self.overfit_threshold.get() / 100.0  # Convert percent to fraction
+
+            # Check for classification (Accuracy columns)
+            if 'Accuracy' in self.results_df.columns and 'Accuracycv' in self.results_df.columns:
+                cal_acc = row.get('Accuracy')
+                cv_acc = row.get('Accuracycv')
+                if cal_acc is not None and cv_acc is not None:
+                    # Convert percentage strings to floats if needed
+                    if isinstance(cal_acc, str):
+                        cal_acc = float(cal_acc.replace('%', '')) / 100
+                    if isinstance(cv_acc, str):
+                        cv_acc = float(cv_acc.replace('%', '')) / 100
+                    return (cal_acc - cv_acc) > threshold
+
+            # Check for regression (R2 columns)
+            if 'R2' in self.results_df.columns and 'R2cv' in self.results_df.columns:
+                cal_r2 = row.get('R2')
+                cv_r2 = row.get('R2cv')
+                if cal_r2 is not None and cv_r2 is not None:
+                    return (float(cal_r2) - float(cv_r2)) > threshold
+
+        except (KeyError, ValueError, TypeError):
+            pass
+
+        return False
 
     def _update_region_filter_options(self):
         """Update the region/class filter combobox options based on task type.
