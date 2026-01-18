@@ -96,14 +96,7 @@ except ImportError:
     HAS_OUTLIER_DETECTION = False
     generate_outlier_report = None
 
-# Import new optimization modules
-try:
-    from spectral_predict.coupled_search import run_coupled_search
-    HAS_COUPLED_SEARCH = True
-except ImportError:
-    HAS_COUPLED_SEARCH = False
-    run_coupled_search = None
-
+# Import Bayesian optimization module
 try:
     from spectral_predict.unified_bayesian import run_unified_bayesian
     HAS_UNIFIED_BAYESIAN = True
@@ -1421,18 +1414,13 @@ class SpectralPredictApp:
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
         self._updating_from_tier = False  # Flag to prevent infinite loops when updating checkboxes
 
-        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II vs Coupled vs Unified)
-        self.optimization_method = tk.StringVar(value="grid")  # "grid", "bayesian", "nsga2", "coupled", or "unified"
-        self.n_bayesian_trials = tk.IntVar(value=100)  # Number of Bayesian optimization trials (default: 100)
-        self.n_unified_trials = tk.IntVar(value=500)   # Number of Unified Bayesian trials (default: 500)
+        # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II)
+        self.optimization_method = tk.StringVar(value="grid")  # "grid", "unified" (Bayesian), or "nsga2"
+        self.n_unified_trials = tk.IntVar(value=500)   # Number of Bayesian optimization trials (default: 500)
         self.nsga2_population = tk.IntVar(value=60)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=120)  # NSGA-II number of generations
         self.nsga2_selection_method = tk.StringVar(value="Min Error")  # "Min Error", "Balanced", "Knee Point"
         self.nsga2_mode = tk.StringVar(value="NSGA-II w/Guidance")  # "NSGA-II", "NSGA-II w/Guidance"
-
-        # Advanced preprocessing options (for coupled optimization)
-        self.use_ensemble_preprocessing = tk.BooleanVar(value=False)  # Stacked preprocessing
-        self.use_learned_preprocessing = tk.BooleanVar(value=False)   # Deep preprocessing (requires PyTorch)
 
         # Model selection (original models)
         # Standard tier models (enabled by default)
@@ -5840,24 +5828,17 @@ class SpectralPredictApp:
         opt_method_frame.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian", variable=self.optimization_method, value="bayesian").grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="⚡ Unified Bayesian", variable=self.optimization_method, value="unified").grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=3, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🔗 Coupled (Preprocessing+Model)", variable=self.optimization_method, value="coupled").grid(row=0, column=4, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian Optimization", variable=self.optimization_method, value="unified").grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=2, sticky=tk.W, padx=5)
 
         # Parameter frame for optimization-specific settings
         param_frame = ttk.Frame(opt_frame)
         param_frame.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(10, 5))
 
-        # Bayesian trials input
+        # Bayesian Optimization trials input
         ttk.Label(param_frame, text="Bayesian Trials:", style='Normal.TLabel').grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        self.n_trials_entry = ttk.Entry(param_frame, textvariable=self.n_bayesian_trials, width=8)
-        self.n_trials_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
-
-        # Unified Bayesian trials input
-        ttk.Label(param_frame, text="Unified Trials:", style='Normal.TLabel').grid(row=1, column=0, sticky=tk.W, padx=(0, 5))
         self.n_unified_trials_entry = ttk.Entry(param_frame, textvariable=self.n_unified_trials, width=8)
-        self.n_unified_trials_entry.grid(row=1, column=1, sticky=tk.W, padx=(0, 20))
+        self.n_unified_trials_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
 
         # NSGA-II parameters
         ttk.Label(param_frame, text="NSGA-II Pop:", style='Normal.TLabel').grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
@@ -5880,52 +5861,10 @@ class SpectralPredictApp:
 
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
-                    "   Bayesian: Smart search in 30-50 trials (fast, single-objective)\n"
-                    "   Unified Bayesian: Joint optimization of preprocessing + model + variables (300 trials, finds optimal combinations)\n"
-                    "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)\n"
-                    "   Coupled: Joint optimization of preprocessing + model (finds optimal combinations)")
+                    "   Bayesian Optimization: Joint optimization of preprocessing + model + variables (recommended)\n"
+                    "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)")
         ttk.Label(opt_frame, text=info_text,
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
-
-        # === Advanced Preprocessing Options Card ===
-        adv_preproc_card_outer, adv_preproc_card = self._create_card(content_frame, title="Advanced Preprocessing",
-                                                                      subtitle="Experimental preprocessing methods")
-        adv_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
-        row += 1
-        adv_preproc_frame = tk.Frame(adv_preproc_card, bg=self.colors['card_bg'])
-        adv_preproc_frame.pack(fill='both', expand=True)
-
-        # Ensemble Preprocessing checkbox
-        self.ensemble_preproc_checkbox = ttk.Checkbutton(
-            adv_preproc_frame,
-            text="Use Ensemble Preprocessing (Stacking)",
-            variable=self.use_ensemble_preprocessing
-        )
-        self.ensemble_preproc_checkbox.grid(row=0, column=0, sticky=tk.W, pady=5)
-        ttk.Label(adv_preproc_frame, text="Stacks multiple preprocessing methods (SNV, derivatives, etc.)",
-                 style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
-
-        # Deep Learning Model checkbox - DISABLED: produces poor results, needs debugging
-        self.learned_preproc_checkbox = ttk.Checkbutton(
-            adv_preproc_frame,
-            text="Deep Learning Model (Disabled - needs debugging)",
-            variable=self.use_learned_preprocessing,
-            state='disabled'  # Disabled until root cause of poor results is found
-        )
-        self.learned_preproc_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(adv_preproc_frame, text="Disabled: Produces poor results - root cause under investigation",
-                 style='Caption.TLabel', foreground='gray').grid(row=1, column=1, sticky=tk.W, padx=15)
-
-        # Info label - these options only work with Coupled mode
-        coupled_only_text = "ℹ️ These options only work with Coupled optimization mode"
-        self.coupled_options_label = ttk.Label(adv_preproc_frame, text=coupled_only_text,
-                 style='Caption.TLabel', foreground='#666666')
-        self.coupled_options_label.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
-
-        # Add trace to enable/disable these checkboxes based on optimization method
-        self.optimization_method.trace_add("write", self._update_coupled_options_state)
-        # Set initial state (disabled since default is "grid")
-        self._update_coupled_options_state()
 
         # Create card for model selection
         models_card_outer, models_card = self._create_card(content_frame, title="Select Models",
@@ -13854,28 +13793,6 @@ class SpectralPredictApp:
         }
         self.importance_desc_label.config(text=descriptions.get(method, ""))
 
-    def _update_coupled_options_state(self, *args):
-        """Enable/disable Ensemble preprocessing checkbox based on optimization method.
-
-        Ensemble preprocessing only works with Coupled optimization mode.
-        When other modes are selected, the checkbox is disabled and unchecked.
-        Note: Deep Preprocessing (Learned) is permanently disabled - not suitable for spectral data.
-        """
-        is_coupled = self.optimization_method.get() == "coupled"
-
-        if is_coupled:
-            # Enable ensemble checkbox only (learned is permanently disabled)
-            self.ensemble_preproc_checkbox.configure(state='normal')
-            # Learned preprocessing stays disabled - produces poor results for spectral data
-            self.coupled_options_label.configure(foreground='#666666')
-        else:
-            # Disable and uncheck the checkboxes
-            self.ensemble_preproc_checkbox.configure(state='disabled')
-            # Learned already disabled, just ensure value is False
-            self.use_ensemble_preprocessing.set(False)
-            self.use_learned_preprocessing.set(False)
-            self.coupled_options_label.configure(foreground='orange')
-
     def _on_baseline_method_changed(self, event):
         """Show/hide method-specific baseline options."""
         method = self.baseline_method.get()
@@ -14780,7 +14697,7 @@ class SpectralPredictApp:
                     'analysis_wl_min': analysis_wl_min,
                     'analysis_wl_max': analysis_wl_max,
                     'use_full_spectrum_preprocessing': True,
-                    'n_base_models': len(ensemble_results),
+                    'n_base_models': len(ensemble_results[0]['ensemble'].models) if ensemble_results else 0,
                     'manually_retrained': True,
                     'retrain_timestamp': datetime.now().isoformat()
                 })
@@ -14922,30 +14839,56 @@ class SpectralPredictApp:
                         cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
                     )
 
-                    # Make predictions
-                    ensemble_pred = ensemble.predict(X_filtered)
-
-                    # Calculate metrics
+                    # Use cross-validation to get realistic metrics (comparable to RMSECV)
+                    # Without CV, ensemble metrics on training data would be inflated
                     from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+                    from sklearn.model_selection import KFold
                     import numpy as np
 
-                    rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
-                    r2 = r2_score(y_filtered, ensemble_pred)
-                    mae = mean_absolute_error(y_filtered, ensemble_pred)
+                    n_cv_folds = min(5, len(y_filtered))
+                    if n_cv_folds >= 2:
+                        kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
+                        cv_predictions = np.full(len(y_filtered), np.nan)
+
+                        for train_idx, val_idx in kf.split(X_filtered):
+                            # Re-fit ensemble on CV training fold
+                            # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
+                            if hasattr(X_filtered, 'iloc'):
+                                X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
+                            else:
+                                X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
+                            y_cv_train = y_filtered[train_idx]
+
+                            cv_ensemble = create_ensemble(
+                                models=models,
+                                model_names=model_names,
+                                X=X_cv_train,
+                                y=y_cv_train,
+                                ensemble_type=ensemble_type,
+                                n_regions=n_regions,
+                                cv=min(5, len(y_cv_train)),
+                            )
+                            cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
+
+                        # Calculate CV metrics (realistic, comparable to individual models)
+                        rmse = np.sqrt(mean_squared_error(y_filtered, cv_predictions))
+                        r2 = r2_score(y_filtered, cv_predictions)
+                        mae = mean_absolute_error(y_filtered, cv_predictions)
+                    else:
+                        # Fallback for very small datasets
+                        ensemble_pred = ensemble.predict(X_filtered)
+                        rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
+                        r2 = r2_score(y_filtered, ensemble_pred)
+                        mae = mean_absolute_error(y_filtered, ensemble_pred)
 
                     # Calculate RPD (Ratio of Performance to Deviation)
                     rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
 
-                    self._log_progress(f"> {ensemble_name} Results:")
-                    self._log_progress(f"   RMSE: {rmse:.4f}")
-                    self._log_progress(f"   R²:   {r2:.4f}")
-                    self._log_progress(f"   MAE:  {mae:.4f}")
-                    self._log_progress(f"   RPD:  {rpd:.2f}")
-
-                    # Add warning for mixture of experts about cross-validated performance
-                    if ensemble_type == 'mixture_experts' and r2 > 0.95:
-                        self._log_progress(f"   [!] Note: These metrics are on training data.")
-                        self._log_progress(f"   [!] Actual performance on new data will be lower.")
+                    self._log_progress(f"> {ensemble_name} Results (CV):")
+                    self._log_progress(f"   RMSECV: {rmse:.4f}")
+                    self._log_progress(f"   R²CV:   {r2:.4f}")
+                    self._log_progress(f"   MAECV:  {mae:.4f}")
+                    self._log_progress(f"   RPD:    {rpd:.2f}")
 
                     # Store results
                     ensemble_results.append({
@@ -14989,9 +14932,9 @@ class SpectralPredictApp:
 
                     status = "🏆" if i == 1 else f"  {i}."
                     self._log_progress(f"{status} {result['method']}")
-                    self._log_progress(f"     R²:   {result['r2']:.4f} ({r2_improvement:+.4f})")
-                    self._log_progress(f"     RMSE: {result['rmse']:.4f} ({rmse_improvement:+.1f}%)")
-                    self._log_progress(f"     RPD:  {result['rpd']:.2f}")
+                    self._log_progress(f"     R²cv:   {result['r2']:.4f} ({r2_improvement:+.4f})")
+                    self._log_progress(f"     RMSEcv: {result['rmse']:.4f} ({rmse_improvement:+.1f}%)")
+                    self._log_progress(f"     RPD:    {result['rpd']:.2f}")
 
                 self._log_progress(f"\n> Ensemble training complete!")
                 self._log_progress(f"> Trained {len(ensemble_results)} ensemble(s)")
@@ -15015,7 +14958,7 @@ class SpectralPredictApp:
     def _run_analysis_thread(self, selected_models, tier):
         """Run analysis in background thread."""
         try:
-            from spectral_predict.search import run_search, run_bayesian_search
+            from spectral_predict.search import run_search
             from spectral_predict.report import write_markdown_report
 
             # Determine task type
@@ -16768,350 +16711,20 @@ class SpectralPredictApp:
             if imbalance_method:
                 self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
 
-            # Dispatch to Grid Search or Bayesian Optimization or NSGA-II or Coupled based on user selection
+            # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
             optimization_method = self.optimization_method.get()
 
-            if optimization_method == "coupled":
-                # === COUPLED OPTIMIZATION (Preprocessing + Model Joint) ===
-                self._log_progress("\n🔗 Running Coupled Optimization (Preprocessing+Model)...")
-                self._log_progress(f"   Jointly optimizing preprocessing and model selection")
-                self._log_progress(f"   This finds optimal preprocessing-model combinations\n")
-
-                if not HAS_COUPLED_SEARCH:
-                    self._log_progress("❌ ERROR: Coupled search module not available!")
-                    self._log_progress("   Please ensure src/spectral_predict/coupled_search.py exists")
-                    messagebox.showerror("Module Missing", "Coupled search module not found!")
-                    return
-
-                # Get wavelengths for proper variable output
-                wavelengths = None
-                if hasattr(X_filtered, 'columns'):
-                    try:
-                        wavelengths = np.array([float(c) for c in X_filtered.columns])
-                    except (ValueError, TypeError):
-                        pass
-
-                # Convert to numpy if DataFrame
-                X_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
-                y_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
-
-                # Check advanced preprocessing options
-                use_ensemble = self.use_ensemble_preprocessing.get()
-                use_learned = self.use_learned_preprocessing.get()
-
-                if use_ensemble:
-                    self._log_progress("   ⚠️ Ensemble preprocessing enabled (experimental)")
-                if use_learned:
-                    if HAS_LEARNED_PREPROCESSING:
-                        self._log_progress("   ⚠️ Learned preprocessing enabled (experimental)")
-                    else:
-                        self._log_progress("   ⚠️ Learned preprocessing requested but PyTorch not available - skipping")
-                        use_learned = False
-
-                # Run coupled search for each selected model
-                # Note: run_coupled_search optimizes ONE model at a time
-                all_results = []
-                label_encoder = None
-
-                for model_name in selected_models:
-                    self._log_progress(f"\n  Optimizing {model_name}...")
-
-                    try:
-                        # Map model names to coupled_search format
-                        model_map = {
-                            'PLS': 'pls',
-                            'Ridge': 'ridge',
-                            'Lasso': 'lasso',
-                            'ElasticNet': 'elasticnet',
-                            'RandomForest': 'rf',
-                            'XGBoost': 'xgboost',
-                            'LightGBM': 'lightgbm',
-                            'CatBoost': 'catboost',
-                            'SVR': 'svr',
-                            'SVM': 'svm',
-                            'MLP': 'mlp',
-                            'NeuralBoosted': 'neuralboosted'
-                        }
-
-                        coupled_model_name = model_map.get(model_name, model_name.lower())
-
-                        # === LEARNED PREPROCESSING MODE (PyTorch) ===
-                        if use_learned and HAS_LEARNED_PREPROCESSING:
-                            from spectral_predict.learned_preprocessing import SpectralPreprocessorWithRegressor
-                            from sklearn.model_selection import cross_val_score
-
-                            # Create learned preprocessing + regression model
-                            learned_model = SpectralPreprocessorWithRegressor(
-                                n_wavelengths=n_features,
-                                n_conv_layers=2,
-                                n_filters=16,
-                                kernel_size=11,
-                                hidden_size=64,
-                                dropout=0.3,
-                                learning_rate=1e-3,
-                                batch_size=32,
-                            )
-
-                            # Cross-validate learned model
-                            # Note: This is slower as each fold trains a neural network
-                            if task_type == 'regression':
-                                scoring = 'neg_root_mean_squared_error'
-                            else:
-                                self._log_progress(f"    ⚠️ Learned preprocessing only supports regression - skipping {model_name}")
-                                continue
-
-                            self._log_progress(f"    Training neural preprocessing (this may take a moment)...")
-
-                            scores = cross_val_score(
-                                learned_model, X_np, y_np,
-                                cv=self.folds.get(),
-                                scoring=scoring,
-                                n_jobs=1  # Neural networks don't parallelize well with sklearn
-                            )
-
-                            best_score = -scores.mean()  # RMSECV
-
-                            best_params = {
-                                'preprocessing': 'learned_neural',
-                                'n_conv_layers': 2,
-                                'n_filters': 16,
-                                'kernel_size': 11,
-                                'hidden_size': 64,
-                                'dropout': 0.3,
-                            }
-                            study = None
-
-                            self._log_progress(f"    ✓ Learned preprocessing CV score: {best_score:.4f}")
-                            self._log_progress(f"    Neural network learned optimal preprocessing")
-
-                        # === ENSEMBLE PREPROCESSING MODE ===
-                        elif use_ensemble and HAS_ENSEMBLE_PREPROCESSING:
-                            from spectral_predict.ensemble_preprocessing import create_standard_preprocessing_ensemble
-                            from spectral_predict.models import build_model
-                            from sklearn.model_selection import cross_val_score
-
-                            self._log_progress(f"    Tuning base model hyperparameters...")
-
-                            # Quick grid search over key hyperparameters (like main grid search)
-                            n_samples = X_np.shape[0]
-                            max_components = max(2, min(n_samples // 3, 15))
-
-                            param_grids = {
-                                'PLS': [{'n_components': n} for n in range(2, max_components + 1)],
-                                'Ridge': [{'alpha': a} for a in [0.01, 0.1, 1.0, 10.0, 100.0]],
-                                'Lasso': [{'alpha': a} for a in [0.0001, 0.001, 0.01, 0.1, 1.0]],
-                                'ElasticNet': [{'alpha': a, 'l1_ratio': r} for a in [0.01, 0.1, 1.0] for r in [0.25, 0.5, 0.75]],
-                                'RandomForest': [{'n_estimators': 100, 'max_depth': d} for d in [5, 10, 15, None]],
-                                'LightGBM': [{'n_estimators': 100, 'num_leaves': n} for n in [15, 31, 63, 127]],
-                                'XGBoost': [{'n_estimators': 100, 'max_depth': d} for d in [3, 5, 7, 9]],
-                                'CatBoost': [{'iterations': 100, 'depth': d} for d in [4, 6, 8]],
-                                'SVR': [{'C': c, 'gamma': 'scale'} for c in [0.1, 1.0, 10.0, 100.0]],
-                                'MLP': [{'hidden_layer_sizes': h, 'alpha': 0.001} for h in [(32,), (64,), (128,), (64, 32)]],
-                            }
-
-                            param_grid = param_grids.get(model_name, [{}])
-                            tuning_best_score = float('inf')
-                            tuning_best_params = param_grid[0] if param_grid else {}
-
-                            # Use 3-fold CV for quick tuning (faster than full folds)
-                            tuning_cv = min(3, self.folds.get())
-
-                            for params in param_grid:
-                                try:
-                                    model = build_model(model_name, params, task_type=task_type)
-                                    scores = cross_val_score(model, X_np, y_np, cv=tuning_cv,
-                                                             scoring='neg_root_mean_squared_error', n_jobs=-1)
-                                    score = -scores.mean()
-                                    if score < tuning_best_score:
-                                        tuning_best_score = score
-                                        tuning_best_params = params
-                                except Exception:
-                                    continue
-
-                            self._log_progress(f"    Best params: {tuning_best_params} (RMSE: {tuning_best_score:.4f})")
-
-                            # Build base model with tuned hyperparameters
-                            base_model = build_model(model_name, tuning_best_params, task_type=task_type)
-
-                            # Create ensemble that stacks multiple preprocessings
-                            ensemble = create_standard_preprocessing_ensemble(
-                                base_model,
-                                task_type=task_type,
-                                include_baseline=True
-                            )
-
-                            # Cross-validate ensemble with full folds
-                            if task_type == 'regression':
-                                scoring = 'neg_root_mean_squared_error'
-                            else:
-                                scoring = 'accuracy'
-
-                            self._log_progress(f"    Running ensemble cross-validation...")
-                            scores = cross_val_score(
-                                ensemble, X_np, y_np,
-                                cv=self.folds.get(),
-                                scoring=scoring,
-                                n_jobs=-1
-                            )
-
-                            if task_type == 'regression':
-                                best_score = -scores.mean()  # RMSECV
-                            else:
-                                best_score = scores.mean()  # Accuracy
-
-                            best_params = {
-                                'preprocessing': 'ensemble_stacked',
-                                'n_preprocessings': 24,  # 22 core + 2 baseline variants
-                                'meta_model': 'RidgeCV',
-                                'base_model_params': tuning_best_params,
-                            }
-                            study = None
-
-                            self._log_progress(f"    ✓ Ensemble CV score: {best_score:.4f}")
-                            self._log_progress(f"    Stacking 24 preprocessing methods with tuned {model_name}")
-
-                        # === STANDARD COUPLED OPTIMIZATION MODE ===
-                        else:
-                            # Run coupled optimization for this model
-                            best_params, best_score, study = run_coupled_search(
-                                X=X_np,
-                                y=y_np,
-                                task_type=task_type,
-                                model_name=coupled_model_name,
-                                n_trials=self.n_bayesian_trials.get(),  # Reuse Bayesian trials setting
-                                cv_folds=self.folds.get(),
-                                random_state=42,  # Fixed seed (hardcoded throughout codebase)
-                                verbose=False  # Suppress per-trial output
-                            )
-
-                            self._log_progress(f"    ✓ Best score: {best_score:.4f}")
-                            self._log_progress(f"    Preprocessing: {best_params.get('preprocessing', 'raw')}")
-
-                        # Store result
-                        all_results.append({
-                            'model': model_name,
-                            'best_params': best_params,
-                            'best_score': best_score,
-                            'study': study
-                        })
-
-                    except Exception as e:
-                        self._log_progress(f"    ✗ Error: {str(e)}")
-                        import traceback
-                        self._log_progress(f"    Traceback: {traceback.format_exc()}")
-                        continue
-
-                # Convert results to V1 DataFrame format
-                if all_results:
-                    results_list = []
-                    for res in all_results:
-                        model = res['model']
-                        params = res['best_params']
-                        score = res['best_score']
-
-                        # Build preprocessing string
-                        preproc_parts = []
-                        if params.get('baseline_method', 'none') != 'none':
-                            preproc_parts.append(params['baseline_method'])
-                        preproc_type = params.get('preprocessing', 'raw')
-                        if preproc_type != 'raw':
-                            preproc_parts.append(preproc_type)
-                        preprocessing = '+'.join(preproc_parts) if preproc_parts else 'raw'
-
-                        # Extract derivative order from preprocessing type (e.g., 'snv_deriv2' -> 2)
-                        deriv_order = None
-                        if 'deriv' in preproc_type:
-                            for c in preproc_type:
-                                if c.isdigit():
-                                    deriv_order = int(c)
-                                    break
-
-                        # Get window and polyorder from params
-                        window = params.get('savgol_window', None)
-                        polyorder = deriv_order + 1 if deriv_order else None
-
-                        # Calculate metrics (approximation - real calc needs actual predictions)
-                        if task_type == 'regression':
-                            cv_error = score  # Already RMSECV
-                            r2 = max(0, 1 - (score**2 / np.var(y_np)))  # Approximate
-                        else:
-                            cv_error = 1 - score  # Convert accuracy to error
-                            r2 = score  # Use accuracy as "R2" for classification
-
-                        # Build wavelength strings for Model Development tab
-                        all_vars_str = ','.join([f"{w:.0f}" for w in wavelengths]) if wavelengths is not None else ''
-
-                        # Build training config dict for validation
-                        training_config = {
-                            'folds': self.folds.get(),
-                            'n_samples_used': len(X_np),
-                            'n_samples_total': len(X_np),
-                            'excluded_count': 0,
-                            'validation_count': 0,
-                            'n_features_used': n_features,
-                            'random_state': self.random_state.get() if hasattr(self, 'random_state') else 42
-                        }
-
-                        results_list.append({
-                            'Model': model,
-                            'CV Error': cv_error,
-                            'R²': r2,
-                            'N Components': params.get('n_components', params.get('n_estimators', 'N/A')),
-                            'Params': str(params),
-                            # Add columns required by write_markdown_report and Model Development tab
-                            'Task': task_type,
-                            'Preprocess': preprocessing,
-                            'SubsetTag': 'full',
-                            'Deriv': deriv_order,
-                            'Window': window,
-                            'Poly': polyorder,
-                            'LVs': params.get('n_components', None),
-                            'n_vars': n_features,
-                            'full_vars': n_features,
-                            'RMSE': cv_error if task_type == 'regression' else None,
-                            'R2': r2,
-                            'Accuracy': r2 if task_type == 'classification' else None,
-                            'ROC_AUC': None,
-                            'Imbalance': 'none',
-                            # Store complete Optuna params for save/predict
-                            'optuna_params': params,  # Full dict (not just string)
-                            'baseline_method': params.get('baseline_method', 'none'),
-                            'savgol_window': params.get('savgol_window', 11),
-                            # CRITICAL: Wavelength columns for Model Development tab
-                            'all_vars': all_vars_str,
-                            'top_vars': all_vars_str,  # Same as all_vars (no feature selection in coupled)
-                            'training_config': training_config,
-                            # Flag for Model Development detection
-                            'is_coupled': True,
-                        })
-
-                    results_df = pd.DataFrame(results_list)
-                    results_df = results_df.sort_values('CV Error').reset_index(drop=True)
-                    # Add Rank and Score columns for report compatibility
-                    results_df['Rank'] = results_df.index + 1
-                    results_df['Score'] = results_df['CV Error']
-                else:
-                    results_df = pd.DataFrame()
-
-                # Log completion
-                self._log_progress(f"\n> Coupled Optimization Complete!")
-                self._log_progress(f"  Tested {len(all_results)} models")
-                if len(results_df) > 0:
-                    best = results_df.iloc[0]
-                    self._log_progress(f"  Best: {best.get('Model', 'N/A')} + {best.get('Preprocess', 'N/A')}")
-                    self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
-
-            elif optimization_method == "unified":
-                # === UNIFIED BAYESIAN OPTIMIZATION (Joint Preprocessing + Model + Variable Selection) ===
-                self._log_progress("\n⚡ Running Unified Bayesian Optimization...")
+            if optimization_method == "unified":
+                # === BAYESIAN OPTIMIZATION (Joint Preprocessing + Model + Variable Selection) ===
+                self._log_progress("\n🎯 Running Bayesian Optimization...")
                 self._log_progress(f"   Jointly optimizing preprocessing + model + variable selection")
                 self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
                 self._log_progress(f"   This intelligently explores the full configuration space\n")
 
                 if not HAS_UNIFIED_BAYESIAN:
-                    self._log_progress("❌ ERROR: Unified Bayesian module not available!")
+                    self._log_progress("❌ ERROR: Bayesian optimization module not available!")
                     self._log_progress("   Please ensure src/spectral_predict/unified_bayesian.py exists")
-                    messagebox.showerror("Module Missing", "Unified Bayesian module not found!")
+                    messagebox.showerror("Module Missing", "Bayesian optimization module not found!")
                     return
 
                 # Get wavelengths for proper variable output
@@ -17215,7 +16828,7 @@ class SpectralPredictApp:
                         self.validation_y is not None and
                         len(results_df) > 0):
 
-                        self._log_progress("\n📊 Computing validation metrics for Unified Bayesian results...")
+                        self._log_progress("\n📊 Computing validation metrics for Bayesian Optimization results...")
 
                         try:
                             from spectral_predict.search import compute_validation_metrics_for_top_models
@@ -17261,7 +16874,7 @@ class SpectralPredictApp:
                     results_df = pd.DataFrame()
 
                 # Log completion
-                self._log_progress(f"\n> Unified Bayesian Optimization Complete!")
+                self._log_progress(f"\n> Bayesian Optimization Complete!")
                 self._log_progress(f"  Tested {len(all_results)} models")
                 if len(results_df) > 0:
                     best = results_df.iloc[0]
@@ -17387,51 +17000,6 @@ class SpectralPredictApp:
                         self._log_progress(f"    Wavelengths: {ks['n_wavelengths']}")
                         self._log_progress(f"    Error: {ks['objectives']['error']:.4f}")
 
-            elif optimization_method == "bayesian":
-                # === BAYESIAN OPTIMIZATION ===
-                self._log_progress("\n🎯 Running Bayesian Hyperparameter Optimization...")
-                self._log_progress(f"   Trials per model: {self.n_bayesian_trials.get()}")
-                self._log_progress(f"   Optimization method: TPE (Tree-structured Parzen Estimator)")
-                self._log_progress(f"   Expected speedup: ~100x faster than grid search\n")
-
-                results_df, label_encoder = run_bayesian_search(
-                    X=X_filtered,
-                    y=y_filtered,
-                    task_type=task_type,
-                    models_to_test=selected_models,
-                    preprocessing_methods=preprocessing_methods,
-                    n_trials=self.n_bayesian_trials.get(),
-                    folds=self.folds.get(),
-                    excluded_count=n_excluded,
-                    validation_count=n_validation,
-                    total_samples_original=n_total_original,
-                    max_n_components=adjusted_max_components,
-                    tier=tier,
-                    imbalance_method=imbalance_method,
-                    imbalance_params=imbalance_params,
-                    random_state=42,
-                    progress_callback=self._progress_callback,
-                    enable_variable_subsets=enable_variable_subsets,
-                    variable_counts=variable_counts if variable_counts else None,
-                    variable_selection_methods=selected_varsel_methods,
-                    # Validation metrics for results table
-                    X_validation=self.validation_X.values if (
-                        self.validation_enabled.get() and
-                        self.show_validation_metrics.get() and
-                        self.validation_X is not None
-                    ) else None,
-                    y_validation=self.validation_y.values if (
-                        self.validation_enabled.get() and
-                        self.show_validation_metrics.get() and
-                        self.validation_y is not None
-                    ) else None,
-                    compute_validation=(
-                        self.validation_enabled.get() and
-                        self.show_validation_metrics.get() and
-                        self.validation_X is not None
-                    ),
-                    validation_top_n=self.validation_top_n.get()
-                )
             else:
                 # === GRID SEARCH (Original behavior) ===
                 self._log_progress("\n📊 Running Grid Search...")
@@ -18242,10 +17810,11 @@ class SpectralPredictApp:
             if widget != getattr(self, '_legend_header', None):
                 widget.destroy()
 
-        # Add header
-        legend_label = ttk.Label(self.region_legend_frame, text="Region Legend:", font=('Segoe UI', 9, 'bold'))
-        legend_label.pack(side='left', padx=5)
-        self._legend_header = legend_label
+        # Add header only if it doesn't exist
+        if not hasattr(self, '_legend_header') or self._legend_header is None:
+            legend_label = ttk.Label(self.region_legend_frame, text="Region Legend:", font=('Segoe UI', 9, 'bold'))
+            legend_label.pack(side='left', padx=5)
+            self._legend_header = legend_label
 
         # Add Color toggle checkbox
         color_checkbox = ttk.Checkbutton(
@@ -18317,9 +17886,10 @@ class SpectralPredictApp:
 
     def _update_class_legend(self):
         """Update the legend for classification (class-based) results."""
-        # Clear existing legend items
+        # Clear existing legend items and header reference
         for widget in self.region_legend_frame.winfo_children():
             widget.destroy()
+        self._legend_header = None
 
         # Add header
         legend_label = ttk.Label(self.region_legend_frame, text="Class Legend:", font=('Segoe UI', 9, 'bold'))
@@ -18775,16 +18345,16 @@ class SpectralPredictApp:
             self.ensemble_tree.delete(item)
 
         # Define columns
-        columns = ['Rank', 'Method', 'RMSE', 'R²', 'MAE', 'RPD', 'vs Best Individual']
+        columns = ['Rank', 'Method', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
         self.ensemble_tree['columns'] = columns
 
         # Configure columns
         column_widths = {
             'Rank': 60,
             'Method': 200,
-            'RMSE': 100,
-            'R²': 100,
-            'MAE': 100,
+            'RMSEcv': 100,
+            'R²cv': 100,
+            'MAEcv': 100,
             'RPD': 80,
             'vs Best Individual': 150
         }
