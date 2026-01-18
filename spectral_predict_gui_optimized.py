@@ -1414,6 +1414,8 @@ class SpectralPredictApp:
         self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors
         self.overfit_filter_enabled = tk.BooleanVar(value=False)   # Toggle overfit marking
         self.overfit_threshold = tk.DoubleVar(value=3.0)           # Overfit threshold in percent
+        self.rmse_ratio_filter_enabled = tk.BooleanVar(value=False)  # Toggle RMSE ratio filter
+        self.rmse_ratio_threshold = tk.DoubleVar(value=1.2)          # RMSE ratio threshold (RMSEcv/RMSE)
 
         # Tier selection
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
@@ -18006,6 +18008,9 @@ class SpectralPredictApp:
         # Repopulate with sorted data
         self._populate_results_table(sorted_df, is_sorted=True)
 
+        # Ensure highlighting persists after sorting
+        self._refresh_row_tags()
+
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
         if results_df is None or len(results_df) == 0:
@@ -18251,12 +18256,12 @@ class SpectralPredictApp:
         )
         color_checkbox.pack(side='left', padx=(0, 10))
 
-        # Add Overfit Filter controls
+        # Add ΔR² Overfit Filter controls
         overfit_frame = ttk.Frame(self.region_legend_frame)
         overfit_frame.pack(side='left', padx=(0, 10))
         overfit_checkbox = ttk.Checkbutton(
             overfit_frame,
-            text="Overfit Filter (>",
+            text="ΔR² (>",
             variable=self.overfit_filter_enabled,
             command=self._on_overfit_toggle_changed
         )
@@ -18268,6 +18273,27 @@ class SpectralPredictApp:
         )
         overfit_spinbox.pack(side='left', padx=2)
         ttk.Label(overfit_frame, text="%)").pack(side='left')
+
+        # Add RMSECV/RMSE ratio filter controls (regression only)
+        rmse_ratio_frame = ttk.Frame(self.region_legend_frame)
+        rmse_ratio_frame.pack(side='left', padx=(0, 10))
+        rmse_ratio_checkbox = ttk.Checkbutton(
+            rmse_ratio_frame,
+            text="RMSECV/RMSE (>",
+            variable=self.rmse_ratio_filter_enabled,
+            command=self._on_rmse_ratio_toggle_changed
+        )
+        rmse_ratio_checkbox.pack(side='left')
+        rmse_ratio_combo = ttk.Combobox(
+            rmse_ratio_frame,
+            textvariable=self.rmse_ratio_threshold,
+            values=["1.1", "1.2", "1.3", "1.4", "1.5", "2.0"],
+            width=4,
+            state="readonly"
+        )
+        rmse_ratio_combo.pack(side='left', padx=2)
+        rmse_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmse_ratio_toggle_changed())
+        ttk.Label(rmse_ratio_frame, text=")").pack(side='left')
 
         # Color swatches for quartiles
         colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
@@ -18308,12 +18334,12 @@ class SpectralPredictApp:
         )
         color_checkbox.pack(side='left', padx=(0, 10))
 
-        # Add Overfit Filter controls
+        # Add ΔAcc Overfit Filter controls (classification only - no RMSE ratio filter)
         overfit_frame = ttk.Frame(self.region_legend_frame)
         overfit_frame.pack(side='left', padx=(0, 10))
         overfit_checkbox = ttk.Checkbutton(
             overfit_frame,
-            text="Overfit Filter (>",
+            text="ΔAcc (>",
             variable=self.overfit_filter_enabled,
             command=self._on_overfit_toggle_changed
         )
@@ -18379,6 +18405,10 @@ class SpectralPredictApp:
         """Handle overfit filter toggle - refresh row styling."""
         self._refresh_row_tags()
 
+    def _on_rmse_ratio_toggle_changed(self):
+        """Handle RMSE ratio filter toggle - refresh row styling."""
+        self._refresh_row_tags()
+
     def _refresh_row_tags(self):
         """Refresh all row tags based on current color and overfit filter settings."""
         if self.results_df is None:
@@ -18386,10 +18416,11 @@ class SpectralPredictApp:
 
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
         overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
+        rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
 
         for row_id in self.results_tree.get_children():
             idx = int(row_id)
-            if color_enabled or overfit_enabled:
+            if color_enabled or overfit_enabled or rmse_ratio_enabled:
                 # Re-apply appropriate tag based on rankings and overfit state
                 tag = self._get_highlight_tag_for_row(idx)
                 self.results_tree.item(row_id, tags=tag)
@@ -18408,6 +18439,8 @@ class SpectralPredictApp:
         """
         is_overfit = self._is_model_overfit(idx)
         overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
+        rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
+        any_overfit_filter = overfit_enabled or rmse_ratio_enabled
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
 
         # Check classification rankings first
@@ -18417,11 +18450,11 @@ class SpectralPredictApp:
                 class_labels = self._class_rankings.get('class_labels', [])
                 try:
                     class_idx = class_labels.index(str(best_c))
-                    if color_enabled and overfit_enabled and is_overfit:
+                    if color_enabled and any_overfit_filter and is_overfit:
                         return (f"overfit_class{class_idx}",)
                     elif color_enabled:
                         return (f"top_class{class_idx}",)
-                    elif overfit_enabled and is_overfit:
+                    elif any_overfit_filter and is_overfit:
                         return ("overfit",)
                     return ()
                 except (ValueError, IndexError):
@@ -18433,56 +18466,77 @@ class SpectralPredictApp:
                 # Map region name to quartile number (Q1, Q2, Q3, Q4)
                 quartile_map = {'q1': 1, 'q2': 2, 'q3': 3, 'q4': 4}
                 q_num = quartile_map.get(region.lower(), 0)
-                if color_enabled and overfit_enabled and is_overfit and q_num > 0:
+                if color_enabled and any_overfit_filter and is_overfit and q_num > 0:
                     return (f"overfit_q{q_num}",)
                 elif color_enabled:
                     return (f"top_{region.lower()}",)
-                elif overfit_enabled and is_overfit:
+                elif any_overfit_filter and is_overfit:
                     return ("overfit",)
                 return ()
 
         # No color highlighting, but check for overfit-only marking
-        if overfit_enabled and is_overfit:
+        if any_overfit_filter and is_overfit:
             return ("overfit",)
         return ()
 
     def _is_model_overfit(self, idx: int) -> bool:
-        """Check if a model's calibration metric exceeds its CV metric by threshold.
+        """Check if model exceeds R²/Acc threshold OR RMSE ratio threshold.
 
-        For regression: Checks if R2 - R2cv > threshold
+        For regression: Checks if (R2 - R2cv > threshold) OR (RMSEcv/RMSE > ratio_threshold)
         For classification: Checks if Accuracy - Accuracycv > threshold
 
         Args:
             idx: Row index in results_df
 
         Returns:
-            True if model appears overfit, False otherwise
+            True if model appears overfit by either condition, False otherwise
         """
         if self.results_df is None or idx not in self.results_df.index:
             return False
 
         try:
             row = self.results_df.loc[idx]
-            threshold = self.overfit_threshold.get() / 100.0  # Convert percent to fraction
+            cols = self.results_df.columns
 
-            # Check for classification (Accuracy columns)
-            if 'Accuracy' in self.results_df.columns and 'Accuracycv' in self.results_df.columns:
-                cal_acc = row.get('Accuracy')
-                cv_acc = row.get('Accuracycv')
-                if cal_acc is not None and cv_acc is not None:
-                    # Convert percentage strings to floats if needed
-                    if isinstance(cal_acc, str):
-                        cal_acc = float(cal_acc.replace('%', '')) / 100
-                    if isinstance(cv_acc, str):
-                        cv_acc = float(cv_acc.replace('%', '')) / 100
-                    return (cal_acc - cv_acc) > threshold
+            # Check R²/Accuracy difference (existing logic)
+            r2_acc_overfit = False
+            if self.overfit_filter_enabled.get():
+                threshold = self.overfit_threshold.get() / 100.0  # Convert percent to fraction
 
-            # Check for regression (R2 columns)
-            if 'R2' in self.results_df.columns and 'R2cv' in self.results_df.columns:
-                cal_r2 = row.get('R2')
-                cv_r2 = row.get('R2cv')
-                if cal_r2 is not None and cv_r2 is not None:
-                    return (float(cal_r2) - float(cv_r2)) > threshold
+                # Check for classification (Accuracy columns)
+                if 'Accuracy' in cols and 'Accuracycv' in cols:
+                    cal_acc = row.get('Accuracy')
+                    cv_acc = row.get('Accuracycv')
+                    if cal_acc is not None and cv_acc is not None:
+                        # Convert percentage strings to floats if needed
+                        if isinstance(cal_acc, str):
+                            cal_acc = float(cal_acc.replace('%', '')) / 100
+                        if isinstance(cv_acc, str):
+                            cv_acc = float(cv_acc.replace('%', '')) / 100
+                        r2_acc_overfit = (cal_acc - cv_acc) > threshold
+
+                # Check for regression (R2 columns)
+                elif 'R2' in cols and 'R2cv' in cols:
+                    cal_r2 = row.get('R2')
+                    cv_r2 = row.get('R2cv')
+                    if cal_r2 is not None and cv_r2 is not None:
+                        r2_acc_overfit = (float(cal_r2) - float(cv_r2)) > threshold
+
+            # Check RMSE ratio (regression only)
+            rmse_ratio_overfit = False
+            if self.rmse_ratio_filter_enabled.get():
+                if 'RMSE' in cols and 'RMSEcv' in cols:
+                    rmse = row.get('RMSE')
+                    rmsecv = row.get('RMSEcv')
+                    if rmse is not None and rmsecv is not None:
+                        rmse_val = float(rmse)
+                        rmsecv_val = float(rmsecv)
+                        if rmse_val > 0:
+                            ratio = rmsecv_val / rmse_val
+                            rmse_ratio_overfit = ratio > self.rmse_ratio_threshold.get()
+
+            # OR logic: flag if either condition is met
+            return r2_acc_overfit or rmse_ratio_overfit
 
         except (KeyError, ValueError, TypeError):
             pass
@@ -18796,13 +18850,15 @@ class SpectralPredictApp:
                     r2 = metrics['r2']
                     rmse = metrics['rmse']
                     mae = rmse * 0.8  # Approximate MAE (we don't store it separately)
-                    rpd = 1 / (1 - r2) if r2 < 1 else 99.99
+                    # RPD = SD(y) / RMSE (correct formula)
+                    y_std = metrics.get('y_std', 0)
+                    rpd = y_std / rmse if rmse > 0 and y_std > 0 else 0
                 else:
-                    # Classification - use accuracy as pseudo-R2 for display
+                    # Classification - RPD is not meaningful
                     r2 = metrics.get('accuracy', 0)
                     rmse = 1 - r2  # Pseudo RMSE for display
                     mae = rmse
-                    rpd = 1 / (1 - r2) if r2 < 1 else 99.99
+                    rpd = 0  # RPD not applicable for classification
 
                 # Calculate improvement
                 r2_improvement = r2 - best_individual_r2
@@ -18951,13 +19007,18 @@ class SpectralPredictApp:
                 auto_info = self.auto_ensembles[ensemble_name]
                 # Return in same format as user ensemble results for compatibility
                 metrics = auto_info['metrics']
+                # Compute RPD correctly: SD(y) / RMSE
+                r2_val = metrics.get('r2', metrics.get('accuracy', 0))
+                rmse_val = metrics.get('rmse', 1 - metrics.get('accuracy', 0))
+                y_std = metrics.get('y_std', 0)
+                rpd_val = y_std / rmse_val if rmse_val > 0 and y_std > 0 else 0
                 return {
                     'ensemble': auto_info['ensemble'],
                     'method': f"{ensemble_name} (Auto)",
-                    'r2': metrics.get('r2', metrics.get('accuracy', 0)),
-                    'rmse': metrics.get('rmse', 1 - metrics.get('accuracy', 0)),
+                    'r2': r2_val,
+                    'rmse': rmse_val,
                     'mae': metrics.get('rmse', 0) * 0.8,  # Approximate
-                    'rpd': 1 / (1 - metrics.get('r2', metrics.get('accuracy', 0.99))) if metrics.get('r2', metrics.get('accuracy', 0)) < 1 else 99.99,
+                    'rpd': rpd_val,
                     'is_auto': True,
                     'base_models': auto_info['base_models'],
                     'specialist_info': auto_info['specialist_info']
