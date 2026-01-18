@@ -16,6 +16,7 @@ References:
 - pymoo library: https://pymoo.org/
 """
 
+import ast
 import numpy as np
 import pandas as pd
 import warnings
@@ -699,6 +700,41 @@ def _decode_hyperparameter_genes(
         'max_features': max_features,
     }
 
+
+def _get_constrained_pls_components(model_param: int, n_features: int, n_samples: int = None) -> int:
+    """Get constrained n_components for PLS model.
+
+    Constraints:
+    - n_components <= 15 (practical max in chemometrics)
+    - n_components <= n_features - 1 (ensures dimensionality reduction, prevents OLS equivalence)
+    - n_components <= n_samples - 1 (mathematical requirement)
+
+    Parameters
+    ----------
+    model_param : int
+        Raw gene value (0-14)
+    n_features : int
+        Number of selected features/wavelengths
+    n_samples : int, optional
+        Number of samples. If None, only n_features constraint is applied.
+
+    Returns
+    -------
+    int
+        Constrained n_components value (>= 1)
+    """
+    # Practical cap: 15 is rarely exceeded in chemometrics
+    # n_features - 1 ensures PLS doesn't degenerate to OLS
+    n_components = min(model_param + 1, 15, n_features - 1)
+
+    # Apply sample constraint if n_samples is provided
+    if n_samples is not None and n_samples > 1:
+        n_components = min(n_components, n_samples - 1)
+
+    # Ensure at least 1 component (handles edge case where n_features <= 1)
+    return max(1, n_components)
+
+
 def _build_model(model_type: str, model_param: int, task_type: str, random_state: int, hyperparams: Optional[Dict[str, float]] = None):
     """
     Build a model instance based on type and parameter encoding.
@@ -1216,8 +1252,10 @@ class SpectralOptimizationProblem(Problem):
 
             # Special handling for PLS - limit components and use scale=False
             # scale=False matches get_model() in models.py for consistency with Model Development
+            # Practical cap: 15 is rarely exceeded in chemometrics
+            # n_features - 1 ensures PLS doesn't degenerate to OLS
             if model_type == 'PLS':
-                n_components = min(model_param + 1, X_subset.shape[1], X_subset.shape[0] - 1)
+                n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
                 n_components = max(1, n_components)
                 model = PLSRegression(n_components=n_components, scale=False)
             else:
@@ -1610,12 +1648,12 @@ def run_nsga2_search(
         )
 
         # Create mutation operator with CARS importance and sparsity bias
-        # sparsity_bias=1.9 means dropping is 1.9x more likely than adding (encourages compact subsets)
+        # sparsity_bias=1.4 means dropping is 1.4x more likely than adding (mild preference for compact subsets)
         mutation_operator = SmartMutation(
             prob=0.1,
             eta=20,
             importance_scores=cars_importance,
-            sparsity_bias=1.9,
+            sparsity_bias=1.4,
         )
     else:
         # Standard NSGA-II: Use random sampling and polynomial mutation
@@ -1801,7 +1839,7 @@ def run_nsga2_search(
 
         # Use this solution
         knee_chromosome = all_solutions[best_idx].astype(int)
-        knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type)
+        knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type, n_samples=problem.X.shape[0])
         knee_solution['objectives'] = {
             'error': all_objectives[best_idx, 0],
             'n_wavelengths': all_objectives[best_idx, 1] * problem.n_wavelengths,
@@ -1825,7 +1863,7 @@ def run_nsga2_search(
 
         # Decode knee solution
         knee_chromosome = pareto_solutions[knee_idx].astype(int)
-        knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type)
+        knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type, n_samples=problem.X.shape[0])
         knee_solution['objectives'] = {
             'error': pareto_front[knee_idx, 0],
             'n_wavelengths': pareto_front[knee_idx, 1] * problem.n_wavelengths,
@@ -1863,7 +1901,7 @@ def run_nsga2_search(
     }
 
 
-def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Optional[List[str]] = None, task_type: str = 'regression') -> Dict[str, Any]:
+def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Optional[List[str]] = None, task_type: str = 'regression', n_samples: int = None) -> Dict[str, Any]:
     """
     Decode a chromosome into human-readable solution description.
 
@@ -1877,6 +1915,9 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
         Model types used in optimization. If None, uses default MODEL_TYPES.
     task_type : str, default='regression'
         Task type ('regression' or 'classification')
+    n_samples : int, optional
+        Number of samples. If provided, constrains PLS n_components appropriately.
+        PLS requires n_components <= min(n_features, n_samples - 1).
 
     Returns
     -------
@@ -1924,9 +1965,13 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
     model_type = model_types[min(model_idx, len(model_types) - 1)]
     random_state = 42  # Standard random state used throughout NSGA-II
 
+    # Number of selected features (for PLS constraint)
+    n_selected_features = int(np.sum(wavelength_mask))
+
     # Compute NSGA-specific parameter overrides
     if model_type == 'PLS':
-        n_components = model_param + 1
+        # Apply constraints: n_components <= min(n_features, n_samples - 1)
+        n_components = _get_constrained_pls_components(model_param, n_selected_features, n_samples)
         nsga_overrides = {'n_components': n_components}
     elif model_type == 'Ridge':
         alpha = 10 ** (model_param / 3 - 2)
@@ -2226,8 +2271,10 @@ def _compute_solution_r2(
         model_type = model_types[min(model_idx, len(model_types) - 1)]
 
         # For PLS, limit n_components to valid range and use scale=False to match Model Development
+        # Practical cap: 15 is rarely exceeded in chemometrics
+        # n_features - 1 ensures PLS doesn't degenerate to OLS
         if model_type == 'PLS':
-            n_components = min(model_param + 1, X_subset.shape[1], X_subset.shape[0] - 1)
+            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
             n_components = max(1, n_components)
             # scale=False matches get_model() in models.py for consistent R² between NSGA and Model Development
             model = PLSRegression(n_components=n_components, scale=False)
@@ -2338,8 +2385,10 @@ def _compute_display_rmse(
         model_type = model_types[min(model_idx, len(model_types) - 1)]
 
         # For PLS, limit n_components to valid range and use scale=False to match Model Development
+        # Practical cap: 15 is rarely exceeded in chemometrics
+        # n_features - 1 ensures PLS doesn't degenerate to OLS
         if model_type == 'PLS':
-            n_components = min(model_param + 1, X_subset.shape[1], X_subset.shape[0] - 1)
+            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
             n_components = max(1, n_components)
             model = PLSRegression(n_components=n_components, scale=False)
         else:
@@ -2557,36 +2606,70 @@ def _compute_calibration_metrics(
     )
 
     try:
-        # Decode solution
-        decoded = decode_solution(solution, n_wavelengths, model_types, task_type)
-        selected_indices = decoded['selected_indices']
-
-        if not selected_indices:
-            return {}
-
-        # Get wavelength subset
-        X_subset = X[:, selected_indices]
-
-        # Apply preprocessing
+        # Decode solution directly (same pattern as _compute_display_rmse)
         preproc_idx = int(solution[0])
         window_idx = int(solution[1])
+        model_idx = int(solution[2])
+        model_param = int(solution[3])
+        lr_gene = int(solution[4])
+        reg_alpha_gene = int(solution[5])
+        reg_lambda_gene = int(solution[6])
+        l1_gene = int(solution[7])
+        subsample_gene = int(solution[8])
+        colsample_gene = int(solution[9])
+        min_samples_gene = int(solution[10])
+        gamma_gene = int(solution[11])
+        max_features_gene = int(solution[12])
+        wavelength_mask = solution[13:].astype(bool)
+
+        # Apply edge masking (same as _compute_display_rmse)
+        edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+        if edge_zone > 0:
+            wavelength_mask = wavelength_mask.copy()
+            wavelength_mask[:edge_zone] = False
+            wavelength_mask[-edge_zone:] = False
+
+        # Decode hyperparameters
+        hyperparams = _decode_hyperparameter_genes(
+            lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
+            subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
+        )
+
+        # Apply preprocessing FIRST (before wavelength selection)
         transform = _get_preprocessing_transform(preproc_idx, window_idx)
         if transform is not None:
-            X_proc = transform(X_subset)
+            X_proc = transform(X)
         else:
-            X_proc = X_subset.copy()
+            X_proc = X.copy()
 
-        # Get model
-        from .models import get_model
-        model_type = decoded['model']
-        model_params = decoded.get('model_params', {})
-        model = get_model(model_type, task_type, **model_params)
+        # Then select wavelengths
+        X_subset = X_proc[:, wavelength_mask]
+
+        if X_subset.shape[1] == 0:
+            if task_type == 'regression':
+                return {'RMSE': np.nan, 'R2': np.nan}
+            else:
+                return {'Accuracy': np.nan, 'ROC_AUC': np.nan, 'F1': np.nan,
+                        'Precision': np.nan, 'Recall': np.nan}
+
+        # Get model type and build model (same as _compute_display_rmse)
+        model_type = model_types[min(model_idx, len(model_types) - 1)]
+
+        # For PLS, limit n_components to valid range
+        # Practical cap: 15 is rarely exceeded in chemometrics
+        # n_features - 1 ensures PLS doesn't degenerate to OLS
+        if model_type == 'PLS':
+            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+            n_components = max(1, n_components)
+            model = PLSRegression(n_components=n_components, scale=False)
+        else:
+            model = _build_model(model_type, model_param, task_type, 42, hyperparams)
 
         # Fit on full training data
-        model.fit(X_proc, y)
+        model.fit(X_subset, y)
 
         # Predict on training data
-        y_pred = model.predict(X_proc)
+        y_pred = model.predict(X_subset)
 
         # Compute metrics
         metrics = {}
@@ -2599,7 +2682,7 @@ def _compute_calibration_metrics(
             # ROC AUC if probabilities available
             try:
                 if hasattr(model, 'predict_proba'):
-                    y_proba = model.predict_proba(X_proc)
+                    y_proba = model.predict_proba(X_subset)
                     n_classes = len(np.unique(y))
                     if n_classes == 2:
                         metrics['ROC_AUC'] = roc_auc_score(y, y_proba[:, 1])
@@ -2673,7 +2756,7 @@ def convert_nsga2_to_v1_format(
         result['pareto_front'],
         result['pareto_solutions']
     )):
-        decoded = decode_solution(solution, n_wavelengths, model_types, task_type)
+        decoded = decode_solution(solution, n_wavelengths, model_types, task_type, n_samples=n_samples)
 
         # Parse preprocessing info for derivative/window details
         preproc = decoded['preprocessing']
@@ -2710,7 +2793,7 @@ def convert_nsga2_to_v1_format(
             'Deriv': deriv_order,
             'Window': window_size,
             'Poly': deriv_order + 1 if deriv_order else None,  # polyorder = deriv + 1
-            'LVs': int(solution[3]) + 1 if decoded['model'] == 'PLS' else None,  # n_components for PLS
+            'LVs': _get_constrained_pls_components(int(solution[3]), decoded['n_wavelengths'], n_samples) if decoded['model'] == 'PLS' else None,
             'Complexity': objectives[2],
             'Is_Knee': i == result['knee_idx'],
         }
