@@ -21,7 +21,8 @@ import numpy as np
 import pandas as pd
 import warnings
 from typing import Dict, List, Optional, Tuple, Callable, Any, Union
-from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
+from sklearn.model_selection import cross_val_score, cross_val_predict, KFold, StratifiedKFold
+from sklearn.metrics import r2_score
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.linear_model import Ridge, RidgeClassifier, Lasso, ElasticNet
 from .models import PLSTransformer  # Wrapper that ensures 2D output for PLS-DA
@@ -570,7 +571,7 @@ def _compute_wavelength_importance(
             n_comp = min(5, X_proc.shape[1] // 2, X_proc.shape[0] - 1)
             n_comp = max(1, n_comp)
 
-            pls = PLSRegression(n_components=n_comp)
+            pls = PLSRegression(n_components=n_comp, scale=False)
             pls.fit(X_proc, y)
 
             # Compute VIP scores
@@ -758,7 +759,20 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
     """
     if model_type == 'PLS':
         n_components = model_param + 1  # 1-15
-        return PLSRegression(n_components=n_components, scale=False)
+        if task_type == 'classification':
+            # PLS-DA: PLSTransformer + StandardScaler + LogisticRegression
+            from sklearn.pipeline import Pipeline
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.linear_model import LogisticRegression
+            pls_transformer = PLSTransformer(n_components=n_components, scale=False)
+            return Pipeline([
+                ('pls', pls_transformer),
+                ('scaler', StandardScaler()),
+                ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
+            ])
+        else:
+            # Regression: use PLSRegression directly
+            return PLSRegression(n_components=n_components, scale=False)
 
     elif model_type == 'Ridge':
         # Exponential alpha scale: 1e-4 to 1e3
@@ -2326,13 +2340,15 @@ def _compute_solution_r2(
             # Use _build_model for all other models with hyperparams
             model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
 
-        # Cross-validation for R2
+        # Cross-validation for R2 using aggregated predictions (not per-fold averages)
+        # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
+        # This matches the method used in search.py for consistency with Model Development
         cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            scores = cross_val_score(model, X_subset, y, cv=cv, scoring='r2')
+            y_pred = cross_val_predict(model, X_subset, y, cv=cv)
 
-        return float(np.mean(scores))
+        return float(r2_score(y, y_pred))
 
     except Exception:
         return None
@@ -2705,7 +2721,20 @@ def _compute_calibration_metrics(
         if model_type == 'PLS':
             n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
             n_components = max(1, n_components)
-            model = PLSRegression(n_components=n_components, scale=False)
+            if task_type == 'classification':
+                # PLS-DA: PLSTransformer + StandardScaler + LogisticRegression
+                from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.linear_model import LogisticRegression
+                pls_transformer = PLSTransformer(n_components=n_components, scale=False)
+                model = Pipeline([
+                    ('pls', pls_transformer),
+                    ('scaler', StandardScaler()),
+                    ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                ])
+            else:
+                # Regression: use PLSRegression directly
+                model = PLSRegression(n_components=n_components, scale=False)
         else:
             model = _build_model(model_type, model_param, task_type, 42, hyperparams)
 
