@@ -329,12 +329,39 @@ def create_objective_function(
             if enable_variable_subsets and supports_subset_analysis(model_name):
                 # Fit model on full data to compute feature importances
                 from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.linear_model import LogisticRegression
 
-                # Build model-only pipeline (data is already preprocessed)
-                pipe_steps = [("model", model)]
+                # Scale-sensitive models need StandardScaler (matches search.py behavior)
+                SCALE_SENSITIVE_MODELS = {'SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted'}
+
+                # Build pipeline with proper scaling (data is already preprocessed)
+                # For PLS-DA: PLS + StandardScaler + LogisticRegression (matches search.py lines 3417-3424)
+                # For scale-sensitive models: StandardScaler + Model (matches search.py lines 3427-3429)
+                if model_name == "PLS-DA" and task_type == 'classification':
+                    pipe_steps = [
+                        ("pls", model),
+                        ("scaler", StandardScaler()),  # Scale PLS scores for LogisticRegression
+                        ("lr", LogisticRegression(max_iter=1000, random_state=42))
+                    ]
+                elif model_name in SCALE_SENSITIVE_MODELS:
+                    # Apply to both regression and classification
+                    pipe_steps = [
+                        ("scaler", StandardScaler()),
+                        ("model", model)
+                    ]
+                else:
+                    pipe_steps = [("model", model)]
+
                 pipe = Pipeline(pipe_steps)
                 pipe.fit(X, y)
-                fitted_model = pipe.named_steps["model"]
+
+                # Get the fitted model for feature importance extraction
+                # For PLS-DA, extract from 'pls' step; for others from 'model' step
+                if model_name == "PLS-DA" and task_type == 'classification':
+                    fitted_model = pipe.named_steps["pls"]
+                else:
+                    fitted_model = pipe.named_steps["model"]
 
                 # Filter to valid variable counts (< total features)
                 n_features_available = X.shape[1]
@@ -725,6 +752,14 @@ def convert_optuna_result_to_dasp_format(
                 result['F1cv'] = config_result.get('F1cv', np.nan)
                 result['Precisioncv'] = config_result.get('Precisioncv', np.nan)
                 result['Recallcv'] = config_result.get('Recallcv', np.nan)
+                # Per-class metrics (analogous to regional_rmse for regression)
+                result['per_class_metrics'] = config_result.get('per_class_metrics', None)
+                result['class_labels'] = config_result.get('class_labels', None)
+                # Individual class F1 columns for display/sorting
+                per_class = config_result.get('per_class_metrics')
+                if per_class:
+                    for class_label, metrics in per_class.items():
+                        result[f'F1_Class{class_label}'] = metrics.get('F1', np.nan)
 
             all_results.append(result)
 

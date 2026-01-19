@@ -623,14 +623,26 @@ def create_unified_objective(
             # 6. Build and cross-validate model
             model = build_model(model_name, model_params, task_type=task_type)
 
-            # For PLS-DA classification, wrap PLSTransformer with LogisticRegression
-            # (just like search.py does at lines 2998-3005)
+            # Scale-sensitive models need StandardScaler (matches search.py behavior)
+            # For PLS-DA: PLS + StandardScaler + LogisticRegression (search.py lines 3417-3424)
+            # For scale-sensitive models: StandardScaler + Model (search.py lines 3427-3429)
+            SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
+
             if task_type == 'classification' and model_name.lower() in ('pls', 'pls-da'):
                 from sklearn.pipeline import Pipeline
                 from sklearn.linear_model import LogisticRegression
+                from sklearn.preprocessing import StandardScaler
                 model = Pipeline([
                     ('pls', model),
+                    ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
                     ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
+                ])
+            elif model_name in SCALE_SENSITIVE_MODELS:
+                from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                model = Pipeline([
+                    ('scaler', StandardScaler()),
+                    ('model', model)
                 ])
 
             # 7. Compute metrics using cross_validate for proper scoring

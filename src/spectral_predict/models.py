@@ -419,10 +419,14 @@ def build_model(model_name, params, task_type='regression'):
             )
 
         elif model_name == "CatBoost":
+            # bagging_temperature only valid for Bayesian bootstrap
+            cb_params = params.copy()
+            if cb_params.get('bootstrap_type') != 'Bayesian':
+                cb_params.pop('bagging_temperature', None)
             return CatBoostRegressor(
                 random_state=42,
                 verbose=False,
-                **params
+                **cb_params
             )
 
         else:
@@ -483,10 +487,14 @@ def build_model(model_name, params, task_type='regression'):
             )
 
         elif model_name == "CatBoost":
+            # bagging_temperature only valid for Bayesian bootstrap
+            cb_params = params.copy()
+            if cb_params.get('bootstrap_type') != 'Bayesian':
+                cb_params.pop('bagging_temperature', None)
             return CatBoostClassifier(
                 random_state=42,
                 verbose=False,
-                **params
+                **cb_params
             )
 
         else:
@@ -516,6 +524,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
                     catboost_l2_leaf_reg_list=None, catboost_border_count_list=None,
                     catboost_bagging_temperature_list=None, catboost_random_strength_list=None,
+                    catboost_min_data_in_leaf_list=None, catboost_bootstrap_type_list=None,
                     svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
                     svr_epsilon_list=None, svr_degree_list=None, svr_coef0_list=None, svr_shrinking_list=None,
                     mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
@@ -731,6 +740,12 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if catboost_random_strength_list is None:
         cb_config = get_hyperparameters('CatBoost', tier)
         catboost_random_strength_list = cb_config.get('random_strength', [1.0])
+    if catboost_min_data_in_leaf_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_min_data_in_leaf_list = cb_config.get('min_data_in_leaf', [1])
+    if catboost_bootstrap_type_list is None:
+        cb_config = get_hyperparameters('CatBoost', tier)
+        catboost_bootstrap_type_list = cb_config.get('bootstrap_type', ['Bayesian'])
 
     # SVR defaults (tier-aware)
     if svr_kernels is None:
@@ -1246,30 +1261,38 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                             for border_count in catboost_border_count_list:
                                 for bagging_temp in catboost_bagging_temperature_list:
                                     for random_str in catboost_random_strength_list:
-                                        catboost_configs.append(
-                                            (
-                                                CatBoostRegressor(
-                                                    iterations=iterations,
-                                                    learning_rate=lr,
-                                                    depth=depth,
-                                                    l2_leaf_reg=l2_leaf_reg,
-                                                    border_count=border_count,
-                                                    bagging_temperature=bagging_temp,
-                                                    random_strength=random_str,
-                                                    random_state=42,
-                                                    verbose=False
-                                                ),
-                                                {
+                                        for min_data_leaf in catboost_min_data_in_leaf_list:
+                                            for bootstrap_type in catboost_bootstrap_type_list:
+                                                # Build model kwargs - bagging_temperature only valid for Bayesian
+                                                model_kwargs = {
+                                                    'iterations': iterations,
+                                                    'learning_rate': lr,
+                                                    'depth': depth,
+                                                    'l2_leaf_reg': l2_leaf_reg,
+                                                    'border_count': border_count,
+                                                    'random_strength': random_str,
+                                                    'min_data_in_leaf': min_data_leaf,
+                                                    'bootstrap_type': bootstrap_type,
+                                                    'random_state': 42,
+                                                    'verbose': False
+                                                }
+                                                params_dict = {
                                                     "iterations": iterations,
                                                     "learning_rate": lr,
                                                     "depth": depth,
                                                     "l2_leaf_reg": l2_leaf_reg,
                                                     "border_count": border_count,
-                                                    "bagging_temperature": bagging_temp,
-                                                    "random_strength": random_str
+                                                    "random_strength": random_str,
+                                                    "min_data_in_leaf": min_data_leaf,
+                                                    "bootstrap_type": bootstrap_type
                                                 }
-                                            )
-                                        )
+                                                # bagging_temperature only applies to Bayesian bootstrap
+                                                if bootstrap_type == 'Bayesian':
+                                                    model_kwargs['bagging_temperature'] = bagging_temp
+                                                    params_dict['bagging_temperature'] = bagging_temp
+                                                catboost_configs.append(
+                                                    (CatBoostRegressor(**model_kwargs), params_dict)
+                                                )
             grids["CatBoost"] = catboost_configs
 
     else:  # classification
@@ -1570,18 +1593,42 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
             for iterations in catboost_iterations_list:
                 for lr in catboost_learning_rates:
                     for depth in catboost_depths:
-                        catboost_configs.append(
-                            (
-                                CatBoostClassifier(
-                                    iterations=iterations,
-                                    learning_rate=lr,
-                                    depth=depth,
-                                    random_state=42,
-                                    verbose=False
-                                ),
-                                {"iterations": iterations, "learning_rate": lr, "depth": depth}
-                            )
-                        )
+                        for l2_leaf_reg in catboost_l2_leaf_reg_list:
+                            for border_count in catboost_border_count_list:
+                                for bagging_temp in catboost_bagging_temperature_list:
+                                    for random_str in catboost_random_strength_list:
+                                        for min_data_leaf in catboost_min_data_in_leaf_list:
+                                            for bootstrap_type in catboost_bootstrap_type_list:
+                                                # Build model kwargs - bagging_temperature only valid for Bayesian
+                                                model_kwargs = {
+                                                    'iterations': iterations,
+                                                    'learning_rate': lr,
+                                                    'depth': depth,
+                                                    'l2_leaf_reg': l2_leaf_reg,
+                                                    'border_count': border_count,
+                                                    'random_strength': random_str,
+                                                    'min_data_in_leaf': min_data_leaf,
+                                                    'bootstrap_type': bootstrap_type,
+                                                    'random_state': 42,
+                                                    'verbose': False
+                                                }
+                                                params_dict = {
+                                                    "iterations": iterations,
+                                                    "learning_rate": lr,
+                                                    "depth": depth,
+                                                    "l2_leaf_reg": l2_leaf_reg,
+                                                    "border_count": border_count,
+                                                    "random_strength": random_str,
+                                                    "min_data_in_leaf": min_data_leaf,
+                                                    "bootstrap_type": bootstrap_type
+                                                }
+                                                # bagging_temperature only applies to Bayesian bootstrap
+                                                if bootstrap_type == 'Bayesian':
+                                                    model_kwargs['bagging_temperature'] = bagging_temp
+                                                    params_dict['bagging_temperature'] = bagging_temp
+                                                catboost_configs.append(
+                                                    (CatBoostClassifier(**model_kwargs), params_dict)
+                                                )
             grids["CatBoost"] = catboost_configs
 
     return grids

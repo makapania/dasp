@@ -10,9 +10,9 @@ This module implements advanced ensemble strategies that go beyond simple averag
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
+from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.linear_model import Ridge, LogisticRegression
-from sklearn.model_selection import cross_val_predict
+from sklearn.model_selection import cross_val_predict, KFold
 import warnings
 
 from .preprocessing_wrapper import PreprocessorConfig
@@ -74,7 +74,11 @@ class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):
                 X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
-            predictions.append(model.predict(X_processed))
+            pred = model.predict(X_processed)
+            # Ensure 1D predictions (PLSRegression returns (n,1))
+            if hasattr(pred, 'ravel'):
+                pred = pred.ravel()
+            predictions.append(pred)
         return np.mean(predictions, axis=0)
 
 
@@ -254,46 +258,67 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
 
     def fit(self, X, y):
         """
-        Fit the ensemble by computing regional performance weights.
+        Fit the ensemble by computing regional performance weights using
+        out-of-fold predictions to prevent data leakage.
 
-        Uses direct predictions from already-fitted models (not cross_val_predict)
-        to ensure weights match what predict() will actually produce.
+        Uses KFold cross-validation to generate OOF predictions for computing
+        regional weights. This ensures the ensemble weights are computed on
+        predictions the models haven't seen during training, providing
+        realistic estimates of model performance.
 
-        Note: Models passed to ensembles are typically already fitted with
-        preprocessing wrappers. cross_val_predict would clone these models
-        and refit from scratch, creating a mismatch between weight calculation
-        and actual prediction behavior.
+        The original fitted models are preserved for use in predict().
         """
-        # Get direct predictions from fitted models
-        # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
-        predictions = []
+        # Ensure y is numpy array
+        y = np.asarray(y).ravel()
+        n_samples = len(y)
+
+        # Set up cross-validation using self.cv parameter
+        n_splits = min(self.cv, n_samples)
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # Generate out-of-fold predictions for all models
+        predictions = np.zeros((len(self.models), n_samples))
+
         for i, model in enumerate(self.models):
             try:
-                # Apply preprocessing for this model (must match predict behavior)
+                # Get preprocessor for this model
                 preprocessor = self._get_preprocessor(i)
-                if preprocessor is not None:
-                    X_processed = preprocessor.transform(X)
-                else:
-                    X_processed = X
 
-                # Use direct prediction from fitted model (NOT cross_val_predict)
-                # This ensures weights match what predict() will produce
-                pred = model.predict(X_processed)
-                pred = np.asarray(pred).ravel()
-                predictions.append(pred)
+                # Generate OOF predictions using CV
+                oof_pred = np.zeros(n_samples)
+                for train_idx, val_idx in kf.split(X):
+                    # Split data
+                    if hasattr(X, 'iloc'):  # DataFrame
+                        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                    else:  # numpy array
+                        X_train, X_val = X[train_idx], X[val_idx]
+                    y_train = y[train_idx]
+
+                    # Apply preprocessing
+                    if preprocessor is not None:
+                        X_train_proc = preprocessor.transform(X_train)
+                        X_val_proc = preprocessor.transform(X_val)
+                    else:
+                        X_train_proc, X_val_proc = X_train, X_val
+
+                    # Clone and fit model on this fold
+                    fold_model = clone(model)
+                    fold_model.fit(X_train_proc, y_train)
+
+                    # Predict on validation fold
+                    pred = fold_model.predict(X_val_proc)
+                    oof_pred[val_idx] = np.asarray(pred).ravel()
+
+                predictions[i] = oof_pred
             except Exception as e:
-                warnings.warn(f"Model {self.model_names[len(predictions)]} failed: {e}")
-                predictions.append(np.zeros_like(y))
+                warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
+                predictions[i] = np.zeros(n_samples)
 
-        predictions = np.array(predictions)  # (n_models, n_samples)
-
-        # Define region boundaries from average predictions
-        # This ensures consistency with predict(), which assigns regions
-        # based on average predictions
+        # Define region boundaries from average OOF predictions
         avg_pred = np.mean(predictions, axis=0)
         self.analyzer_.fit(avg_pred)
 
-        # Compute regional performance for each model
+        # Compute regional performance for each model using OOF predictions
         regional_errors = np.zeros((len(self.models), self.n_regions))
 
         for model_idx in range(len(self.models)):
@@ -330,7 +355,11 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
                 X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
-            predictions.append(model.predict(X_processed))
+            pred = model.predict(X_processed)
+            # Ensure 1D predictions (PLSRegression returns (n,1))
+            if hasattr(pred, 'ravel'):
+                pred = pred.ravel()
+            predictions.append(pred)
         predictions = np.array(predictions)  # (n_models, n_samples)
 
         # For each prediction, determine which region it falls in
@@ -392,7 +421,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
     Optionally uses soft gating (weighted combination).
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, preprocessors=None, preprocessor_configs=None):
+    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, cv=5, preprocessors=None, preprocessor_configs=None):
         """
         Parameters
         ----------
@@ -401,6 +430,8 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         n_regions : int, default=5
         soft_gating : bool, default=True
             If True, use weighted combination. If False, use hard selection.
+        cv : int, default=5
+            Cross-validation folds for computing expert assignments using OOF predictions.
         preprocessors : list of preprocessors, optional
             Individual preprocessor for each base model. If None, assumes
             models receive raw data directly.
@@ -412,6 +443,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
         self.n_regions = n_regions
         self.soft_gating = soft_gating
+        self.cv = cv
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
         self.expert_assignment_ = None  # Which model is best for each region
@@ -446,40 +478,70 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
 
     def fit(self, X, y):
         """
-        Fit by determining which expert handles which region.
+        Fit by determining which expert handles which region using
+        out-of-fold predictions to prevent data leakage.
 
-        Uses direct predictions from already-fitted models (not cross_val_predict)
-        to ensure weights match what predict() will actually produce.
+        Uses KFold cross-validation to generate OOF predictions for determining
+        expert assignments. This ensures expert selection is based on realistic
+        model performance estimates.
+
+        The original fitted models are preserved for use in predict().
         """
-        # Get direct predictions from all fitted models
-        # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
-        predictions = []
+        # Ensure y is numpy array
+        y = np.asarray(y).ravel()
+        n_samples = len(y)
+
+        # Set up cross-validation using self.cv parameter
+        n_splits = min(self.cv, n_samples)
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # Generate out-of-fold predictions for all models
+        predictions = np.zeros((len(self.models), n_samples))
+
         for i, model in enumerate(self.models):
-            # Apply preprocessing for this model (must match predict behavior)
-            preprocessor = self._get_preprocessor(i)
-            if preprocessor is not None:
-                X_processed = preprocessor.transform(X)
-            else:
-                X_processed = X
+            try:
+                # Get preprocessor for this model
+                preprocessor = self._get_preprocessor(i)
 
-            # Use direct prediction from fitted model (NOT cross_val_predict)
-            # This ensures weights match what predict() will produce
-            pred = model.predict(X_processed)
-            pred = np.asarray(pred).ravel()
-            predictions.append(pred)
-        predictions = np.array(predictions)
+                # Generate OOF predictions using CV
+                oof_pred = np.zeros(n_samples)
+                for train_idx, val_idx in kf.split(X):
+                    # Split data
+                    if hasattr(X, 'iloc'):  # DataFrame
+                        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                    else:  # numpy array
+                        X_train, X_val = X[train_idx], X[val_idx]
+                    y_train = y[train_idx]
 
-        # Define region boundaries from average predictions
-        # This ensures consistency with predict(), which assigns regions
-        # based on average predictions
+                    # Apply preprocessing
+                    if preprocessor is not None:
+                        X_train_proc = preprocessor.transform(X_train)
+                        X_val_proc = preprocessor.transform(X_val)
+                    else:
+                        X_train_proc, X_val_proc = X_train, X_val
+
+                    # Clone and fit model on this fold
+                    fold_model = clone(model)
+                    fold_model.fit(X_train_proc, y_train)
+
+                    # Predict on validation fold
+                    pred = fold_model.predict(X_val_proc)
+                    oof_pred[val_idx] = np.asarray(pred).ravel()
+
+                predictions[i] = oof_pred
+            except Exception as e:
+                warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
+                predictions[i] = np.zeros(n_samples)
+
+        # Define region boundaries from average OOF predictions
         avg_pred = np.mean(predictions, axis=0)
         self.analyzer_.fit(avg_pred)
 
-        # For each region, find the best model
+        # For each region, find the best model using OOF predictions
         self.expert_assignment_ = np.zeros(self.n_regions, dtype=int)
         self.expert_weights_ = np.zeros((len(self.models), self.n_regions))
 
-        # Assign regions based on average predictions (matches predict behavior)
+        # Assign regions based on average OOF predictions
         regions = self.analyzer_.assign_regions(avg_pred)
 
         for region_idx in range(self.n_regions):
@@ -493,7 +555,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
 
             y_region = y[mask]
 
-            # Compute error for each model in this region
+            # Compute error for each model in this region using OOF predictions
             region_errors = []
             for model_idx in range(len(self.models)):
                 pred_region = predictions[model_idx][mask]
@@ -525,7 +587,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
                 X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
-            predictions.append(model.predict(X_processed))
+            pred = model.predict(X_processed)
+            # Ensure 1D predictions (PLSRegression returns (n,1))
+            if hasattr(pred, 'ravel'):
+                pred = pred.ravel()
+            predictions.append(pred)
         predictions = np.array(predictions)
 
         # Determine regions for predictions
@@ -622,39 +688,64 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
 
     def fit(self, X, y):
         """
-        Fit the stacking ensemble.
+        Fit the stacking ensemble using out-of-fold predictions to prevent
+        data leakage in the meta-model.
 
-        Uses direct predictions from already-fitted models (not cross_val_predict)
-        to ensure meta-features match what predict() will actually produce.
+        Uses KFold cross-validation to generate OOF predictions from base models.
+        The meta-model is trained on these OOF predictions, ensuring it learns
+        to combine base model predictions on unseen data.
+
+        The original fitted base models are preserved for use in predict().
         """
-        # Get direct predictions for meta-features
-        # IMPORTANT: Apply preprocessing to X for each model (same as in predict)
-        meta_features = []
+        # Ensure y is numpy array
+        y = np.asarray(y).ravel()
+        n_samples = len(y)
+
+        # Set up cross-validation using self.cv parameter
+        n_splits = min(self.cv, n_samples)
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # Generate out-of-fold predictions for all models
+        meta_features = np.zeros((n_samples, len(self.models)))
 
         for i, model in enumerate(self.models):
             try:
-                # Apply preprocessing for this model (must match predict behavior)
+                # Get preprocessor for this model
                 preprocessor = self._get_preprocessor(i)
-                if preprocessor is not None:
-                    X_processed = preprocessor.transform(X)
-                else:
-                    X_processed = X
 
-                # Use direct prediction from fitted model (NOT cross_val_predict)
-                # This ensures meta-features match what predict() will produce
-                pred = model.predict(X_processed)
-                pred = np.asarray(pred).ravel()
-                meta_features.append(pred)
+                # Generate OOF predictions using CV
+                oof_pred = np.zeros(n_samples)
+                for train_idx, val_idx in kf.split(X):
+                    # Split data
+                    if hasattr(X, 'iloc'):  # DataFrame
+                        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                    else:  # numpy array
+                        X_train, X_val = X[train_idx], X[val_idx]
+                    y_train = y[train_idx]
+
+                    # Apply preprocessing
+                    if preprocessor is not None:
+                        X_train_proc = preprocessor.transform(X_train)
+                        X_val_proc = preprocessor.transform(X_val)
+                    else:
+                        X_train_proc, X_val_proc = X_train, X_val
+
+                    # Clone and fit model on this fold
+                    fold_model = clone(model)
+                    fold_model.fit(X_train_proc, y_train)
+
+                    # Predict on validation fold
+                    pred = fold_model.predict(X_val_proc)
+                    oof_pred[val_idx] = np.asarray(pred).ravel()
+
+                meta_features[:, i] = oof_pred
             except Exception as e:
-                warnings.warn(f"Model failed: {e}")
-                meta_features.append(np.zeros_like(y))
-
-        meta_features = np.column_stack(meta_features)  # (n_samples, n_models)
+                warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
+                meta_features[:, i] = np.zeros(n_samples)
 
         # Add region-aware features if enabled
         if self.region_aware:
-            # Define region boundaries from average predictions
-            # This ensures consistency with predict()
+            # Define region boundaries from average OOF predictions
             avg_pred = np.mean(meta_features, axis=1)
             self.analyzer_.fit(avg_pred)
 
@@ -662,7 +753,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             regions = self.analyzer_.assign_regions(avg_pred)
 
             # One-hot encode regions
-            region_features = np.zeros((len(y), self.n_regions))
+            region_features = np.zeros((n_samples, self.n_regions))
             for i, region in enumerate(regions):
                 region_features[i, region] = 1.0
 
@@ -675,7 +766,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
                 pred_value_feature
             ])
 
-        # Fit meta-model
+        # Fit meta-model on OOF predictions (prevents leakage)
         self.meta_model.fit(meta_features, y)
 
         return self
@@ -690,7 +781,11 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
                 X_processed = preprocessor.transform(X)
             else:
                 X_processed = X
-            predictions.append(model.predict(X_processed))
+            pred = model.predict(X_processed)
+            # Ensure 1D predictions (PLSRegression returns (n,1))
+            if hasattr(pred, 'ravel'):
+                pred = pred.ravel()
+            predictions.append(pred)
         meta_features = np.column_stack(predictions)
 
         # Add region features if enabled
@@ -711,6 +806,336 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             ])
 
         return self.meta_model.predict(meta_features)
+
+    def get_specialist_info(self):
+        """
+        Get information about the stacked models.
+
+        Returns
+        -------
+        dict mapping 'Stacked' -> list of model names
+        """
+        return {'Stacked': self.model_names.copy() if self.model_names else []}
+
+
+class RegionSpecialistEnsemble(BaseEstimator, RegressorMixin):
+    """
+    Ensemble where each region uses only its specialist model(s).
+
+    For a Q1 sample, only Q1's top model(s) contribute to the prediction.
+    For a Q2 sample, only Q2's top model(s) contribute.
+    And so on for each quartile.
+
+    This is similar to MixtureOfExpertsEnsemble with hard gating, but:
+    - Experts are assigned per quartile based on pre-computed regional rankings
+    - Each quartile has its own set of specialist models (not learned from scratch)
+
+    Parameters
+    ----------
+    models_per_region : dict
+        Dictionary mapping region names ('Q1', 'Q2', 'Q3', 'Q4') to lists of
+        (model, preprocessor_config) tuples. Each list contains the specialist
+        models for that region.
+    region_boundaries : array-like
+        Percentile boundaries for assigning samples to regions.
+        Should be [0, 25, 50, 75, 100] for quartiles.
+    model_names_per_region : dict, optional
+        Dictionary mapping region names to lists of model names.
+    """
+
+    def __init__(self, models_per_region, region_boundaries, model_names_per_region=None,
+                 y_percentiles=None):
+        """
+        Parameters
+        ----------
+        models_per_region : dict
+            Dictionary mapping region names ('Q1', 'Q2', 'Q3', 'Q4') to lists of
+            (model, preprocessor_config) tuples.
+        region_boundaries : array-like
+            Percentile boundaries for assigning samples to regions.
+            Should be [0, 25, 50, 75, 100] for quartiles.
+        model_names_per_region : dict, optional
+            Dictionary mapping region names to lists of model names.
+        y_percentiles : array-like, optional
+            Pre-computed TRUE Y percentile values. If provided, these boundaries
+            will be used for region assignment instead of computing from predictions.
+            This ensures consistent region assignment between selection (based on
+            TRUE Y) and routing (based on these boundaries).
+        """
+        self.models_per_region = models_per_region
+        self.region_boundaries = np.array(region_boundaries)
+        self.model_names_per_region = model_names_per_region or {}
+        self.y_percentiles_ = np.array(y_percentiles) if y_percentiles is not None else None
+
+    def fit(self, X, y):
+        """
+        Fit by computing region boundaries (if not already provided).
+
+        If y_percentiles was provided at construction time, those boundaries
+        are used directly (ensuring selection and routing use the same TRUE Y
+        quartile boundaries).
+
+        Otherwise, computes boundaries from initial predictions to ensure
+        consistency with predict()'s region assignment.
+        """
+        # If y_percentiles already provided, skip computing
+        if self.y_percentiles_ is not None:
+            return self
+
+        # Compute initial predictions (same as predict() does)
+        all_preds = []
+        for region, model_list in self.models_per_region.items():
+            for model, preproc_config in model_list:
+                try:
+                    if preproc_config is not None:
+                        X_processed = preproc_config.transform(X)
+                    else:
+                        X_processed = X
+                    pred = model.predict(X_processed)
+                    # FIX D: Ensure 1D predictions (PLSRegression returns (n,1))
+                    if hasattr(pred, 'ravel'):
+                        pred = pred.ravel()
+                    all_preds.append(pred)
+                except Exception:
+                    pass  # Skip models that fail
+
+        if not all_preds:
+            # Fallback to y-based boundaries if all models fail
+            self.y_percentiles_ = np.percentile(y, self.region_boundaries)
+            return self
+
+        # Compute initial prediction (mean of all model predictions)
+        initial_pred = np.mean(all_preds, axis=0)
+
+        # Compute boundaries from PREDICTIONS, not y
+        # This ensures consistent region assignment with predict()
+        self.y_percentiles_ = np.percentile(initial_pred, self.region_boundaries)
+        return self
+
+    def _assign_region(self, y_pred):
+        """
+        Assign a predicted Y-value to a region (Q1, Q2, Q3, Q4).
+
+        Uses the percentile boundaries from training data.
+        """
+        if self.y_percentiles_ is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        # digitize returns 1-based index, we want 0-based
+        region_idx = np.digitize(y_pred, self.y_percentiles_[1:-1])
+        region_names = ['Q1', 'Q2', 'Q3', 'Q4']
+        # Clip to valid range
+        region_idx = np.clip(region_idx, 0, 3)
+        return region_names[region_idx]
+
+    def predict(self, X):
+        """
+        Predict using region-specialist models.
+
+        For each sample:
+        1. Get initial prediction (simple average of all models) to determine region
+        2. Use only that region's specialist models for final prediction
+        """
+        n_samples = X.shape[0]
+        predictions = np.zeros(n_samples)
+
+        # First pass: get initial predictions from all models to determine regions
+        all_preds = []
+        all_models = []
+        for region, model_list in self.models_per_region.items():
+            for model, preproc_config in model_list:
+                all_models.append((model, preproc_config))
+
+        # Deduplicate models (same model might be specialist in multiple regions)
+        seen = set()
+        unique_models = []
+        for model, preproc_config in all_models:
+            model_id = id(model)
+            if model_id not in seen:
+                seen.add(model_id)
+                unique_models.append((model, preproc_config))
+
+        # Get predictions from unique models
+        for model, preproc_config in unique_models:
+            if preproc_config is not None:
+                X_processed = preproc_config.transform(X)
+            else:
+                X_processed = X
+            pred = model.predict(X_processed)
+            # FIX D: Ensure 1D predictions (PLSRegression returns (n,1))
+            if hasattr(pred, 'ravel'):
+                pred = pred.ravel()
+            all_preds.append(pred)
+
+        if not all_preds:
+            return np.zeros(n_samples)
+
+        # Use average prediction to determine region
+        initial_pred = np.mean(all_preds, axis=0)
+
+        # Second pass: for each sample, use only the region's specialist models
+        for i in range(n_samples):
+            region = self._assign_region(initial_pred[i])
+            region_models = self.models_per_region.get(region, [])
+
+            if not region_models:
+                # Fallback to initial prediction if no models for this region
+                predictions[i] = initial_pred[i]
+                continue
+
+            # Get predictions from region's specialist models
+            region_preds = []
+            for model, preproc_config in region_models:
+                if preproc_config is not None:
+                    X_i = preproc_config.transform(X[i:i+1])
+                else:
+                    X_i = X[i:i+1]
+                pred = model.predict(X_i)
+                # FIX D: Ensure 1D predictions (PLSRegression returns (n,1))
+                if hasattr(pred, 'ravel'):
+                    pred = pred.ravel()
+                region_preds.append(pred[0])
+
+            # Average the specialist predictions (equal weight within region)
+            predictions[i] = np.mean(region_preds)
+
+        return predictions
+
+    def get_specialist_info(self):
+        """
+        Get information about which models are specialists for each region.
+
+        Returns
+        -------
+        dict mapping region -> list of model names
+        """
+        info = {}
+        for region, names in self.model_names_per_region.items():
+            info[region] = names if names else []
+        return info
+
+
+class ClassSpecialistEnsemble(BaseEstimator, ClassifierMixin):
+    """
+    Classification ensemble where each class uses its specialist model(s).
+
+    For predicting class A, models that specialize in class A get higher weight.
+    Specialists are determined by per-class F1 scores from the search results.
+
+    Uses soft voting with class-specific weighting: each model's vote is weighted
+    by its F1 score for the class it predicts.
+
+    Parameters
+    ----------
+    models_per_class : dict
+        Dictionary mapping class labels to lists of (model, preprocessor_config) tuples.
+        Each list contains the specialist models for that class.
+    model_names_per_class : dict, optional
+        Dictionary mapping class labels to lists of model names.
+    classes : array-like
+        Array of class labels (will be set during fit if not provided).
+    """
+
+    def __init__(self, models_per_class, model_names_per_class=None, classes=None):
+        self.models_per_class = models_per_class
+        self.model_names_per_class = model_names_per_class or {}
+        self.classes_ = np.array(classes) if classes is not None else None
+
+    def fit(self, X, y):
+        """
+        Fit by setting class labels from training data.
+
+        The base models are already fitted. We just need to store the class labels.
+        """
+        self.classes_ = np.unique(y)
+        return self
+
+    def predict_proba(self, X):
+        """
+        Predict class probabilities using class-specialist models.
+
+        For each sample:
+        1. Get probability predictions from all specialist models
+        2. Weight each model's prediction by its specialization for each class
+        3. Normalize to get final probabilities
+        """
+        n_samples = X.shape[0]
+        n_classes = len(self.classes_)
+
+        # Collect all unique models
+        all_models = []
+        for class_label, model_list in self.models_per_class.items():
+            for model, preproc_config in model_list:
+                all_models.append((model, preproc_config, class_label))
+
+        # Deduplicate models (same model might be specialist in multiple classes)
+        seen = set()
+        unique_models = []
+        for model, preproc_config, class_label in all_models:
+            model_id = id(model)
+            if model_id not in seen:
+                seen.add(model_id)
+                unique_models.append((model, preproc_config))
+
+        if not unique_models:
+            # Return uniform probabilities if no models
+            return np.ones((n_samples, n_classes)) / n_classes
+
+        # Get predictions from all unique models
+        all_proba = []
+        for model, preproc_config in unique_models:
+            if preproc_config is not None:
+                X_processed = preproc_config.transform(X)
+            else:
+                X_processed = X
+
+            if hasattr(model, 'predict_proba'):
+                proba = model.predict_proba(X_processed)
+            else:
+                # Fall back to hard predictions converted to one-hot
+                preds = model.predict(X_processed)
+                proba = np.zeros((len(preds), n_classes))
+                for i, p in enumerate(preds):
+                    class_idx = np.where(self.classes_ == p)[0]
+                    if len(class_idx) > 0:
+                        proba[i, class_idx[0]] = 1.0
+                    else:
+                        proba[i] = 1.0 / n_classes
+            all_proba.append(proba)
+
+        # Weight models by their class specialization
+        # For now, use equal weighting (simpler approach)
+        # More sophisticated: weight by class-specific F1 scores stored during creation
+        weighted_proba = np.mean(all_proba, axis=0)
+
+        # Normalize to ensure valid probabilities
+        row_sums = weighted_proba.sum(axis=1, keepdims=True)
+        weighted_proba = np.divide(
+            weighted_proba,
+            row_sums,
+            out=np.ones_like(weighted_proba) / n_classes,
+            where=row_sums > 0
+        )
+
+        return weighted_proba
+
+    def predict(self, X):
+        """Predict class labels using class-specialist models."""
+        proba = self.predict_proba(X)
+        return self.classes_[np.argmax(proba, axis=1)]
+
+    def get_specialist_info(self):
+        """
+        Get information about which models are specialists for each class.
+
+        Returns
+        -------
+        dict mapping class_label -> list of model names
+        """
+        info = {}
+        for class_label, names in self.model_names_per_class.items():
+            info[class_label] = names if names else []
+        return info
 
 
 def extract_preprocessor_config(row, all_wavelengths):
@@ -813,10 +1238,8 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
         ensemble.fit(X, y)
 
     elif ensemble_type == 'mixture_experts':
-        # MixtureOfExpertsEnsemble doesn't use cv parameter
-        moe_kwargs = {k: v for k, v in kwargs.items() if k != 'cv'}
         ensemble = MixtureOfExpertsEnsemble(
-            models, model_names, n_regions=n_regions, **moe_kwargs
+            models, model_names, n_regions=n_regions, **kwargs
         )
         ensemble.fit(X, y)
 
@@ -922,3 +1345,399 @@ def compute_regional_rankings(results_df, top_n=10):
         'top_models': top_models,
         'y_quartiles': y_quartiles
     }
+
+
+def compute_class_rankings(results_df, top_n=10):
+    """
+    Rank models by performance on each class (for classification tasks).
+
+    Uses the 'per_class_metrics' column computed during grid search, which contains
+    a dict with class labels as keys and metrics (F1, Precision, Recall, Support) as values.
+
+    This is analogous to compute_regional_rankings for regression, but uses F1 score
+    (higher is better) instead of RMSE (lower is better).
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Results DataFrame containing 'per_class_metrics' column
+    top_n : int, default=10
+        Number of top models to identify per class
+
+    Returns
+    -------
+    dict with keys:
+        'rankings': dict mapping class_label -> list of (row_idx, f1, rank) tuples
+        'best_class': dict mapping row_idx -> (best_class, rank, other_classes_count)
+        'top_models': set of row indices that are in top N of any class
+        'class_labels': list of class labels
+    """
+    # Check if per_class_metrics column exists
+    if 'per_class_metrics' not in results_df.columns:
+        return {
+            'rankings': {},
+            'best_class': {},
+            'top_models': set(),
+            'class_labels': None
+        }
+
+    # Get class labels from first row with per_class_metrics
+    class_labels = None
+    for idx, row in results_df.iterrows():
+        per_class = row.get('per_class_metrics')
+        if per_class is not None and isinstance(per_class, dict) and len(per_class) > 0:
+            class_labels = sorted(per_class.keys())
+            break
+
+    if not class_labels:
+        return {
+            'rankings': {},
+            'best_class': {},
+            'top_models': set(),
+            'class_labels': None
+        }
+
+    rankings = {c: [] for c in class_labels}
+    best_class = {}
+    top_models = set()
+
+    # Collect F1 values for each class
+    for class_label in class_labels:
+        class_data = []
+        for idx, row in results_df.iterrows():
+            per_class = row.get('per_class_metrics')
+            if per_class is not None and isinstance(per_class, dict):
+                metrics = per_class.get(str(class_label))
+                if metrics is not None:
+                    f1 = metrics.get('F1')
+                    if f1 is not None and not np.isnan(f1):
+                        class_data.append((idx, f1))
+
+        # Sort by F1 (descending - higher is better, unlike RMSE)
+        class_data.sort(key=lambda x: x[1], reverse=True)
+
+        # Assign ranks
+        for rank, (idx, f1) in enumerate(class_data, start=1):
+            rankings[class_label].append((idx, f1, rank))
+            if rank <= top_n:
+                top_models.add(idx)
+
+    # Determine best class for each model in top_models
+    for idx in top_models:
+        model_ranks = {}
+        for class_label in class_labels:
+            for (row_idx, f1, rank) in rankings[class_label]:
+                if row_idx == idx and rank <= top_n:
+                    model_ranks[class_label] = rank
+                    break
+
+        if model_ranks:
+            # Find class with best (lowest) rank
+            best_c = min(model_ranks.keys(), key=lambda c: model_ranks[c])
+            best_rank = model_ranks[best_c]
+            other_count = len(model_ranks) - 1
+            best_class[idx] = (best_c, best_rank, other_count)
+
+    return {
+        'rankings': rankings,
+        'best_class': best_class,
+        'top_models': top_models,
+        'class_labels': class_labels
+    }
+
+
+def select_top_models_per_region(results_df, top_n, task_type, reconstruct_func, X_train, y_train, all_wavelengths):
+    """
+    Select top N models for each quartile (regression) or class (classification).
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Results DataFrame with model performance metrics
+    top_n : int
+        Number of top models to select per region/class
+    task_type : str
+        'regression' or 'classification'
+    reconstruct_func : callable
+        Function to reconstruct a fitted model from a results row.
+        Signature: reconstruct_func(row, X_train, y_train) -> (fitted_model, model_name)
+    X_train : array-like
+        Training features
+    y_train : array-like
+        Training targets
+    all_wavelengths : array-like
+        Full wavelength array from the dataset
+
+    Returns
+    -------
+    dict with keys:
+        'models_per_region': dict mapping region/class -> list of (model, preproc_config) tuples
+        'model_names_per_region': dict mapping region/class -> list of model names
+        'unique_model_count': int - total number of unique models selected
+    """
+    if task_type == 'regression':
+        # Use regional rankings (quartiles)
+        rankings_result = compute_regional_rankings(results_df, top_n=top_n)
+        rankings = rankings_result['rankings']
+        regions = ['Q1', 'Q2', 'Q3', 'Q4']
+    else:
+        # Use class rankings
+        rankings_result = compute_class_rankings(results_df, top_n=top_n)
+        rankings = rankings_result['rankings']
+        regions = rankings_result.get('class_labels') or []
+
+    if not rankings or not regions:
+        return {
+            'models_per_region': {},
+            'model_names_per_region': {},
+            'unique_model_count': 0
+        }
+
+    models_per_region = {}
+    model_names_per_region = {}
+    all_selected_indices = set()
+
+    for region in regions:
+        region_rankings = rankings.get(region, [])
+        models_per_region[region] = []
+        model_names_per_region[region] = []
+
+        for idx, metric_val, rank in region_rankings[:top_n]:
+            if idx in results_df.index:
+                all_selected_indices.add(idx)
+                row = results_df.loc[idx]
+
+                # Reconstruct the model
+                try:
+                    fitted_model, model_name = reconstruct_func(row, X_train, y_train)
+                    # Model already handles preprocessing internally
+                    models_per_region[region].append((fitted_model, None))
+                    model_names_per_region[region].append(model_name)
+                except Exception as e:
+                    warnings.warn(f"Failed to reconstruct model for region {region}: {e}")
+
+    return {
+        'models_per_region': models_per_region,
+        'model_names_per_region': model_names_per_region,
+        'unique_model_count': len(all_selected_indices)
+    }
+
+
+def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_func, all_wavelengths):
+    """
+    Create Ensemble-Top1, Top2, Top3 with region-specialist weighting.
+
+    Generates 3 automatic ensembles at the end of every search run:
+    - Ensemble-Top1: Top 1 model from each quartile/class
+    - Ensemble-Top2: Top 2 models from each quartile/class
+    - Ensemble-Top3: Top 3 models from each quartile/class
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Results DataFrame with model performance metrics and regional/class rankings
+    X_train : array-like
+        Training features
+    y_train : array-like
+        Training targets
+    task_type : str
+        'regression' or 'classification'
+    reconstruct_func : callable
+        Function to reconstruct a fitted model from a results row.
+        Signature: reconstruct_func(row, X_train, y_train) -> (fitted_model, model_name)
+    all_wavelengths : array-like
+        Full wavelength array from the dataset
+
+    Returns
+    -------
+    dict with keys 'Ensemble-Top1', 'Ensemble-Top2', 'Ensemble-Top3', each containing:
+        'ensemble': fitted ensemble model (RegionSpecialistEnsemble or ClassSpecialistEnsemble)
+        'base_models': list of model names in the ensemble
+        'metrics': dict with 'r2', 'rmse' (regression) or 'accuracy', 'f1' (classification)
+        'n_models': int - number of unique base models
+        'specialist_info': dict mapping region/class -> list of model names
+    """
+    from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, f1_score
+    from sklearn.model_selection import KFold
+
+    auto_ensembles = {}
+    region_boundaries = [0, 25, 50, 75, 100]  # Quartile percentiles
+    n_cv_folds = min(5, len(y_train))
+
+    for top_n, ensemble_name in [(1, 'Ensemble-Top1'), (2, 'Ensemble-Top2'), (3, 'Ensemble-Top3')]:
+        # Select top models for each region
+        selection = select_top_models_per_region(
+            results_df, top_n, task_type, reconstruct_func, X_train, y_train, all_wavelengths
+        )
+
+        models_per_region = selection['models_per_region']
+        model_names_per_region = selection['model_names_per_region']
+        unique_model_count = selection['unique_model_count']
+
+        # Skip if too few unique models selected
+        if unique_model_count < 2:
+            continue
+
+        # Create appropriate ensemble based on task type
+        if task_type == 'regression':
+            # Compute TRUE Y quartile boundaries
+            # These boundaries are used for BOTH:
+            # 1. Selection: Models were ranked by TRUE Y regional performance
+            # 2. Routing: Samples are assigned to regions using these same boundaries
+            y_percentiles = np.percentile(y_train, region_boundaries)
+
+            # Use RegionSpecialistEnsemble with TRUE Y boundaries
+            # Only the region's specialist models contribute to each sample's prediction
+            ensemble = RegionSpecialistEnsemble(
+                models_per_region=models_per_region,
+                region_boundaries=region_boundaries,
+                model_names_per_region=model_names_per_region,
+                y_percentiles=y_percentiles  # Pass TRUE Y boundaries for consistent routing
+            )
+            ensemble.fit(X_train, y_train)
+
+            # Use cross-validation to get realistic metrics (comparable to RMSECV)
+            # Without CV, metrics on training data would be inflated (high RPD, low RMSE)
+            y_std = np.std(y_train)  # Store for proper RPD calculation
+
+            if n_cv_folds >= 2:
+                kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
+                cv_predictions = np.full(len(y_train), np.nan)
+
+                for train_idx, val_idx in kf.split(X_train):
+                    # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
+                    if hasattr(X_train, 'iloc'):
+                        X_cv_train, X_cv_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+                    else:
+                        X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    y_cv_train = y_train[train_idx]
+
+                    # Reconstruct models for this CV fold
+                    cv_selection = select_top_models_per_region(
+                        results_df, top_n, task_type, reconstruct_func,
+                        X_cv_train, y_cv_train, all_wavelengths
+                    )
+
+                    if cv_selection['unique_model_count'] >= 2:
+                        cv_y_percentiles = np.percentile(y_cv_train, region_boundaries)
+                        cv_ensemble = RegionSpecialistEnsemble(
+                            models_per_region=cv_selection['models_per_region'],
+                            region_boundaries=region_boundaries,
+                            model_names_per_region=cv_selection['model_names_per_region'],
+                            y_percentiles=cv_y_percentiles
+                        )
+                        cv_ensemble.fit(X_cv_train, y_cv_train)
+                        cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
+                    else:
+                        # Fallback: use main ensemble for this fold
+                        cv_predictions[val_idx] = ensemble.predict(X_cv_val)
+
+                # Calculate CV metrics
+                r2 = r2_score(y_train, cv_predictions)
+                rmse = np.sqrt(mean_squared_error(y_train, cv_predictions))
+            else:
+                # Fallback for very small datasets
+                y_pred = ensemble.predict(X_train)
+                r2 = r2_score(y_train, y_pred)
+                rmse = np.sqrt(mean_squared_error(y_train, y_pred))
+
+            metrics = {'r2': r2, 'rmse': rmse, 'y_std': y_std}
+
+            # === DIAGNOSTIC: Check if reconstructed models match original performance ===
+            # Set SPECTRAL_PREDICT_DEBUG=1 environment variable to enable
+            import os
+            if os.environ.get('SPECTRAL_PREDICT_DEBUG', '').strip() in ('1', 'true', 'True'):
+                print(f"\n=== DIAGNOSTIC: {ensemble_name} ===")
+                for region, models in models_per_region.items():
+                    for i, (model, preproc) in enumerate(models):
+                        try:
+                            if preproc is not None:
+                                X_proc = preproc.transform(X_train)
+                            else:
+                                X_proc = X_train
+                            y_pred_model = model.predict(X_proc)
+                            if hasattr(y_pred_model, 'ravel'):
+                                y_pred_model = y_pred_model.ravel()
+                            r2_model = r2_score(y_train, y_pred_model)
+                            rmse_model = np.sqrt(mean_squared_error(y_train, y_pred_model))
+                            model_name = model_names_per_region.get(region, ['unknown'])[i] if i < len(model_names_per_region.get(region, [])) else 'unknown'
+                            print(f"  {region} model {i} ({model_name}): R2={r2_model:.4f}, RMSE={rmse_model:.4f}")
+                        except Exception as e:
+                            print(f"  {region} model {i}: FAILED - {e}")
+
+                print(f"  ENSEMBLE {ensemble_name} (RegionSpecialist): R2={r2:.4f}, RMSE={rmse:.4f}")
+                print(f"  Expected: Individual model R2s should match their original R2 from results_df")
+                print(f"  If individual R2s are LOW, reconstruction is broken (hyperparams/preprocessing)")
+                print(f"  RegionSpecialist uses TRUE Y boundaries for routing")
+            # === END DIAGNOSTIC ===
+        else:
+            # Classification
+            classes = np.unique(y_train)
+            ensemble = ClassSpecialistEnsemble(
+                models_per_class=models_per_region,  # Same structure, different semantics
+                model_names_per_class=model_names_per_region,
+                classes=classes
+            )
+            ensemble.fit(X_train, y_train)
+
+            # Use cross-validation to get realistic metrics
+            if n_cv_folds >= 2:
+                kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
+                cv_predictions = np.full(len(y_train), np.nan, dtype=object)
+
+                for train_idx, val_idx in kf.split(X_train):
+                    # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
+                    if hasattr(X_train, 'iloc'):
+                        X_cv_train, X_cv_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+                    else:
+                        X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    y_cv_train = y_train[train_idx]
+
+                    # Reconstruct models for this CV fold
+                    cv_selection = select_top_models_per_region(
+                        results_df, top_n, task_type, reconstruct_func,
+                        X_cv_train, y_cv_train, all_wavelengths
+                    )
+
+                    if cv_selection['unique_model_count'] >= 2:
+                        cv_classes = np.unique(y_cv_train)
+                        cv_ensemble = ClassSpecialistEnsemble(
+                            models_per_class=cv_selection['models_per_region'],
+                            model_names_per_class=cv_selection['model_names_per_region'],
+                            classes=cv_classes
+                        )
+                        cv_ensemble.fit(X_cv_train, y_cv_train)
+                        cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
+                    else:
+                        # Fallback: use main ensemble for this fold
+                        cv_predictions[val_idx] = ensemble.predict(X_cv_val)
+
+                # Calculate CV metrics
+                accuracy = accuracy_score(y_train, cv_predictions)
+                f1 = f1_score(y_train, cv_predictions, average='weighted')
+            else:
+                # Fallback for very small datasets
+                y_pred = ensemble.predict(X_train)
+                accuracy = accuracy_score(y_train, y_pred)
+                f1 = f1_score(y_train, y_pred, average='weighted')
+
+            metrics = {'accuracy': accuracy, 'f1': f1}
+
+        # Collect all unique model names
+        all_model_names = []
+        seen_names = set()
+        for region, names in model_names_per_region.items():
+            for name in names:
+                if name not in seen_names:
+                    seen_names.add(name)
+                    all_model_names.append(name)
+
+        auto_ensembles[ensemble_name] = {
+            'ensemble': ensemble,
+            'base_models': all_model_names,
+            'metrics': metrics,
+            'n_models': unique_model_count,
+            'specialist_info': ensemble.get_specialist_info()
+        }
+
+    return auto_ensembles
