@@ -230,7 +230,7 @@ def _compute_vip_importance(X: np.ndarray, y: np.ndarray) -> np.ndarray:
         n_components = min(10, n_features // 10, n_samples // 2)
         n_components = max(2, n_components)
 
-        pls = PLSRegression(n_components=n_components)
+        pls = PLSRegression(n_components=n_components, scale=False)
         pls.fit(X, y)
 
         return compute_vip(pls, X, y)
@@ -705,7 +705,7 @@ def _quick_evaluate(
         n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
         n_components = max(2, n_components)
 
-        pls = PLSRegression(n_components=n_components)
+        pls = PLSRegression(n_components=n_components, scale=False)
         scores = cross_val_score(pls, X, y, cv=cv_folds, scoring='neg_root_mean_squared_error')
         return -scores.mean()
 
@@ -902,6 +902,17 @@ def discover_preprocessing(
     # Select diverse top N
     print(f"\nSelecting top {n_top} diverse configurations...")
     top_configs = select_diverse_configs(all_configs, n_top, task_type)
+
+    # Display top 10 preprocessing ranking in progress area
+    if progress_callback:
+        progress_callback(total, total, "=== Top Preprocessing Ranking ===")
+        for i, config in enumerate(top_configs[:10]):  # Show top 10
+            window_str = f"w={config['window']}" if config['window'] else ""
+            if task_type == 'regression':
+                score_str = f"RMSE={config['score']:.4f}"
+            else:
+                score_str = f"Acc={config['score']:.4f}"
+            progress_callback(total, total, f"  {i+1}. {config['preprocessing']} {window_str}: {score_str}")
 
     # For model_specific importance with multiple models, compute per-model importance
     if importance_method == 'model_specific' and models_to_test and len(models_to_test) > 1:
