@@ -23,7 +23,8 @@ import warnings
 from typing import Dict, List, Optional, Tuple, Callable, Any, Union
 from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.linear_model import Ridge, RidgeClassifier, Lasso, ElasticNet
+from .models import PLSTransformer  # Wrapper that ensures 2D output for PLS-DA
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVR, SVC
 from sklearn.neural_network import MLPRegressor, MLPClassifier
@@ -762,7 +763,10 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
     elif model_type == 'Ridge':
         # Exponential alpha scale: 1e-4 to 1e3
         alpha = 10 ** (model_param / 3 - 2)  # param 0-14 -> alpha 0.01 to 1000
-        return Ridge(alpha=alpha, random_state=random_state)
+        if task_type == 'regression':
+            return Ridge(alpha=alpha, random_state=random_state)
+        else:
+            return RidgeClassifier(alpha=alpha, random_state=random_state)
 
     elif model_type == 'Lasso':
         # alpha from 1e-3 to 100 (log scale)
@@ -1264,13 +1268,45 @@ class SpectralOptimizationProblem(Problem):
             if model is None:
                 return 1e10
 
+            # Scale-sensitive models need StandardScaler (matches search.py behavior)
+            # For classification: PLS needs StandardScaler + LogisticRegression wrapper
+            # For both tasks: SVC/SVR, MLP, NeuralBoosted need StandardScaler wrapper
+            SCALE_SENSITIVE_MODELS = {'SVR', 'MLP', 'NeuralBoosted'}
+
+            # Build pipeline with proper scaling if needed
+            if self.task_type == 'classification' and model_type == 'PLS':
+                # PLS-DA: PLSTransformer (2D output) + StandardScaler + LogisticRegression
+                # PLSTransformer ensures transform() returns 2D arrays (fixes sklearn 3D output bug)
+                from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.linear_model import LogisticRegression
+                n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+                n_components = max(1, n_components)
+                pls_transformer = PLSTransformer(n_components=n_components, scale=False)
+                pipeline_model = Pipeline([
+                    ('pls', pls_transformer),
+                    ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
+                    ('lr', LogisticRegression(max_iter=1000, random_state=self.random_state))
+                ])
+            elif model_type in SCALE_SENSITIVE_MODELS:
+                # Scale-sensitive models: StandardScaler + Model (matches search.py lines 3427-3429)
+                from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                pipeline_model = Pipeline([
+                    ('scaler', StandardScaler()),
+                    ('model', model)
+                ])
+            else:
+                # Other models don't need scaling
+                pipeline_model = model
+
             # Cross-validation
             if self.task_type == 'regression':
                 cv = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     scores = cross_val_score(
-                        model, X_subset, self.y, cv=cv, scoring='neg_mean_squared_error'
+                        pipeline_model, X_subset, self.y, cv=cv, scoring='neg_mean_squared_error'
                     )
                 # Use mean(sqrt(MSE)) for optimization and display consistency
                 # This matches Bayesian optimization and Model Development exactly.
@@ -1282,7 +1318,7 @@ class SpectralOptimizationProblem(Problem):
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     scores = cross_val_score(
-                        model, X_subset, self.y, cv=cv, scoring='accuracy'
+                        pipeline_model, X_subset, self.y, cv=cv, scoring='accuracy'
                     )
                 # Return 1 - accuracy (to minimize)
                 return 1.0 - np.mean(scores)
@@ -1598,6 +1634,14 @@ def run_nsga2_search(
         models=models,
     )
 
+    # Encode labels for classification before CARS importance calculation
+    # (CARS-Tree uses numeric targets internally)
+    y_for_importance = y
+    if task_type == 'classification':
+        if y.dtype == object or not np.issubdtype(y.dtype, np.number):
+            label_encoder_for_importance = LabelEncoder()
+            y_for_importance = label_encoder_for_importance.fit_transform(y)
+
     # Compute CARS-Tree importance for principled wavelength guidance (if use_guidance=True)
     # CARS-Tree uses hybrid split+gain importance (denser than plain CARS)
     if use_guidance:
@@ -1605,7 +1649,7 @@ def run_nsga2_search(
             print("  Computing CARS-Tree importance scores for wavelength guidance...")
         try:
             cars_importance = cars_selection(
-                X, y,
+                X, y_for_importance,
                 n_iterations=50,
                 pls_components=min(10, X.shape[0] - 1),
                 cv_folds=min(cv_folds, X.shape[0] // 2),  # Ensure enough samples per fold
