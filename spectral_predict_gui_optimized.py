@@ -27,6 +27,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix, roc_curve, auc
+from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 
 # Sound notification for analysis completion
 try:
@@ -1141,6 +1142,266 @@ class SidebarNavigation:
                 section['content'].config(bg=sidebar_bg)
 
 
+# ===== SKLEARN-COMPATIBLE WRAPPER CLASSES =====
+# These classes wrap models with preprocessing/wavelength selection
+# and are sklearn-clonable (required for ensemble OOF predictions)
+
+def _build_transform_from_config(config: dict):
+    """
+    Build a preprocessing transform function from configuration.
+
+    This is factored out so wrapper classes can recreate transforms after cloning.
+    Imports are done inside to avoid circular dependencies.
+    """
+    from spectral_predict.preprocess import SavgolDerivative, SNV, SavgolSmooth
+    from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
+
+    def transform(X):
+        import numpy as np
+        X_out = np.asarray(X, dtype=np.float64)
+
+        # Apply smoothing first (if enabled)
+        if config.get('smooth'):
+            smoother = SavgolSmooth(window_length=config['smooth'], polyorder=2)
+            X_out = smoother.fit_transform(X_out)
+
+        # Apply baseline correction
+        baseline = config.get('baseline')
+        if baseline == 'polynomial':
+            bl = BaselinePolynomial(degree=2)
+            X_out = bl.fit_transform(X_out)
+        elif baseline == 'als':
+            bl = BaselineALS(lambda_=1e6, p=0.01, niter=10)
+            X_out = bl.fit_transform(X_out)
+        elif baseline == 'airpls':
+            bl = BaselineAirPLS(lam=1e6, max_iter=15)
+            X_out = bl.fit_transform(X_out)
+
+        # Apply main preprocessing
+        pt = config.get('type', 'raw')
+        w = config.get('window', 15)
+
+        if pt == 'raw':
+            pass
+        elif pt == 'snv':
+            X_out = SNV().fit_transform(X_out)
+        elif pt == 'deriv1':
+            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+        elif pt == 'deriv2':
+            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+        elif pt == 'deriv3':
+            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
+        elif pt == 'deriv4':
+            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+        elif pt == 'snv_deriv1':
+            X_out = SNV().fit_transform(X_out)
+            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+        elif pt == 'snv_deriv2':
+            X_out = SNV().fit_transform(X_out)
+            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+        elif pt == 'snv_deriv3':
+            X_out = SNV().fit_transform(X_out)
+            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
+        elif pt == 'snv_deriv4':
+            X_out = SNV().fit_transform(X_out)
+            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+        elif pt == 'deriv1_snv':
+            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
+        elif pt == 'deriv2_snv':
+            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
+        elif pt == 'deriv3_snv':
+            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
+        elif pt == 'deriv4_snv':
+            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
+            X_out = SNV().fit_transform(X_out)
+
+        return X_out
+
+    return transform
+
+
+class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
+    """
+    Sklearn-compatible wrapper that applies wavelength subsetting during fit and predict.
+
+    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
+    and implements get_params/set_params properly.
+    """
+
+    def __init__(self, pipeline=None, wavelength_cols=None):
+        self.pipeline = pipeline
+        self.wavelength_cols = wavelength_cols
+
+    def _subset(self, X):
+        """Subset X to selected wavelengths."""
+        if self.wavelength_cols is None:
+            return X
+
+        if hasattr(X, 'loc'):
+            # DataFrame - use column selection
+            try:
+                return X[self.wavelength_cols]
+            except KeyError:
+                # Column name type mismatch - try matching by string conversion
+                stored_cols_str = [str(c) for c in self.wavelength_cols]
+                str_to_col = {str(col): col for col in X.columns}
+
+                matching_cols = []
+                for stored_str in stored_cols_str:
+                    if stored_str in str_to_col:
+                        matching_cols.append(str_to_col[stored_str])
+                    else:
+                        # Try float comparison for numeric columns
+                        try:
+                            stored_val = float(stored_str)
+                            for col in X.columns:
+                                try:
+                                    if abs(float(col) - stored_val) < 0.5:
+                                        matching_cols.append(col)
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+                        except (ValueError, TypeError):
+                            pass
+
+                if len(matching_cols) == len(self.wavelength_cols):
+                    return X[matching_cols]
+                else:
+                    raise KeyError(
+                        f"Could not match all wavelength columns. "
+                        f"Expected {len(self.wavelength_cols)}, found {len(matching_cols)}"
+                    )
+        else:
+            # numpy array - assume columns are already matched
+            return X
+
+    def fit(self, X, y):
+        X_subset = self._subset(X)
+        self.pipeline.fit(X_subset, y)
+        return self
+
+    def predict(self, X):
+        X_subset = self._subset(X)
+        return self.pipeline.predict(X_subset)
+
+    def get_params(self, deep=True):
+        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+
+class GAPreprocessWrapper(BaseEstimator, RegressorMixin):
+    """
+    Sklearn-compatible wrapper for GA/NSGA preprocessing.
+
+    Stores preprocessing config (not the transform function) so it can be cloned.
+    The transform function is recreated from config when needed.
+    """
+
+    def __init__(self, pipeline=None, preprocess_config=None):
+        self.pipeline = pipeline
+        self.preprocess_config = preprocess_config
+        self._transform = None
+
+    @property
+    def transform(self):
+        """Lazily create transform function from config."""
+        if self._transform is None and self.preprocess_config:
+            self._transform = _build_transform_from_config(self.preprocess_config)
+        return self._transform
+
+    def fit(self, X, y):
+        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+        self.pipeline.fit(X_preproc, y)
+        return self
+
+    def predict(self, X):
+        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+        return self.pipeline.predict(X_preproc)
+
+    def get_params(self, deep=True):
+        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        # Reset transform cache if config changes
+        if 'preprocess_config' in params:
+            self._transform = None
+        return self
+
+
+class CombinedPreprocessWrapper(BaseEstimator, RegressorMixin):
+    """
+    Sklearn-compatible wrapper for combined preprocessing + wavelength selection (NSGA-II).
+
+    Stores preprocessing config and column info (not the transform function) so it can be cloned.
+    The transform function is recreated from config when needed.
+    """
+
+    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
+        self.pipeline = pipeline
+        self.preprocess_config = preprocess_config
+        self.wavelength_cols = wavelength_cols
+        self.all_columns = all_columns
+        self._transform = None
+        self._col_indices = None
+
+    @property
+    def transform(self):
+        """Lazily create transform function from config."""
+        if self._transform is None and self.preprocess_config:
+            self._transform = _build_transform_from_config(self.preprocess_config)
+        return self._transform
+
+    @property
+    def col_indices(self):
+        """Lazily compute column indices."""
+        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
+            all_cols_list = list(self.all_columns)
+            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
+        return self._col_indices
+
+    def _preprocess_and_subset(self, X):
+        X_arr = X.values if hasattr(X, 'values') else X
+        X_preproc = self.transform(X_arr)
+        # Subset to selected wavelengths (after preprocessing)
+        return X_preproc[:, self.col_indices]
+
+    def fit(self, X, y):
+        X_processed = self._preprocess_and_subset(X)
+        self.pipeline.fit(X_processed, y)
+        return self
+
+    def predict(self, X):
+        X_processed = self._preprocess_and_subset(X)
+        return self.pipeline.predict(X_processed)
+
+    def get_params(self, deep=True):
+        return {
+            'pipeline': self.pipeline,
+            'preprocess_config': self.preprocess_config,
+            'wavelength_cols': self.wavelength_cols,
+            'all_columns': self.all_columns
+        }
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        # Reset caches if relevant params change
+        if 'preprocess_config' in params:
+            self._transform = None
+        if 'all_columns' in params or 'wavelength_cols' in params:
+            self._col_indices = None
+        return self
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -2047,7 +2308,6 @@ class SpectralPredictApp:
         self.ensemble_n_regions = tk.IntVar(value=5)  # Number of regions for region-based ensembles
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
         self.ensemble_results = None  # Store ensemble predictions and metrics
-        self.auto_ensembles = None  # Store auto-generated region-specialist ensembles
 
         # Region selection controls for "Select Top by Region" button
         self.select_region_top_n = tk.IntVar(value=3)  # Models per region for selection (lower default)
@@ -5496,7 +5756,7 @@ class SpectralPredictApp:
 
         # Importance method descriptions
         self.importance_desc_label = ttk.Label(self.smart_preproc_options_frame,
-                  text="CARS-Tree: LightGBM hybrid importance (dense, stable)", style='Caption.TLabel')
+                  text="Model-Specific: VIP for PLS, tree importance for RF/LightGBM", style='Caption.TLabel')
         self.importance_desc_label.grid(row=0, column=2, sticky=tk.W, padx=5)
 
         # Bind to update description when selection changes
@@ -5512,10 +5772,10 @@ class SpectralPredictApp:
 
         # Info about what smart preprocessing does
         ttk.Label(smart_preproc_frame,
-                 text="Tests: 14 preprocessing types x 5 window sizes = 62 combinations",
+                 text="Tests: 14 preprocessing types x 6 window sizes = 74 combinations",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
         ttk.Label(smart_preproc_frame,
-                 text="Each config tested with 4 wavelength subset sizes: [50, 100, 200, 300]",
+                 text="Evaluates using all wavelengths with 3-fold CV to rank preprocessing configs",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
         ttk.Label(smart_preproc_frame,
                  text="Runtime: ~3-4 minutes. Returns top N diverse preprocessing configs for grid search.",
@@ -7659,7 +7919,6 @@ class SpectralPredictApp:
         # Initialize ensemble storage
         self.ensemble_results = None
         self.trained_ensembles = None
-        self.auto_ensembles = None
 
     def _create_tab7_refine_model(self):
         """Tab 7: Model Development - Interactive model parameter refinement with subtabs."""
@@ -14119,70 +14378,7 @@ class SpectralPredictApp:
                 # If parsing fails, don't subset
                 return None
 
-        class WavelengthSubsetWrapper:
-            """Wrapper that applies wavelength subsetting during fit and predict."""
-
-            def __init__(self, pipeline, wavelength_cols):
-                self.pipeline = pipeline
-                self.wavelength_cols = wavelength_cols
-
-            def _subset(self, X):
-                """Subset X to selected wavelengths."""
-                if hasattr(X, 'loc'):
-                    # DataFrame - use column selection
-                    try:
-                        return X[self.wavelength_cols]
-                    except KeyError:
-                        # Column name type mismatch - try matching by string conversion
-                        # Convert stored column names to strings for comparison
-                        stored_cols_str = [str(c) for c in self.wavelength_cols]
-
-                        # Create mapping from string representation to actual column
-                        str_to_col = {str(col): col for col in X.columns}
-
-                        # Find matching columns
-                        matching_cols = []
-                        for stored_str in stored_cols_str:
-                            if stored_str in str_to_col:
-                                matching_cols.append(str_to_col[stored_str])
-                            else:
-                                # Try float comparison for numeric columns
-                                try:
-                                    stored_val = float(stored_str)
-                                    for col in X.columns:
-                                        try:
-                                            if abs(float(col) - stored_val) < 0.5:
-                                                matching_cols.append(col)
-                                                break
-                                        except (ValueError, TypeError):
-                                            continue
-                                except (ValueError, TypeError):
-                                    pass
-
-                        if len(matching_cols) == len(self.wavelength_cols):
-                            return X[matching_cols]
-                        else:
-                            raise KeyError(
-                                f"Could not match all wavelength columns. "
-                                f"Expected {len(self.wavelength_cols)}, found {len(matching_cols)}"
-                            )
-                else:
-                    # numpy array - need to find column indices
-                    # This shouldn't happen in normal use, but handle it
-                    return X
-
-            def fit(self, X, y):
-                X_subset = self._subset(X)
-                self.pipeline.fit(X_subset, y)
-                return self
-
-            def predict(self, X):
-                X_subset = self._subset(X)
-                return self.pipeline.predict(X_subset)
-
-            def __getattr__(self, name):
-                # Delegate other attributes to the wrapped pipeline
-                return getattr(self.pipeline, name)
+        # NOTE: WavelengthSubsetWrapper is now defined at module level (sklearn-compatible)
 
         def parse_ga_preprocess_name(name):
             """
@@ -14306,6 +14502,7 @@ class SpectralPredictApp:
                 # Create preprocessing pipeline
                 steps = []
                 ga_transform = None  # For GA preprocessing
+                preprocess_config = None  # For sklearn-clonable wrappers
 
                 # Check for GA preprocessing (has suffix like _pls, _tree, etc.)
                 is_ga_preprocess = any(preprocess.endswith(suffix) for suffix in GA_SUFFIXES)
@@ -14318,16 +14515,16 @@ class SpectralPredictApp:
 
                 if is_ga_preprocess:
                     # Parse GA preprocessing name and build transform
-                    ga_config = parse_ga_preprocess_name(preprocess)
-                    ga_transform = build_ga_transform(ga_config)
-                    self._log_progress(f"    [GA] Reconstructed preprocessing: {ga_config['type']} w={ga_config['window']}")
+                    preprocess_config = parse_ga_preprocess_name(preprocess)
+                    ga_transform = build_ga_transform(preprocess_config)
+                    self._log_progress(f"    [GA] Reconstructed preprocessing: {preprocess_config['type']} w={preprocess_config['window']}")
 
                 elif is_nsga_preprocess:
                     # NSGA-II preprocessing - build transform using the same logic as GA
                     # Window comes from the row's Window column
-                    nsga_config = {'type': preprocess, 'window': int(window) if window and not pd.isna(window) else 15, 'baseline': None, 'smooth': None}
-                    ga_transform = build_ga_transform(nsga_config)
-                    self._log_progress(f"    [NSGA] Reconstructed preprocessing: {nsga_config['type']} w={nsga_config['window']}")
+                    preprocess_config = {'type': preprocess, 'window': int(window) if window and not pd.isna(window) else 15, 'baseline': None, 'smooth': None}
+                    ga_transform = build_ga_transform(preprocess_config)
+                    self._log_progress(f"    [NSGA] Reconstructed preprocessing: {preprocess_config['type']} w={preprocess_config['window']}")
 
                 # Add derivative/SNV preprocessing if applicable (Grid Search format)
                 # FIX: Properly apply SNV preprocessing (was previously just 'pass')
@@ -14439,56 +14636,29 @@ class SpectralPredictApp:
 
                 if ga_transform is not None and wavelength_subset is not None:
                     # NSGA-II case: preprocessing + wavelength selection
-                    # Create combined wrapper that does both
+                    # Use module-level sklearn-compatible CombinedPreprocessWrapper
                     # FIX: Wrapper should apply transform during both fit() and predict()
-                    # to avoid double-preprocessing bug
-                    class CombinedPreprocessWrapper:
-                        def __init__(self, pipeline, transform, wavelength_cols, all_columns):
-                            self.pipeline = pipeline
-                            self.transform = transform
-                            self.wavelength_cols = wavelength_cols
-                            # Build index mapping from original columns to subset
-                            self.col_indices = [list(all_columns).index(c) for c in wavelength_cols]
-
-                        def _preprocess_and_subset(self, X):
-                            X_arr = X.values if hasattr(X, 'values') else X
-                            X_preproc = self.transform(X_arr)
-                            # Subset to selected wavelengths (after preprocessing)
-                            return X_preproc[:, self.col_indices]
-
-                        def fit(self, X, y):
-                            X_processed = self._preprocess_and_subset(X)
-                            self.pipeline.fit(X_processed, y)
-                            return self
-
-                        def predict(self, X):
-                            X_processed = self._preprocess_and_subset(X)
-                            return self.pipeline.predict(X_processed)
-
-                    # FIX: Fit on RAW data, let wrapper handle preprocessing
                     # Previous bug: fitted on transformed data, then wrapper transformed AGAIN during predict
-                    pipeline = CombinedPreprocessWrapper(pipeline, ga_transform, wavelength_subset, X_train.columns)
+                    # NOTE: Using preprocess_config (not ga_transform) for sklearn cloning support
+                    pipeline = CombinedPreprocessWrapper(
+                        pipeline=pipeline,
+                        preprocess_config=preprocess_config,
+                        wavelength_cols=wavelength_subset,
+                        all_columns=list(X_train.columns)
+                    )
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
                     self._log_progress(f"    [Combined] Preprocessing + {len(wavelength_subset)} wavelength subset")
 
                 elif ga_transform is not None:
                     # GA/NSGA preprocessing only (no wavelength subset)
+                    # Use module-level sklearn-compatible GAPreprocessWrapper
                     # FIX: Fit on RAW data, let wrapper handle preprocessing
                     # Previous bug: fitted on transformed data, then wrapper transformed AGAIN during predict
-                    class GAPreprocessWrapper:
-                        def __init__(self, pipeline, transform):
-                            self.pipeline = pipeline
-                            self.transform = transform
-
-                        def predict(self, X):
-                            X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-                            return self.pipeline.predict(X_preproc)
-
-                        def fit(self, X, y):
-                            X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-                            return self.pipeline.fit(X_preproc, y)
-
-                    pipeline = GAPreprocessWrapper(pipeline, ga_transform)
+                    # NOTE: Using preprocess_config (not ga_transform) for sklearn cloning support
+                    pipeline = GAPreprocessWrapper(
+                        pipeline=pipeline,
+                        preprocess_config=preprocess_config
+                    )
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
                 elif wavelength_subset is not None:
@@ -14524,51 +14694,6 @@ class SpectralPredictApp:
                 continue
 
         return reconstructed_models
-
-    def _reconstruct_single_model_for_auto_ensemble(self, row, X_train, y_train, task_type=None):
-        """
-        Reconstruct a single model from a results DataFrame row for auto-ensemble creation.
-
-        This is a wrapper around _reconstruct_models_from_results that handles
-        single rows and returns the format expected by create_auto_ensembles().
-
-        Args:
-            row: Series/dict from results DataFrame with model configuration
-            X_train: Training features
-            y_train: Training targets
-            task_type: Optional task type ('classification' or 'regression'). If not provided,
-                      will try to get from training_data_cache or infer from y_train.
-
-        Returns:
-            Tuple of (fitted_model, model_name)
-
-        Raises:
-            ValueError if reconstruction fails
-        """
-        # Use provided task_type, or get from cache, or infer from y_train
-        if task_type is None:
-            if self.training_data_cache and 'task_type' in self.training_data_cache:
-                task_type = self.training_data_cache['task_type']
-            else:
-                task_type = 'classification' if len(np.unique(y_train)) < 20 and y_train.dtype == object else 'regression'
-
-        # Convert row to single-row DataFrame if needed
-        if isinstance(row, pd.Series):
-            single_row_df = pd.DataFrame([row])
-        else:
-            single_row_df = pd.DataFrame([dict(row)])
-
-        # Use existing reconstruction method
-        reconstructed = self._reconstruct_models_from_results(
-            single_row_df, X_train, y_train, task_type
-        )
-
-        if not reconstructed:
-            raise ValueError(f"Failed to reconstruct model: {row.get('Model', 'Unknown')}")
-
-        # Return (fitted_model, model_name)
-        fitted_pipeline, model_name, metadata = reconstructed[0]
-        return fitted_pipeline, model_name
 
     def _on_train_ensemble_click(self):
         """Handle Train Ensemble button click with custom model selection."""
@@ -17277,59 +17402,7 @@ class SpectralPredictApp:
                         # Populate ensemble results table in Tab 5
                         self.root.after(0, self._populate_ensemble_results)
 
-            # === Generate Automatic Region-Specialist Ensembles ===
-            # These are generated for every run (regardless of user ensemble settings)
-            # to provide automatic ensemble options based on top models per quartile/class
-            try:
-                from spectral_predict.ensemble import create_auto_ensembles
-
-                self._log_progress("\n> Generating automatic region-specialist ensembles...")
-
-                # Create wrapper function for model reconstruction
-                # Capture task_type in closure to ensure correct model types are used
-                def reconstruct_for_auto_ensemble(row, X_train, y_train, _task_type=task_type):
-                    return self._reconstruct_single_model_for_auto_ensemble(row, X_train, y_train, task_type=_task_type)
-
-                # Get wavelengths from X_filtered
-                all_wavelengths = X_filtered.columns.tolist()
-
-                # For classification with string labels, encode y_filtered to match what models were trained with
-                y_for_auto_ensemble = y_filtered
-                if task_type == 'classification' and label_encoder is not None:
-                    try:
-                        y_for_auto_ensemble = label_encoder.transform(y_filtered)
-                    except Exception as e:
-                        self._log_progress(f"  [!] Label encoding failed: {e}")
-
-                # Generate auto-ensembles
-                self.auto_ensembles = create_auto_ensembles(
-                    results_df=results_df,
-                    X_train=X_filtered,
-                    y_train=y_for_auto_ensemble,
-                    task_type=task_type,
-                    reconstruct_func=reconstruct_for_auto_ensemble,
-                    all_wavelengths=all_wavelengths
-                )
-
-                if self.auto_ensembles:
-                    for name, info in self.auto_ensembles.items():
-                        n_models = info['n_models']
-                        if task_type == 'regression':
-                            r2 = info['metrics']['r2']
-                            rmse = info['metrics']['rmse']
-                            self._log_progress(f"  {name}: {n_models} models, R2={r2:.4f}, RMSE={rmse:.4f}")
-                        else:
-                            acc = info['metrics']['accuracy']
-                            f1 = info['metrics']['f1']
-                            self._log_progress(f"  {name}: {n_models} models, Acc={acc:.4f}, F1={f1:.4f}")
-                else:
-                    self._log_progress("  No auto-ensembles generated (insufficient model diversity)")
-
-            except Exception as e:
-                self._log_progress(f"\n[!] Auto-ensemble generation failed: {e}")
-                self.auto_ensembles = None
-
-            # Populate auto-ensembles in Ensemble Model Results
+            # Populate ensemble results in Ensemble Model Results tab
             self.root.after(0, self._populate_ensemble_results)
 
             # Store results for Results tab
@@ -18366,11 +18439,10 @@ class SpectralPredictApp:
 
     def _populate_ensemble_results(self):
         """Populate the ensemble results table with trained ensemble performance."""
-        # Check if we have any ensembles (user-configured or auto-generated)
+        # Check if we have any user-configured ensembles
         has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
-        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
 
-        if not has_user_ensembles and not has_auto_ensembles:
+        if not has_user_ensembles:
             self.ensemble_status.config(text="No ensemble results. Enable ensembles in Analysis Configuration.")
             # Disable buttons
             self.btn_save_best_ensemble.config(state='disabled')
@@ -18448,61 +18520,8 @@ class SpectralPredictApp:
                 self.ensemble_tree.insert('', 'end', iid=str(row_index), values=values, tags=(tag,))
                 row_index += 1
 
-        # Populate auto-generated ensembles (if any)
-        if has_auto_ensembles:
-            for name, info in self.auto_ensembles.items():
-                metrics = info['metrics']
-
-                # Get R2 and RMSE based on task type
-                if 'r2' in metrics:
-                    # Regression
-                    r2 = metrics['r2']
-                    rmse = metrics['rmse']
-                    mae = rmse * 0.8  # Approximate MAE (we don't store it separately)
-                    # RPD = SD(y) / RMSE (correct formula)
-                    y_std = metrics.get('y_std', 0)
-                    rpd = y_std / rmse if rmse > 0 and y_std > 0 else 0
-                else:
-                    # Classification - RPD is not meaningful
-                    r2 = metrics.get('accuracy', 0)
-                    rmse = 1 - r2  # Pseudo RMSE for display
-                    mae = rmse
-                    rpd = 0  # RPD not applicable for classification
-
-                # Calculate improvement
-                r2_improvement = r2 - best_individual_r2
-
-                # Format comparison
-                if r2_improvement > 0:
-                    comparison = f"+{r2_improvement:.4f} >"
-                elif r2_improvement < 0:
-                    comparison = f"{r2_improvement:.4f} [X]"
-                else:
-                    comparison = "Same"
-
-                # Auto-ensembles don't get rank numbers, just "(Auto)" label
-                values = (
-                    "(Auto)",
-                    f"{name} ({info['n_models']} models)",
-                    f"{rmse:.4f}",
-                    f"{r2:.4f}",
-                    f"{mae:.4f}",
-                    f"{rpd:.2f}",
-                    comparison
-                )
-
-                # Track best ensemble
-                if r2 > best_r2:
-                    best_r2 = r2
-                    best_idx = row_index
-
-                # Use 'auto' tag for styling
-                self.ensemble_tree.insert('', 'end', iid=f"auto_{name}", values=values, tags=('auto',))
-                row_index += 1
-
         # Configure tag colors
         self.ensemble_tree.tag_configure('best', background='#d4edda', foreground='#155724')
-        self.ensemble_tree.tag_configure('auto', background='#e7f3ff', foreground='#004085')
 
         # Select the first item by default
         first_item = self.ensemble_tree.get_children()[0] if self.ensemble_tree.get_children() else None
@@ -18512,18 +18531,8 @@ class SpectralPredictApp:
 
         # Update status
         n_user_ensembles = len(self.ensemble_results) if has_user_ensembles else 0
-        n_auto_ensembles = len(self.auto_ensembles) if has_auto_ensembles else 0
-        total_ensembles = n_user_ensembles + n_auto_ensembles
-
-        if has_user_ensembles:
-            best_method = self.ensemble_results[0]['method']
-            status_text = f"> {n_user_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})"
-        else:
-            status_text = f"> No user ensembles"
-
-        if has_auto_ensembles:
-            status_text += f" + {n_auto_ensembles} auto-generated"
-
+        best_method = self.ensemble_results[0]['method']
+        status_text = f"> {n_user_ensembles} ensemble(s) trained. Best: {best_method} (R²={self.ensemble_results[0]['r2']:.4f})"
         self.ensemble_status.config(text=status_text)
 
         # Update button states based on selected ensemble's capabilities
@@ -18532,9 +18541,8 @@ class SpectralPredictApp:
     def _on_ensemble_selection_change(self, event=None):
         """Update button states when ensemble selection changes."""
         has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
-        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
 
-        if not has_user_ensembles and not has_auto_ensembles:
+        if not has_user_ensembles:
             return
 
         selection = self.ensemble_tree.selection()
@@ -18544,22 +18552,13 @@ class SpectralPredictApp:
         try:
             selected_iid = selection[0]
 
-            # Determine if this is a user ensemble or auto-ensemble
-            if selected_iid.startswith('auto_'):
-                # Auto-ensemble selected
-                ensemble_name = selected_iid[5:]  # Remove 'auto_' prefix
-                if has_auto_ensembles and ensemble_name in self.auto_ensembles:
-                    ensemble = self.auto_ensembles[ensemble_name].get('ensemble')
-                else:
-                    ensemble = None
+            # Get the user ensemble
+            selected_idx = int(selected_iid)
+            if has_user_ensembles and selected_idx < len(self.ensemble_results):
+                result = self.ensemble_results[selected_idx]
+                ensemble = result.get('ensemble')
             else:
-                # User ensemble selected
-                selected_idx = int(selected_iid)
-                if has_user_ensembles and selected_idx < len(self.ensemble_results):
-                    result = self.ensemble_results[selected_idx]
-                    ensemble = result.get('ensemble')
-                else:
-                    ensemble = None
+                ensemble = None
 
             if ensemble is None:
                 # Disable all visualization buttons
@@ -18608,48 +18607,20 @@ class SpectralPredictApp:
 
         selected_iid = selection[0]
 
-        # Determine if this is a user ensemble or auto-ensemble
-        if selected_iid.startswith('auto_'):
-            # Auto-ensemble selected
-            ensemble_name = selected_iid[5:]  # Remove 'auto_' prefix
-            if hasattr(self, 'auto_ensembles') and self.auto_ensembles and ensemble_name in self.auto_ensembles:
-                auto_info = self.auto_ensembles[ensemble_name]
-                # Return in same format as user ensemble results for compatibility
-                metrics = auto_info['metrics']
-                # Compute RPD correctly: SD(y) / RMSE
-                r2_val = metrics.get('r2', metrics.get('accuracy', 0))
-                rmse_val = metrics.get('rmse', 1 - metrics.get('accuracy', 0))
-                y_std = metrics.get('y_std', 0)
-                rpd_val = y_std / rmse_val if rmse_val > 0 and y_std > 0 else 0
-                return {
-                    'ensemble': auto_info['ensemble'],
-                    'method': f"{ensemble_name} (Auto)",
-                    'r2': r2_val,
-                    'rmse': rmse_val,
-                    'mae': metrics.get('rmse', 0) * 0.8,  # Approximate
-                    'rpd': rpd_val,
-                    'is_auto': True,
-                    'base_models': auto_info['base_models'],
-                    'specialist_info': auto_info['specialist_info']
-                }
-            else:
-                messagebox.showwarning("Ensemble Not Found", f"Auto-ensemble '{ensemble_name}' not found.")
-                return None
-        else:
-            # User ensemble selected
-            has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None
-            if has_user_ensembles:
-                selected_idx = int(selected_iid)
-                if selected_idx < len(self.ensemble_results):
-                    return self.ensemble_results[selected_idx]
-            messagebox.showwarning("Ensemble Not Found", "Selected ensemble not found.")
-            return None
+        # Get user ensemble
+        has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None
+        if has_user_ensembles:
+            selected_idx = int(selected_iid)
+            if selected_idx < len(self.ensemble_results):
+                return self.ensemble_results[selected_idx]
+
+        messagebox.showwarning("Ensemble Not Found", "Selected ensemble not found.")
+        return None
 
     def _show_regional_performance(self):
         """Show regional performance heatmap for all models in the selected ensemble."""
         has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
-        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
-        if not has_user_ensembles and not has_auto_ensembles:
+        if not has_user_ensembles:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
 
@@ -18703,8 +18674,7 @@ class SpectralPredictApp:
     def _show_ensemble_weights(self):
         """Show ensemble weights visualization for selected ensemble."""
         has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
-        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
-        if not has_user_ensembles and not has_auto_ensembles:
+        if not has_user_ensembles:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
 
@@ -18744,8 +18714,7 @@ class SpectralPredictApp:
     def _show_specialization_profile(self):
         """Show model specialization profiles for selected ensemble."""
         has_user_ensembles = hasattr(self, 'ensemble_results') and self.ensemble_results is not None and len(self.ensemble_results) > 0
-        has_auto_ensembles = hasattr(self, 'auto_ensembles') and self.auto_ensembles is not None and len(self.auto_ensembles) > 0
-        if not has_user_ensembles and not has_auto_ensembles:
+        if not has_user_ensembles:
             messagebox.showwarning("No Ensembles", "No ensemble results available.")
             return
 
