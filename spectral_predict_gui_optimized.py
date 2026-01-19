@@ -14780,7 +14780,11 @@ class SpectralPredictApp:
 
             # Reconstruct models from results
             self._log_progress(f"\nReconstructing top {len(top_models_df)} models...")
-            reconstructed = self._reconstruct_models_from_results(top_models_df, X_filtered, y_filtered, task_type)
+            # Normalize column names to strings for consistent wavelength subset matching
+            # This fixes CARS ensemble R² bug where column name types mismatch (float vs string)
+            X_for_reconstruction = X_filtered.copy()
+            X_for_reconstruction.columns = [str(c) for c in X_for_reconstruction.columns]
+            reconstructed = self._reconstruct_models_from_results(top_models_df, X_for_reconstruction, y_filtered, task_type)
 
             if len(reconstructed) < 2:
                 self._log_progress(f"[!] Need at least 2 models for ensemble (got {len(reconstructed)}), skipping...")
