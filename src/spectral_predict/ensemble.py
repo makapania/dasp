@@ -202,7 +202,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
     that varies based on the predicted value.
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None):
+    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None):
         """
         Parameters
         ----------
@@ -220,6 +220,11 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
             Used when preprocessors aren't available directly.
+        y_percentiles : array-like, optional
+            Pre-computed TRUE Y percentile values. If provided, these boundaries
+            will be used for region assignment instead of computing from predictions.
+            This ensures consistent region assignment between selection (based on
+            TRUE Y) and routing (based on these boundaries).
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -227,6 +232,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         self.cv = cv
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
+        self.y_percentiles = y_percentiles
         self.regional_weights_ = None
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
 
@@ -314,11 +320,17 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
                 warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
                 predictions[i] = np.zeros(n_samples)
 
-        # Define region boundaries from average OOF predictions
-        avg_pred = np.mean(predictions, axis=0)
-        self.analyzer_.fit(avg_pred)
+        # Define region boundaries
+        if self.y_percentiles is not None:
+            # Use fixed TRUE Y boundaries (ensures selection and routing use same boundaries)
+            self.analyzer_.region_boundaries = np.array(self.y_percentiles)
+        else:
+            # Fallback to prediction-based boundaries (legacy behavior)
+            avg_pred = np.mean(predictions, axis=0)
+            self.analyzer_.fit(avg_pred)
 
         # Compute regional performance for each model using OOF predictions
+        # When using TRUE Y boundaries, performance is computed on TRUE Y regions
         regional_errors = np.zeros((len(self.models), self.n_regions))
 
         for model_idx in range(len(self.models)):
@@ -421,7 +433,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
     Optionally uses soft gating (weighted combination).
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, cv=5, preprocessors=None, preprocessor_configs=None):
+    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None):
         """
         Parameters
         ----------
@@ -438,6 +450,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
             Used when preprocessors aren't available directly.
+        y_percentiles : array-like, optional
+            Pre-computed TRUE Y percentile values. If provided, these boundaries
+            will be used for region assignment instead of computing from predictions.
+            This ensures consistent region assignment between selection (based on
+            TRUE Y) and routing (based on these boundaries).
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -446,6 +463,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         self.cv = cv
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
+        self.y_percentiles = y_percentiles
         self.expert_assignment_ = None  # Which model is best for each region
         self.expert_weights_ = None  # Soft weights if soft_gating=True
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
@@ -533,16 +551,22 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
                 warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
                 predictions[i] = np.zeros(n_samples)
 
-        # Define region boundaries from average OOF predictions
-        avg_pred = np.mean(predictions, axis=0)
-        self.analyzer_.fit(avg_pred)
+        # Define region boundaries
+        if self.y_percentiles is not None:
+            # Use fixed TRUE Y boundaries (ensures selection and routing use same boundaries)
+            self.analyzer_.region_boundaries = np.array(self.y_percentiles)
+            # Assign regions based on TRUE Y values (not predictions)
+            regions = self.analyzer_.assign_regions(y)
+        else:
+            # Fallback to prediction-based boundaries (legacy behavior)
+            avg_pred = np.mean(predictions, axis=0)
+            self.analyzer_.fit(avg_pred)
+            # Assign regions based on average OOF predictions
+            regions = self.analyzer_.assign_regions(avg_pred)
 
         # For each region, find the best model using OOF predictions
         self.expert_assignment_ = np.zeros(self.n_regions, dtype=int)
         self.expert_weights_ = np.zeros((len(self.models), self.n_regions))
-
-        # Assign regions based on average OOF predictions
-        regions = self.analyzer_.assign_regions(avg_pred)
 
         for region_idx in range(self.n_regions):
             mask = regions == region_idx
@@ -630,7 +654,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
     """
 
     def __init__(self, models, model_names=None, meta_model=None,
-                 region_aware=True, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None):
+                 region_aware=True, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None):
         """
         Parameters
         ----------
@@ -649,6 +673,11 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
             Used when preprocessors aren't available directly.
+        y_percentiles : array-like, optional
+            Pre-computed TRUE Y percentile values. If provided, these boundaries
+            will be used for region assignment instead of computing from predictions.
+            This ensures consistent region assignment between selection (based on
+            TRUE Y) and routing (based on these boundaries).
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -658,6 +687,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         self.cv = cv
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
+        self.y_percentiles = y_percentiles
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions) if region_aware else None
 
     @property
@@ -745,12 +775,18 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
 
         # Add region-aware features if enabled
         if self.region_aware:
-            # Define region boundaries from average OOF predictions
+            # Define region boundaries
             avg_pred = np.mean(meta_features, axis=1)
-            self.analyzer_.fit(avg_pred)
-
-            # Add one-hot encoded region features
-            regions = self.analyzer_.assign_regions(avg_pred)
+            if self.y_percentiles is not None:
+                # Use fixed TRUE Y boundaries (ensures selection and routing use same boundaries)
+                self.analyzer_.region_boundaries = np.array(self.y_percentiles)
+                # Assign regions based on TRUE Y values (not predictions)
+                regions = self.analyzer_.assign_regions(y)
+            else:
+                # Fallback to prediction-based boundaries (legacy behavior)
+                self.analyzer_.fit(avg_pred)
+                # Assign regions based on average OOF predictions
+                regions = self.analyzer_.assign_regions(avg_pred)
 
             # One-hot encode regions
             region_features = np.zeros((n_samples, self.n_regions))
@@ -1216,6 +1252,15 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
         - 'region_stacking': Region-aware stacking
     n_regions : int, default=5
     **kwargs : additional arguments for specific ensemble types
+        Common kwargs:
+        - y_percentiles : array-like, optional
+            Pre-computed TRUE Y percentile values for region boundaries.
+            Used by region_weighted, mixture_experts, and region_stacking.
+        - preprocessors : list of preprocessors, optional
+        - preprocessor_configs : list of PreprocessorConfig, optional
+        - cv : int, cross-validation folds
+        - soft_gating : bool, for mixture_experts
+        - meta_model : estimator, for stacking
 
     Returns
     -------
