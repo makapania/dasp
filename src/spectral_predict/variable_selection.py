@@ -816,7 +816,7 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
 
 def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
                    monte_carlo_samples=80, random_state=42, model_type=None,
-                   use_hybrid_importance=False, hybrid_importance_weight=0.5):
+                   use_hybrid_importance=False, hybrid_importance_weight=0.5, task_type='regression'):
     """
     Competitive Adaptive Reweighted Sampling (CARS) for variable selection.
 
@@ -861,6 +861,9 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
         Weight for blending split-based and gain-based importance.
         Final importance = weight * split_norm + (1-weight) * gain_norm.
         Only used when use_hybrid_importance=True.
+    task_type : str, default='regression'
+        Task type ('regression' or 'classification'). Determines whether to use
+        LGBMRegressor or LGBMClassifier for tree-based evaluation.
 
     Returns
     -------
@@ -951,7 +954,7 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     use_hybrid = use_hybrid_importance and use_tree_model
 
     if use_tree_model:
-        from lightgbm import LGBMRegressor
+        from lightgbm import LGBMRegressor, LGBMClassifier
         if use_hybrid:
             print(f"CARS-Tree: Using hybrid importance (split+gain) for '{model_type}'")
         else:
@@ -1002,27 +1005,51 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
                 # LightGBM-based evaluation for tree models
                 # CARS-Tree uses enhanced config for more stable importance
                 if use_hybrid:
-                    lgb_model = LGBMRegressor(
-                        n_estimators=100,
-                        max_depth=-1,  # Unlimited, controlled by num_leaves
-                        num_leaves=31,
-                        min_child_samples=5,
-                        subsample=0.8,
-                        subsample_freq=1,
-                        colsample_bytree=0.8,
-                        reg_lambda=1.0,
-                        random_state=random_state,
-                        verbose=-1,
-                        n_jobs=1
-                    )
+                    if task_type == 'regression':
+                        lgb_model = LGBMRegressor(
+                            n_estimators=100,
+                            max_depth=-1,  # Unlimited, controlled by num_leaves
+                            num_leaves=31,
+                            min_child_samples=5,
+                            subsample=0.8,
+                            subsample_freq=1,
+                            colsample_bytree=0.8,
+                            reg_lambda=1.0,
+                            random_state=random_state,
+                            verbose=-1,
+                            n_jobs=1
+                        )
+                    else:
+                        lgb_model = LGBMClassifier(
+                            n_estimators=100,
+                            max_depth=-1,  # Unlimited, controlled by num_leaves
+                            num_leaves=31,
+                            min_child_samples=5,
+                            subsample=0.8,
+                            subsample_freq=1,
+                            colsample_bytree=0.8,
+                            reg_lambda=1.0,
+                            random_state=random_state,
+                            verbose=-1,
+                            n_jobs=1
+                        )
                 else:
-                    lgb_model = LGBMRegressor(
-                        n_estimators=50,
-                        max_depth=5,
-                        random_state=random_state,
-                        verbose=-1,
-                        n_jobs=1
-                    )
+                    if task_type == 'regression':
+                        lgb_model = LGBMRegressor(
+                            n_estimators=50,
+                            max_depth=5,
+                            random_state=random_state,
+                            verbose=-1,
+                            n_jobs=1
+                        )
+                    else:
+                        lgb_model = LGBMClassifier(
+                            n_estimators=50,
+                            max_depth=5,
+                            random_state=random_state,
+                            verbose=-1,
+                            n_jobs=1
+                        )
 
                 for train_idx, val_idx in kf.split(X_subset):
                     X_train, X_val = X_subset[train_idx], X_subset[val_idx]
@@ -1030,10 +1057,19 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
 
                     lgb_model.fit(X_train, y_train)
                     y_pred = lgb_model.predict(X_val)
-                    mse = np.mean((y_val - y_pred.ravel()) ** 2)
-                    cv_errors.append(mse)
 
-                rmsecv = np.sqrt(np.mean(cv_errors))
+                    if task_type == 'regression':
+                        mse = np.mean((y_val - y_pred.ravel()) ** 2)
+                        cv_errors.append(mse)
+                    else:
+                        # Classification: compute error as 1 - accuracy
+                        accuracy = np.mean(y_val == y_pred)
+                        cv_errors.append(1.0 - accuracy)
+
+                if task_type == 'regression':
+                    rmsecv = np.sqrt(np.mean(cv_errors))
+                else:
+                    rmsecv = np.mean(cv_errors)  # Mean error for classification
 
                 # Fit on full subset to get feature importances
                 lgb_model.fit(X_subset, y)

@@ -1671,7 +1671,8 @@ def run_nsga2_search(
                 random_state=random_state,
                 model_type='LightGBM',  # Use tree model for denser importance distribution
                 use_hybrid_importance=True,  # CARS-Tree mode: blend split+gain importance
-                hybrid_importance_weight=0.5
+                hybrid_importance_weight=0.5,
+                task_type=task_type  # Pass task type for correct model selection
             )
             # Normalize to [0, 1]
             if cars_importance.max() > 0:
@@ -2930,6 +2931,14 @@ def convert_nsga2_to_v1_format(
 
             row['CompositeScore'] = row['Accuracycv']  # Use CV accuracy as composite
 
+            # Add GUI-required classification columns
+            row['per_class_metrics'] = {}  # GUI checks: 'per_class_metrics' in results_df.columns
+            row['class_labels'] = list(np.unique(y)) if y is not None else []
+            # Per-class F1 columns
+            if y is not None:
+                for class_idx, class_label in enumerate(np.unique(y)):
+                    row[f'F1_Class{class_idx}'] = row.get('F1', np.nan)
+
         rows.append(row)
 
     # Include best solution from all evaluations if not already in Pareto front
@@ -3076,6 +3085,14 @@ def convert_nsga2_to_v1_format(
                     best_row['Precisioncv'] = None
                     best_row['Recallcv'] = None
                     best_row['CompositeScore'] = 1.0 - knee_error
+
+                    # Add GUI-required classification columns
+                    best_row['per_class_metrics'] = {}  # GUI checks: 'per_class_metrics' in results_df.columns
+                    best_row['class_labels'] = list(np.unique(y)) if y is not None else []
+                    # Per-class F1 columns
+                    if y is not None:
+                        for class_idx, class_label in enumerate(np.unique(y)):
+                            best_row[f'F1_Class{class_idx}'] = best_row.get('F1', np.nan)
 
                 rows.append(best_row)
 
