@@ -14130,7 +14130,42 @@ class SpectralPredictApp:
                 """Subset X to selected wavelengths."""
                 if hasattr(X, 'loc'):
                     # DataFrame - use column selection
-                    return X[self.wavelength_cols]
+                    try:
+                        return X[self.wavelength_cols]
+                    except KeyError:
+                        # Column name type mismatch - try matching by string conversion
+                        # Convert stored column names to strings for comparison
+                        stored_cols_str = [str(c) for c in self.wavelength_cols]
+
+                        # Create mapping from string representation to actual column
+                        str_to_col = {str(col): col for col in X.columns}
+
+                        # Find matching columns
+                        matching_cols = []
+                        for stored_str in stored_cols_str:
+                            if stored_str in str_to_col:
+                                matching_cols.append(str_to_col[stored_str])
+                            else:
+                                # Try float comparison for numeric columns
+                                try:
+                                    stored_val = float(stored_str)
+                                    for col in X.columns:
+                                        try:
+                                            if abs(float(col) - stored_val) < 0.5:
+                                                matching_cols.append(col)
+                                                break
+                                        except (ValueError, TypeError):
+                                            continue
+                                except (ValueError, TypeError):
+                                    pass
+
+                        if len(matching_cols) == len(self.wavelength_cols):
+                            return X[matching_cols]
+                        else:
+                            raise KeyError(
+                                f"Could not match all wavelength columns. "
+                                f"Expected {len(self.wavelength_cols)}, found {len(matching_cols)}"
+                            )
                 else:
                     # numpy array - need to find column indices
                     # This shouldn't happen in normal use, but handle it
@@ -16822,7 +16857,7 @@ class SpectralPredictApp:
                 # Combine results from all models
                 if all_results:
                     results_df = pd.concat(all_results, ignore_index=True)
-                    results_df = results_df.sort_values('RMSE' if task_type == 'regression' else 'CV Error').reset_index(drop=True)
+                    results_df = results_df.sort_values('RMSEcv' if task_type == 'regression' else 'CV Error').reset_index(drop=True)
                     results_df['Rank'] = results_df.index + 1
 
                     # === COMPUTE VALIDATION METRICS FOR UNIFIED BAYESIAN ===
