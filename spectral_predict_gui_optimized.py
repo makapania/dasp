@@ -8687,6 +8687,116 @@ class SpectralPredictApp:
         self.refine_plot_frame = ttk.Frame(plot_frame)
         self.refine_plot_frame.pack(fill='both', expand=True)
 
+        # === Wavelength Analysis ===
+        ttk.Label(content_frame, text="Wavelength Analysis", style='Heading.TLabel').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
+        row += 1
+
+        wavelength_analysis_frame = ttk.LabelFrame(content_frame, text="Wavelength Importance & Residual Contribution", padding="20")
+        wavelength_analysis_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Help text
+        wl_analysis_help_frame = ttk.Frame(wavelength_analysis_frame)
+        wl_analysis_help_frame.pack(fill='x', padx=10, pady=(5, 15))
+
+        wl_analysis_help_text = (
+            "Wavelength Importance: Shows which wavelengths contribute most to model predictions.\n\n"
+            "- PLS: VIP scores (Variable Importance in Projection) - values > 1 are typically significant.\n"
+            "- Linear models: Absolute coefficient values.\n"
+            "- Tree-based models: Feature importance scores.\n\n"
+            "Residual Correlation (green overlay): High values indicate wavelengths where spectral values correlate with\n"
+            "prediction errors - these may contain noise or interfering information and could be candidates for removal.\n\n"
+            "> Click any point to see exact values | Select wavelengths in table below to remove and retrain model"
+        )
+
+        wl_analysis_help_label = ttk.Label(wl_analysis_help_frame, text=wl_analysis_help_text,
+                                           style='Caption.TLabel', justify='left', wraplength=1200)
+        wl_analysis_help_label.pack(anchor='w')
+
+        # Controls frame
+        wl_controls_frame = ttk.Frame(wavelength_analysis_frame)
+        wl_controls_frame.pack(fill='x', padx=10, pady=(0, 10))
+
+        # Show residual correlation checkbox
+        self.show_residual_corr_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(wl_controls_frame, text="Show residual correlation overlay",
+                        variable=self.show_residual_corr_var,
+                        command=self._plot_wavelength_importance).pack(side='left', padx=(0, 20))
+
+        # VIP threshold indicator (for PLS)
+        self.vip_threshold_label = ttk.Label(wl_controls_frame, text="", style='Caption.TLabel')
+        self.vip_threshold_label.pack(side='left')
+
+        # Plot frame
+        self.wavelength_importance_plot_frame = ttk.Frame(wavelength_analysis_frame)
+        self.wavelength_importance_plot_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Table controls frame (Top N spinbox directly above table since it only affects table display)
+        wl_table_controls_frame = ttk.Frame(wavelength_analysis_frame)
+        wl_table_controls_frame.pack(fill='x', padx=10, pady=(5, 0))
+
+        ttk.Label(wl_table_controls_frame, text="Top wavelengths to show:", style='TLabel').pack(side='left', padx=(0, 5))
+        self.top_n_wavelengths_var = tk.StringVar(value="250")
+        self.top_n_entry = ttk.Entry(wl_table_controls_frame, textvariable=self.top_n_wavelengths_var, width=6)
+        self.top_n_entry.pack(side='left')
+        self.top_n_entry.bind('<Return>', lambda e: self._update_wavelength_table())
+        self.top_n_entry.bind('<FocusOut>', lambda e: self._update_wavelength_table())
+
+        # Table frame
+        wl_table_frame = ttk.LabelFrame(wavelength_analysis_frame, text="Top Wavelengths", padding="10")
+        wl_table_frame.pack(fill='both', expand=True, padx=10, pady=(10, 5))
+
+        # Create treeview for wavelengths table with checkboxes
+        columns = ('rank', 'wavelength', 'importance', 'residual_corr')
+        self.wavelength_table = ttk.Treeview(wl_table_frame, columns=columns, show='tree headings', height=8)
+
+        # Configure columns
+        self.wavelength_table.heading('#0', text='Select')
+        self.wavelength_table.heading('rank', text='Rank')
+        self.wavelength_table.heading('wavelength', text='Wavelength (nm)',
+            command=lambda: self._sort_wavelength_table('wavelength', False))
+        self.wavelength_table.heading('importance', text='Importance',
+            command=lambda: self._sort_wavelength_table('importance', False))
+        self.wavelength_table.heading('residual_corr', text='Residual Corr',
+            command=lambda: self._sort_wavelength_table('residual_corr', False))
+
+        self.wavelength_table.column('#0', width=60, anchor='center')
+        self.wavelength_table.column('rank', width=60, anchor='center')
+        self.wavelength_table.column('wavelength', width=120, anchor='center')
+        self.wavelength_table.column('importance', width=120, anchor='center')
+        self.wavelength_table.column('residual_corr', width=120, anchor='center')
+
+        # Add scrollbar
+        wl_table_scrollbar = ttk.Scrollbar(wl_table_frame, orient='vertical', command=self.wavelength_table.yview)
+        self.wavelength_table.configure(yscrollcommand=wl_table_scrollbar.set)
+
+        self.wavelength_table.pack(side='left', fill='both', expand=True)
+        wl_table_scrollbar.pack(side='right', fill='y')
+
+        # Track selected wavelengths for removal
+        self.selected_wavelengths_for_removal = set()
+
+        # Bind click to toggle selection
+        self.wavelength_table.bind('<ButtonRelease-1>', self._on_wavelength_table_click)
+
+        # Button frame for removal action
+        wl_removal_frame = ttk.Frame(wavelength_analysis_frame)
+        wl_removal_frame.pack(fill='x', padx=10, pady=(5, 10))
+
+        self.remove_wavelengths_btn = self._create_accent_button(
+            wl_removal_frame, text="Remove Selected from Model",
+            command=self._remove_selected_wavelengths, state='disabled'
+        )
+        self.remove_wavelengths_btn.pack(side='left', padx=(0, 10))
+
+        self.wl_removal_status_label = ttk.Label(wl_removal_frame, text="", style='Caption.TLabel')
+        self.wl_removal_status_label.pack(side='left')
+
+        # Store importance data for click handling
+        self.wavelength_importance_data = None
+        self.wavelength_residual_corr_data = None
+
         # === Residual Diagnostics ===
         ttk.Label(content_frame, text="Residual Diagnostics", style='Heading.TLabel').grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -15084,7 +15194,7 @@ class SpectralPredictApp:
                 ensemble_results.sort(key=lambda x: x['r2'], reverse=True)
 
                 # Find best individual model for comparison
-                best_individual_r2 = results_df['R2'].max() if 'R2' in results_df.columns else 0
+                best_individual_r2 = results_df['R2cv'].max() if 'R2cv' in results_df.columns else 0
                 best_individual_rmse = results_df['RMSE'].min() if 'RMSE' in results_df.columns else float('inf')
 
                 self._log_progress(f"\nBest Individual Model: R²={best_individual_r2:.4f}, RMSE={best_individual_rmse:.4f}")
@@ -18475,7 +18585,7 @@ class SpectralPredictApp:
             self.ensemble_tree.column(col, width=column_widths.get(col, 100), anchor='center')
 
         # Get best individual model performance for comparison
-        best_individual_r2 = self.results_df['R2'].max() if self.results_df is not None and 'R2' in self.results_df.columns else 0
+        best_individual_r2 = self.results_df['R2cv'].max() if self.results_df is not None and 'R2cv' in self.results_df.columns else 0
         best_individual_rmse = self.results_df['RMSE'].min() if self.results_df is not None and 'RMSE' in self.results_df.columns else float('inf')
 
         row_index = 0  # Track row index for tree iid
@@ -21243,6 +21353,460 @@ F1 Score:  {f1:.4f}
             self.refine_metrics_text.delete('1.0', tk.END)
             self.refine_metrics_text.insert('1.0', metrics_text)
 
+    # ==========================================================================
+    # Wavelength Analysis Methods
+    # ==========================================================================
+
+    def _compute_residual_contribution(self, X, y_true, y_pred):
+        """
+        Compute correlation between residuals and spectral values at each wavelength.
+
+        Parameters
+        ----------
+        X : array-like
+            Spectral data (n_samples, n_wavelengths)
+        y_true : array-like
+            True target values
+        y_pred : array-like
+            Predicted target values
+
+        Returns
+        -------
+        contributions : ndarray
+            Absolute correlation between residuals and each wavelength
+        """
+        residuals = np.array(y_true) - np.array(y_pred)
+        X = np.array(X)
+        contributions = []
+
+        for i in range(X.shape[1]):
+            if np.std(X[:, i]) > 1e-10 and np.std(residuals) > 1e-10:
+                corr = np.corrcoef(residuals, X[:, i])[0, 1]
+                contributions.append(abs(corr) if not np.isnan(corr) else 0.0)
+            else:
+                contributions.append(0.0)
+
+        return np.array(contributions)
+
+    def _plot_wavelength_importance(self):
+        """Plot wavelength importance with optional residual correlation overlay."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Check if we have a trained model
+        if not hasattr(self, 'refined_model') or self.refined_model is None:
+            return
+
+        if not hasattr(self, 'refined_wavelengths') or self.refined_wavelengths is None:
+            return
+
+        if not hasattr(self, 'refined_X_train') or self.refined_X_train is None:
+            return
+
+        # Clear existing plot
+        for widget in self.wavelength_importance_plot_frame.winfo_children():
+            widget.destroy()
+
+        try:
+            # Get feature importances
+            model_name = self.refined_config.get('model_name', 'PLS') if hasattr(self, 'refined_config') else 'PLS'
+
+            # Apply preprocessing to the raw data if preprocessor exists
+            X_for_importance = self.refined_X_train
+            if hasattr(self, 'refined_preprocessor') and self.refined_preprocessor is not None:
+                try:
+                    X_for_importance = self.refined_preprocessor.transform(self.refined_X_train)
+                except Exception as e:
+                    print(f"Could not apply preprocessor for importance: {e}")
+                    # Use raw data as fallback
+                    X_for_importance = self.refined_X_train
+
+            try:
+                from spectral_predict.models import get_feature_importances
+                importances = get_feature_importances(
+                    self.refined_model, model_name,
+                    X_for_importance, self.refined_y_train
+                )
+            except Exception as e:
+                print(f"Could not compute feature importances: {e}")
+                return
+
+            wavelengths = np.array(self.refined_wavelengths)
+
+            # Handle wavelength/feature dimension mismatch (common with derivative preprocessing)
+            if len(importances) != len(wavelengths):
+                # Preprocessing (likely derivatives) changed feature count
+                # Derivatives typically trim equally from both ends
+                diff = len(wavelengths) - len(importances)
+                if diff > 0:
+                    trim_start = diff // 2
+                    trim_end = diff - trim_start
+                    if trim_end > 0:
+                        wavelengths = wavelengths[trim_start:-trim_end]
+                    else:
+                        wavelengths = wavelengths[trim_start:]
+                    print(f"Adjusted wavelengths: trimmed {diff} values to match {len(importances)} features")
+                else:
+                    # More importances than wavelengths - shouldn't happen, use indices as fallback
+                    print(f"Warning: More features ({len(importances)}) than wavelengths ({len(wavelengths)}), using indices")
+                    wavelengths = np.arange(len(importances))
+
+            # Final check - if still mismatched, cannot proceed
+            if len(importances) != len(wavelengths):
+                print(f"Cannot resolve mismatch: {len(importances)} importances vs {len(wavelengths)} wavelengths")
+                return
+
+            # Store data for click handling and table
+            self.wavelength_importance_data = {
+                'wavelengths': wavelengths,
+                'importances': importances,
+                'model_name': model_name
+            }
+
+            # Compute residual correlation if we have predictions
+            # Use preprocessed data for consistent analysis
+            try:
+                y_pred_train = self.refined_model.predict(X_for_importance)
+                self.wavelength_residual_corr_data = self._compute_residual_contribution(
+                    X_for_importance, self.refined_y_train, y_pred_train
+                )
+            except Exception as e:
+                print(f"Could not compute residual correlation: {e}")
+                self.wavelength_residual_corr_data = np.zeros(len(wavelengths))
+
+            # Create figure
+            fig, ax1 = plt.subplots(figsize=(12, 4), dpi=100)
+            fig.patch.set_facecolor(self.colors['bg'])
+            ax1.set_facecolor(self.colors['panel'])
+
+            # Determine importance label based on model type
+            if model_name in ['PLS', 'PLS-DA']:
+                importance_label = 'VIP Score'
+                # Highlight VIP > 1 threshold
+                vip_threshold = 1.0
+                colors = ['#d62728' if v > vip_threshold else '#1f77b4' for v in importances]
+                self.vip_threshold_label.config(text=f"PLS VIP > 1.0: {np.sum(importances > vip_threshold)} wavelengths")
+            else:
+                importance_label = 'Feature Importance'
+                colors = '#1f77b4'
+                self.vip_threshold_label.config(text="")
+
+            # Plot importance as stems/bars
+            markerline, stemlines, baseline = ax1.stem(wavelengths, importances, linefmt='-', markerfmt='o', basefmt='k-')
+            plt.setp(markerline, color='#1f77b4', markersize=4, picker=5)
+            plt.setp(stemlines, color='#1f77b4', alpha=0.6, linewidth=1)
+            plt.setp(baseline, color='gray', linewidth=0.5)
+
+            # Store stem references for click handling
+            for i, (wl, imp) in enumerate(zip(wavelengths, importances)):
+                markerline.set_gid(str(i))
+
+            ax1.set_xlabel('Wavelength (nm)', color=self.colors['text'])
+            ax1.set_ylabel(importance_label, color='#1f77b4')
+            ax1.tick_params(axis='y', labelcolor='#1f77b4')
+            ax1.tick_params(axis='x', colors=self.colors['text'])
+
+            # Add VIP threshold line for PLS
+            if model_name in ['PLS', 'PLS-DA']:
+                ax1.axhline(y=1.0, color='red', linestyle='--', alpha=0.5, label='VIP = 1.0')
+                ax1.legend(loc='upper right')
+
+            # Show residual correlation overlay if enabled
+            if self.show_residual_corr_var.get() and self.wavelength_residual_corr_data is not None:
+                ax2 = ax1.twinx()
+                ax2.set_facecolor(self.colors['panel'])
+                ax2.plot(wavelengths, self.wavelength_residual_corr_data, 'g-', alpha=0.7, linewidth=1.5, label='Residual Corr')
+                ax2.set_ylabel('|Residual Correlation|', color='#2ca02c')
+                ax2.tick_params(axis='y', labelcolor='#2ca02c')
+                ax2.legend(loc='upper left')
+
+            ax1.set_title(f'Wavelength Importance ({model_name})', color=self.colors['text'], fontsize=11)
+            fig.tight_layout()
+
+            # Click handler
+            def on_importance_click(event):
+                if event.inaxes != ax1:
+                    return
+
+                # Find nearest wavelength to click
+                x_click = event.xdata
+                if x_click is None:
+                    return
+
+                nearest_idx = np.argmin(np.abs(wavelengths - x_click))
+                wl = wavelengths[nearest_idx]
+                imp = importances[nearest_idx]
+
+                # Build info text
+                info_parts = [f"Wavelength: {wl:.1f} nm", f"Importance: {imp:.4f}"]
+                if self.wavelength_residual_corr_data is not None:
+                    res_corr = self.wavelength_residual_corr_data[nearest_idx]
+                    info_parts.append(f"Residual Corr: {res_corr:.4f}")
+
+                # Get rank
+                sorted_indices = np.argsort(importances)[::-1]
+                rank = np.where(sorted_indices == nearest_idx)[0][0] + 1
+                info_parts.append(f"Rank: {rank}")
+
+                info_text = "\n".join(info_parts)
+                self._create_or_update_annotation(ax1, wl, imp, info_text, fig.canvas)
+
+            fig.canvas.mpl_connect('button_press_event', on_importance_click)
+
+            # Embed in tkinter
+            canvas = FigureCanvasTkAgg(fig, master=self.wavelength_importance_plot_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+
+            # Add toolbar
+            toolbar_frame = ttk.Frame(self.wavelength_importance_plot_frame)
+            toolbar_frame.pack(fill='x')
+            toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+            toolbar.update()
+
+            # Update table
+            self._update_wavelength_table()
+
+            # Enable remove button
+            self.remove_wavelengths_btn.config(state='normal')
+
+        except Exception as e:
+            print(f"Error plotting wavelength importance: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _update_wavelength_table(self):
+        """Update the top wavelengths table with importance and residual correlation data."""
+        if not hasattr(self, 'wavelength_table'):
+            return
+
+        if self.wavelength_importance_data is None:
+            return
+
+        # Clear existing items
+        for item in self.wavelength_table.get_children():
+            self.wavelength_table.delete(item)
+
+        wavelengths = self.wavelength_importance_data['wavelengths']
+        importances = self.wavelength_importance_data['importances']
+
+        # Get residual correlation if available
+        if self.wavelength_residual_corr_data is not None:
+            residual_corr = self.wavelength_residual_corr_data
+        else:
+            residual_corr = np.zeros(len(wavelengths))
+
+        # Sort by importance (descending)
+        sorted_indices = np.argsort(importances)[::-1]
+
+        # Get top N
+        try:
+            top_n = int(self.top_n_wavelengths_var.get())
+        except (ValueError, tk.TclError):
+            top_n = 20
+
+        top_n = min(top_n, len(wavelengths))
+
+        # Reset selection tracking
+        self.selected_wavelengths_for_removal = set()
+
+        # Populate table
+        for rank, idx in enumerate(sorted_indices[:top_n], start=1):
+            wl = wavelengths[idx]
+            imp = importances[idx]
+            rc = residual_corr[idx]
+
+            # Use checkbox-style indicator
+            select_text = "[ ]"
+
+            item_id = self.wavelength_table.insert('', 'end', text=select_text,
+                                                   values=(rank, f"{wl:.1f}", f"{imp:.4f}", f"{rc:.4f}"),
+                                                   tags=(str(idx),))
+
+        # Update status
+        self.wl_removal_status_label.config(text=f"Showing top {top_n} of {len(wavelengths)} wavelengths")
+
+    def _sort_wavelength_table(self, column, reverse):
+        """Sort wavelength table by the specified column."""
+        # Get all items with their values
+        items = [(self.wavelength_table.set(item, column), item)
+                 for item in self.wavelength_table.get_children('')]
+
+        # Sort - convert to float for numeric columns
+        try:
+            items.sort(key=lambda x: float(x[0]), reverse=reverse)
+        except ValueError:
+            items.sort(key=lambda x: x[0], reverse=reverse)
+
+        # Rearrange items in sorted order
+        for index, (_, item) in enumerate(items):
+            self.wavelength_table.move(item, '', index)
+
+        # Update heading with sort indicator and toggle for next click
+        indicator = ' ▼' if reverse else ' ▲'
+        col_names = {'wavelength': 'Wavelength (nm)', 'importance': 'Importance', 'residual_corr': 'Residual Corr'}
+
+        # Clear indicators from all sortable columns
+        for col, name in col_names.items():
+            self.wavelength_table.heading(col, text=name,
+                command=lambda c=col: self._sort_wavelength_table(c, False))
+
+        # Set indicator on current column with toggled direction for next click
+        self.wavelength_table.heading(column, text=col_names[column] + indicator,
+            command=lambda c=column, r=reverse: self._sort_wavelength_table(c, not r))
+
+    def _on_wavelength_table_click(self, event):
+        """Handle click on wavelength table to toggle selection."""
+        region = self.wavelength_table.identify('region', event.x, event.y)
+        if region != 'tree' and region != 'cell':
+            return
+
+        item = self.wavelength_table.identify_row(event.y)
+        if not item:
+            return
+
+        # Get wavelength index from tags
+        tags = self.wavelength_table.item(item, 'tags')
+        if not tags:
+            return
+
+        try:
+            wl_idx = int(tags[0])
+        except (ValueError, IndexError):
+            return
+
+        # Toggle selection
+        current_text = self.wavelength_table.item(item, 'text')
+        if wl_idx in self.selected_wavelengths_for_removal:
+            self.selected_wavelengths_for_removal.discard(wl_idx)
+            self.wavelength_table.item(item, text="[ ]")
+        else:
+            self.selected_wavelengths_for_removal.add(wl_idx)
+            self.wavelength_table.item(item, text="[X]")
+
+        # Update status
+        n_selected = len(self.selected_wavelengths_for_removal)
+        if n_selected > 0:
+            self.wl_removal_status_label.config(text=f"{n_selected} wavelength(s) selected for removal")
+        else:
+            top_n = min(int(self.top_n_wavelengths_var.get()), len(self.wavelength_importance_data['wavelengths']))
+            self.wl_removal_status_label.config(text=f"Showing top {top_n} of {len(self.wavelength_importance_data['wavelengths'])} wavelengths")
+
+    def _remove_selected_wavelengths(self):
+        """Remove selected wavelengths and update the wavelength specification in Tab 7A."""
+        if not self.selected_wavelengths_for_removal:
+            messagebox.showinfo("No Selection", "Please select wavelengths to remove by clicking on rows in the table.")
+            return
+
+        if self.wavelength_importance_data is None:
+            return
+
+        wavelengths = self.wavelength_importance_data['wavelengths']
+        n_to_remove = len(self.selected_wavelengths_for_removal)
+
+        # Confirm removal
+        if not messagebox.askyesno("Confirm Removal",
+                                   f"Remove {n_to_remove} wavelength(s) from the model?\n\n"
+                                   f"This will update the wavelength specification in the Selection tab.\n"
+                                   f"Click 'Run Model' to retrain with the remaining wavelengths."):
+            return
+
+        # Get wavelengths to keep
+        wavelengths_to_keep = [wl for i, wl in enumerate(wavelengths) if i not in self.selected_wavelengths_for_removal]
+
+        if not wavelengths_to_keep:
+            messagebox.showerror("Error", "Cannot remove all wavelengths. At least one wavelength must remain.")
+            return
+
+        # Format as range specifications (for readability)
+        wl_spec_lines = self._format_wavelengths_as_ranges(wavelengths_to_keep)
+
+        # Update the wavelength specification text widget in Tab 7A
+        if hasattr(self, 'refine_wl_spec'):
+            self.refine_wl_spec.delete('1.0', tk.END)
+            self.refine_wl_spec.insert('1.0', wl_spec_lines)
+
+            # Update count label
+            if hasattr(self, '_update_wavelength_count'):
+                self._update_wavelength_count()
+
+        # Clear selection
+        self.selected_wavelengths_for_removal = set()
+
+        # Update table display
+        self._update_wavelength_table()
+
+        # Show message
+        removed_wl_str = ", ".join([f"{wavelengths[i]:.1f}" for i in sorted(self.selected_wavelengths_for_removal)[:5]])
+        if n_to_remove > 5:
+            removed_wl_str += f", ... ({n_to_remove - 5} more)"
+
+        messagebox.showinfo("Wavelengths Updated",
+                            f"Removed {n_to_remove} wavelength(s).\n\n"
+                            f"The wavelength specification has been updated in the Selection tab.\n"
+                            f"Click 'Run Model' in the Selection tab to retrain the model.")
+
+        # Switch to Selection tab
+        self.model_dev_notebook.select(0)  # Select first tab (Selection)
+
+    def _format_wavelengths_as_ranges(self, wavelengths):
+        """
+        Format a list of wavelengths as compact range specifications.
+
+        Parameters
+        ----------
+        wavelengths : list
+            List of wavelength values
+
+        Returns
+        -------
+        str
+            Formatted wavelength specification (e.g., "1000-1100, 1150, 1200-1300")
+        """
+        if not wavelengths:
+            return ""
+
+        wavelengths = sorted(wavelengths)
+        ranges = []
+        start = wavelengths[0]
+        end = wavelengths[0]
+        step = None
+
+        for i in range(1, len(wavelengths)):
+            curr_step = wavelengths[i] - wavelengths[i - 1]
+
+            if step is None:
+                step = curr_step
+                end = wavelengths[i]
+            elif abs(curr_step - step) < 0.01:  # Continue range with consistent step
+                end = wavelengths[i]
+            else:
+                # End current range
+                if start == end:
+                    ranges.append(f"{start:.1f}")
+                else:
+                    ranges.append(f"{start:.1f}-{end:.1f}")
+                start = wavelengths[i]
+                end = wavelengths[i]
+                step = None
+
+        # Add final range
+        if start == end:
+            ranges.append(f"{start:.1f}")
+        else:
+            ranges.append(f"{start:.1f}-{end:.1f}")
+
+        # Join with commas, adding newlines every few ranges for readability
+        result = []
+        for i, r in enumerate(ranges):
+            result.append(r)
+            if (i + 1) % 5 == 0 and i < len(ranges) - 1:
+                result.append("\n")
+            elif i < len(ranges) - 1:
+                result.append(", ")
+
+        return "".join(result)
+
     def _plot_residual_diagnostics(self):
         """Plot diagnostics - residuals for regression, ROC curves for classification."""
         if not HAS_MATPLOTLIB:
@@ -23233,6 +23797,28 @@ F1 Score:  {f1:.4f}
 
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
 
+            # CRITICAL FIX: Constrain n_components based on CV fold training sample size
+            # This prevents sklearn ValueError when NSGA2 found an n_components that's too high
+            # for the current CV fold sizes or feature count after preprocessing/subsetting
+            if model_name in ('PLS', 'PLS-DA'):
+                n_samples_total, n_features_final = X_work.shape
+                min_train_samples = n_samples_total * (n_folds - 1) // n_folds
+
+                # sklearn PLS constraint: n_components <= min(n_features, n_samples - 1)
+                max_valid_components = min(n_features_final - 1, min_train_samples - 1)
+                max_valid_components = max(1, max_valid_components)  # Ensure at least 1
+
+                if n_components > max_valid_components:
+                    print(f"WARNING: Clamping n_components from {n_components} to {max_valid_components} "
+                          f"(n_features={n_features_final}, min_train_samples={min_train_samples})")
+                    n_components = max_valid_components
+
+                    # Update the PLS model in the pipeline
+                    if 'pls' in pipe.named_steps:
+                        pipe.named_steps['pls'].set_params(n_components=n_components)
+                    elif 'model' in pipe.named_steps and hasattr(pipe.named_steps['model'], 'n_components'):
+                        pipe.named_steps['model'].set_params(n_components=n_components)
+
             # DATA FINGERPRINT - verify same data as search.py
             import hashlib
             X_hash = hashlib.md5(X_work.tobytes()).hexdigest()[:8]
@@ -23596,6 +24182,8 @@ Configuration:
                 self.shap_explainer = None
             # Plot the predictions
             self._plot_refined_predictions()
+            # Plot wavelength importance analysis
+            self._plot_wavelength_importance()
             # Plot diagnostic plots
             self._plot_residual_diagnostics()
             self._plot_leverage_diagnostics()
