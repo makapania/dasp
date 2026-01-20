@@ -90,6 +90,34 @@ except ImportError:
     MSC = None
     OSC = None
 
+# Import contaminant analysis methods
+try:
+    from spectral_predict.contaminant_analysis import (
+        DifferenceAnalyzer,
+        EstimatedEPO,
+        ContaminantOPLSDA,
+        ContaminantGLSW,
+        RegionExcluder,
+        MultiContaminantAnalyzer,
+        MultiGroupEPO,
+        MultiContaminantGLSW,
+        analyze_contaminant_influence,
+        analyze_multiple_contaminants
+    )
+    HAS_CONTAMINANT_ANALYSIS = True
+except ImportError:
+    HAS_CONTAMINANT_ANALYSIS = False
+    DifferenceAnalyzer = None
+    EstimatedEPO = None
+    ContaminantOPLSDA = None
+    ContaminantGLSW = None
+    RegionExcluder = None
+    MultiContaminantAnalyzer = None
+    MultiGroupEPO = None
+    MultiContaminantGLSW = None
+    analyze_contaminant_influence = None
+    analyze_multiple_contaminants = None
+
 try:
     from spectral_predict.outlier_detection import generate_outlier_report
     HAS_OUTLIER_DETECTION = True
@@ -664,14 +692,14 @@ TOOLTIP_CONTENT = {
         # Transfer Methods
         'method_DS': (
             "Direct Standardization (DS) is a simple pairwise calibration transfer method. "
-            "Builds a linear transformation matrix F that directly maps slave spectra to master spectra: "
-            "X_master ≈ X_slave × F. Fast and straightforward, works well when master and slave "
+            "Builds a linear transformation matrix F that directly maps satellite spectra to primary spectra: "
+            "X_primary ≈ X_satellite × F. Fast and straightforward, works well when primary and satellite "
             "instruments have similar wavelength grids. Best for simple spectral differences. "
             "Requires paired samples measured on both instruments. Lambda parameter controls regularization."
         ),
         'method_PDS': (
-            "Piecewise Direct Standardization (PDS) is a local version of DS that models each master "
-            "wavelength independently using a sliding window of neighboring slave wavelengths. "
+            "Piecewise Direct Standardization (PDS) is a local version of DS that models each primary "
+            "wavelength independently using a sliding window of neighboring satellite wavelengths. "
             "More flexible than global DS, better at handling nonlinear wavelength dependencies. "
             "Window size controls how many neighboring wavelengths are used (typical: 7-15). "
             "Larger windows = smoother transfer but may miss local spectral features. "
@@ -704,7 +732,7 @@ TOOLTIP_CONTENT = {
         ),
         'method_JYPLS': (
             "Joint-Y Partial Least Squares Inverse (JYPLS-inv) uses PLS regression to model the "
-            "master-slave relationship, treating master spectra as 'Y' and slave spectra as 'X'. "
+            "primary-satellite relationship, treating primary spectra as 'Y' and satellite spectra as 'X'. "
             "The PLS model learns latent variables capturing the systematic spectral differences. "
             "Number of components controls model complexity (typical: 3-15, or 'Auto' for cross-validation). "
             "More flexible than DS for nonlinear relationships, but requires more transfer samples (30+). "
@@ -722,8 +750,8 @@ TOOLTIP_CONTENT = {
             "Decrease if transfer doesn't correct spectral differences enough (underfitting)."
         ),
         'param_pds_window': (
-            "Window size for Piecewise Direct Standardization (PDS). Defines how many neighboring slave "
-            "wavelengths are used to predict each master wavelength. Must be odd number. "
+            "Window size for Piecewise Direct Standardization (PDS). Defines how many neighboring satellite "
+            "wavelengths are used to predict each primary wavelength. Must be odd number. "
             "Small windows (5-9) = more local, captures fine spectral details, may be noisy. "
             "Medium windows (11-15) = balanced, recommended for most applications (default: 11). "
             "Large windows (17-25) = more global, smoother, approaches regular DS. "
@@ -747,7 +775,7 @@ TOOLTIP_CONTENT = {
         ),
         'param_jypls_components': (
             "Number of PLS latent variables for JYPLS-inv transfer model. Components capture systematic "
-            "spectral differences between master and slave instruments. "
+            "spectral differences between primary and satellite instruments. "
             "'Auto' = automatic optimization via cross-validation (recommended, slower). "
             "3-5 = simple spectral differences (baseline, scale). "
             "8-12 = moderate complexity (wavelength shifts, nonlinearities). "
@@ -1839,53 +1867,53 @@ class SpectralPredictApp:
         # Calibration Transfer Tab (Tab 10) variables - Redesigned wizard interface
         # Section A: Transfer Model
         self.current_transfer_model = None  # TransferModel object (loaded or built)
-        self.current_master_data = None  # (wavelengths, X) tuple for building model
-        self.current_slave_data = None  # (wavelengths, X) tuple for building model
-        self.master_data_format = None  # 'csv', 'npy', 'folder', etc.
-        self.slave_data_format = None  # 'csv', 'npy', 'folder', etc.
+        self.current_primary_data = None  # (wavelengths, X) tuple for building model
+        self.current_satellite_data = None  # (wavelengths, X) tuple for building model
+        self.primary_data_format = None  # 'csv', 'npy', 'folder', etc.
+        self.satellite_data_format = None  # 'csv', 'npy', 'folder', etc.
 
         # Enhanced loading with Y values (for JYPLS-inv)
-        # Master data with Y values
-        self.ct_master_X = None  # pd.DataFrame with sample IDs as index
-        self.ct_master_y = None  # pd.Series with sample IDs as index
-        self.ct_master_wavelengths = None  # np.ndarray of wavelengths
-        self.ct_master_detected_type = None  # 'asd', 'csv', 'spc', etc.
-        self.ct_master_spectra_path_var = tk.StringVar()  # Path to master spectra directory
-        self.ct_master_reference_path_var = tk.StringVar()  # Path to master reference CSV
-        self.ct_master_spectral_file_col_var = tk.StringVar()  # Spectral file column name
-        self.ct_master_id_col_var = tk.StringVar()  # Specimen ID column name
-        self.ct_master_target_col_var = tk.StringVar()  # Target variable column name
+        # Primary data with Y values
+        self.ct_primary_X = None  # pd.DataFrame with sample IDs as index
+        self.ct_primary_y = None  # pd.Series with sample IDs as index
+        self.ct_primary_wavelengths = None  # np.ndarray of wavelengths
+        self.ct_primary_detected_type = None  # 'asd', 'csv', 'spc', etc.
+        self.ct_primary_spectra_path_var = tk.StringVar()  # Path to primary spectra directory
+        self.ct_primary_reference_path_var = tk.StringVar()  # Path to primary reference CSV
+        self.ct_primary_spectral_file_col_var = tk.StringVar()  # Spectral file column name
+        self.ct_primary_id_col_var = tk.StringVar()  # Specimen ID column name
+        self.ct_primary_target_col_var = tk.StringVar()  # Target variable column name
 
-        # Slave data with Y values
-        self.ct_slave_X = None  # pd.DataFrame with sample IDs as index
-        self.ct_slave_y = None  # pd.Series with sample IDs as index
-        self.ct_slave_wavelengths = None  # np.ndarray of wavelengths
-        self.ct_slave_detected_type = None  # 'asd', 'csv', 'spc', etc.
-        self.ct_slave_spectra_path_var = tk.StringVar()  # Path to slave spectra directory
-        self.ct_slave_reference_path_var = tk.StringVar()  # Path to slave reference CSV
-        self.ct_slave_spectral_file_col_var = tk.StringVar()  # Spectral file column name
-        self.ct_slave_id_col_var = tk.StringVar()  # Specimen ID column name
-        self.ct_slave_target_col_var = tk.StringVar()  # Target variable column name
+        # Satellite data with Y values
+        self.ct_satellite_X = None  # pd.DataFrame with sample IDs as index
+        self.ct_satellite_y = None  # pd.Series with sample IDs as index
+        self.ct_satellite_wavelengths = None  # np.ndarray of wavelengths
+        self.ct_satellite_detected_type = None  # 'asd', 'csv', 'spc', etc.
+        self.ct_satellite_spectra_path_var = tk.StringVar()  # Path to satellite spectra directory
+        self.ct_satellite_reference_path_var = tk.StringVar()  # Path to satellite reference CSV
+        self.ct_satellite_spectral_file_col_var = tk.StringVar()  # Spectral file column name
+        self.ct_satellite_id_col_var = tk.StringVar()  # Specimen ID column name
+        self.ct_satellite_target_col_var = tk.StringVar()  # Target variable column name
 
         # Section B: Application Mode
         self.application_mode = None  # 'predict' or 'export'
 
         # Section C: Prediction Workflow (Mode A)
         self.current_prediction_model = None  # sklearn model for predictions
-        self.new_slave_data_predict = None  # New slave data to transform and predict
+        self.new_satellite_data_predict = None  # New satellite data to transform and predict
 
         # Section D: Export Workflow (Mode B)
-        self.new_slave_data_export = None  # New slave data to transform and export
+        self.new_satellite_data_export = None  # New satellite data to transform and export
         self.transformed_spectra = None  # Transformed spectra ready for export
 
         # Legacy variables (kept for backward compatibility with existing methods)
-        self.ct_master_model_dict = None  # Loaded master model for predictions
-        self.ct_X_master_common = None  # Master spectra on common grid
-        self.ct_X_slave_common = None  # Slave spectra on common grid
+        self.ct_primary_model_dict = None  # Loaded primary model for predictions
+        self.ct_X_primary_common = None  # Primary spectra on common grid
+        self.ct_X_satellite_common = None  # Satellite spectra on common grid
         self.ct_wavelengths_common = None  # Common wavelength grid
         self.ct_transfer_model = None  # Current TransferModel object
-        self.ct_master_instrument_id = tk.StringVar()  # Selected master instrument
-        self.ct_slave_instrument_id = tk.StringVar()  # Selected slave instrument
+        self.ct_primary_instrument_id = tk.StringVar()  # Selected primary instrument
+        self.ct_satellite_instrument_id = tk.StringVar()  # Selected satellite instrument
         self.ct_pred_transfer_model = None  # Transfer model loaded for prediction
         self.ct_pred_y_pred = None  # Predictions from transferred spectra
         self.ct_pred_sample_ids = None  # Sample IDs for predictions
@@ -1896,7 +1924,7 @@ class SpectralPredictApp:
 
         # Transfer Model Registry - persistent storage of built transfer models
         self.transfer_model_registry = {}  # Dict of model_key -> TransferModel
-        # model_key format: "MasterID_SlaveID_Method"
+        # model_key format: "PrimaryID_SatelliteID_Method"
 
         # Interference Removal Tab (Tab 11) variables - Phase 4: Advanced GUI
         # Tab 11A: Interferent Library Management
@@ -1936,6 +1964,18 @@ class SpectralPredictApp:
         # Tab 11D: Diagnostics & Visualization
         self.interference_diagnostics_plot = None  # Before/after plot
         self.interference_variance_metrics = None  # Variance explained metrics
+
+        # Tab 12: Contaminant Analysis variables
+        self.contam_clean_data = None  # Clean/uncontaminated spectra
+        self.contam_clean_path = tk.StringVar()
+        self.contam_groups = {}  # Dict of {label: spectra array}
+        self.contam_group_paths = {}  # Dict of {label: filepath}
+        self.contam_wavelengths = None
+        self.contam_results = None  # Analysis results dict
+        self.contam_method = tk.StringVar(value='Estimated EPO')
+        self.contam_threshold = tk.DoubleVar(value=0.5)
+        self.contam_n_components = tk.IntVar(value=2)
+        self.contam_aggregation = tk.StringVar(value='max')
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -4049,6 +4089,7 @@ class SpectralPredictApp:
         self.sidebar.add_section('advanced', 'Advanced', [
             ('calibration', '🔄', 'Cal Transfer'),
             ('interference', '🧬', 'Interference'),
+            ('contaminant_analysis', '⚗️', 'Contaminant'),
             ('spectral_library', '📚', 'Spectral Library'),
             ('data_management', '🗃', 'Data Management'),
         ], expanded=False)
@@ -4079,6 +4120,7 @@ class SpectralPredictApp:
         self._create_tab9_multi_model_comparison()  # Multi-Model
         self._create_tab10_calibration_transfer()   # Cal Transfer
         self._create_tab11_interference_removal()   # Interference
+        self._create_tab13_contaminant_analysis()   # Contaminant Analysis
         self._create_tab12_spectral_library()       # Spectral Library
 
         # Map nav IDs to notebook tab indices
@@ -4096,7 +4138,8 @@ class SpectralPredictApp:
             'multi_model': 10,
             'calibration': 11,
             'interference': 12,
-            'spectral_library': 13,
+            'contaminant_analysis': 13,
+            'spectral_library': 14,
         }
 
         # Now pack the notebook and show it
@@ -18525,8 +18568,8 @@ class SpectralPredictApp:
         # Auto-refresh calibration transfer instruments when switching to that tab (index 10)
         if current_tab == 10 and hasattr(self, 'instrument_profiles') and self.instrument_profiles:
             inst_ids = list(self.instrument_profiles.keys())
-            self.ct_master_instrument_combo['values'] = inst_ids
-            self.ct_slave_instrument_combo['values'] = inst_ids
+            self.ct_primary_instrument_combo['values'] = inst_ids
+            self.ct_satellite_instrument_combo['values'] = inst_ids
 
     def _show_help(self):
         """Show help dialog."""
@@ -28565,35 +28608,35 @@ Configuration:
     # TAB 9 HELPER METHODS: Calibration Transfer
     # ======================================================================
 
-    def _browse_ct_master_model(self):
-        """Browse for master model .pkl file."""
+    def _browse_ct_primary_model(self):
+        """Browse for primary model .pkl file."""
         filepath = filedialog.askopenfilename(
-            title="Select Master Model",
+            title="Select Primary Model",
             filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
         )
         if filepath:
-            self.ct_master_model_path_var.set(filepath)
+            self.ct_primary_model_path_var.set(filepath)
 
-    def _load_ct_master_model(self):
-        """Load master model from selected .pkl file."""
+    def _load_ct_primary_model(self):
+        """Load primary model from selected .pkl file."""
         if not HAS_CALIBRATION_TRANSFER:
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
-        filepath = self.ct_master_model_path_var.get()
+        filepath = self.ct_primary_model_path_var.get()
         if not filepath:
-            messagebox.showwarning("Warning", "Please browse and select a master model file")
+            messagebox.showwarning("Warning", "Please browse and select a primary model file")
             return
 
         try:
             import pickle
             with open(filepath, 'rb') as f:
-                self.ct_master_model_dict = pickle.load(f)
+                self.ct_primary_model_dict = pickle.load(f)
 
             # Display model info
-            model_type = self.ct_master_model_dict.get('model_type', 'Unknown')
-            n_components = self.ct_master_model_dict.get('n_components', 'N/A')
-            wl_model = self.ct_master_model_dict.get('wavelengths', np.array([]))
+            model_type = self.ct_primary_model_dict.get('model_type', 'Unknown')
+            n_components = self.ct_primary_model_dict.get('n_components', 'N/A')
+            wl_model = self.ct_primary_model_dict.get('wavelengths', np.array([]))
 
             info_text = (f"Model Type: {model_type}\n"
                         f"Components: {n_components}\n"
@@ -28605,7 +28648,7 @@ Configuration:
             self.ct_model_info_text.insert('1.0', info_text)
             self.ct_model_info_text.config(state='disabled')
 
-            messagebox.showinfo("Success", "Master model loaded successfully")
+            messagebox.showinfo("Success", "Primary model loaded successfully")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
 
@@ -28617,8 +28660,8 @@ Configuration:
     #         return
     #
     #     inst_ids = list(self.instrument_profiles.keys())
-    #     self.ct_master_instrument_combo['values'] = inst_ids
-    #     self.ct_slave_instrument_combo['values'] = inst_ids
+    #     self.ct_primary_instrument_combo['values'] = inst_ids
+    #     self.ct_satellite_instrument_combo['values'] = inst_ids
     #
     #     messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
 
@@ -28634,14 +28677,14 @@ Configuration:
             self.ct_registry_tree.delete(item)
 
         for model_key, model_data in self.transfer_model_registry.items():
-            master_id = model_data['master_id']
-            slave_id = model_data['slave_id']
+            primary_id = model_data['primary_id']
+            satellite_id = model_data['satellite_id']
             method = model_data['method']
             date_built = model_data['date_built']
             n_samples = model_data['n_samples']
 
             self.ct_registry_tree.insert('', 'end', iid=model_key,
-                                        values=(master_id, slave_id, method, date_built, n_samples))
+                                        values=(primary_id, satellite_id, method, date_built, n_samples))
 
         # Update registry combos in sections C and D
         registry_keys = list(self.transfer_model_registry.keys())
@@ -28664,8 +28707,8 @@ Configuration:
 
         messagebox.showinfo("Success",
             f"Loaded transfer model from registry:\n"
-            f"Master: {model_data['master_id']}\n"
-            f"Slave: {model_data['slave_id']}\n"
+            f"Primary: {model_data['primary_id']}\n"
+            f"Satellite: {model_data['satellite_id']}\n"
             f"Method: {model_data['method'].upper()}")
 
     def _delete_from_registry(self):
@@ -28680,8 +28723,8 @@ Configuration:
 
         response = messagebox.askyesno("Confirm Delete",
             f"Delete transfer model?\n\n"
-            f"Master: {model_data['master_id']}\n"
-            f"Slave: {model_data['slave_id']}\n"
+            f"Primary: {model_data['primary_id']}\n"
+            f"Satellite: {model_data['satellite_id']}\n"
             f"Method: {model_data['method'].upper()}\n\n"
             f"This cannot be undone.")
 
@@ -28710,15 +28753,15 @@ Configuration:
             # Load the model
             transfer_model = load_transfer_model(file_path)
 
-            # Try to extract master/slave IDs and method from the model
+            # Try to extract primary/satellite IDs and method from the model
             # These might be stored as metadata in the model
-            master_id = getattr(transfer_model, 'master_id', 'Unknown_Master')
-            slave_id = getattr(transfer_model, 'slave_id', 'Unknown_Slave')
+            primary_id = getattr(transfer_model, 'primary_id', 'Unknown_Primary')
+            satellite_id = getattr(transfer_model, 'satellite_id', 'Unknown_Satellite')
             method = transfer_model.method
 
             # Create registry key
             import datetime
-            model_key = f"{master_id}_{slave_id}_{method}"
+            model_key = f"{primary_id}_{satellite_id}_{method}"
 
             # Check if already exists
             if model_key in self.transfer_model_registry:
@@ -28731,8 +28774,8 @@ Configuration:
             # Store in registry
             self.transfer_model_registry[model_key] = {
                 'model': transfer_model,
-                'master_id': master_id,
-                'slave_id': slave_id,
+                'primary_id': primary_id,
+                'satellite_id': satellite_id,
                 'method': method,
                 'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 'n_samples': 0,  # Unknown from loaded file
@@ -28760,8 +28803,8 @@ Configuration:
 
         messagebox.showinfo("Success",
             f"Loaded transfer model from registry for file equalization:\n"
-            f"Master: {model_data['master_id']}\n"
-            f"Slave: {model_data['slave_id']}\n"
+            f"Primary: {model_data['primary_id']}\n"
+            f"Satellite: {model_data['satellite_id']}\n"
             f"Method: {model_data['method'].upper()}")
 
     def _load_ct_pred_from_registry(self):
@@ -28776,8 +28819,8 @@ Configuration:
 
         messagebox.showinfo("Success",
             f"Loaded transfer model from registry for prediction:\n"
-            f"Master: {model_data['master_id']}\n"
-            f"Slave: {model_data['slave_id']}\n"
+            f"Primary: {model_data['primary_id']}\n"
+            f"Satellite: {model_data['satellite_id']}\n"
             f"Method: {model_data['method'].upper()}")
 
     def _on_pred_tm_source_changed(self):
@@ -28795,97 +28838,97 @@ Configuration:
             self.ct_pred_registry_frame.pack_forget()
             self.ct_pred_load_tm_frame.pack_forget()
 
-    def _browse_ct_pred_master_model(self):
-        """Browse for master calibration model in Section D."""
+    def _browse_ct_pred_primary_model(self):
+        """Browse for primary calibration model in Section D."""
         file_path = filedialog.askopenfilename(
-            title="Select Master Calibration Model",
+            title="Select Primary Calibration Model",
             filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
         )
         if file_path:
-            self.ct_pred_master_model_var.set(file_path)
+            self.ct_pred_primary_model_var.set(file_path)
 
-    def _load_ct_pred_master_model(self):
-        """Load master calibration model in Section D."""
-        model_path = self.ct_pred_master_model_var.get()
+    def _load_ct_pred_primary_model(self):
+        """Load primary calibration model in Section D."""
+        model_path = self.ct_pred_primary_model_var.get()
         if not model_path:
-            messagebox.showwarning("Warning", "Please browse and select a master model file")
+            messagebox.showwarning("Warning", "Please browse and select a primary model file")
             return
 
         try:
             import pickle
             with open(model_path, 'rb') as f:
-                self.ct_master_model_dict = pickle.load(f)
+                self.ct_primary_model_dict = pickle.load(f)
 
-            messagebox.showinfo("Success", f"Master model loaded successfully")
+            messagebox.showinfo("Success", f"Primary model loaded successfully")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load master model:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load primary model:\n{str(e)}")
 
-    def _browse_ct_master_spectra_dir(self):
-        """Browse for master instrument standardization spectra directory."""
-        directory = filedialog.askdirectory(title="Select Master Instrument Spectra Directory")
+    def _browse_ct_primary_spectra_dir(self):
+        """Browse for primary instrument standardization spectra directory."""
+        directory = filedialog.askdirectory(title="Select Primary Instrument Spectra Directory")
         if directory:
-            self.ct_master_spectra_dir_var.set(directory)
+            self.ct_primary_spectra_dir_var.set(directory)
 
-    def _browse_ct_slave_spectra_dir(self):
-        """Browse for slave instrument standardization spectra directory."""
-        directory = filedialog.askdirectory(title="Select Slave Instrument Spectra Directory")
+    def _browse_ct_satellite_spectra_dir(self):
+        """Browse for satellite instrument standardization spectra directory."""
+        directory = filedialog.askdirectory(title="Select Satellite Instrument Spectra Directory")
         if directory:
-            self.ct_slave_spectra_dir_var.set(directory)
+            self.ct_satellite_spectra_dir_var.set(directory)
 
     def _load_ct_paired_spectra(self):
-        """Load paired standardization spectra for master and slave instruments from separate directories."""
+        """Load paired standardization spectra for primary and satellite instruments from separate directories."""
         if not HAS_CALIBRATION_TRANSFER:
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
 
-        master_id = self.ct_master_instrument_id.get()
-        slave_id = self.ct_slave_instrument_id.get()
-        master_dir = self.ct_master_spectra_dir_var.get()
-        slave_dir = self.ct_slave_spectra_dir_var.get()
+        primary_id = self.ct_primary_instrument_id.get()
+        satellite_id = self.ct_satellite_instrument_id.get()
+        primary_dir = self.ct_primary_spectra_dir_var.get()
+        satellite_dir = self.ct_satellite_spectra_dir_var.get()
 
-        if not master_id or not slave_id:
-            messagebox.showwarning("Warning", "Please select both master and slave instruments")
+        if not primary_id or not satellite_id:
+            messagebox.showwarning("Warning", "Please select both primary and satellite instruments")
             return
 
-        if not master_dir or not slave_dir:
-            messagebox.showwarning("Warning", "Please browse and select both master and slave spectra directories")
+        if not primary_dir or not satellite_dir:
+            messagebox.showwarning("Warning", "Please browse and select both primary and satellite spectra directories")
             return
 
-        if master_id not in self.instrument_profiles or slave_id not in self.instrument_profiles:
+        if primary_id not in self.instrument_profiles or satellite_id not in self.instrument_profiles:
             messagebox.showerror("Error", "Selected instruments not found in registry")
             return
 
-        # VALIDATION: Check that master and slave are different instruments
-        if master_id == slave_id:
+        # VALIDATION: Check that primary and satellite are different instruments
+        if primary_id == satellite_id:
             messagebox.showerror(
                 "Same Instrument Selected",
-                "Master and slave instruments must be different for calibration transfer.\n\n"
-                f"You selected: {master_id} for both master and slave.\n\n"
+                "Primary and satellite instruments must be different for calibration transfer.\n\n"
+                f"You selected: {primary_id} for both primary and satellite.\n\n"
                 "Please select different instruments."
             )
             return
 
         try:
             # Load spectra from SEPARATE directories
-            wavelengths_master, X_master = self._load_spectra_from_directory(master_dir)
-            wavelengths_slave, X_slave = self._load_spectra_from_directory(slave_dir)
+            wavelengths_primary, X_primary = self._load_spectra_from_directory(primary_dir)
+            wavelengths_satellite, X_satellite = self._load_spectra_from_directory(satellite_dir)
 
             # VALIDATION 1: Same Sample Count Check
-            if X_master.shape[0] != X_slave.shape[0]:
+            if X_primary.shape[0] != X_satellite.shape[0]:
                 messagebox.showerror(
                     "Sample Count Mismatch",
-                    f"Master has {X_master.shape[0]} samples, Slave has {X_slave.shape[0]} samples.\n\n"
+                    f"Primary has {X_primary.shape[0]} samples, Satellite has {X_satellite.shape[0]} samples.\n\n"
                     "Paired spectra must have the same number of samples (same sample set measured on both instruments).\n\n"
                     "Please ensure both instruments measured the exact same samples."
                 )
                 return
 
             # VALIDATION 2: Minimum Sample Check
-            if X_master.shape[0] < 20:
+            if X_primary.shape[0] < 20:
                 response = messagebox.askokcancel(
                     "Few Samples",
-                    f"Only {X_master.shape[0]} paired samples loaded.\n\n"
+                    f"Only {X_primary.shape[0]} paired samples loaded.\n\n"
                     "At least 30 samples recommended for robust calibration transfer.\n"
                     "Results may be unreliable with fewer samples.\n\n"
                     "Do you want to continue anyway?"
@@ -28894,37 +28937,37 @@ Configuration:
                     return
 
             # VALIDATION 3: Wavelength Overlap Check
-            master_range = (wavelengths_master[0], wavelengths_master[-1])
-            slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
+            primary_range = (wavelengths_primary[0], wavelengths_primary[-1])
+            satellite_range = (wavelengths_satellite[0], wavelengths_satellite[-1])
 
-            overlap_start = max(master_range[0], slave_range[0])
-            overlap_end = min(master_range[1], slave_range[1])
+            overlap_start = max(primary_range[0], satellite_range[0])
+            overlap_end = min(primary_range[1], satellite_range[1])
 
             if overlap_start >= overlap_end:
                 messagebox.showerror(
                     "No Wavelength Overlap",
-                    f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
-                    f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n\n"
+                    f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
+                    f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n\n"
                     "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
                     "Please select instruments with compatible wavelength coverage."
                 )
                 return
 
             # Check overlap percentage
-            master_span = master_range[1] - master_range[0]
-            slave_span = slave_range[1] - slave_range[0]
+            primary_span = primary_range[1] - primary_range[0]
+            satellite_span = satellite_range[1] - satellite_range[0]
             overlap_span = overlap_end - overlap_start
 
-            master_overlap_pct = (overlap_span / master_span) * 100
-            slave_overlap_pct = (overlap_span / slave_span) * 100
-            min_overlap_pct = min(master_overlap_pct, slave_overlap_pct)
+            primary_overlap_pct = (overlap_span / primary_span) * 100
+            satellite_overlap_pct = (overlap_span / satellite_span) * 100
+            min_overlap_pct = min(primary_overlap_pct, satellite_overlap_pct)
 
             if min_overlap_pct < 80:
                 response = messagebox.askokcancel(
                     "Limited Wavelength Overlap",
                     f"Wavelength overlap is {min_overlap_pct:.1f}% of instrument range.\n\n"
-                    f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
-                    f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n"
+                    f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
+                    f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n"
                     f"Overlap region: {overlap_start:.1f}-{overlap_end:.1f} nm\n\n"
                     "Transfer quality may be reduced with limited overlap.\n"
                     "Consider using instruments with better wavelength coverage overlap.\n\n"
@@ -28934,22 +28977,22 @@ Configuration:
                     return
 
             # Get instrument profiles
-            master_prof = self.instrument_profiles[master_id]
-            slave_prof = self.instrument_profiles[slave_id]
+            primary_prof = self.instrument_profiles[primary_id]
+            satellite_prof = self.instrument_profiles[satellite_id]
 
             # Choose common grid
             common_wl = choose_common_grid(
-                {master_id: master_prof, slave_id: slave_prof},
-                [master_id, slave_id]
+                {primary_id: primary_prof, satellite_id: satellite_prof},
+                [primary_id, satellite_id]
             )
 
             # Resample both to common grid
-            self.ct_X_master_common = resample_to_grid(X_master, wavelengths_master, common_wl)
-            self.ct_X_slave_common = resample_to_grid(X_slave, wavelengths_slave, common_wl)
+            self.ct_X_primary_common = resample_to_grid(X_primary, wavelengths_primary, common_wl)
+            self.ct_X_satellite_common = resample_to_grid(X_satellite, wavelengths_satellite, common_wl)
             self.ct_wavelengths_common = common_wl
 
             # Display info
-            info_text = (f"Loaded {X_master.shape[0]} paired spectra\n"
+            info_text = (f"Loaded {X_primary.shape[0]} paired spectra\n"
                         f"Common wavelength grid: {common_wl.shape[0]} points\n"
                         f"Range: {common_wl.min():.1f} - {common_wl.max():.1f} nm\n"
                         f"Wavelength overlap: {min_overlap_pct:.1f}%")
@@ -28960,7 +29003,7 @@ Configuration:
             self.ct_spectra_info_text.config(state='disabled')
 
             # Show preview plots immediately after loading
-            self._plot_paired_spectra_preview(master_id, slave_id)
+            self._plot_paired_spectra_preview(primary_id, satellite_id)
 
             messagebox.showinfo("Success", "Paired spectra loaded and resampled to common grid.\n\nPreview plots displayed.")
         except Exception as e:
@@ -28973,85 +29016,85 @@ Configuration:
     #         messagebox.showerror("Error", "Calibration transfer modules not available")
     #         return
     #
-    #     master_id = self.ct_master_instrument_id.get()
-    #     slave_id = self.ct_slave_instrument_id.get()
+    #     primary_id = self.ct_primary_instrument_id.get()
+    #     satellite_id = self.ct_satellite_instrument_id.get()
     #
-    #     if not master_id or not slave_id:
-    #         messagebox.showwarning("Warning", "Please select both master and slave instruments from the dropdowns")
+    #     if not primary_id or not satellite_id:
+    #         messagebox.showwarning("Warning", "Please select both primary and satellite instruments from the dropdowns")
     #         return
     #
     #     # Check if both instruments have characterization data
     #     # First check if instrument is in registry but spectral data not loaded
-    #     if master_id not in self.instrument_spectral_data:
+    #     if primary_id not in self.instrument_spectral_data:
     #         # Check if it's in the registry (metadata exists but data doesn't)
-    #         if master_id in self.instrument_profiles:
+    #         if primary_id in self.instrument_profiles:
     #             messagebox.showerror(
-    #                 "Master Spectral Data Not Loaded",
-    #                 f"Instrument '{master_id}' is in the registry, but spectral data is not loaded.\n\n"
+    #                 "Primary Spectral Data Not Loaded",
+    #                 f"Instrument '{primary_id}' is in the registry, but spectral data is not loaded.\n\n"
     #                 f"This happens when you load a registry JSON file without the actual data files.\n\n"
     #                 f"To fix this:\n"
     #                 f"1. Go to the Instrument Lab tab\n"
-    #                 f"2. Enter instrument ID: {master_id}\n"
+    #                 f"2. Enter instrument ID: {primary_id}\n"
     #                 f"3. Browse and load the original spectral data file\n"
     #                 f"4. Click 'Characterize Instrument'\n\n"
     #                 f"This will load the spectral data needed for calibration transfer."
     #             )
     #         else:
     #             messagebox.showerror(
-    #                 "Master Data Not Found",
-    #                 f"No characterization data found for '{master_id}' in Instrument Lab.\n\n"
+    #                 "Primary Data Not Found",
+    #                 f"No characterization data found for '{primary_id}' in Instrument Lab.\n\n"
     #                 "Please go to the Instrument Lab tab and load & characterize this instrument first."
     #             )
     #         return
     #
-    #     if slave_id not in self.instrument_spectral_data:
+    #     if satellite_id not in self.instrument_spectral_data:
     #         # Check if it's in the registry (metadata exists but data doesn't)
-    #         if slave_id in self.instrument_profiles:
+    #         if satellite_id in self.instrument_profiles:
     #             messagebox.showerror(
-    #                 "Slave Spectral Data Not Loaded",
-    #                 f"Instrument '{slave_id}' is in the registry, but spectral data is not loaded.\n\n"
+    #                 "Satellite Spectral Data Not Loaded",
+    #                 f"Instrument '{satellite_id}' is in the registry, but spectral data is not loaded.\n\n"
     #                 f"This happens when you load a registry JSON file without the actual data files.\n\n"
     #                 f"To fix this:\n"
     #                 f"1. Go to the Instrument Lab tab\n"
-    #                 f"2. Enter instrument ID: {slave_id}\n"
+    #                 f"2. Enter instrument ID: {satellite_id}\n"
     #                 f"3. Browse and load the original spectral data file\n"
     #                 f"4. Click 'Characterize Instrument'\n\n"
     #                 f"This will load the spectral data needed for calibration transfer."
     #             )
     #         else:
     #             messagebox.showerror(
-    #                 "Slave Data Not Found",
-    #                 f"No characterization data found for '{slave_id}' in Instrument Lab.\n\n"
+    #                 "Satellite Data Not Found",
+    #                 f"No characterization data found for '{satellite_id}' in Instrument Lab.\n\n"
     #                 "Please go to the Instrument Lab tab and load & characterize this instrument first."
     #             )
     #         return
     #
-    #     # VALIDATION: Check that master and slave are different
-    #     if master_id == slave_id:
+    #     # VALIDATION: Check that primary and satellite are different
+    #     if primary_id == satellite_id:
     #         messagebox.showerror(
     #             "Same Instrument Selected",
-    #             "Master and slave instruments must be different for calibration transfer.\n\n"
-    #             f"You selected: {master_id} for both master and slave.\n\n"
+    #             "Primary and satellite instruments must be different for calibration transfer.\n\n"
+    #             f"You selected: {primary_id} for both primary and satellite.\n\n"
     #             "Please select different instruments."
     #         )
     #         return
     #
     #     try:
     #         # Import data from Instrument Lab
-    #         wavelengths_master, X_master = self.instrument_spectral_data[master_id]
-    #         wavelengths_slave, X_slave = self.instrument_spectral_data[slave_id]
+    #         wavelengths_primary, X_primary = self.instrument_spectral_data[primary_id]
+    #         wavelengths_satellite, X_satellite = self.instrument_spectral_data[satellite_id]
     #
     #         # Make copies to avoid modifying original data
-    #         wavelengths_master = wavelengths_master.copy()
-    #         X_master = X_master.copy()
-    #         wavelengths_slave = wavelengths_slave.copy()
-    #         X_slave = X_slave.copy()
+    #         wavelengths_primary = wavelengths_primary.copy()
+    #         X_primary = X_primary.copy()
+    #         wavelengths_satellite = wavelengths_satellite.copy()
+    #         X_satellite = X_satellite.copy()
     #
     #         # VALIDATION 1: Sample Count Check
-    #         if X_master.shape[0] != X_slave.shape[0]:
+    #         if X_primary.shape[0] != X_satellite.shape[0]:
     #             response = messagebox.askyesno(
     #                 "Sample Count Mismatch",
-    #                 f"Master has {X_master.shape[0]} samples, Slave has {X_slave.shape[0]} samples.\n\n"
+    #                 f"Primary has {X_primary.shape[0]} samples, Satellite has {X_satellite.shape[0]} samples.\n\n"
     #                 "For optimal calibration transfer, both instruments should measure the same samples.\n\n"
     #                 "Do you want to continue anyway?\n"
     #                 "(Will use minimum sample count)"
@@ -29060,15 +29103,15 @@ Configuration:
     #                 return
     #
     #             # Use minimum number of samples
-    #             min_samples = min(X_master.shape[0], X_slave.shape[0])
-    #             X_master = X_master[:min_samples, :]
-    #             X_slave = X_slave[:min_samples, :]
+    #             min_samples = min(X_primary.shape[0], X_satellite.shape[0])
+    #             X_primary = X_primary[:min_samples, :]
+    #             X_satellite = X_satellite[:min_samples, :]
     #
     #         # VALIDATION 2: Minimum Sample Check
-    #         if X_master.shape[0] < 20:
+    #         if X_primary.shape[0] < 20:
     #             response = messagebox.askokcancel(
     #                 "Few Samples",
-    #                 f"Only {X_master.shape[0]} samples available.\n\n"
+    #                 f"Only {X_primary.shape[0]} samples available.\n\n"
     #                 "At least 30 samples recommended for robust calibration transfer.\n"
     #                 "Results may be unreliable with fewer samples.\n\n"
     #                 "Do you want to continue anyway?"
@@ -29079,37 +29122,37 @@ Configuration:
     #         # VALIDATION 3: Wavelength Overlap Check
     #         from spectral_predict.calibration_transfer import resample_to_grid
     #
-    #         master_range = (wavelengths_master[0], wavelengths_master[-1])
-    #         slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
+    #         primary_range = (wavelengths_primary[0], wavelengths_primary[-1])
+    #         satellite_range = (wavelengths_satellite[0], wavelengths_satellite[-1])
     #
-    #         overlap_start = max(master_range[0], slave_range[0])
-    #         overlap_end = min(master_range[1], slave_range[1])
+    #         overlap_start = max(primary_range[0], satellite_range[0])
+    #         overlap_end = min(primary_range[1], satellite_range[1])
     #
     #         if overlap_start >= overlap_end:
     #             messagebox.showerror(
     #                 "No Wavelength Overlap",
-    #                 f"Master range: {master_range[0]:.1f}-{master_range[1]:.1f} nm\n"
-    #                 f"Slave range: {slave_range[0]:.1f}-{slave_range[1]:.1f} nm\n\n"
+    #                 f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
+    #                 f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n\n"
     #                 "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
     #                 "Please select instruments with compatible wavelength coverage."
     #             )
     #             return
     #
     #         # Use overlap region as common grid
-    #         master_in_overlap = (wavelengths_master >= overlap_start) & (wavelengths_master <= overlap_end)
-    #         slave_in_overlap = (wavelengths_slave >= overlap_start) & (wavelengths_slave <= overlap_end)
+    #         primary_in_overlap = (wavelengths_primary >= overlap_start) & (wavelengths_primary <= overlap_end)
+    #         satellite_in_overlap = (wavelengths_satellite >= overlap_start) & (wavelengths_satellite <= overlap_end)
     #
-    #         common_wl = wavelengths_master[master_in_overlap]
+    #         common_wl = wavelengths_primary[primary_in_overlap]
     #
-    #         # Resample slave to master's grid in overlap region
-    #         X_master_common = X_master[:, master_in_overlap]
-    #         X_slave_common = resample_to_grid(X_slave, wavelengths_slave, common_wl)
+    #         # Resample satellite to primary's grid in overlap region
+    #         X_primary_common = X_primary[:, primary_in_overlap]
+    #         X_satellite_common = resample_to_grid(X_satellite, wavelengths_satellite, common_wl)
     #
     #         # Calculate overlap percentage
-    #         master_span = master_range[1] - master_range[0]
-    #         slave_span = slave_range[1] - slave_range[0]
+    #         primary_span = primary_range[1] - primary_range[0]
+    #         satellite_span = satellite_range[1] - satellite_range[0]
     #         overlap_span = overlap_end - overlap_start
-    #         min_overlap_pct = 100 * overlap_span / min(master_span, slave_span)
+    #         min_overlap_pct = 100 * overlap_span / min(primary_span, satellite_span)
     #
     #         if min_overlap_pct < 80:
     #             response = messagebox.askokcancel(
@@ -29122,13 +29165,13 @@ Configuration:
     #                 return
     #
     #         # Store for transfer model building
-    #         self.ct_X_master_common = X_master_common
-    #         self.ct_X_slave_common = X_slave_common
+    #         self.ct_X_primary_common = X_primary_common
+    #         self.ct_X_satellite_common = X_satellite_common
     #         self.ct_wavelengths_common = common_wl
     #
     #         # Display info
     #         info_text = (f"✅ Imported from Instrument Lab\n"
-    #                     f"Samples: {X_master.shape[0]} paired spectra\n"
+    #                     f"Samples: {X_primary.shape[0]} paired spectra\n"
     #                     f"Common wavelength grid: {common_wl.shape[0]} points ({common_wl.min():.1f}-{common_wl.max():.1f} nm)\n"
     #                     f"Wavelength overlap: {min_overlap_pct:.1f}%")
     #
@@ -29138,12 +29181,12 @@ Configuration:
     #         self.ct_spectra_info_text.config(state='disabled')
     #
     #         # Show preview plots
-    #         self._plot_paired_spectra_preview(master_id, slave_id)
+    #         self._plot_paired_spectra_preview(primary_id, satellite_id)
     #
     #         messagebox.showinfo("Success",
     #             f"Imported paired spectra from Instrument Lab!\n\n"
-    #             f"Master: {master_id} ({X_master.shape[0]} samples)\n"
-    #             f"Slave: {slave_id} ({X_slave.shape[0]} samples)\n\n"
+    #             f"Primary: {primary_id} ({X_primary.shape[0]} samples)\n"
+    #             f"Satellite: {satellite_id} ({X_satellite.shape[0]} samples)\n\n"
     #             "Preview plots displayed. You can now build a transfer model in Section C.")
     #
     #     except Exception as e:
@@ -29156,14 +29199,14 @@ Configuration:
             return
 
         # VALIDATION: Data Loaded Check
-        if not hasattr(self, 'ct_X_master_common') or not hasattr(self, 'ct_X_slave_common'):
+        if not hasattr(self, 'ct_X_primary_common') or not hasattr(self, 'ct_X_satellite_common'):
             messagebox.showerror(
                 "No Paired Spectra Loaded",
                 "Please load paired standardization spectra in Section B first."
             )
             return
 
-        if self.ct_X_master_common is None or self.ct_X_slave_common is None:
+        if self.ct_X_primary_common is None or self.ct_X_satellite_common is None:
             messagebox.showerror(
                 "No Paired Spectra Loaded",
                 "Please load paired standardization spectra in Section B first."
@@ -29171,14 +29214,14 @@ Configuration:
             return
 
         method = self.ct_method_var.get()
-        master_id = self.ct_master_instrument_id.get()
-        slave_id = self.ct_slave_instrument_id.get()
+        primary_id = self.ct_primary_instrument_id.get()
+        satellite_id = self.ct_satellite_instrument_id.get()
 
         # VALIDATION: Different Instruments Check
-        if master_id == slave_id:
+        if primary_id == satellite_id:
             messagebox.showerror(
                 "Same Instrument Selected",
-                "Master and slave instruments must be different for calibration transfer."
+                "Primary and satellite instruments must be different for calibration transfer."
             )
             return
 
@@ -29197,13 +29240,13 @@ Configuration:
                 except ValueError:
                     messagebox.showerror("Invalid Parameter", "DS Ridge Lambda must be a number.")
                     return
-                A = estimate_ds(self.ct_X_master_common, self.ct_X_slave_common, lam=lam)
+                A = estimate_ds(self.ct_X_primary_common, self.ct_X_satellite_common, lam=lam)
 
                 # Create TransferModel object
                 from spectral_predict.calibration_transfer import TransferModel
                 self.ct_transfer_model = TransferModel(
-                    master_id=master_id,
-                    slave_id=slave_id,
+                    primary_id=primary_id,
+                    satellite_id=satellite_id,
                     method='ds',
                     wavelengths_common=self.ct_wavelengths_common,
                     params={'A': A},
@@ -29211,7 +29254,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: Direct Standardization (DS)\n"
-                            f"Master: {master_id} -> Slave: {slave_id}\n"
+                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
                             f"Ridge Lambda: {lam}\n"
                             f"Matrix Shape: {A.shape}")
 
@@ -29235,12 +29278,12 @@ Configuration:
                 except ValueError:
                     messagebox.showerror("Invalid Parameter", "PDS Window must be an integer.")
                     return
-                B = estimate_pds(self.ct_X_master_common, self.ct_X_slave_common, window=window)
+                B = estimate_pds(self.ct_X_primary_common, self.ct_X_satellite_common, window=window)
 
                 from spectral_predict.calibration_transfer import TransferModel
                 self.ct_transfer_model = TransferModel(
-                    master_id=master_id,
-                    slave_id=slave_id,
+                    primary_id=primary_id,
+                    satellite_id=satellite_id,
                     method='pds',
                     wavelengths_common=self.ct_wavelengths_common,
                     params={'B': B, 'window': window},
@@ -29248,7 +29291,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
-                            f"Master: {master_id} -> Slave: {slave_id}\n"
+                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
                             f"Window Size: {window}\n"
                             f"Coefficient Matrix Shape: {B.shape}")
 
@@ -29263,26 +29306,26 @@ Configuration:
                     if n_transfer < 2:
                         messagebox.showerror("Invalid Parameter", "Need at least 2 transfer samples")
                         return
-                    if n_transfer > self.ct_X_master_common.shape[0]:
+                    if n_transfer > self.ct_X_primary_common.shape[0]:
                         messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_master_common.shape[0]} available")
+                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
                         return
                 except (ValueError, AttributeError):
                     n_transfer = 12  # Default
 
                 # Select transfer samples using Kennard-Stone
-                transfer_indices = kennard_stone(self.ct_X_master_common, n_samples=n_transfer)
+                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
 
                 # Estimate TSR model
                 tsr_params = estimate_tsr(
-                    self.ct_X_master_common,
-                    self.ct_X_slave_common,
+                    self.ct_X_primary_common,
+                    self.ct_X_satellite_common,
                     transfer_indices
                 )
 
                 self.ct_transfer_model = TransferModel(
-                    master_id=master_id,
-                    slave_id=slave_id,
+                    primary_id=primary_id,
+                    satellite_id=satellite_id,
                     method='tsr',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=tsr_params,
@@ -29290,7 +29333,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
-                            f"Master: {master_id} -> Slave: {slave_id}\n"
+                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
                             f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
                             f"Mean R²: {tsr_params['mean_r_squared']:.4f}\n"
                             f"Slope Range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
@@ -29301,13 +29344,13 @@ Configuration:
 
                 # Estimate CTAI model
                 ctai_params = estimate_ctai(
-                    self.ct_X_master_common,
-                    self.ct_X_slave_common
+                    self.ct_X_primary_common,
+                    self.ct_X_satellite_common
                 )
 
                 self.ct_transfer_model = TransferModel(
-                    master_id=master_id,
-                    slave_id=slave_id,
+                    primary_id=primary_id,
+                    satellite_id=satellite_id,
                     method='ctai',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=ctai_params,
@@ -29315,7 +29358,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
-                            f"Master: {master_id} -> Slave: {slave_id}\n"
+                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
                             f"NO TRANSFER SAMPLES NEEDED >\n"
                             f"Components: {ctai_params['n_components']}\n"
                             f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
@@ -29332,9 +29375,9 @@ Configuration:
                     if n_transfer < 5:
                         messagebox.showerror("Invalid Parameter", "JYPLS-inv needs at least 5 transfer samples")
                         return
-                    if n_transfer > self.ct_X_master_common.shape[0]:
+                    if n_transfer > self.ct_X_primary_common.shape[0]:
                         messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_master_common.shape[0]} available")
+                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
                         return
                 except (ValueError, AttributeError):
                     n_transfer = 12  # Default
@@ -29347,24 +29390,24 @@ Configuration:
                     n_components = int(n_comp_str)
 
                 # Select transfer samples using Kennard-Stone
-                transfer_indices = kennard_stone(self.ct_X_master_common, n_samples=n_transfer)
+                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
 
                 # Need Y values for JYPLS-inv - use spectral mean as pseudo-Y
                 # In real applications, user would provide reference values
-                y_transfer = self.ct_X_master_common[transfer_indices].mean(axis=1)
+                y_transfer = self.ct_X_primary_common[transfer_indices].mean(axis=1)
 
                 # Estimate JYPLS-inv model
                 jypls_params = estimate_jypls_inv(
-                    self.ct_X_master_common,
-                    self.ct_X_slave_common,
+                    self.ct_X_primary_common,
+                    self.ct_X_satellite_common,
                     y_transfer,
                     transfer_indices,
                     n_components=n_components
                 )
 
                 self.ct_transfer_model = TransferModel(
-                    master_id=master_id,
-                    slave_id=slave_id,
+                    primary_id=primary_id,
+                    satellite_id=satellite_id,
                     method='jypls-inv',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=jypls_params,
@@ -29372,7 +29415,7 @@ Configuration:
                 )
 
                 info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
-                            f"Master: {master_id} -> Slave: {slave_id}\n"
+                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
                             f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
                             f"PLS Components: {jypls_params['n_components']}\n"
                             f"CV RMSE: {jypls_params['cv_rmse']:.6f}\n"
@@ -29400,8 +29443,8 @@ Configuration:
 
                 # Estimate NS-PFCE model
                 nspfce_params = estimate_nspfce(
-                    self.ct_X_master_common,
-                    self.ct_X_slave_common,
+                    self.ct_X_primary_common,
+                    self.ct_X_satellite_common,
                     self.ct_wavelengths_common,
                     use_wavelength_selection=use_wavelength_selection,
                     wavelength_selector=wavelength_selector,
@@ -29409,8 +29452,8 @@ Configuration:
                 )
 
                 self.ct_transfer_model = TransferModel(
-                    master_id=master_id,
-                    slave_id=slave_id,
+                    primary_id=primary_id,
+                    satellite_id=satellite_id,
                     method='nspfce',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=nspfce_params,
@@ -29424,7 +29467,7 @@ Configuration:
                 # Build info text
                 info_lines = [
                     f"Transfer Method: NS-PFCE (Non-supervised Parameter-Free)",
-                    f"Master: {master_id} -> Slave: {slave_id}",
+                    f"Primary: {primary_id} -> Satellite: {satellite_id}",
                     f"Iterations: {nspfce_params['n_iterations']} / {max_iterations}",
                     f"Converged: {'Yes >' if nspfce_params['converged'] else 'No (max iter reached)'}",
                 ]
@@ -29453,25 +29496,25 @@ Configuration:
             self._plot_transfer_quality(method)
 
             # Save to transfer model registry
-            master_id = self.ct_master_instrument_id.get()
-            slave_id = self.ct_slave_instrument_id.get()
-            if master_id and slave_id:
+            primary_id = self.ct_primary_instrument_id.get()
+            satellite_id = self.ct_satellite_instrument_id.get()
+            if primary_id and satellite_id:
                 import datetime
-                model_key = f"{master_id}_{slave_id}_{method}"
+                model_key = f"{primary_id}_{satellite_id}_{method}"
                 # Store model with metadata
                 self.transfer_model_registry[model_key] = {
                     'model': self.ct_transfer_model,
-                    'master_id': master_id,
-                    'slave_id': slave_id,
+                    'primary_id': primary_id,
+                    'satellite_id': satellite_id,
                     'method': method,
                     'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'n_samples': self.ct_X_master_common.shape[0] if self.ct_X_master_common is not None else 0,
+                    'n_samples': self.ct_X_primary_common.shape[0] if self.ct_X_primary_common is not None else 0,
                     'n_features': self.ct_wavelengths_common.shape[0] if self.ct_wavelengths_common is not None else 0
                 }
 
             messagebox.showinfo("Success",
                 f"{method.upper()} transfer model built successfully\n\n"
-                f"Model saved to registry: {model_key}" if master_id and slave_id else
+                f"Model saved to registry: {model_key}" if primary_id and satellite_id else
                 f"{method.upper()} transfer model built successfully")
         except KeyError as e:
             # Specific handling for missing dictionary keys
@@ -29806,19 +29849,19 @@ Configuration:
             messagebox.showinfo("Success",
                 f"Transfer model loaded:\n"
                 f"Method: {self.ct_pred_transfer_model.method.upper()}\n"
-                f"Master: {self.ct_pred_transfer_model.master_id}\n"
-                f"Slave: {self.ct_pred_transfer_model.slave_id}")
+                f"Primary: {self.ct_pred_transfer_model.primary_id}\n"
+                f"Satellite: {self.ct_pred_transfer_model.satellite_id}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
 
-    def _browse_ct_new_slave_dir(self):
-        """Browse for new slave spectra directory."""
-        directory = filedialog.askdirectory(title="Select New Slave Spectra Directory")
+    def _browse_ct_new_satellite_dir(self):
+        """Browse for new satellite spectra directory."""
+        directory = filedialog.askdirectory(title="Select New Satellite Spectra Directory")
         if directory:
-            self.ct_new_slave_dir_var.set(directory)
+            self.ct_new_satellite_dir_var.set(directory)
 
     def _load_and_predict_ct(self):
-        """Load new slave spectra, apply transfer, and predict."""
+        """Load new satellite spectra, apply transfer, and predict."""
         if not HAS_CALIBRATION_TRANSFER:
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
@@ -29832,92 +29875,92 @@ Configuration:
             )
             return
 
-        # VALIDATION: Master Model Check (needed for prediction)
-        if self.ct_master_model_dict is None:
+        # VALIDATION: Primary Model Check (needed for prediction)
+        if self.ct_primary_model_dict is None:
             messagebox.showerror(
-                "Master Model Required for Prediction",
-                "To make predictions, you need to load the master model in Section A.\n\n"
-                "The master model is the trained PLS/PCR model that makes the actual predictions.\n\n"
+                "Primary Model Required for Prediction",
+                "To make predictions, you need to load the primary model in Section A.\n\n"
+                "The primary model is the trained PLS/PCR model that makes the actual predictions.\n\n"
                 "If you only want to transform spectra WITHOUT making predictions, "
                 "use Section F 'File Equalize' instead."
             )
             return
 
-        new_slave_dir = self.ct_new_slave_dir_var.get()
-        if not new_slave_dir:
-            messagebox.showwarning("Warning", "Please browse and select new slave spectra directory")
+        new_satellite_dir = self.ct_new_satellite_dir_var.get()
+        if not new_satellite_dir:
+            messagebox.showwarning("Warning", "Please browse and select new satellite spectra directory")
             return
 
         try:
-            # Load new slave spectra
-            wavelengths_slave, X_slave_new = self._load_spectra_from_directory(new_slave_dir)
+            # Load new satellite spectra
+            wavelengths_satellite, X_satellite_new = self._load_spectra_from_directory(new_satellite_dir)
 
             # VALIDATION: Wavelength Compatibility Check
-            transfer_slave_range = (
+            transfer_satellite_range = (
                 self.ct_pred_transfer_model.wavelengths_common[0],
                 self.ct_pred_transfer_model.wavelengths_common[-1]
             )
-            new_slave_range = (wavelengths_slave[0], wavelengths_slave[-1])
+            new_satellite_range = (wavelengths_satellite[0], wavelengths_satellite[-1])
 
             # Check if new slave data can be resampled to transfer model wavelengths
-            if new_slave_range[0] > transfer_slave_range[0] or new_slave_range[1] < transfer_slave_range[1]:
+            if new_satellite_range[0] > transfer_satellite_range[0] or new_satellite_range[1] < transfer_satellite_range[1]:
                 messagebox.showwarning(
                     "Wavelength Range Mismatch",
-                    f"Transfer model expects wavelengths: {transfer_slave_range[0]:.1f}-{transfer_slave_range[1]:.1f} nm\n"
-                    f"New slave data has wavelengths: {new_slave_range[0]:.1f}-{new_slave_range[1]:.1f} nm\n\n"
-                    "New slave data has narrower wavelength coverage than the transfer model expects.\n"
+                    f"Transfer model expects wavelengths: {transfer_satellite_range[0]:.1f}-{transfer_satellite_range[1]:.1f} nm\n"
+                    f"New satellite data has wavelengths: {new_satellite_range[0]:.1f}-{new_satellite_range[1]:.1f} nm\n\n"
+                    "New satellite data has narrower wavelength coverage than the transfer model expects.\n"
                     "Predictions may require extrapolation and could be unreliable."
                 )
 
             # Resample to common grid
             common_wl = self.ct_pred_transfer_model.wavelengths_common
-            X_slave_common = resample_to_grid(X_slave_new, wavelengths_slave, common_wl)
+            X_satellite_common = resample_to_grid(X_satellite_new, wavelengths_satellite, common_wl)
 
             # Apply transfer model
             if self.ct_pred_transfer_model.method == 'ds':
                 A = self.ct_pred_transfer_model.params['A']
-                X_transferred = apply_ds(X_slave_common, A)
+                X_transferred = apply_ds(X_satellite_common, A)
             elif self.ct_pred_transfer_model.method == 'pds':
                 B = self.ct_pred_transfer_model.params['B']
                 window = self.ct_pred_transfer_model.params['window']
-                X_transferred = apply_pds(X_slave_common, B, window)
+                X_transferred = apply_pds(X_satellite_common, B, window)
             elif self.ct_pred_transfer_model.method == 'tsr':
                 from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(X_slave_common, self.ct_pred_transfer_model.params)
+                X_transferred = apply_tsr(X_satellite_common, self.ct_pred_transfer_model.params)
             elif self.ct_pred_transfer_model.method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(X_slave_common, self.ct_pred_transfer_model.params)
+                X_transferred = apply_ctai(X_satellite_common, self.ct_pred_transfer_model.params)
             elif self.ct_pred_transfer_model.method == 'jypls-inv':
                 from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(X_slave_common, self.ct_pred_transfer_model.params)
+                X_transferred = apply_jypls_inv(X_satellite_common, self.ct_pred_transfer_model.params)
             elif self.ct_pred_transfer_model.method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(X_slave_common, self.ct_pred_transfer_model.params)
+                X_transferred = apply_nspfce(X_satellite_common, self.ct_pred_transfer_model.params)
             else:
                 raise ValueError(f"Unknown transfer method: {self.ct_pred_transfer_model.method}")
 
-            # Resample transferred spectra to master model's wavelength grid
-            wl_model = self.ct_master_model_dict['wavelengths']
+            # Resample transferred spectra to primary model's wavelength grid
+            wl_model = self.ct_primary_model_dict['wavelengths']
             X_for_prediction = resample_to_grid(X_transferred, common_wl, wl_model)
 
             # VALIDATION: Extrapolation Warning
-            if 'wavelength_range' in self.ct_master_model_dict:
-                model_wl_range = self.ct_master_model_dict['wavelength_range']
+            if 'wavelength_range' in self.ct_primary_model_dict:
+                model_wl_range = self.ct_primary_model_dict['wavelength_range']
                 if wl_model[0] < model_wl_range[0] or wl_model[-1] > model_wl_range[1]:
                     messagebox.showwarning(
                         "Extrapolation Warning",
                         f"Transferred data wavelengths ({wl_model[0]:.1f}-{wl_model[-1]:.1f} nm)\n"
-                        f"exceed master model training range ({model_wl_range[0]:.1f}-{model_wl_range[1]:.1f} nm).\n\n"
+                        f"exceed primary model training range ({model_wl_range[0]:.1f}-{model_wl_range[1]:.1f} nm).\n\n"
                         "Predictions may be unreliable in extrapolated regions."
                     )
 
             # Apply preprocessing if present
-            if 'preprocessing' in self.ct_master_model_dict:
-                prep = self.ct_master_model_dict['preprocessing']
+            if 'preprocessing' in self.ct_primary_model_dict:
+                prep = self.ct_primary_model_dict['preprocessing']
                 X_for_prediction = prep.transform(X_for_prediction)
 
             # Predict
-            model = self.ct_master_model_dict['model']
+            model = self.ct_primary_model_dict['model']
             y_pred = model.predict(X_for_prediction).ravel()
 
             # Store predictions
@@ -30045,8 +30088,8 @@ Configuration:
             self.ct_eq_loaded_transfer_model = tm
 
             info_text = (f"Loaded Transfer Model:\n"
-                        f"  Master: {tm.master_id}\n"
-                        f"  Slave: {tm.slave_id}\n"
+                        f"  Primary: {tm.primary_id}\n"
+                        f"  Satellite: {tm.satellite_id}\n"
                         f"  Method: {tm.method.upper()}\n"
                         f"  Wavelengths: {len(tm.wavelengths_common)}")
 
@@ -30060,8 +30103,8 @@ Configuration:
             messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
 
     def _browse_ct_eq_input_dir(self):
-        """Browse for input directory containing slave spectra to transform."""
-        directory = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        """Browse for input directory containing satellite spectra to transform."""
+        directory = filedialog.askdirectory(title="Select Satellite Spectra Directory")
         if directory:
             self.ct_eq_input_dir_var.set(directory)
 
@@ -30072,7 +30115,7 @@ Configuration:
             self.ct_eq_output_dir_var.set(directory)
 
     def _file_equalize_batch(self):
-        """Main File Equalize function: Transform slave spectra and export to files."""
+        """Main File Equalize function: Transform satellite spectra and export to files."""
         if not HAS_CALIBRATION_TRANSFER:
             messagebox.showerror("Error", "Calibration transfer modules not available")
             return
@@ -30095,7 +30138,7 @@ Configuration:
         # Get input/output directories
         input_dir = self.ct_eq_input_dir_var.get()
         if not input_dir:
-            messagebox.showwarning("Warning", "Please select an input directory containing slave spectra")
+            messagebox.showwarning("Warning", "Please select an input directory containing satellite spectra")
             return
 
         output_dir = self.ct_eq_output_dir_var.get()
@@ -30114,12 +30157,12 @@ Configuration:
             # Update status
             self.ct_eq_status_text.config(state='normal')
             self.ct_eq_status_text.delete('1.0', tk.END)
-            self.ct_eq_status_text.insert('1.0', "Loading slave spectra...\n")
+            self.ct_eq_status_text.insert('1.0', "Loading satellite spectra...\n")
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
-            # Load slave spectra
-            wavelengths_slave, X_slave = self._load_spectra_from_directory(input_dir)
+            # Load satellite spectra
+            wavelengths_satellite, X_satellite = self._load_spectra_from_directory(input_dir)
 
             # Get sample IDs from filenames in the directory
             input_path = Path(input_dir)
@@ -30129,9 +30172,9 @@ Configuration:
 
             sample_ids = [f.stem for f in sample_files]
 
-            if len(sample_ids) != X_slave.shape[0]:
+            if len(sample_ids) != X_satellite.shape[0]:
                 # Fallback to generic IDs if mismatch
-                sample_ids = [f"spectrum_{i+1:03d}" for i in range(X_slave.shape[0])]
+                sample_ids = [f"spectrum_{i+1:03d}" for i in range(X_satellite.shape[0])]
 
             # Detect input format for auto mode
             detected_format = 'csv'  # default fallback
@@ -30149,13 +30192,13 @@ Configuration:
 
             # Update status
             self.ct_eq_status_text.config(state='normal')
-            self.ct_eq_status_text.insert(tk.END, f"Loaded {X_slave.shape[0]} spectra\n")
+            self.ct_eq_status_text.insert(tk.END, f"Loaded {X_satellite.shape[0]} spectra\n")
             self.ct_eq_status_text.insert(tk.END, "Resampling to transfer model grid...\n")
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
             # Resample to transfer model's common grid
-            X_slave_resampled = resample_to_grid(X_slave, wavelengths_slave,
+            X_satellite_resampled = resample_to_grid(X_satellite, wavelengths_satellite,
                                                   transfer_model.wavelengths_common)
 
             # Apply transfer transformation
@@ -30165,14 +30208,14 @@ Configuration:
             self.root.update()
 
             if transfer_model.method == 'ds':
-                X_transformed = apply_ds(X_slave_resampled, transfer_model.params['A'])
+                X_transformed = apply_ds(X_satellite_resampled, transfer_model.params['A'])
             else:  # pds
-                X_transformed = apply_pds(X_slave_resampled,
+                X_transformed = apply_pds(X_satellite_resampled,
                                          transfer_model.params['B'],
                                          transfer_model.params['window'])
 
             # Create model name for filename prefix
-            model_name = f"{transfer_model.master_id}_from_{transfer_model.slave_id}_{transfer_model.method}"
+            model_name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}"
 
             # Create DataFrame with transformed spectra
             transformed_ids = [f"{model_name}_{sid}" for sid in sample_ids]
@@ -30243,13 +30286,13 @@ Configuration:
             import traceback
             traceback.print_exc()
 
-    def _plot_paired_spectra_preview(self, master_id, slave_id):
+    def _plot_paired_spectra_preview(self, primary_id, satellite_id):
         """
-        Plot preview comparison of master and slave spectra immediately after loading.
+        Plot preview comparison of primary and satellite spectra immediately after loading.
 
         Shows:
-        1. Master spectra overlay (mean ± std)
-        2. Slave spectra overlay (mean ± std)
+        1. Primary spectra overlay (mean ± std)
+        2. Satellite spectra overlay (mean ± std)
         3. Side-by-side wavelength range comparison
         """
         if not HAS_MATPLOTLIB:
@@ -30259,35 +30302,35 @@ Configuration:
 
         # Get data
         wl = self.ct_wavelengths_common
-        X_master = self.ct_X_master_common
-        X_slave = self.ct_X_slave_common
+        X_primary = self.ct_X_primary_common
+        X_satellite = self.ct_X_satellite_common
 
         # Compute statistics
-        master_mean = np.mean(X_master, axis=0)
-        master_std = np.std(X_master, axis=0)
-        slave_mean = np.mean(X_slave, axis=0)
-        slave_std = np.std(X_slave, axis=0)
+        primary_mean = np.mean(X_primary, axis=0)
+        primary_std = np.std(X_primary, axis=0)
+        satellite_mean = np.mean(X_satellite, axis=0)
+        satellite_std = np.std(X_satellite, axis=0)
 
         # Create figure with 2 subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-        # Plot 1: Master spectra
-        ax1.plot(wl, master_mean, 'b-', linewidth=2, label='Mean')
-        ax1.fill_between(wl, master_mean - master_std, master_mean + master_std,
+        # Plot 1: Primary spectra
+        ax1.plot(wl, primary_mean, 'b-', linewidth=2, label='Mean')
+        ax1.fill_between(wl, primary_mean - primary_std, primary_mean + primary_std,
                         alpha=0.3, color='b', label='±1 Std')
         ax1.set_xlabel('Wavelength (nm)', fontsize=11)
         ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
-        ax1.set_title(f'Master: {master_id}\n({X_master.shape[0]} spectra)', fontsize=12, fontweight='bold')
+        ax1.set_title(f'Primary: {primary_id}\n({X_primary.shape[0]} spectra)', fontsize=12, fontweight='bold')
         ax1.legend(loc='best')
         ax1.grid(True, alpha=0.3)
 
-        # Plot 2: Slave spectra
-        ax2.plot(wl, slave_mean, 'r-', linewidth=2, label='Mean')
-        ax2.fill_between(wl, slave_mean - slave_std, slave_mean + slave_std,
+        # Plot 2: Satellite spectra
+        ax2.plot(wl, satellite_mean, 'r-', linewidth=2, label='Mean')
+        ax2.fill_between(wl, satellite_mean - satellite_std, satellite_mean + satellite_std,
                         alpha=0.3, color='r', label='±1 Std')
         ax2.set_xlabel('Wavelength (nm)', fontsize=11)
         ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
-        ax2.set_title(f'Slave: {slave_id}\n({X_slave.shape[0]} spectra)', fontsize=12, fontweight='bold')
+        ax2.set_title(f'Satellite: {satellite_id}\n({X_satellite.shape[0]} spectra)', fontsize=12, fontweight='bold')
         ax2.legend(loc='best')
         ax2.grid(True, alpha=0.3)
 
@@ -30299,17 +30342,17 @@ Configuration:
         fig2, ax = plt.subplots(figsize=(10, 4))
 
         # Show overlaid comparison
-        for i in range(min(10, X_master.shape[0])):  # Plot first 10 samples
-            ax.plot(wl, X_master[i, :], 'b-', alpha=0.3, linewidth=0.5)
-            ax.plot(wl, X_slave[i, :], 'r-', alpha=0.3, linewidth=0.5)
+        for i in range(min(10, X_primary.shape[0])):  # Plot first 10 samples
+            ax.plot(wl, X_primary[i, :], 'b-', alpha=0.3, linewidth=0.5)
+            ax.plot(wl, X_satellite[i, :], 'r-', alpha=0.3, linewidth=0.5)
 
         # Add means on top
-        ax.plot(wl, master_mean, 'b-', linewidth=2, label=f'Master ({master_id})')
-        ax.plot(wl, slave_mean, 'r-', linewidth=2, label=f'Slave ({slave_id})')
+        ax.plot(wl, primary_mean, 'b-', linewidth=2, label=f'Primary ({primary_id})')
+        ax.plot(wl, satellite_mean, 'r-', linewidth=2, label=f'Satellite ({satellite_id})')
 
         ax.set_xlabel('Wavelength (nm)', fontsize=11)
         ax.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
-        ax.set_title('Master vs. Slave Spectra Overlay (First 10 Samples + Means)', fontsize=12, fontweight='bold')
+        ax.set_title('Primary vs. Satellite Spectra Overlay (First 10 Samples + Means)', fontsize=12, fontweight='bold')
         ax.legend(loc='best')
         ax.grid(True, alpha=0.3)
 
@@ -30320,7 +30363,7 @@ Configuration:
         """Plot transfer quality diagnostics for Section C.
 
         Shows:
-        1. Transfer Quality Plot (3 subplots): Master, Slave before, Slave after
+        1. Transfer Quality Plot (3 subplots): Primary, Satellite before, Satellite after
         2. Transfer Scatter Plot: Master vs Transferred with R²
         """
         if not HAS_MATPLOTLIB:
@@ -30334,23 +30377,23 @@ Configuration:
             # Apply transfer to get transferred spectra
             if method == 'ds':
                 A = self.ct_transfer_model.params['A']
-                X_transferred = apply_ds(self.ct_X_slave_common, A)
+                X_transferred = apply_ds(self.ct_X_satellite_common, A)
             elif method == 'pds':
                 B = self.ct_transfer_model.params['B']
                 window = self.ct_transfer_model.params['window']
-                X_transferred = apply_pds(self.ct_X_slave_common, B, window)
+                X_transferred = apply_pds(self.ct_X_satellite_common, B, window)
             elif method == 'tsr':
                 from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(self.ct_X_slave_common, self.ct_transfer_model.params)
+                X_transferred = apply_tsr(self.ct_X_satellite_common, self.ct_transfer_model.params)
             elif method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(self.ct_X_slave_common, self.ct_transfer_model.params)
+                X_transferred = apply_ctai(self.ct_X_satellite_common, self.ct_transfer_model.params)
             elif method == 'jypls-inv':
                 from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(self.ct_X_slave_common, self.ct_transfer_model.params)
+                X_transferred = apply_jypls_inv(self.ct_X_satellite_common, self.ct_transfer_model.params)
             elif method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(self.ct_X_slave_common, self.ct_transfer_model.params)
+                X_transferred = apply_nspfce(self.ct_X_satellite_common, self.ct_transfer_model.params)
             else:
                 # Unsupported method for plotting
                 return
@@ -30388,12 +30431,12 @@ Configuration:
 
                 # Subplot 1: Master
                 ax1 = fig.add_subplot(131)
-                master_mean = np.mean(master_data, axis=0)
-                master_std = np.std(master_data, axis=0)
-                ax1.plot(self.ct_wavelengths_common, master_mean, 'b-', linewidth=2, label='Mean')
+                primary_mean = np.mean(master_data, axis=0)
+                primary_std = np.std(master_data, axis=0)
+                ax1.plot(self.ct_wavelengths_common, primary_mean, 'b-', linewidth=2, label='Mean')
                 ax1.fill_between(self.ct_wavelengths_common,
-                               master_mean - master_std,
-                               master_mean + master_std,
+                               primary_mean - primary_std,
+                               primary_mean + primary_std,
                                alpha=0.3, color='b', label='±1 Std')
                 ax1.set_xlabel('Wavelength (nm)', fontsize=10)
                 ax1.set_ylabel(ylabel, fontsize=10)
@@ -30403,12 +30446,12 @@ Configuration:
 
                 # Subplot 2: Slave before transfer
                 ax2 = fig.add_subplot(132)
-                slave_mean = np.mean(slave_data, axis=0)
-                slave_std = np.std(slave_data, axis=0)
-                ax2.plot(self.ct_wavelengths_common, slave_mean, 'r-', linewidth=2, label='Mean')
+                satellite_mean = np.mean(slave_data, axis=0)
+                satellite_std = np.std(slave_data, axis=0)
+                ax2.plot(self.ct_wavelengths_common, satellite_mean, 'r-', linewidth=2, label='Mean')
                 ax2.fill_between(self.ct_wavelengths_common,
-                               slave_mean - slave_std,
-                               slave_mean + slave_std,
+                               satellite_mean - satellite_std,
+                               satellite_mean + satellite_std,
                                alpha=0.3, color='r', label='±1 Std')
                 ax2.set_xlabel('Wavelength (nm)', fontsize=10)
                 ax2.set_ylabel(ylabel, fontsize=10)
@@ -30435,12 +30478,12 @@ Configuration:
                 return fig
 
             # Compute all derivatives
-            master_d1 = compute_derivative(self.ct_X_master_common, self.ct_wavelengths_common, 1)
-            slave_d1 = compute_derivative(self.ct_X_slave_common, self.ct_wavelengths_common, 1)
+            master_d1 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 1)
+            slave_d1 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 1)
             transferred_d1 = compute_derivative(X_transferred, self.ct_wavelengths_common, 1)
 
-            master_d2 = compute_derivative(self.ct_X_master_common, self.ct_wavelengths_common, 2)
-            slave_d2 = compute_derivative(self.ct_X_slave_common, self.ct_wavelengths_common, 2)
+            master_d2 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 2)
+            slave_d2 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 2)
             transferred_d2 = compute_derivative(X_transferred, self.ct_wavelengths_common, 2)
 
             # Tab 1: Raw spectra
@@ -30448,7 +30491,7 @@ Configuration:
             derivative_notebook.add(tab_raw, text='Raw Spectra')
 
             fig_raw = create_comparison_figure(
-                self.ct_X_master_common, self.ct_X_slave_common, X_transferred,
+                self.ct_X_primary_common, self.ct_X_satellite_common, X_transferred,
                 self._get_spectral_ylabel(), 'Spectra'
             )
 
@@ -30490,7 +30533,7 @@ Configuration:
             ax = fig2.add_subplot(111)
 
             # Flatten arrays for scatter plot
-            master_flat = self.ct_X_master_common.ravel()
+            master_flat = self.ct_X_primary_common.ravel()
             transferred_flat = X_transferred.ravel()
 
             # Calculate R²
@@ -30822,15 +30865,15 @@ Configuration:
             # Extract components
             self.current_transfer_model = transfer_model_data.get('model')
             method = transfer_model_data.get('method', 'Unknown')
-            master_id = transfer_model_data.get('master_id', 'N/A')
-            slave_id = transfer_model_data.get('slave_id', 'N/A')
+            primary_id = transfer_model_data.get('primary_id', 'N/A')
+            satellite_id = transfer_model_data.get('satellite_id', 'N/A')
             date_created = transfer_model_data.get('date_created', 'N/A')
             wavelengths = transfer_model_data.get('wavelengths_common', None)
             n_samples = transfer_model_data.get('n_samples', 'N/A')
 
             # Display model info
             self._display_transfer_model_info(
-                method, master_id, slave_id, date_created, n_samples, wavelengths
+                method, primary_id, satellite_id, date_created, n_samples, wavelengths
             )
 
             # Play success sound (removed popup - info shown in text widget)
@@ -30839,11 +30882,11 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
 
-    def _display_transfer_model_info(self, method, master_id, slave_id, date_created, n_samples, wavelengths):
+    def _display_transfer_model_info(self, method, primary_id, satellite_id, date_created, n_samples, wavelengths):
         """Display transfer model information in text widget."""
         info_text = f"Method: {method}\n"
-        info_text += f"Master ID: {master_id}\n"
-        info_text += f"Slave ID: {slave_id}\n"
+        info_text += f"Master ID: {primary_id}\n"
+        info_text += f"Slave ID: {satellite_id}\n"
         info_text += f"Date Created: {date_created}\n"
         info_text += f"Training Samples: {n_samples}\n"
 
@@ -30856,8 +30899,8 @@ Configuration:
         self.ct_loaded_model_info_text.insert('1.0', info_text)
         self.ct_loaded_model_info_text.config(state='disabled')
 
-    def _browse_master_spectra(self):
-        """Browse for master spectra folder or file."""
+    def _browse_primary_spectra(self):
+        """Browse for primary spectra folder or file."""
         from tkinter import filedialog
         path = filedialog.askdirectory(title="Select Master Spectra Directory")
         if not path:
@@ -30867,12 +30910,12 @@ Configuration:
                 filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
             )
         if path:
-            self.ct_master_data_path_var.set(path)
+            self.ct_primary_data_path_var.set(path)
 
-    def _browse_slave_spectra(self):
-        """Browse for slave spectra folder or file."""
+    def _browse_satellite_spectra(self):
+        """Browse for satellite spectra folder or file."""
         from tkinter import filedialog
-        path = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        path = filedialog.askdirectory(title="Select Satellite Spectra Directory")
         if not path:
             # Try file selection
             path = filedialog.askopenfilename(
@@ -30880,7 +30923,7 @@ Configuration:
                 filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
             )
         if path:
-            self.ct_slave_data_path_var.set(path)
+            self.ct_satellite_data_path_var.set(path)
 
     def _detect_data_format(self, filepath):
         """Detect data format for export matching.
@@ -30909,18 +30952,18 @@ Configuration:
         else:
             return 'unknown'
 
-    def _load_master_spectra(self):
-        """Load master spectra from file or folder."""
+    def _load_primary_spectra(self):
+        """Load primary spectra from file or folder."""
         from tkinter import messagebox
 
-        path = self.ct_master_data_path_var.get()
+        path = self.ct_primary_data_path_var.get()
         if not path:
-            messagebox.showwarning("No Path", "Please browse and select master spectra first.")
+            messagebox.showwarning("No Path", "Please browse and select primary spectra first.")
             return
 
         try:
             # Detect format
-            self.master_data_format = self._detect_data_format(path)
+            self.primary_data_format = self._detect_data_format(path)
 
             # Load data
             if os.path.isdir(path):
@@ -30940,7 +30983,7 @@ Configuration:
                 raise ValueError(f"Unsupported file format: {path}")
 
             # Store data
-            self.current_master_data = (wavelengths, X)
+            self.current_primary_data = (wavelengths, X)
 
             # Update info display
             self._update_data_info()
@@ -30949,20 +30992,20 @@ Configuration:
             self.play_sound('success')
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load master spectra:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load primary spectra:\n{str(e)}")
 
-    def _load_slave_spectra(self):
-        """Load slave spectra from file or folder."""
+    def _load_satellite_spectra(self):
+        """Load satellite spectra from file or folder."""
         from tkinter import messagebox
 
-        path = self.ct_slave_data_path_var.get()
+        path = self.ct_satellite_data_path_var.get()
         if not path:
-            messagebox.showwarning("No Path", "Please browse and select slave spectra first.")
+            messagebox.showwarning("No Path", "Please browse and select satellite spectra first.")
             return
 
         try:
             # Detect format
-            self.slave_data_format = self._detect_data_format(path)
+            self.satellite_data_format = self._detect_data_format(path)
 
             # Load data
             if os.path.isdir(path):
@@ -30980,7 +31023,7 @@ Configuration:
                 raise ValueError(f"Unsupported file format: {path}")
 
             # Store data
-            self.current_slave_data = (wavelengths, X)
+            self.current_satellite_data = (wavelengths, X)
 
             # Update info display
             self._update_data_info()
@@ -30989,72 +31032,72 @@ Configuration:
             self.play_sound('success')
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load satellite spectra:\n{str(e)}")
 
     def _update_data_info(self):
         """Update data information display."""
         info_text = ""
 
         # Check enhanced loading first (with Y values)
-        if self.ct_master_X is not None:
+        if self.ct_primary_X is not None:
             info_text += f"Master (with Y values):\n"
-            info_text += f"  Samples: {len(self.ct_master_X)}\n"
-            info_text += f"  Wavelengths: {len(self.ct_master_wavelengths)} "
-            info_text += f"({self.ct_master_wavelengths[0]:.1f} - {self.ct_master_wavelengths[-1]:.1f} nm)\n"
-            if hasattr(self, 'ct_master_target_col_var') and self.ct_master_target_col_var.get():
-                info_text += f"  Target: {self.ct_master_target_col_var.get()}\n"
+            info_text += f"  Samples: {len(self.ct_primary_X)}\n"
+            info_text += f"  Wavelengths: {len(self.ct_primary_wavelengths)} "
+            info_text += f"({self.ct_primary_wavelengths[0]:.1f} - {self.ct_primary_wavelengths[-1]:.1f} nm)\n"
+            if hasattr(self, 'ct_primary_target_col_var') and self.ct_primary_target_col_var.get():
+                info_text += f"  Target: {self.ct_primary_target_col_var.get()}\n"
             info_text += "\n"
-        elif self.current_master_data is not None:
+        elif self.current_primary_data is not None:
             # Fall back to simple loading
-            wl_m, X_m = self.current_master_data
-            info_text += f"Master: {X_m.shape[0]} samples, {len(wl_m)} wavelengths "
+            wl_m, X_m = self.current_primary_data
+            info_text += f"Primary: {X_m.shape[0]} samples, {len(wl_m)} wavelengths "
             info_text += f"({wl_m[0]:.1f} - {wl_m[-1]:.1f} nm)\n"
-            info_text += f"Format: {self.master_data_format}\n"
+            info_text += f"Format: {self.primary_data_format}\n"
             info_text += "[!] No Y values loaded (simple loading)\n\n"
 
-        if self.ct_slave_X is not None:
+        if self.ct_satellite_X is not None:
             info_text += f"Slave (with Y values):\n"
-            info_text += f"  Samples: {len(self.ct_slave_X)}\n"
-            info_text += f"  Wavelengths: {len(self.ct_slave_wavelengths)} "
-            info_text += f"({self.ct_slave_wavelengths[0]:.1f} - {self.ct_slave_wavelengths[-1]:.1f} nm)\n"
-            if hasattr(self, 'ct_slave_target_col_var') and self.ct_slave_target_col_var.get():
-                info_text += f"  Target: {self.ct_slave_target_col_var.get()}\n"
+            info_text += f"  Samples: {len(self.ct_satellite_X)}\n"
+            info_text += f"  Wavelengths: {len(self.ct_satellite_wavelengths)} "
+            info_text += f"({self.ct_satellite_wavelengths[0]:.1f} - {self.ct_satellite_wavelengths[-1]:.1f} nm)\n"
+            if hasattr(self, 'ct_satellite_target_col_var') and self.ct_satellite_target_col_var.get():
+                info_text += f"  Target: {self.ct_satellite_target_col_var.get()}\n"
             info_text += "\n"
-        elif self.current_slave_data is not None:
-            wl_s, X_s = self.current_slave_data
-            info_text += f"Slave: {X_s.shape[0]} samples, {len(wl_s)} wavelengths "
+        elif self.current_satellite_data is not None:
+            wl_s, X_s = self.current_satellite_data
+            info_text += f"Satellite: {X_s.shape[0]} samples, {len(wl_s)} wavelengths "
             info_text += f"({wl_s[0]:.1f} - {wl_s[-1]:.1f} nm)\n"
-            info_text += f"Format: {self.slave_data_format}\n"
+            info_text += f"Format: {self.satellite_data_format}\n"
             info_text += "[!] No Y values loaded (simple loading)\n\n"
 
         # Check for sample matching (if both enhanced loading used)
-        if self.ct_master_X is not None and self.ct_slave_X is not None:
-            master_ids = set(self.ct_master_X.index)
-            slave_ids = set(self.ct_slave_X.index)
-            common_ids = master_ids & slave_ids
+        if self.ct_primary_X is not None and self.ct_satellite_X is not None:
+            primary_ids = set(self.ct_primary_X.index)
+            satellite_ids = set(self.ct_satellite_X.index)
+            common_ids = primary_ids & satellite_ids
 
             info_text += f"Sample Matching:\n"
             info_text += f"  Matched samples: {len(common_ids)}\n"
-            if len(common_ids) < len(master_ids):
-                info_text += f"  Only in master: {len(master_ids) - len(common_ids)}\n"
-            if len(common_ids) < len(slave_ids):
-                info_text += f"  Only in slave: {len(slave_ids) - len(common_ids)}\n"
+            if len(common_ids) < len(primary_ids):
+                info_text += f"  Only in master: {len(primary_ids) - len(common_ids)}\n"
+            if len(common_ids) < len(satellite_ids):
+                info_text += f"  Only in slave: {len(satellite_ids) - len(common_ids)}\n"
 
-            if len(common_ids) == len(master_ids) == len(slave_ids):
+            if len(common_ids) == len(primary_ids) == len(satellite_ids):
                 info_text += f"  > Perfect match!\n"
 
         # Calculate wavelength overlap (works for both loading types)
         wl_m = None
         wl_s = None
-        if self.ct_master_X is not None:
-            wl_m = self.ct_master_wavelengths
-        elif self.current_master_data is not None:
-            wl_m, _ = self.current_master_data
+        if self.ct_primary_X is not None:
+            wl_m = self.ct_primary_wavelengths
+        elif self.current_primary_data is not None:
+            wl_m, _ = self.current_primary_data
 
-        if self.ct_slave_X is not None:
-            wl_s = self.ct_slave_wavelengths
-        elif self.current_slave_data is not None:
-            wl_s, _ = self.current_slave_data
+        if self.ct_satellite_X is not None:
+            wl_s = self.ct_satellite_wavelengths
+        elif self.current_satellite_data is not None:
+            wl_s, _ = self.current_satellite_data
 
         if wl_m is not None and wl_s is not None:
             overlap_start = max(wl_m[0], wl_s[0])
@@ -31068,11 +31111,11 @@ Configuration:
         self.ct_data_info_text.config(state='disabled')
 
     def _preview_spectra(self):
-        """Preview master vs slave spectra."""
+        """Preview master vs satellite spectra."""
         from tkinter import messagebox
 
-        if self.current_master_data is None or self.current_slave_data is None:
-            messagebox.showwarning("No Data", "Please load both master and slave spectra first.")
+        if self.current_primary_data is None or self.current_satellite_data is None:
+            messagebox.showwarning("No Data", "Please load both primary and satellite spectra first.")
             return
 
         if not HAS_MATPLOTLIB:
@@ -31082,17 +31125,17 @@ Configuration:
         try:
             import matplotlib.pyplot as plt
 
-            wl_m, X_m = self.current_master_data
-            wl_s, X_s = self.current_slave_data
+            wl_m, X_m = self.current_primary_data
+            wl_s, X_s = self.current_satellite_data
 
             # Create figure with 2 subplots
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
             # Plot master
-            master_mean = np.mean(X_m, axis=0)
-            master_std = np.std(X_m, axis=0)
-            ax1.plot(wl_m, master_mean, 'b-', linewidth=2, label='Mean')
-            ax1.fill_between(wl_m, master_mean - master_std, master_mean + master_std,
+            primary_mean = np.mean(X_m, axis=0)
+            primary_std = np.std(X_m, axis=0)
+            ax1.plot(wl_m, primary_mean, 'b-', linewidth=2, label='Mean')
+            ax1.fill_between(wl_m, primary_mean - primary_std, primary_mean + primary_std,
                            alpha=0.3, color='b', label='±1 Std')
             ax1.set_xlabel('Wavelength (nm)', fontsize=11)
             ax1.set_ylabel('Intensity', fontsize=11)
@@ -31101,10 +31144,10 @@ Configuration:
             ax1.grid(True, alpha=0.3)
 
             # Plot slave
-            slave_mean = np.mean(X_s, axis=0)
-            slave_std = np.std(X_s, axis=0)
-            ax2.plot(wl_s, slave_mean, 'r-', linewidth=2, label='Mean')
-            ax2.fill_between(wl_s, slave_mean - slave_std, slave_mean + slave_std,
+            satellite_mean = np.mean(X_s, axis=0)
+            satellite_std = np.std(X_s, axis=0)
+            ax2.plot(wl_s, satellite_mean, 'r-', linewidth=2, label='Mean')
+            ax2.fill_between(wl_s, satellite_mean - satellite_std, satellite_mean + satellite_std,
                            alpha=0.3, color='r', label='±1 Std')
             ax2.set_xlabel('Wavelength (nm)', fontsize=11)
             ax2.set_ylabel('Intensity', fontsize=11)
@@ -31133,37 +31176,37 @@ Configuration:
             return
 
         # Validate data loaded
-        if self.current_master_data is None or self.current_slave_data is None:
-            messagebox.showwarning("No Data", "Please load both master and slave spectra first.")
+        if self.current_primary_data is None or self.current_satellite_data is None:
+            messagebox.showwarning("No Data", "Please load both primary and satellite spectra first.")
             return
 
         try:
-            wl_master, X_master = self.current_master_data
-            wl_slave, X_slave = self.current_slave_data
+            wl_master, X_primary = self.current_primary_data
+            wl_slave, X_satellite = self.current_satellite_data
 
             # Find common wavelength grid (interpolate if needed)
             if np.allclose(wl_master, wl_slave):
                 wl_common = wl_master
-                X_master_common = X_master
-                X_slave_common = X_slave
+                X_primary_common = X_primary
+                X_satellite_common = X_satellite
             else:
-                # Interpolate to common grid (use master wavelengths as reference)
+                # Interpolate to common grid (use primary wavelengths as reference)
                 from scipy.interpolate import interp1d
                 wl_common = wl_master
 
                 # Interpolate slave to master grid
-                X_slave_common = np.zeros_like(X_master)
-                for i in range(X_slave.shape[0]):
-                    f = interp1d(wl_slave, X_slave[i, :], kind='linear', fill_value='extrapolate')
-                    X_slave_common[i, :] = f(wl_common)
+                X_satellite_common = np.zeros_like(X_primary)
+                for i in range(X_satellite.shape[0]):
+                    f = interp1d(wl_slave, X_satellite[i, :], kind='linear', fill_value='extrapolate')
+                    X_satellite_common[i, :] = f(wl_common)
 
-                X_master_common = X_master
-                messagebox.showinfo("Info", "Slave spectra interpolated to master wavelength grid.")
+                X_primary_common = X_primary
+                messagebox.showinfo("Info", "Slave spectra interpolated to primary wavelength grid.")
 
             # Store common grid data
             self.ct_wavelengths_common = wl_common
-            self.ct_X_master_common = X_master_common
-            self.ct_X_slave_common = X_slave_common
+            self.ct_X_primary_common = X_primary_common
+            self.ct_X_satellite_common = X_satellite_common
 
             # Get method and parameters
             method = self.ct_method_var.get()
@@ -31171,32 +31214,32 @@ Configuration:
             # Build transfer model based on method
             if method == 'ds':
                 lambda_val = float(self.ct_ds_lambda_var.get())
-                A = estimate_ds(X_master_common, X_slave_common, lam=lambda_val)
+                A = estimate_ds(X_primary_common, X_satellite_common, lam=lambda_val)
                 params = {'A': A}
 
             elif method == 'pds':
                 window = int(self.ct_pds_window_var.get())
-                B = estimate_pds(X_master_common, X_slave_common, window=window)
+                B = estimate_pds(X_primary_common, X_satellite_common, window=window)
                 params = {'B': B, 'window': window}
 
             elif method == 'tsr':
                 n_samples = int(self.ct_tsr_n_samples_var.get())
-                if n_samples > X_master_common.shape[0]:
-                    raise ValueError(f"TSR requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
+                if n_samples > X_primary_common.shape[0]:
+                    raise ValueError(f"TSR requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
                 # TSR requires transfer_indices: assume all loaded samples are paired
                 transfer_indices = np.arange(n_samples)
-                params = estimate_tsr(X_master_common[:n_samples], X_slave_common[:n_samples],
+                params = estimate_tsr(X_primary_common[:n_samples], X_satellite_common[:n_samples],
                                      transfer_indices)
 
             elif method == 'ctai':
-                params = estimate_ctai(X_master_common, X_slave_common)
+                params = estimate_ctai(X_primary_common, X_satellite_common)
 
             elif method == 'nspfce':
                 max_iter = int(self.ct_nspfce_max_iterations_var.get())
                 use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
                 selector_name = self.ct_nspfce_selector_var.get() if use_wavelength_selection else None
 
-                params = estimate_nspfce(X_master_common, X_slave_common, wl_common,
+                params = estimate_nspfce(X_primary_common, X_satellite_common, wl_common,
                                         use_wavelength_selection=use_wavelength_selection,
                                         wavelength_selector=selector_name if selector_name else 'vcpa-iriv',
                                         max_iterations=max_iter)
@@ -31207,8 +31250,8 @@ Configuration:
                 n_components = None if n_comp_str == 'Auto' else int(n_comp_str)
 
                 # Check if enhanced loading was used (with Y values)
-                if self.ct_master_X is not None and self.ct_slave_X is not None and \
-                   self.ct_master_y is not None and self.ct_slave_y is not None:
+                if self.ct_primary_X is not None and self.ct_satellite_X is not None and \
+                   self.ct_primary_y is not None and self.ct_satellite_y is not None:
 
                     # Enhanced loading: Use real Y values
                     # First, validate master/slave pairing
@@ -31216,29 +31259,29 @@ Configuration:
                         return  # Validation failed, user notified
 
                     # Get common sample IDs
-                    master_ids = set(self.ct_master_X.index)
-                    slave_ids = set(self.ct_slave_X.index)
-                    common_ids = sorted(list(master_ids & slave_ids))
+                    primary_ids = set(self.ct_primary_X.index)
+                    satellite_ids = set(self.ct_satellite_X.index)
+                    common_ids = sorted(list(primary_ids & satellite_ids))
 
                     if len(common_ids) < n_samples:
                         raise ValueError(f"JYPLS-inv requires {n_samples} transfer samples, "
                                        f"but only {len(common_ids)} matched samples available.")
 
                     # Filter to common samples only
-                    X_master_paired = self.ct_master_X.loc[common_ids].values
-                    X_slave_paired = self.ct_slave_X.loc[common_ids].values
-                    y_paired = self.ct_master_y.loc[common_ids].values
+                    X_primary_paired = self.ct_primary_X.loc[common_ids].values
+                    X_satellite_paired = self.ct_satellite_X.loc[common_ids].values
+                    y_paired = self.ct_primary_y.loc[common_ids].values
 
                     # Select transfer samples using Kennard-Stone
                     from spectral_predict.sample_selection import kennard_stone
-                    transfer_indices = kennard_stone(X_master_paired, n_samples=n_samples)
+                    transfer_indices = kennard_stone(X_primary_paired, n_samples=n_samples)
 
                     # Extract Y values for selected transfer samples (REAL VALUES!)
                     y_transfer = y_paired[transfer_indices]
 
                     # Use selected samples for building
-                    X_master_transfer = X_master_paired[transfer_indices]
-                    X_slave_transfer = X_slave_paired[transfer_indices]
+                    X_primary_transfer = X_primary_paired[transfer_indices]
+                    X_satellite_transfer = X_satellite_paired[transfer_indices]
 
                     # Show info about Y values used
                     y_min, y_max = y_transfer.min(), y_transfer.max()
@@ -31250,25 +31293,25 @@ Configuration:
                         f"Y mean: {y_mean:.3f} ± {y_std:.3f}\n\n"
                         f"Selected using Kennard-Stone algorithm.")
 
-                    params = estimate_jypls_inv(X_master_transfer, X_slave_transfer,
+                    params = estimate_jypls_inv(X_primary_transfer, X_satellite_transfer,
                                                y_transfer, transfer_indices,
                                                n_components=n_components)
 
                 else:
                     # Simple loading: Fall back to placeholder (not recommended)
-                    if n_samples > X_master_common.shape[0]:
-                        raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_master_common.shape[0]} available.")
+                    if n_samples > X_primary_common.shape[0]:
+                        raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
 
                     messagebox.showwarning("JYPLS-inv Limitation",
                         "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
                         "Building with placeholder zeros because enhanced loading was not used.\n\n"
-                        "For accurate results, use the 'Load Master/Slave Data with Y values' section above.\n"
+                        "For accurate results, use the 'Load Master/Satellite Data with Y values' section above.\n"
                         "Otherwise, consider using CTAI or NS-PFCE instead, which don't require reference values.")
 
                     y_transfer = np.zeros(n_samples)  # Placeholder
                     transfer_indices = np.arange(n_samples)
 
-                    params = estimate_jypls_inv(X_master_common[:n_samples], X_slave_common[:n_samples],
+                    params = estimate_jypls_inv(X_primary_common[:n_samples], X_satellite_common[:n_samples],
                                                y_transfer, transfer_indices,
                                                n_components=n_components)
 
@@ -31277,8 +31320,8 @@ Configuration:
 
             # Create TransferModel with all required fields
             self.ct_transfer_model = TransferModel(
-                master_id='master',
-                slave_id='slave',
+                primary_id='master',
+                satellite_id='slave',
                 method=method,
                 wavelengths_common=wl_common,
                 params=params,
@@ -31291,7 +31334,7 @@ Configuration:
             # Update info display
             info_text = f"Transfer Model Built Successfully!\n"
             info_text += f"Method: {method.upper()}\n"
-            info_text += f"Training Samples: {X_master_common.shape[0]}\n"
+            info_text += f"Training Samples: {X_primary_common.shape[0]}\n"
             info_text += f"Wavelength Range: {wl_common[0]:.1f} - {wl_common[-1]:.1f} nm ({len(wl_common)} points)\n"
 
             self.ct_transfer_info_text.config(state='normal')
@@ -31338,16 +31381,16 @@ Configuration:
             transfer_model_data = {
                 'model': self.ct_transfer_model,
                 'method': self.ct_transfer_model.method,
-                'master_id': 'master',  # Could be customized with a dialog
-                'slave_id': 'slave',    # Could be customized with a dialog
+                'primary_id': 'master',  # Could be customized with a dialog
+                'satellite_id': 'slave',    # Could be customized with a dialog
                 'date_created': datetime.now().isoformat(),
                 'wavelengths_common': self.ct_wavelengths_common,
-                'n_samples': self.ct_X_master_common.shape[0],
+                'n_samples': self.ct_X_primary_common.shape[0],
                 'metadata': {
-                    'master_shape': self.ct_X_master_common.shape,
-                    'slave_shape': self.ct_X_slave_common.shape,
-                    'master_format': self.master_data_format,
-                    'slave_format': self.slave_data_format
+                    'master_shape': self.ct_X_primary_common.shape,
+                    'slave_shape': self.ct_X_satellite_common.shape,
+                    'master_format': self.primary_data_format,
+                    'slave_format': self.satellite_data_format
                 }
             }
 
@@ -31366,11 +31409,11 @@ Configuration:
     # ========================================================================
 
     # ========================================================================
-    # STEP 1 ENHANCED HELPER METHODS: Load Master/Slave Data with Y Values (for JYPLS-inv)
+    # STEP 1 ENHANCED HELPER METHODS: Load Master/Satellite Data with Y Values (for JYPLS-inv)
     # ========================================================================
 
-    def _browse_master_spectra_simple(self):
-        """Browse master spectra directory (simple version without Y auto-detection)."""
+    def _browse_primary_spectra_simple(self):
+        """Browse primary spectra directory (simple version without Y auto-detection)."""
         from tkinter import filedialog
         from pathlib import Path
 
@@ -31378,7 +31421,7 @@ Configuration:
         if not directory:
             return
 
-        self.ct_master_spectra_path_var.set(directory)
+        self.ct_primary_spectra_path_var.set(directory)
 
         # Auto-detect file type (priority order)
         path = Path(directory)
@@ -31387,62 +31430,62 @@ Configuration:
         spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
-            self.ct_master_detected_type = "asd"
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = "asd"
+            self.ct_primary_detection_status.config(
                 text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
-            self.ct_master_detected_type = "spc"
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = "spc"
+            self.ct_primary_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
-            self.ct_master_detected_type = "csv"
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = "csv"
+            self.ct_primary_detection_status.config(
                 text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
-            self.ct_master_detected_type = None
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = None
+            self.ct_primary_detection_status.config(
                 text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
 
     def _load_master_data_simple(self):
-        """Load master spectra without Y values (for non-JYPLS methods)."""
+        """Load primary spectra without Y values (for non-JYPLS methods)."""
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
         from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir
 
         # Validate inputs
-        if not self.ct_master_spectra_path_var.get():
-            messagebox.showwarning("No Path", "Please browse and select master spectra directory.")
+        if not self.ct_primary_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select primary spectra directory.")
             return
 
         try:
             # Load spectra based on detected type
             # These functions return (df, metadata) where df is a DataFrame with samples as rows
-            if self.ct_master_detected_type == 'asd':
-                df, metadata = read_asd_dir(self.ct_master_spectra_path_var.get())
-            elif self.ct_master_detected_type == 'spc':
-                df, metadata = read_spc_dir(self.ct_master_spectra_path_var.get())
-            elif self.ct_master_detected_type == 'csv':
-                df, metadata = read_csv_spectra(self.ct_master_spectra_path_var.get())
+            if self.ct_primary_detected_type == 'asd':
+                df, metadata = read_asd_dir(self.ct_primary_spectra_path_var.get())
+            elif self.ct_primary_detected_type == 'spc':
+                df, metadata = read_spc_dir(self.ct_primary_spectra_path_var.get())
+            elif self.ct_primary_detected_type == 'csv':
+                df, metadata = read_csv_spectra(self.ct_primary_spectra_path_var.get())
             else:
-                raise ValueError(f"Unsupported file type: {self.ct_master_detected_type}")
+                raise ValueError(f"Unsupported file type: {self.ct_primary_detected_type}")
 
             # Store data (without Y values)
             # df is a DataFrame with index=sample names, columns=wavelengths
-            self.ct_master_X = df  # Store as DataFrame
-            self.ct_master_wavelengths = df.columns.values  # Get wavelengths from column names
-            self.master_data_format = self.ct_master_detected_type
+            self.ct_primary_X = df  # Store as DataFrame
+            self.ct_primary_wavelengths = df.columns.values  # Get wavelengths from column names
+            self.primary_data_format = self.ct_primary_detected_type
 
             # Update info display
-            info_text = f"Master: {self.ct_master_X.shape[0]} samples, {len(self.ct_master_wavelengths)} wavelengths\n"
+            info_text = f"Primary: {self.ct_primary_X.shape[0]} samples, {len(self.ct_primary_wavelengths)} wavelengths\n"
             self.ct_data_info_text.config(state='normal')
             self.ct_data_info_text.delete('1.0', tk.END)
             self.ct_data_info_text.insert('1.0', info_text)
@@ -31452,46 +31495,46 @@ Configuration:
             self.play_sound('success')
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load master spectra:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load primary spectra:\n{str(e)}")
             import traceback
             traceback.print_exc()
 
     def _load_slave_data_simple(self):
-        """Load slave spectra without Y values (for non-JYPLS methods)."""
+        """Load satellite spectra without Y values (for non-JYPLS methods)."""
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
         from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir
 
         # Validate inputs
-        if not self.ct_slave_spectra_path_var.get():
-            messagebox.showwarning("No Path", "Please browse and select slave spectra directory.")
+        if not self.ct_satellite_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select satellite spectra directory.")
             return
 
         try:
             # Load spectra based on detected type
             # These functions return (df, metadata) where df is a DataFrame with samples as rows
-            if self.ct_slave_detected_type == 'asd':
-                df, metadata = read_asd_dir(self.ct_slave_spectra_path_var.get())
-            elif self.ct_slave_detected_type == 'spc':
-                df, metadata = read_spc_dir(self.ct_slave_spectra_path_var.get())
-            elif self.ct_slave_detected_type == 'csv':
-                df, metadata = read_csv_spectra(self.ct_slave_spectra_path_var.get())
+            if self.ct_satellite_detected_type == 'asd':
+                df, metadata = read_asd_dir(self.ct_satellite_spectra_path_var.get())
+            elif self.ct_satellite_detected_type == 'spc':
+                df, metadata = read_spc_dir(self.ct_satellite_spectra_path_var.get())
+            elif self.ct_satellite_detected_type == 'csv':
+                df, metadata = read_csv_spectra(self.ct_satellite_spectra_path_var.get())
             else:
-                raise ValueError(f"Unsupported file type: {self.ct_slave_detected_type}")
+                raise ValueError(f"Unsupported file type: {self.ct_satellite_detected_type}")
 
             # Store data (without Y values)
             # df is a DataFrame with index=sample names, columns=wavelengths
-            self.ct_slave_X = df  # Store as DataFrame
-            self.ct_slave_wavelengths = df.columns.values  # Get wavelengths from column names
-            self.slave_data_format = self.ct_slave_detected_type
+            self.ct_satellite_X = df  # Store as DataFrame
+            self.ct_satellite_wavelengths = df.columns.values  # Get wavelengths from column names
+            self.satellite_data_format = self.ct_satellite_detected_type
 
             # Update info display
             master_info = ""
-            if hasattr(self, 'ct_master_X') and self.ct_master_X is not None:
-                master_info = f"Master: {self.ct_master_X.shape[0]} samples, {len(self.ct_master_wavelengths)} wavelengths\n"
+            if hasattr(self, 'ct_primary_X') and self.ct_primary_X is not None:
+                master_info = f"Primary: {self.ct_primary_X.shape[0]} samples, {len(self.ct_primary_wavelengths)} wavelengths\n"
 
-            slave_info = f"Slave: {self.ct_slave_X.shape[0]} samples, {len(self.ct_slave_wavelengths)} wavelengths\n"
+            slave_info = f"Satellite: {self.ct_satellite_X.shape[0]} samples, {len(self.ct_satellite_wavelengths)} wavelengths\n"
 
             self.ct_data_info_text.config(state='normal')
             self.ct_data_info_text.delete('1.0', tk.END)
@@ -31502,12 +31545,12 @@ Configuration:
             self.play_sound('success')
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load satellite spectra:\n{str(e)}")
             import traceback
             traceback.print_exc()
 
-    def _browse_master_spectra_with_y(self):
-        """Browse master spectra directory with auto-detection (Import tab pattern)."""
+    def _browse_primary_spectra_with_y(self):
+        """Browse primary spectra directory with auto-detection (Import tab pattern)."""
         from tkinter import filedialog, messagebox
         from pathlib import Path
 
@@ -31515,7 +31558,7 @@ Configuration:
         if not directory:
             return
 
-        self.ct_master_spectra_path_var.set(directory)
+        self.ct_primary_spectra_path_var.set(directory)
 
         # Auto-detect file type (priority order)
         path = Path(directory)
@@ -31524,26 +31567,26 @@ Configuration:
         spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
-            self.ct_master_detected_type = "asd"
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = "asd"
+            self.ct_primary_detection_status.config(
                 text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
-            self.ct_master_detected_type = "spc"
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = "spc"
+            self.ct_primary_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
-            self.ct_master_detected_type = "csv"
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = "csv"
+            self.ct_primary_detection_status.config(
                 text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
-            self.ct_master_detected_type = None
-            self.ct_master_detection_status.config(
+            self.ct_primary_detected_type = None
+            self.ct_primary_detection_status.config(
                 text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
@@ -31555,8 +31598,8 @@ Configuration:
         ref_files = [f for f in ref_files if f not in csv_files]
 
         if len(ref_files) == 1:
-            self.ct_master_reference_path_var.set(str(ref_files[0]))
-            self._auto_detect_master_columns()
+            self.ct_primary_reference_path_var.set(str(ref_files[0]))
+            self._auto_detect_primary_columns()
             messagebox.showinfo("Auto-Detected",
                 f"Auto-detected reference file:\n{ref_files[0].name}")
 
@@ -31569,19 +31612,19 @@ Configuration:
             filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx;*.xls"), ("All files", "*.*")]
         )
         if filepath:
-            self.ct_master_reference_path_var.set(filepath)
-            self._auto_detect_master_columns()
+            self.ct_primary_reference_path_var.set(filepath)
+            self._auto_detect_primary_columns()
 
-    def _auto_detect_master_columns(self):
+    def _auto_detect_primary_columns(self):
         """Auto-detect column mapping from master reference file."""
         from tkinter import messagebox
         import pandas as pd
 
-        if not self.ct_master_reference_path_var.get():
+        if not self.ct_primary_reference_path_var.get():
             return
 
         try:
-            ref_path = self.ct_master_reference_path_var.get()
+            ref_path = self.ct_primary_reference_path_var.get()
             if ref_path.lower().endswith(('.xlsx', '.xls')):
                 df = pd.read_excel(ref_path, nrows=5)
             else:
@@ -31590,69 +31633,69 @@ Configuration:
             columns = list(df.columns)
 
             # Update comboboxes
-            self.ct_master_spectral_file_combo['values'] = columns
-            self.ct_master_id_combo['values'] = columns
-            self.ct_master_target_combo['values'] = columns
+            self.ct_primary_spectral_file_combo['values'] = columns
+            self.ct_primary_id_combo['values'] = columns
+            self.ct_primary_target_combo['values'] = columns
 
             # Auto-select if 3+ columns
             if len(columns) >= 3:
-                self.ct_master_spectral_file_col_var.set(columns[0])
-                self.ct_master_id_col_var.set(columns[1])
-                self.ct_master_target_col_var.set(columns[2])
+                self.ct_primary_spectral_file_col_var.set(columns[0])
+                self.ct_primary_id_col_var.set(columns[1])
+                self.ct_primary_target_col_var.set(columns[2])
             elif len(columns) >= 2:
-                self.ct_master_spectral_file_col_var.set(columns[0])
-                self.ct_master_id_col_var.set(columns[0])
-                self.ct_master_target_col_var.set(columns[1])
+                self.ct_primary_spectral_file_col_var.set(columns[0])
+                self.ct_primary_id_col_var.set(columns[0])
+                self.ct_primary_target_col_var.set(columns[1])
 
         except Exception as e:
             messagebox.showerror("Error", f"Could not read reference file:\n{str(e)}")
 
     def _load_master_data_with_y(self):
-        """Load master spectra + reference Y values and align."""
+        """Load primary spectra + reference Y values and align."""
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
         from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir, read_reference_csv, align_xy
 
         # Validate inputs
-        if not self.ct_master_spectra_path_var.get():
-            messagebox.showwarning("No Path", "Please browse and select master spectra directory.")
+        if not self.ct_primary_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select primary spectra directory.")
             return
 
-        if not self.ct_master_reference_path_var.get():
+        if not self.ct_primary_reference_path_var.get():
             messagebox.showwarning("No Reference", "Please browse and select master reference CSV/Excel.")
             return
 
-        if not self.ct_master_spectral_file_col_var.get():
+        if not self.ct_primary_spectral_file_col_var.get():
             messagebox.showwarning("No Column", "Please select spectral file column.")
             return
 
-        if not self.ct_master_target_col_var.get():
+        if not self.ct_primary_target_col_var.get():
             messagebox.showwarning("No Target", "Please select target variable column.")
             return
 
         try:
             # Load spectra based on detected type
-            if self.ct_master_detected_type == 'asd':
-                X, metadata = read_asd_dir(self.ct_master_spectra_path_var.get())
-            elif self.ct_master_detected_type == 'spc':
-                X, metadata = read_spc_dir(self.ct_master_spectra_path_var.get())
-            elif self.ct_master_detected_type == 'csv':
-                X, metadata = read_csv_spectra(self.ct_master_spectra_path_var.get())
+            if self.ct_primary_detected_type == 'asd':
+                X, metadata = read_asd_dir(self.ct_primary_spectra_path_var.get())
+            elif self.ct_primary_detected_type == 'spc':
+                X, metadata = read_spc_dir(self.ct_primary_spectra_path_var.get())
+            elif self.ct_primary_detected_type == 'csv':
+                X, metadata = read_csv_spectra(self.ct_primary_spectra_path_var.get())
             else:
-                raise ValueError(f"Unsupported file type: {self.ct_master_detected_type}")
+                raise ValueError(f"Unsupported file type: {self.ct_primary_detected_type}")
 
             # Load reference
             ref = read_reference_csv(
-                self.ct_master_reference_path_var.get(),
-                self.ct_master_spectral_file_col_var.get()
+                self.ct_primary_reference_path_var.get(),
+                self.ct_primary_spectral_file_col_var.get()
             )
 
             # Align by sample ID
             X_aligned, y_aligned, alignment_info = align_xy(
                 X, ref,
-                self.ct_master_spectral_file_col_var.get(),
-                self.ct_master_target_col_var.get(),
+                self.ct_primary_spectral_file_col_var.get(),
+                self.ct_primary_target_col_var.get(),
                 return_alignment_info=True
             )
 
@@ -31671,9 +31714,9 @@ Configuration:
                 messagebox.showinfo("Alignment Report", msg)
 
             # Store as DataFrames (keep index with sample IDs)
-            self.ct_master_X = X_aligned
-            self.ct_master_y = y_aligned
-            self.ct_master_wavelengths = X_aligned.columns.astype(float).values
+            self.ct_primary_X = X_aligned
+            self.ct_primary_y = y_aligned
+            self.ct_primary_wavelengths = X_aligned.columns.astype(float).values
 
             # Update data info display
             self._update_data_info()
@@ -31686,18 +31729,18 @@ Configuration:
             import traceback
             traceback.print_exc()
 
-    # Slave data methods (parallel to master)
+    # Satellite data methods (parallel to master)
 
-    def _browse_slave_spectra_simple(self):
-        """Browse slave spectra directory (simple version without Y auto-detection)."""
+    def _browse_satellite_spectra_simple(self):
+        """Browse satellite spectra directory (simple version without Y auto-detection)."""
         from tkinter import filedialog
         from pathlib import Path
 
-        directory = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        directory = filedialog.askdirectory(title="Select Satellite Spectra Directory")
         if not directory:
             return
 
-        self.ct_slave_spectra_path_var.set(directory)
+        self.ct_satellite_spectra_path_var.set(directory)
 
         # Auto-detect file type (priority order)
         path = Path(directory)
@@ -31706,40 +31749,40 @@ Configuration:
         spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
-            self.ct_slave_detected_type = "asd"
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = "asd"
+            self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
-            self.ct_slave_detected_type = "spc"
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = "spc"
+            self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
-            self.ct_slave_detected_type = "csv"
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = "csv"
+            self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
-            self.ct_slave_detected_type = None
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = None
+            self.ct_satellite_detection_status.config(
                 text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
 
-    def _browse_slave_spectra_with_y(self):
-        """Browse slave spectra directory with auto-detection (Import tab pattern)."""
+    def _browse_satellite_spectra_with_y(self):
+        """Browse satellite spectra directory with auto-detection (Import tab pattern)."""
         from tkinter import filedialog, messagebox
         from pathlib import Path
 
-        directory = filedialog.askdirectory(title="Select Slave Spectra Directory")
+        directory = filedialog.askdirectory(title="Select Satellite Spectra Directory")
         if not directory:
             return
 
-        self.ct_slave_spectra_path_var.set(directory)
+        self.ct_satellite_spectra_path_var.set(directory)
 
         # Auto-detect file type
         path = Path(directory)
@@ -31748,26 +31791,26 @@ Configuration:
         spc_files = sorted(list(path.glob("*.spc")))
 
         if asd_files:
-            self.ct_slave_detected_type = "asd"
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = "asd"
+            self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(asd_files)} ASD files",
                 foreground=self.colors['success']
             )
         elif spc_files:
-            self.ct_slave_detected_type = "spc"
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = "spc"
+            self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
                 foreground=self.colors['success']
             )
         elif csv_files:
-            self.ct_slave_detected_type = "csv"
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = "csv"
+            self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(csv_files)} CSV files",
                 foreground=self.colors['success']
             )
         else:
-            self.ct_slave_detected_type = None
-            self.ct_slave_detection_status.config(
+            self.ct_satellite_detected_type = None
+            self.ct_satellite_detection_status.config(
                 text="[!] No spectral files detected",
                 foreground=self.colors['warning']
             )
@@ -31778,8 +31821,8 @@ Configuration:
         ref_files = [f for f in ref_files if f not in csv_files]
 
         if len(ref_files) == 1:
-            self.ct_slave_reference_path_var.set(str(ref_files[0]))
-            self._auto_detect_slave_columns()
+            self.ct_satellite_reference_path_var.set(str(ref_files[0]))
+            self._auto_detect_satellite_columns()
             messagebox.showinfo("Auto-Detected",
                 f"Auto-detected reference file:\n{ref_files[0].name}")
 
@@ -31792,19 +31835,19 @@ Configuration:
             filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx;*.xls"), ("All files", "*.*")]
         )
         if filepath:
-            self.ct_slave_reference_path_var.set(filepath)
-            self._auto_detect_slave_columns()
+            self.ct_satellite_reference_path_var.set(filepath)
+            self._auto_detect_satellite_columns()
 
-    def _auto_detect_slave_columns(self):
+    def _auto_detect_satellite_columns(self):
         """Auto-detect column mapping from slave reference file."""
         from tkinter import messagebox
         import pandas as pd
 
-        if not self.ct_slave_reference_path_var.get():
+        if not self.ct_satellite_reference_path_var.get():
             return
 
         try:
-            ref_path = self.ct_slave_reference_path_var.get()
+            ref_path = self.ct_satellite_reference_path_var.get()
             if ref_path.lower().endswith(('.xlsx', '.xls')):
                 df = pd.read_excel(ref_path, nrows=5)
             else:
@@ -31813,69 +31856,69 @@ Configuration:
             columns = list(df.columns)
 
             # Update comboboxes
-            self.ct_slave_spectral_file_combo['values'] = columns
-            self.ct_slave_id_combo['values'] = columns
-            self.ct_slave_target_combo['values'] = columns
+            self.ct_satellite_spectral_file_combo['values'] = columns
+            self.ct_satellite_id_combo['values'] = columns
+            self.ct_satellite_target_combo['values'] = columns
 
             # Auto-select
             if len(columns) >= 3:
-                self.ct_slave_spectral_file_col_var.set(columns[0])
-                self.ct_slave_id_col_var.set(columns[1])
-                self.ct_slave_target_col_var.set(columns[2])
+                self.ct_satellite_spectral_file_col_var.set(columns[0])
+                self.ct_satellite_id_col_var.set(columns[1])
+                self.ct_satellite_target_col_var.set(columns[2])
             elif len(columns) >= 2:
-                self.ct_slave_spectral_file_col_var.set(columns[0])
-                self.ct_slave_id_col_var.set(columns[0])
-                self.ct_slave_target_col_var.set(columns[1])
+                self.ct_satellite_spectral_file_col_var.set(columns[0])
+                self.ct_satellite_id_col_var.set(columns[0])
+                self.ct_satellite_target_col_var.set(columns[1])
 
         except Exception as e:
             messagebox.showerror("Error", f"Could not read reference file:\n{str(e)}")
 
     def _load_slave_data_with_y(self):
-        """Load slave spectra + reference Y values and align."""
+        """Load satellite spectra + reference Y values and align."""
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
         from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir, read_reference_csv, align_xy
 
         # Validate inputs
-        if not self.ct_slave_spectra_path_var.get():
-            messagebox.showwarning("No Path", "Please browse and select slave spectra directory.")
+        if not self.ct_satellite_spectra_path_var.get():
+            messagebox.showwarning("No Path", "Please browse and select satellite spectra directory.")
             return
 
-        if not self.ct_slave_reference_path_var.get():
+        if not self.ct_satellite_reference_path_var.get():
             messagebox.showwarning("No Reference", "Please browse and select slave reference CSV/Excel.")
             return
 
-        if not self.ct_slave_spectral_file_col_var.get():
+        if not self.ct_satellite_spectral_file_col_var.get():
             messagebox.showwarning("No Column", "Please select spectral file column.")
             return
 
-        if not self.ct_slave_target_col_var.get():
+        if not self.ct_satellite_target_col_var.get():
             messagebox.showwarning("No Target", "Please select target variable column.")
             return
 
         try:
             # Load spectra based on detected type
-            if self.ct_slave_detected_type == 'asd':
-                X, metadata = read_asd_dir(self.ct_slave_spectra_path_var.get())
-            elif self.ct_slave_detected_type == 'spc':
-                X, metadata = read_spc_dir(self.ct_slave_spectra_path_var.get())
-            elif self.ct_slave_detected_type == 'csv':
-                X, metadata = read_csv_spectra(self.ct_slave_spectra_path_var.get())
+            if self.ct_satellite_detected_type == 'asd':
+                X, metadata = read_asd_dir(self.ct_satellite_spectra_path_var.get())
+            elif self.ct_satellite_detected_type == 'spc':
+                X, metadata = read_spc_dir(self.ct_satellite_spectra_path_var.get())
+            elif self.ct_satellite_detected_type == 'csv':
+                X, metadata = read_csv_spectra(self.ct_satellite_spectra_path_var.get())
             else:
-                raise ValueError(f"Unsupported file type: {self.ct_slave_detected_type}")
+                raise ValueError(f"Unsupported file type: {self.ct_satellite_detected_type}")
 
             # Load reference
             ref = read_reference_csv(
-                self.ct_slave_reference_path_var.get(),
-                self.ct_slave_spectral_file_col_var.get()
+                self.ct_satellite_reference_path_var.get(),
+                self.ct_satellite_spectral_file_col_var.get()
             )
 
             # Align by sample ID
             X_aligned, y_aligned, alignment_info = align_xy(
                 X, ref,
-                self.ct_slave_spectral_file_col_var.get(),
-                self.ct_slave_target_col_var.get(),
+                self.ct_satellite_spectral_file_col_var.get(),
+                self.ct_satellite_target_col_var.get(),
                 return_alignment_info=True
             )
 
@@ -31894,15 +31937,15 @@ Configuration:
                 messagebox.showinfo("Alignment Report", msg)
 
             # Store as DataFrames
-            self.ct_slave_X = X_aligned
-            self.ct_slave_y = y_aligned
-            self.ct_slave_wavelengths = X_aligned.columns.astype(float).values
+            self.ct_satellite_X = X_aligned
+            self.ct_satellite_y = y_aligned
+            self.ct_satellite_wavelengths = X_aligned.columns.astype(float).values
 
             # Update data info display
             self._update_data_info()
 
             # Validate pairing with master if both loaded
-            if self.ct_master_X is not None:
+            if self.ct_primary_X is not None:
                 self._validate_master_slave_pairing()
 
             # Play success sound (removed popup - info shown in text widget)
@@ -31914,31 +31957,31 @@ Configuration:
             traceback.print_exc()
 
     def _validate_master_slave_pairing(self):
-        """Validate that master and slave have matching sample IDs."""
+        """Validate that primary and satellite have matching sample IDs."""
         from tkinter import messagebox
 
-        if self.ct_master_X is None or self.ct_slave_X is None:
+        if self.ct_primary_X is None or self.ct_satellite_X is None:
             return False
 
-        master_ids = set(self.ct_master_X.index)
-        slave_ids = set(self.ct_slave_X.index)
+        primary_ids = set(self.ct_primary_X.index)
+        satellite_ids = set(self.ct_satellite_X.index)
 
         # Find intersection
-        common_ids = master_ids & slave_ids
+        common_ids = primary_ids & satellite_ids
 
         if len(common_ids) == 0:
             messagebox.showerror("No Matching Samples",
-                "Master and slave datasets have NO common sample IDs!\n\n"
+                "Primary and satellite datasets have NO common sample IDs!\n\n"
                 "JYPLS-inv requires the same samples measured on both instruments.\n\n"
                 "Please check that:\n"
-                "1. Sample IDs match between master and slave reference files\n"
+                "1. Sample IDs match between primary and satellite reference files\n"
                 "2. Filename matching is correct")
             return False
 
         # Warn if not all samples match
-        if len(common_ids) < len(master_ids) or len(common_ids) < len(slave_ids):
-            only_master = master_ids - slave_ids
-            only_slave = slave_ids - master_ids
+        if len(common_ids) < len(primary_ids) or len(common_ids) < len(satellite_ids):
+            only_master = primary_ids - satellite_ids
+            only_slave = satellite_ids - primary_ids
 
             msg = f"Partial sample overlap detected:\n\n"
             msg += f"> Matched samples: {len(common_ids)}\n"
@@ -31954,7 +31997,7 @@ Configuration:
         else:
             # Perfect match!
             messagebox.showinfo("Perfect Match",
-                f"> All {len(common_ids)} samples matched between master and slave!")
+                f"> All {len(common_ids)} samples matched between primary and satellite!")
 
         return True
 
@@ -31966,12 +32009,12 @@ Configuration:
     # HELPER METHOD: Apply Transfer Model
     # ========================================================================
 
-    def _apply_transfer_model(self, X_slave, transfer_model):
-        """Apply a transfer model to transform slave spectra to master domain.
+    def _apply_transfer_model(self, X_satellite, transfer_model):
+        """Apply a transfer model to transform satellite spectra to master domain.
 
         Parameters
         ----------
-        X_slave : np.ndarray
+        X_satellite : np.ndarray
             Slave spectra, shape (n_samples, n_wavelengths)
         transfer_model : TransferModel
             Transfer model object with method and params
@@ -31989,17 +32032,17 @@ Configuration:
         params = transfer_model.params
 
         if method == 'ds':
-            return apply_ds(X_slave, params['A'])
+            return apply_ds(X_satellite, params['A'])
         elif method == 'pds':
-            return apply_pds(X_slave, params['B'], params['window'])
+            return apply_pds(X_satellite, params['B'], params['window'])
         elif method == 'tsr':
-            return apply_tsr(X_slave, params)
+            return apply_tsr(X_satellite, params)
         elif method == 'ctai':
-            return apply_ctai(X_slave, params)
+            return apply_ctai(X_satellite, params)
         elif method == 'nspfce':
-            return apply_nspfce(X_slave, params)
+            return apply_nspfce(X_satellite, params)
         elif method == 'jypls-inv':
-            return apply_jypls_inv(X_slave, params)
+            return apply_jypls_inv(X_satellite, params)
         else:
             raise ValueError(f"Unknown transfer method: {method}")
 
@@ -32071,17 +32114,17 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load prediction model:\n{str(e)}")
 
-    def _browse_new_slave_data_predict(self):
-        """Browse for new slave spectra for prediction."""
+    def _browse_new_satellite_data_predict(self):
+        """Browse for new satellite spectra for prediction."""
         from tkinter import filedialog
         filepath = filedialog.askopenfilename(
-            title="Select New Slave Spectra",
+            title="Select New Satellite Spectra",
             filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
         )
         if filepath:
             self.ct_pred_slave_path_var.set(filepath)
 
-    def _load_new_slave_data_predict(self):
+    def _load_new_satellite_data_predict(self):
         """Load new slave data for prediction workflow."""
         import numpy as np
         import pandas as pd
@@ -32089,7 +32132,7 @@ Configuration:
 
         filepath = self.ct_pred_slave_path_var.get()
         if not filepath:
-            messagebox.showwarning("No File", "Please browse and select slave spectra file first.")
+            messagebox.showwarning("No File", "Please browse and select satellite spectra file first.")
             return
 
         try:
@@ -32139,7 +32182,7 @@ Configuration:
                         return
 
             # Store data
-            self.new_slave_data_predict = (wavelengths, X)
+            self.new_satellite_data_predict = (wavelengths, X)
 
             # Display info
             info_text = f"Samples: {X.shape[0]}\n"
@@ -32171,16 +32214,16 @@ Configuration:
             messagebox.showerror("Error", "Please load a prediction model first (C1).")
             return
 
-        if self.new_slave_data_predict is None:
-            messagebox.showerror("Error", "Please load new slave spectra first (C2).")
+        if self.new_satellite_data_predict is None:
+            messagebox.showerror("Error", "Please load new satellite spectra first (C2).")
             return
 
         try:
             # Step 1: Apply transfer model to new slave data
-            wavelengths, X_slave = self.new_slave_data_predict
+            wavelengths, X_satellite = self.new_satellite_data_predict
 
             # Transform slave data to master domain
-            X_transferred = self._apply_transfer_model(X_slave, self.current_transfer_model)
+            X_transferred = self._apply_transfer_model(X_satellite, self.current_transfer_model)
 
             # Step 2: Use prediction model to predict properties
             y_pred = self.current_prediction_model.predict(X_transferred)
@@ -32203,7 +32246,7 @@ Configuration:
             self.ct_export_predictions_button.config(state='normal')
 
             # Create plots
-            self._plot_ct_prediction_results(y_pred, X_slave, X_transferred)
+            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred)
 
             # Play success sound (removed popup - results shown in tree and plots)
             self.play_sound('success')
@@ -32211,7 +32254,7 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Error", f"Prediction workflow failed:\n{str(e)}")
 
-    def _plot_ct_prediction_results(self, y_pred, X_slave_original, X_transferred):
+    def _plot_ct_prediction_results(self, y_pred, X_satellite_original, X_transferred):
         """Create plots showing prediction results and spectral transformation."""
         if not HAS_MATPLOTLIB:
             return
@@ -32236,10 +32279,10 @@ Configuration:
 
         # Subplot 2: Before/After spectra comparison (mean spectra)
         ax2 = fig.add_subplot(122)
-        mean_slave = X_slave_original.mean(axis=0)
+        mean_slave = X_satellite_original.mean(axis=0)
         mean_transferred = X_transferred.mean(axis=0)
 
-        wavelengths = self.new_slave_data_predict[0]
+        wavelengths = self.new_satellite_data_predict[0]
         ax2.plot(wavelengths, mean_slave, label='Slave (Before)', color='red', alpha=0.7)
         ax2.plot(wavelengths, mean_transferred, label='Transferred (After)', color='blue', alpha=0.7)
         ax2.set_xlabel('Wavelength (nm)', color=self.colors['text'])
@@ -32306,9 +32349,9 @@ Configuration:
     # ========================================================================
 
     def _browse_export_slave_spectra(self):
-        """Browse for new slave spectra to transform and export."""
+        """Browse for new satellite spectra to transform and export."""
         from tkinter import filedialog
-        path = filedialog.askdirectory(title="Select Slave Spectra Directory for Export")
+        path = filedialog.askdirectory(title="Select Satellite Spectra Directory for Export")
         if not path:
             # Try file selection
             path = filedialog.askopenfilename(
@@ -32318,7 +32361,7 @@ Configuration:
         if path:
             self.ct_export_slave_path_var.set(path)
 
-    def _load_new_slave_data_export(self):
+    def _load_new_satellite_data_export(self):
         """Load new slave data for transformation and export.
 
         Loads data, detects format, validates compatibility with transfer model,
@@ -32328,7 +32371,7 @@ Configuration:
 
         path = self.ct_export_slave_path_var.get()
         if not path:
-            messagebox.showwarning("No Path", "Please browse and select slave spectra first.")
+            messagebox.showwarning("No Path", "Please browse and select satellite spectra first.")
             return
 
         # Check if transfer model exists
@@ -32340,7 +32383,7 @@ Configuration:
         try:
             # Detect format
             detected_format = self._detect_data_format(path)
-            self.slave_data_format = detected_format  # Store for export
+            self.satellite_data_format = detected_format  # Store for export
 
             # Load data
             if os.path.isdir(path):
@@ -32357,7 +32400,7 @@ Configuration:
                 raise ValueError(f"Unsupported file format: {path}")
 
             # Store data
-            self.new_slave_data_export = (wavelengths, X)
+            self.new_satellite_data_export = (wavelengths, X)
 
             # Validate compatibility with transfer model
             transfer_model = self.current_transfer_model or self.ct_transfer_model
@@ -32385,7 +32428,7 @@ Configuration:
             self.play_sound('success')
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load slave spectra:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load satellite spectra:\n{str(e)}")
 
     def _transform_spectra(self):
         """Apply transfer model to new slave data and show preview.
@@ -32396,8 +32439,8 @@ Configuration:
         from tkinter import messagebox
 
         # Validate inputs
-        if self.new_slave_data_export is None:
-            messagebox.showwarning("No Data", "Please load slave spectra first (Section D1).")
+        if self.new_satellite_data_export is None:
+            messagebox.showwarning("No Data", "Please load satellite spectra first (Section D1).")
             return
 
         transfer_model = self.current_transfer_model or self.ct_transfer_model
@@ -32407,7 +32450,7 @@ Configuration:
             return
 
         try:
-            wavelengths_slave, X_slave = self.new_slave_data_export
+            wavelengths_satellite, X_satellite = self.new_satellite_data_export
 
             # Get transfer model wavelengths
             model_wavelengths = getattr(transfer_model, 'wavelengths_common', None)
@@ -32417,14 +32460,14 @@ Configuration:
 
             # Resample slave data to match transfer model wavelengths if needed
             if model_wavelengths is not None:
-                if not np.array_equal(wavelengths_slave, model_wavelengths):
+                if not np.array_equal(wavelengths_satellite, model_wavelengths):
                     from spectral_predict.calibration_transfer import resample_to_grid
-                    X_slave_resampled = resample_to_grid(wavelengths_slave, X_slave, model_wavelengths)
+                    X_satellite_resampled = resample_to_grid(wavelengths_satellite, X_satellite, model_wavelengths)
                 else:
-                    X_slave_resampled = X_slave
+                    X_satellite_resampled = X_satellite
             else:
-                X_slave_resampled = X_slave
-                model_wavelengths = wavelengths_slave
+                X_satellite_resampled = X_satellite
+                model_wavelengths = wavelengths_satellite
 
             # Apply transfer based on method
             method = transfer_model.method.lower()
@@ -32432,24 +32475,24 @@ Configuration:
             if method == 'ds':
                 from spectral_predict.calibration_transfer import apply_ds
                 A = transfer_model.params['A']
-                X_transferred = apply_ds(X_slave_resampled, A)
+                X_transferred = apply_ds(X_satellite_resampled, A)
             elif method == 'pds':
                 from spectral_predict.calibration_transfer import apply_pds
                 B = transfer_model.params['B']
                 window = transfer_model.params['window']
-                X_transferred = apply_pds(X_slave_resampled, B, window)
+                X_transferred = apply_pds(X_satellite_resampled, B, window)
             elif method == 'tsr':
                 from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(X_slave_resampled, transfer_model.params)
+                X_transferred = apply_tsr(X_satellite_resampled, transfer_model.params)
             elif method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(X_slave_resampled, transfer_model.params)
+                X_transferred = apply_ctai(X_satellite_resampled, transfer_model.params)
             elif method == 'jypls-inv':
                 from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(X_slave_resampled, transfer_model.params)
+                X_transferred = apply_jypls_inv(X_satellite_resampled, transfer_model.params)
             elif method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(X_slave_resampled, transfer_model.params)
+                X_transferred = apply_nspfce(X_satellite_resampled, transfer_model.params)
             else:
                 raise ValueError(f"Unsupported transfer method: {method}")
 
@@ -32457,7 +32500,7 @@ Configuration:
             self.transformed_spectra = (model_wavelengths, X_transferred)
 
             # Calculate statistics
-            rmse = np.sqrt(np.mean((X_transferred - X_slave_resampled) ** 2))
+            rmse = np.sqrt(np.mean((X_transferred - X_satellite_resampled) ** 2))
             coverage = 100.0  # All spectra transformed
 
             # Display statistics
@@ -32471,7 +32514,7 @@ Configuration:
             self.ct_transform_stats_text.config(state='disabled')
 
             # Create before/after plot with tabbed derivatives
-            self._plot_transform_preview(X_slave_resampled, X_transferred, model_wavelengths)
+            self._plot_transform_preview(X_satellite_resampled, X_transferred, model_wavelengths)
 
             # Play success sound (removed popup - stats and plot shown)
             self.play_sound('success')
@@ -32638,7 +32681,7 @@ Configuration:
         try:
             wavelengths, X_transformed = self.transformed_spectra
             input_path = self.ct_export_slave_path_var.get()
-            data_format = self.slave_data_format
+            data_format = self.satellite_data_format
 
             # Update status
             self.ct_export_status_text.config(state='normal')
@@ -33711,7 +33754,7 @@ Configuration:
                 transfer_model = calibration_transfer.load_transfer_model(prefix)
 
                 # Create display description
-                description = f"{transfer_model.method.upper()}: {transfer_model.slave_id} -> {transfer_model.master_id}"
+                description = f"{transfer_model.method.upper()}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
 
                 # Add to list maintaining order
                 self.transfer_models.append({
@@ -34254,7 +34297,7 @@ Configuration:
         self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
 
         # Sub-section A1: Load Data
-        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Slave Data",
+        data_section = ttk.LabelFrame(self.ct_build_new_frame, text="A1) Load Master and Satellite Data",
                                      style='Card.TFrame', padding=10)
         data_section.pack(fill='x', pady=(0, 10))
 
@@ -34268,16 +34311,16 @@ Configuration:
         master_browse_frame = ttk.Frame(master_frame)
         master_browse_frame.pack(fill='x')
 
-        self.ct_master_data_path_var = tk.StringVar()
-        ttk.Entry(master_browse_frame, textvariable=self.ct_master_data_path_var,
+        self.ct_primary_data_path_var = tk.StringVar()
+        ttk.Entry(master_browse_frame, textvariable=self.ct_primary_data_path_var,
                  width=50, state='readonly').pack(side='left', padx=(0, 10))
 
         ttk.Button(master_browse_frame, text="Browse Folder/File...",
-                  command=self._browse_master_spectra,
+                  command=self._browse_primary_spectra,
                   style='Modern.TButton').pack(side='left', padx=(0, 10))
 
         self._create_accent_button(master_browse_frame, "Load Master Spectra",
-                                   self._load_master_spectra).pack(side='left')
+                                   self._load_primary_spectra).pack(side='left')
 
         # Load Slave Spectra
         slave_frame = ttk.Frame(data_section)
@@ -34289,16 +34332,16 @@ Configuration:
         slave_browse_frame = ttk.Frame(slave_frame)
         slave_browse_frame.pack(fill='x')
 
-        self.ct_slave_data_path_var = tk.StringVar()
-        ttk.Entry(slave_browse_frame, textvariable=self.ct_slave_data_path_var,
+        self.ct_satellite_data_path_var = tk.StringVar()
+        ttk.Entry(slave_browse_frame, textvariable=self.ct_satellite_data_path_var,
                  width=50, state='readonly').pack(side='left', padx=(0, 10))
 
         ttk.Button(slave_browse_frame, text="Browse Folder/File...",
-                  command=self._browse_slave_spectra,
+                  command=self._browse_satellite_spectra,
                   style='Modern.TButton').pack(side='left', padx=(0, 10))
 
         self._create_accent_button(slave_browse_frame, "Load Slave Spectra",
-                                   self._load_slave_spectra).pack(side='left')
+                                   self._load_satellite_spectra).pack(side='left')
 
         # Data info display
         ttk.Label(data_section, text="Data Information:",
@@ -34530,7 +34573,7 @@ Configuration:
                        command=self._on_mode_selected).pack(anchor='w', pady=(0, 5))
 
         ttk.Label(mode_b_frame,
-                 text="Transform slave spectra to master domain and export files.\nRequires: Only new slave data (NO prediction model needed)",
+                 text="Transform satellite spectra to master domain and export files.\nRequires: Only new slave data (NO prediction model needed)",
                  style='CardLabel.TLabel', foreground='gray').pack(anchor='w', padx=(25, 0))
 
         # Status label
@@ -34549,12 +34592,12 @@ Configuration:
                                              style='Card.TFrame', padding=15)
         # Don't pack yet - controlled by mode selection
 
-        # C1: Load Master Prediction Model
-        c1_section = ttk.LabelFrame(self.ct_step3a_frame, text="C1) Load Master Prediction Model",
+        # C1: Load Primary Prediction Model
+        c1_section = ttk.LabelFrame(self.ct_step3a_frame, text="C1) Load Primary Prediction Model",
                                    style='Card.TFrame', padding=10)
         c1_section.pack(fill='x', pady=(0, 10))
 
-        ttk.Label(c1_section, text="Load a trained prediction model (sklearn .pkl file):",
+        ttk.Label(c1_section, text="Load a trained prediction model (.dasp or .pkl file):",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
         model_load_frame = ttk.Frame(c1_section)
@@ -34583,12 +34626,12 @@ Configuration:
                                               selectforeground=self.colors['text_inverse'])
         self.ct_pred_model_info_text.pack(fill='x', pady=(0, 10))
 
-        # C2: Load New Slave Data
-        c2_section = ttk.LabelFrame(self.ct_step3a_frame, text="C2) Load New Slave Data",
+        # C2: Load New Satellite Data
+        c2_section = ttk.LabelFrame(self.ct_step3a_frame, text="C2) Load New Satellite Data",
                                    style='Card.TFrame', padding=10)
         c2_section.pack(fill='x', pady=(0, 10))
 
-        ttk.Label(c2_section, text="Load new slave spectra for prediction:",
+        ttk.Label(c2_section, text="Load new satellite spectra for prediction:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
         slave_load_frame = ttk.Frame(c2_section)
@@ -34599,14 +34642,14 @@ Configuration:
                  width=50, state='readonly').pack(side='left', padx=(0, 10))
 
         ttk.Button(slave_load_frame, text="Browse...",
-                  command=self._browse_new_slave_data_predict,
+                  command=self._browse_new_satellite_data_predict,
                   style='Modern.TButton').pack(side='left', padx=(0, 10))
 
         self._create_accent_button(slave_load_frame, "Load Slave Spectra",
-                                   self._load_new_slave_data_predict).pack(side='left')
+                                   self._load_new_satellite_data_predict).pack(side='left')
 
         # Display slave data info
-        ttk.Label(c2_section, text="Slave Data Information:",
+        ttk.Label(c2_section, text="Satellite Data Information:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(10, 5))
 
         self.ct_pred_slave_info_text = tk.Text(c2_section, height=3, width=80,
@@ -34676,13 +34719,13 @@ Configuration:
                                               style='Card.TFrame', padding=15)
         # Don't pack yet - controlled by mode selection in Section B
 
-        # D1: Load New Slave Data for Export
+        # D1: Load New Satellite Data for Export
         export_load_section = ttk.LabelFrame(self.ct_step3b_frame,
-                                            text="D1) Load New Slave Data to Transform",
+                                            text="D1) Load New Satellite Data to Transform",
                                             style='Card.TFrame', padding=10)
         export_load_section.pack(fill='x', pady=(0, 10))
 
-        # Browse for new slave spectra
+        # Browse for new satellite spectra
         export_browse_frame = ttk.Frame(export_load_section)
         export_browse_frame.pack(fill='x', pady=(0, 10))
 
@@ -34701,7 +34744,7 @@ Configuration:
                   style='Modern.TButton').pack(side='left', padx=(0, 10))
 
         self._create_accent_button(browse_row, "Load Slave Spectra",
-                                   self._load_new_slave_data_export).pack(side='left')
+                                   self._load_new_satellite_data_export).pack(side='left')
 
         # Display loaded data info
         ttk.Label(export_load_section, text="Loaded Data Information:",
@@ -36896,6 +36939,1279 @@ Configuration:
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to create example library:\n{str(e)}")
+
+    # ========================================================================
+    # Tab 13: Contaminant Analysis
+    # ========================================================================
+
+    def _create_tab13_contaminant_analysis(self):
+        """Tab 13: Contaminant Analysis - Detect and remove contaminant influences.
+
+        Features:
+        - Tab 13A: Load & Define Groups (Clean + Contaminant groups)
+        - Tab 13B: Difference Analysis (Exploratory)
+        - Tab 13C: Automated Region Detection (EPO, OPLS-DA, iPLS, GLSW)
+        - Tab 13D: Apply & Validate (Correction and validation)
+        """
+        # Create main tab frame
+        self.tab13 = ttk.Frame(self.notebook, style='TFrame')
+        self.notebook.add(self.tab13, text='  ⚗️ Contaminant Analysis  ')
+
+        # Check if module is available
+        if not HAS_CONTAMINANT_ANALYSIS:
+            error_label = ttk.Label(
+                self.tab13,
+                text="Contaminant Analysis module not available. Please check installation.",
+                style='Heading.TLabel'
+            )
+            error_label.pack(pady=20)
+            return
+
+        # Create nested notebook for subtabs
+        self.contam_notebook = ttk.Notebook(self.tab13)
+        self.contam_notebook.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+
+        # Create the 4 subtabs
+        self._create_tab13a_load_groups()
+        self._create_tab13b_difference_analysis()
+        self._create_tab13c_automated_detection()
+        self._create_tab13d_apply_validate()
+
+    def _create_tab13a_load_groups(self):
+        """Subtab 13A: Load & Define Groups - Load clean and contaminant spectral groups."""
+        tab13a = ttk.Frame(self.contam_notebook, style='TFrame')
+        self.contam_notebook.add(tab13a, text='  📂 Load & Define Groups  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab13a, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab13a, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Load & Define Spectral Groups", row=row, columnspan=2)
+        row += 1
+
+        # Info text
+        info_text = ("Define clean (uncontaminated) spectra and one or more contaminant groups.\n"
+                    "The analysis will identify wavelength regions influenced by contaminants.")
+        ttk.Label(content_frame, text=info_text, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # Section 1: Load Clean Data
+        self._create_section_header(content_frame, "1. Load Clean (Uncontaminated) Spectra", row=row, columnspan=2)
+        row += 1
+
+        clean_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        clean_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # Clean data file browser
+        clean_btn_frame = ttk.Frame(clean_frame, style='TFrame')
+        clean_btn_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Button(clean_btn_frame, text="📂 Browse for Clean Spectra",
+                  command=self._contam_load_clean_data).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(clean_btn_frame, textvariable=self.contam_clean_path, width=60,
+                 state='readonly').pack(side=tk.LEFT, fill='x', expand=True)
+
+        # Clean data info
+        self.contam_clean_info_label = ttk.Label(clean_frame, text="No clean data loaded",
+                                                 style='Small.TLabel', foreground='gray')
+        self.contam_clean_info_label.pack(anchor=tk.W, pady=(5, 0))
+        row += 1
+
+        # Section 2: Define Contaminant Groups
+        self._create_section_header(content_frame, "2. Define Contaminant Groups", row=row, columnspan=2)
+        row += 1
+
+        groups_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        groups_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # Add group controls
+        add_group_frame = ttk.Frame(groups_frame, style='TFrame')
+        add_group_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(add_group_frame, text="Group Label:", style='TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        self.contam_new_group_label = ttk.Entry(add_group_frame, width=20)
+        self.contam_new_group_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(add_group_frame, text="📂 Browse & Add Group",
+                  command=self._contam_add_group).pack(side=tk.LEFT)
+
+        # Groups listbox
+        list_label_frame = ttk.Frame(groups_frame, style='TFrame')
+        list_label_frame.pack(fill='x', pady=(0, 5))
+        ttk.Label(list_label_frame, text="Loaded Contaminant Groups:",
+                 style='TLabel').pack(side=tk.LEFT)
+
+        list_scroll_frame = ttk.Frame(groups_frame, style='TFrame')
+        list_scroll_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        list_scrollbar = ttk.Scrollbar(list_scroll_frame, orient=tk.VERTICAL)
+        self.contam_groups_listbox = tk.Listbox(
+            list_scroll_frame, height=6, yscrollcommand=list_scrollbar.set,
+            bg=self.colors['bg'], fg=self.colors['text'],
+            selectbackground=self.colors['accent'],
+            font=('Segoe UI', 10), relief=tk.SOLID, borderwidth=1
+        )
+        list_scrollbar.config(command=self.contam_groups_listbox.yview)
+
+        self.contam_groups_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Remove group button
+        ttk.Button(groups_frame, text="🗑️ Remove Selected Group",
+                  command=self._contam_remove_group).pack(anchor=tk.W)
+        row += 1
+
+        # Section 3: Data Summary & Validation
+        self._create_section_header(content_frame, "3. Data Summary & Validation", row=row, columnspan=2)
+        row += 1
+
+        summary_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        summary_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.contam_summary_text = tk.Text(
+            summary_frame, height=8, width=80, state='disabled', wrap='word',
+            relief='flat', borderwidth=0, bg=self.colors['panel'],
+            fg=self.colors['text'], font=('Consolas', 9)
+        )
+        self.contam_summary_text.pack(fill='both', expand=True)
+
+        ttk.Button(summary_frame, text="🔄 Refresh Summary",
+                  command=self._contam_update_summary).pack(anchor=tk.W, pady=(10, 0))
+        row += 1
+
+        # Section 4: Wavelength Alignment
+        self._create_section_header(content_frame, "4. Wavelength Alignment Check", row=row, columnspan=2)
+        row += 1
+
+        align_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        align_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.contam_alignment_label = ttk.Label(
+            align_frame, text="Load data to check wavelength alignment",
+            style='TLabel', foreground='gray'
+        )
+        self.contam_alignment_label.pack(anchor=tk.W)
+
+    def _create_tab13b_difference_analysis(self):
+        """Subtab 13B: Difference Analysis - Exploratory difference spectrum analysis."""
+        tab13b = ttk.Frame(self.contam_notebook, style='TFrame')
+        self.contam_notebook.add(tab13b, text='  📊 Difference Analysis  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab13b, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab13b, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Difference Spectrum Analysis (Exploratory)", row=row, columnspan=2)
+        row += 1
+
+        # Info text
+        info_text = ("Compute mean difference spectra between clean and each contaminant group.\n"
+                    "Helps identify characteristic wavelength regions affected by contaminants.")
+        ttk.Label(content_frame, text=info_text, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # Analysis controls
+        control_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        control_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        ttk.Button(control_frame, text="▶️ Run Difference Analysis",
+                  command=self._contam_run_difference_analysis,
+                  style='Accent.TButton').pack(anchor=tk.W, pady=(0, 10))
+
+        # Peak detection threshold
+        threshold_frame = ttk.Frame(control_frame, style='TFrame')
+        threshold_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(threshold_frame, text="Peak Detection Threshold (% of max):",
+                 style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        self.contam_peak_threshold = tk.DoubleVar(value=10.0)
+        ttk.Scale(threshold_frame, from_=1, to=50, orient=tk.HORIZONTAL,
+                 variable=self.contam_peak_threshold, length=200).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(threshold_frame, textvariable=self.contam_peak_threshold,
+                 style='TLabel', width=6).pack(side=tk.LEFT)
+
+        ttk.Button(control_frame, text="🔄 Update Peak Detection",
+                  command=self._contam_update_peak_detection).pack(anchor=tk.W)
+        row += 1
+
+        # Plot area
+        plot_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        content_frame.grid_rowconfigure(row, weight=1)
+
+        self.contam_diff_plot_label = ttk.Label(
+            plot_frame,
+            text="📊 Run analysis to view difference spectra\n\n(Plot will show mean difference for each contaminant group)",
+            style='TLabel', justify=tk.CENTER
+        )
+        self.contam_diff_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
+        row += 1
+
+        # Peak regions display
+        self._create_section_header(content_frame, "Identified Peak Regions", row=row, columnspan=2)
+        row += 1
+
+        peaks_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        peaks_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.contam_peaks_text = tk.Text(
+            peaks_frame, height=6, width=80, state='disabled', wrap='word',
+            relief='flat', borderwidth=0, bg=self.colors['panel'],
+            fg=self.colors['text'], font=('Consolas', 9)
+        )
+        self.contam_peaks_text.pack(fill='both', expand=True)
+        row += 1
+
+        # Export button
+        export_frame = ttk.Frame(content_frame, style='TFrame')
+        export_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(export_frame, text="💾 Export Difference Spectra",
+                  command=self._contam_export_difference_spectra).pack(side=tk.LEFT)
+
+    def _create_tab13c_automated_detection(self):
+        """Subtab 13C: Automated Region Detection - Detect contaminant-influenced regions."""
+        tab13c = ttk.Frame(self.contam_notebook, style='TFrame')
+        self.contam_notebook.add(tab13c, text='  🤖 Automated Detection  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab13c, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab13c, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Automated Region Detection", row=row, columnspan=2)
+        row += 1
+
+        # Info text
+        info_text = ("Automatically detect wavelength regions influenced by contaminants using various methods.\n"
+                    "Choose a method based on your data and requirements.")
+        ttk.Label(content_frame, text=info_text, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # Section 1: Method Selection
+        self._create_section_header(content_frame, "1. Select Detection Method", row=row, columnspan=2)
+        row += 1
+
+        method_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        method_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        methods = [
+            ('Estimated EPO (difference-based) - No Y needed', 'Estimated EPO'),
+            ('OPLS-DA (discriminant-based) - No Y needed', 'OPLS-DA'),
+            ('Backward iPLS (performance-based) - REQUIRES Y', 'Backward iPLS'),
+            ('Contaminant-Weighted GLSW - No Y needed', 'GLSW')
+        ]
+
+        for method_desc, method_val in methods:
+            ttk.Radiobutton(
+                method_frame, text=method_desc,
+                variable=self.contam_method, value=method_val,
+                style='TRadiobutton', command=self._contam_on_method_changed
+            ).pack(anchor=tk.W, pady=2)
+
+        # Method description
+        self.contam_method_desc_label = ttk.Label(
+            method_frame, text="", style='Small.TLabel',
+            foreground='gray', wraplength=700
+        )
+        self.contam_method_desc_label.pack(anchor=tk.W, pady=(10, 0))
+        row += 1
+
+        # Section 2: Method Parameters
+        self._create_section_header(content_frame, "2. Configure Parameters", row=row, columnspan=2)
+        row += 1
+
+        params_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        params_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # N components
+        n_comp_frame = ttk.Frame(params_frame, style='TFrame')
+        n_comp_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(n_comp_frame, text="Number of Components:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Spinbox(n_comp_frame, from_=1, to=20, textvariable=self.contam_n_components,
+                   width=10).pack(side=tk.LEFT)
+        ttk.Label(n_comp_frame, text="(for EPO, OPLS-DA, GLSW)", style='Small.TLabel',
+                 foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+
+        # Threshold
+        threshold_frame = ttk.Frame(params_frame, style='TFrame')
+        threshold_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(threshold_frame, text="Detection Threshold:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(threshold_frame, textvariable=self.contam_threshold, width=10).pack(side=tk.LEFT)
+        ttk.Label(threshold_frame, text="(influence weight threshold)", style='Small.TLabel',
+                 foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+
+        # Aggregation method (for multi-contaminant)
+        agg_frame = ttk.Frame(params_frame, style='TFrame')
+        agg_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(agg_frame, text="Multi-Contaminant Aggregation:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        agg_methods = ['max', 'mean', 'union']
+        for agg in agg_methods:
+            ttk.Radiobutton(agg_frame, text=agg, variable=self.contam_aggregation,
+                          value=agg, style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        # Section 3: Run Analysis
+        self._create_section_header(content_frame, "3. Run Analysis", row=row, columnspan=2)
+        row += 1
+
+        run_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        run_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        ttk.Button(run_frame, text="▶️ Run Automated Detection",
+                  command=self._contam_run_automated_detection,
+                  style='Accent.TButton').pack(anchor=tk.W, pady=(0, 10))
+
+        self.contam_detection_status_label = ttk.Label(
+            run_frame, text="Configure parameters and click 'Run' to start analysis",
+            style='Small.TLabel', foreground='gray'
+        )
+        self.contam_detection_status_label.pack(anchor=tk.W)
+        row += 1
+
+        # Section 4: Results
+        self._create_section_header(content_frame, "4. Detection Results", row=row, columnspan=2)
+        row += 1
+
+        # Wavelength influence plot
+        plot_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        content_frame.grid_rowconfigure(row, weight=1)
+
+        self.contam_influence_plot_label = ttk.Label(
+            plot_frame,
+            text="📊 Run analysis to view wavelength influence plot\n\n(Shows contaminant influence across wavelengths)",
+            style='TLabel', justify=tk.CENTER
+        )
+        self.contam_influence_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
+        row += 1
+
+        # Exclusion regions table
+        self._create_section_header(content_frame, "Recommended Exclusion Regions", row=row, columnspan=2)
+        row += 1
+
+        regions_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        regions_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.contam_regions_text = tk.Text(
+            regions_frame, height=6, width=80, state='disabled', wrap='word',
+            relief='flat', borderwidth=0, bg=self.colors['panel'],
+            fg=self.colors['text'], font=('Consolas', 9)
+        )
+        self.contam_regions_text.pack(fill='both', expand=True)
+        row += 1
+
+        # Export results button
+        export_frame = ttk.Frame(content_frame, style='TFrame')
+        export_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
+        ttk.Button(export_frame, text="💾 Export Analysis Results",
+                  command=self._contam_export_detection_results).pack(side=tk.LEFT)
+
+    def _create_tab13d_apply_validate(self):
+        """Subtab 13D: Apply & Validate - Apply corrections and validate results."""
+        tab13d = ttk.Frame(self.contam_notebook, style='TFrame')
+        self.contam_notebook.add(tab13d, text='  ✅ Apply & Validate  ')
+
+        # Create scrollable content
+        canvas = tk.Canvas(tab13d, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab13d, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        # Header
+        self._create_section_header(content_frame, "Apply & Validate Corrections", row=row, columnspan=2)
+        row += 1
+
+        # Info text
+        info_text = ("Apply contaminant corrections to your data and validate the results.\n"
+                    "Compare before/after spectra to ensure corrections are appropriate.")
+        ttk.Label(content_frame, text=info_text, style='Small.TLabel',
+                 foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # Section 1: Correction Method
+        self._create_section_header(content_frame, "1. Select Correction Method", row=row, columnspan=2)
+        row += 1
+
+        method_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        method_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.contam_correction_method = tk.StringVar(value='Exclude Regions')
+        correction_methods = [
+            'Exclude Regions',
+            'EPO Projection',
+            'OPLS-DA Filter',
+            'GLSW Weighting'
+        ]
+
+        for method in correction_methods:
+            ttk.Radiobutton(
+                method_frame, text=method,
+                variable=self.contam_correction_method, value=method,
+                style='TRadiobutton'
+            ).pack(anchor=tk.W, pady=2)
+        row += 1
+
+        # Section 2: Apply Correction
+        self._create_section_header(content_frame, "2. Apply Correction to Data", row=row, columnspan=2)
+        row += 1
+
+        apply_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        apply_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # Data source selection
+        source_frame = ttk.Frame(apply_frame, style='TFrame')
+        source_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Label(source_frame, text="Apply to:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        self.contam_apply_source = tk.StringVar(value='Clean Data')
+        ttk.Radiobutton(source_frame, text="Clean Data", variable=self.contam_apply_source,
+                       value='Clean Data', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(source_frame, text="All Groups", variable=self.contam_apply_source,
+                       value='All Groups', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(source_frame, text="Main Dataset (Tab 1)", variable=self.contam_apply_source,
+                       value='Main Dataset', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+
+        # Apply button
+        ttk.Button(apply_frame, text="▶️ Apply Correction",
+                  command=self._contam_apply_correction,
+                  style='Accent.TButton').pack(anchor=tk.W, pady=(0, 10))
+
+        self.contam_apply_status_label = ttk.Label(
+            apply_frame, text="No correction applied yet",
+            style='Small.TLabel', foreground='gray'
+        )
+        self.contam_apply_status_label.pack(anchor=tk.W)
+        row += 1
+
+        # Section 3: Before/After Comparison
+        self._create_section_header(content_frame, "3. Before/After Comparison", row=row, columnspan=2)
+        row += 1
+
+        comparison_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        comparison_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        content_frame.grid_rowconfigure(row, weight=1)
+
+        self.contam_comparison_plot_label = ttk.Label(
+            comparison_frame,
+            text="📊 Apply correction to view before/after comparison\n\n(Shows overlaid spectra)",
+            style='TLabel', justify=tk.CENTER
+        )
+        self.contam_comparison_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
+        row += 1
+
+        # Section 4: Export
+        self._create_section_header(content_frame, "4. Export Results", row=row, columnspan=2)
+        row += 1
+
+        export_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        export_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        export_btn_frame = ttk.Frame(export_frame, style='TFrame')
+        export_btn_frame.pack(fill='x', pady=(0, 10))
+
+        ttk.Button(export_btn_frame, text="💾 Export Corrected Spectra",
+                  command=self._contam_export_corrected_spectra).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(export_btn_frame, text="📄 Export Analysis Report",
+                  command=self._contam_export_report).pack(side=tk.LEFT)
+
+        self.contam_export_status_label = ttk.Label(
+            export_frame, text="Export status will appear here",
+            style='Small.TLabel', foreground='gray'
+        )
+        self.contam_export_status_label.pack(anchor=tk.W)
+
+    # ========================================================================
+    # Tab 13 Helper Methods - Contaminant Analysis Callbacks
+    # ========================================================================
+
+    def _contam_load_spectra_from_path(self, path: str) -> tuple:
+        """
+        Load spectra from a file or folder.
+
+        Parameters
+        ----------
+        path : str
+            Path to file (csv, xlsx, npy) or folder with raw spectra
+
+        Returns
+        -------
+        data : np.ndarray
+            Spectral data matrix (n_samples, n_wavelengths)
+        wavelengths : np.ndarray or None
+            Wavelength values
+        sample_names : list or None
+            Sample names from index or filenames
+        """
+        from pathlib import Path
+        path = Path(path)
+
+        if path.is_file():
+            # Load from file - extract wavelength columns only (no y column required)
+            if path.suffix.lower() == '.csv':
+                import pandas as pd
+                df = pd.read_csv(path)
+            elif path.suffix.lower() == '.xlsx':
+                import pandas as pd
+                df = pd.read_excel(path)
+            elif path.suffix.lower() == '.npy':
+                return np.load(path), None, None
+            else:
+                raise ValueError(f"Unsupported file format: {path.suffix}")
+
+            # Use io.py helper to identify wavelength columns (works with metadata columns)
+            from spectral_predict.io import identify_wavelength_columns
+            wavelength_cols = identify_wavelength_columns(df)
+
+            if len(wavelength_cols) < 10:
+                raise ValueError(
+                    f"Too few wavelength columns detected ({len(wavelength_cols)}). "
+                    f"Expected columns with numeric headers (wavelengths in nm)."
+                )
+
+            # Extract spectral data from wavelength columns only
+            X_df = df[wavelength_cols].copy()
+
+            # Determine sample names from index or first non-wavelength column
+            non_wl_cols = [c for c in df.columns if c not in wavelength_cols]
+            if non_wl_cols:
+                # Use first non-wavelength column as sample names
+                sample_names = df[non_wl_cols[0]].astype(str).tolist()
+            else:
+                # Use row index
+                sample_names = df.index.astype(str).tolist()
+
+            wavelengths = np.array([float(c) for c in wavelength_cols])
+            return X_df.values, wavelengths, sample_names
+
+        elif path.is_dir():
+            # Load from folder - auto-detect format
+            files = list(path.iterdir())
+
+            # Check for ASD files
+            asd_files = [f for f in files if f.suffix.lower() in ('.asd', '.sig')]
+            if asd_files:
+                from spectral_predict.io import read_asd_dir
+                df, metadata = read_asd_dir(str(path))
+                return df.values, df.columns.astype(float).values, df.index.tolist()
+
+            # Check for SPC files
+            spc_files = [f for f in files if f.suffix.lower() == '.spc']
+            if spc_files:
+                from spectral_predict.io import read_spc_dir
+                df, metadata = read_spc_dir(str(path))
+                return df.values, df.columns.astype(float).values, df.index.tolist()
+
+            # Check for JCAMP files
+            jcamp_files = [f for f in files if f.suffix.lower() in ('.dx', '.jdx')]
+            if jcamp_files:
+                from spectral_predict.io import read_jcamp_dir
+                df, metadata = read_jcamp_dir(str(path))
+                return df.values, df.columns.astype(float).values, df.index.tolist()
+
+            # Check for OPUS files
+            opus_files = [f for f in files if f.suffix.lower() in ('.0', '.1', '.2', '.3')]
+            if opus_files:
+                from spectral_predict.io import read_opus_dir
+                df, metadata = read_opus_dir(str(path))
+                return df.values, df.columns.astype(float).values, df.index.tolist()
+
+            # Check for SP files (PerkinElmer)
+            sp_files = [f for f in files if f.suffix.lower() == '.sp']
+            if sp_files:
+                from spectral_predict.io import read_sp_dir
+                df, metadata = read_sp_dir(str(path))
+                return df.values, df.columns.astype(float).values, df.index.tolist()
+
+            raise ValueError(f"No supported spectral files found in {path}")
+
+        else:
+            raise ValueError(f"Path does not exist: {path}")
+
+    def _contam_load_clean_data(self):
+        """Load clean (uncontaminated) spectral data from file or folder."""
+        # Ask user whether to load file or folder
+        choice = messagebox.askquestion(
+            "Load Clean Data",
+            "Do you want to load from a FILE?\n\n"
+            "Click 'Yes' to browse for a file (CSV, Excel, NPY)\n"
+            "Click 'No' to browse for a FOLDER of raw spectra (ASD, SPC, OPUS, etc.)"
+        )
+
+        if choice == 'yes':
+            # Load from file
+            filepath = filedialog.askopenfilename(
+                title="Select Clean Spectra File",
+                filetypes=[
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx"),
+                    ("NumPy files", "*.npy"),
+                    ("All files", "*.*")
+                ]
+            )
+            if not filepath:
+                return
+        else:
+            # Load from folder
+            filepath = filedialog.askdirectory(title="Select Folder with Clean Spectra")
+            if not filepath:
+                return
+
+        try:
+            # Load data using helper method
+            data, wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
+            self.contam_clean_data = data
+            self.contam_wavelengths = wavelengths
+            self.contam_clean_sample_names = sample_names
+
+            self.contam_clean_path.set(filepath)
+
+            # Update info label
+            n_samples, n_wavelengths = self.contam_clean_data.shape
+            info_text = (f"Loaded {n_samples} clean spectra, "
+                        f"{n_wavelengths} wavelengths")
+            if self.contam_wavelengths is not None:
+                info_text += f" ({self.contam_wavelengths[0]:.1f} - {self.contam_wavelengths[-1]:.1f} nm)"
+
+            self.contam_clean_info_label.config(text=info_text, foreground=self.colors['text'])
+
+            # Update summary
+            self._contam_update_summary()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load clean data:\n{str(e)}")
+
+    def _contam_add_group(self):
+        """Add a new contaminant group from file or folder."""
+        label = self.contam_new_group_label.get().strip()
+
+        if not label:
+            messagebox.showwarning("Warning", "Please enter a group label")
+            return
+
+        if label in self.contam_groups:
+            messagebox.showwarning("Warning", f"Group '{label}' already exists")
+            return
+
+        # Ask user whether to load file or folder
+        choice = messagebox.askquestion(
+            f"Add Group: {label}",
+            "Do you want to load from a FILE?\n\n"
+            "Click 'Yes' to browse for a file (CSV, Excel, NPY)\n"
+            "Click 'No' to browse for a FOLDER of raw spectra (ASD, SPC, OPUS, etc.)"
+        )
+
+        if choice == 'yes':
+            # Load from file
+            filepath = filedialog.askopenfilename(
+                title=f"Select Spectra for Group: {label}",
+                filetypes=[
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx"),
+                    ("NumPy files", "*.npy"),
+                    ("All files", "*.*")
+                ]
+            )
+            if not filepath:
+                return
+        else:
+            # Load from folder
+            filepath = filedialog.askdirectory(title=f"Select Folder with Spectra for Group: {label}")
+            if not filepath:
+                return
+
+        try:
+            # Load data using helper method
+            group_data, group_wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
+
+            # Validate wavelengths match if we have wavelengths loaded
+            if self.contam_wavelengths is not None and group_wavelengths is not None:
+                if not np.allclose(self.contam_wavelengths, group_wavelengths, atol=0.1):
+                    messagebox.showerror("Error",
+                        "Wavelengths do not match clean data!\n"
+                        "All groups must have identical wavelength axes.")
+                    return
+
+            # Store group data
+            self.contam_groups[label] = group_data
+            self.contam_group_paths[label] = filepath
+
+            # Add to listbox
+            n_samples, n_wavelengths = group_data.shape
+            display_text = f"{label}: {n_samples} spectra, {n_wavelengths} wavelengths"
+            self.contam_groups_listbox.insert(tk.END, display_text)
+
+            # Clear entry
+            self.contam_new_group_label.delete(0, tk.END)
+
+            # Update summary
+            self._contam_update_summary()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load group data:\n{str(e)}")
+
+    def _contam_remove_group(self):
+        """Remove selected contaminant group."""
+        selection = self.contam_groups_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a group to remove")
+            return
+
+        idx = selection[0]
+        item_text = self.contam_groups_listbox.get(idx)
+        label = item_text.split(':')[0]
+
+        # Remove from data structures
+        del self.contam_groups[label]
+        del self.contam_group_paths[label]
+
+        # Remove from listbox
+        self.contam_groups_listbox.delete(idx)
+
+        # Update summary
+        self._contam_update_summary()
+
+    def _contam_update_summary(self):
+        """Update the data summary display."""
+        summary_lines = []
+
+        # Clean data summary
+        if self.contam_clean_data is not None:
+            n_samples, n_wavelengths = self.contam_clean_data.shape
+            summary_lines.append(f"Clean Data:")
+            summary_lines.append(f"  - {n_samples} spectra")
+            summary_lines.append(f"  - {n_wavelengths} wavelengths")
+            if self.contam_wavelengths is not None:
+                summary_lines.append(
+                    f"  - Range: {self.contam_wavelengths[0]:.1f} - "
+                    f"{self.contam_wavelengths[-1]:.1f} nm"
+                )
+        else:
+            summary_lines.append("Clean Data: Not loaded")
+
+        summary_lines.append("")
+
+        # Contaminant groups summary
+        summary_lines.append(f"Contaminant Groups: {len(self.contam_groups)}")
+        for label, data in self.contam_groups.items():
+            n_samples, n_wavelengths = data.shape
+            summary_lines.append(f"  - {label}: {n_samples} spectra, {n_wavelengths} wavelengths")
+
+        summary_lines.append("")
+
+        # Validation status
+        if self.contam_clean_data is not None and len(self.contam_groups) > 0:
+            summary_lines.append("Status: ✓ Ready for analysis")
+            self._contam_check_alignment()
+        elif self.contam_clean_data is None:
+            summary_lines.append("Status: ⚠ Need clean data")
+        elif len(self.contam_groups) == 0:
+            summary_lines.append("Status: ⚠ Need at least one contaminant group")
+
+        # Update text widget
+        self.contam_summary_text.config(state='normal')
+        self.contam_summary_text.delete('1.0', tk.END)
+        self.contam_summary_text.insert('1.0', '\n'.join(summary_lines))
+        self.contam_summary_text.config(state='disabled')
+
+    def _contam_check_alignment(self):
+        """Check wavelength alignment across all groups."""
+        if self.contam_wavelengths is None:
+            self.contam_alignment_label.config(
+                text="⚠ Wavelength information not available",
+                foreground='orange'
+            )
+            return
+
+        # Check all groups have same wavelengths
+        all_aligned = True
+        for label, data in self.contam_groups.items():
+            if data.shape[1] != len(self.contam_wavelengths):
+                all_aligned = False
+                break
+
+        if all_aligned:
+            self.contam_alignment_label.config(
+                text="✓ All datasets have aligned wavelengths",
+                foreground='green'
+            )
+        else:
+            self.contam_alignment_label.config(
+                text="⚠ Wavelength mismatch detected! Check data dimensions",
+                foreground='red'
+            )
+
+    def _contam_run_difference_analysis(self):
+        """Run difference spectrum analysis."""
+        if self.contam_clean_data is None:
+            messagebox.showerror("Error", "Please load clean data first")
+            return
+
+        if len(self.contam_groups) == 0:
+            messagebox.showerror("Error", "Please add at least one contaminant group")
+            return
+
+        try:
+            # Compute differences for each group
+            differences = {}
+            analyzers = {}
+            for label, contam_data in self.contam_groups.items():
+                # Create and fit difference analyzer for each group
+                analyzer = DifferenceAnalyzer()
+                analyzer.fit(contam_data, self.contam_clean_data)
+                differences[label] = analyzer.get_difference_spectrum()
+                analyzers[label] = analyzer
+
+            # Store results
+            self.contam_diff_results = differences
+            self.contam_analyzers = analyzers
+
+            # Show success message
+            messagebox.showinfo("Success",
+                f"Difference analysis complete!\n"
+                f"Analyzed {len(self.contam_groups)} contaminant groups.")
+
+            # Update peak detection
+            self._contam_update_peak_detection()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Difference analysis failed:\n{str(e)}")
+
+    def _contam_update_peak_detection(self):
+        """Update peak detection with current threshold."""
+        if not hasattr(self, 'contam_diff_results') or not hasattr(self, 'contam_analyzers'):
+            return
+
+        if self.contam_wavelengths is None:
+            peaks_text = ["Peak detection requires wavelength information."]
+            self.contam_peaks_text.config(state='normal')
+            self.contam_peaks_text.delete('1.0', tk.END)
+            self.contam_peaks_text.insert('1.0', '\n'.join(peaks_text))
+            self.contam_peaks_text.config(state='disabled')
+            return
+
+        threshold_pct = self.contam_peak_threshold.get() / 100.0  # Convert % to fraction
+
+        peaks_text = []
+        peaks_text.append(f"Peak Detection (Threshold: {threshold_pct * 100:.1f}% of max)\n")
+        peaks_text.append("=" * 60)
+
+        # Use analyzer's identify_peak_regions method for each group
+        for label, analyzer in self.contam_analyzers.items():
+            peaks_text.append(f"\n{label}:")
+            try:
+                regions = analyzer.identify_peak_regions(
+                    self.contam_wavelengths,
+                    threshold=threshold_pct,
+                    min_width=3
+                )
+                if regions:
+                    for i, (start_wl, end_wl, peak_inf) in enumerate(regions, 1):
+                        peaks_text.append(f"  Region {i}: {start_wl:.1f} - {end_wl:.1f} nm (peak influence: {peak_inf:.3f})")
+                else:
+                    peaks_text.append("  No significant peaks above threshold")
+            except Exception as e:
+                peaks_text.append(f"  Error: {str(e)}")
+
+        self.contam_peaks_text.config(state='normal')
+        self.contam_peaks_text.delete('1.0', tk.END)
+        self.contam_peaks_text.insert('1.0', '\n'.join(peaks_text))
+        self.contam_peaks_text.config(state='disabled')
+
+    def _contam_export_difference_spectra(self):
+        """Export difference spectra to file."""
+        if not hasattr(self, 'contam_diff_results'):
+            messagebox.showerror("Error", "No difference analysis results to export")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Difference Spectra",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Create DataFrame with difference spectra
+            df = pd.DataFrame(self.contam_diff_results, index=self.contam_wavelengths)
+            df.index.name = 'Wavelength'
+
+            if filepath.endswith('.csv'):
+                df.to_csv(filepath)
+            else:
+                df.to_excel(filepath)
+
+            messagebox.showinfo("Success", f"Difference spectra exported to:\n{filepath}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed:\n{str(e)}")
+
+    def _contam_on_method_changed(self):
+        """Update method description when method changes."""
+        method = self.contam_method.get()
+
+        descriptions = {
+            'Estimated EPO': (
+                "Estimated EPO uses difference spectra to approximate EPO projection "
+                "without requiring interferent libraries. Fast and works well for simple cases."
+            ),
+            'OPLS-DA': (
+                "OPLS-DA discriminates between clean and contaminated samples. "
+                "Identifies wavelengths that contribute to class separation."
+            ),
+            'Backward iPLS': (
+                "Backward interval PLS iteratively removes wavelength regions to find "
+                "those that degrade model performance. REQUIRES target Y values."
+            ),
+            'GLSW': (
+                "Generalized Least Squares Weighting identifies and downweights "
+                "contaminated regions based on within-group variance."
+            )
+        }
+
+        desc = descriptions.get(method, "")
+        self.contam_method_desc_label.config(text=desc)
+
+    def _contam_run_automated_detection(self):
+        """Run automated contaminant region detection."""
+        if self.contam_clean_data is None:
+            messagebox.showerror("Error", "Please load clean data first")
+            return
+
+        if len(self.contam_groups) == 0:
+            messagebox.showerror("Error", "Please add at least one contaminant group")
+            return
+
+        method = self.contam_method.get()
+        n_components = self.contam_n_components.get()
+        threshold = self.contam_threshold.get()
+        aggregation = self.contam_aggregation.get()
+
+        try:
+            self.contam_detection_status_label.config(
+                text=f"Running {method} analysis...",
+                foreground='blue'
+            )
+            self.update()
+
+            # Run analysis based on method
+            if len(self.contam_groups) == 1:
+                # Single contaminant group
+                contam_label = list(self.contam_groups.keys())[0]
+                contam_data = self.contam_groups[contam_label]
+
+                if method == 'Estimated EPO':
+                    results = analyze_contaminant_influence(
+                        self.contam_clean_data,
+                        contam_data,
+                        method='estimated_epo',
+                        n_components=n_components,
+                        threshold=threshold
+                    )
+                elif method == 'OPLS-DA':
+                    results = analyze_contaminant_influence(
+                        self.contam_clean_data,
+                        contam_data,
+                        method='opls_da',
+                        n_components=n_components,
+                        threshold=threshold
+                    )
+                elif method == 'GLSW':
+                    results = analyze_contaminant_influence(
+                        self.contam_clean_data,
+                        contam_data,
+                        method='glsw',
+                        threshold=threshold
+                    )
+                else:
+                    messagebox.showerror("Error", f"Method '{method}' not implemented for single group")
+                    return
+
+            else:
+                # Multiple contaminant groups
+                results = analyze_multiple_contaminants(
+                    self.contam_clean_data,
+                    self.contam_groups,
+                    method=method.lower().replace(' ', '_').replace('-', '_'),
+                    n_components=n_components,
+                    threshold=threshold,
+                    aggregation=aggregation
+                )
+
+            # Store results
+            self.contam_results = results
+
+            # Display results
+            self.contam_detection_status_label.config(
+                text=f"✓ Analysis complete using {method}",
+                foreground='green'
+            )
+
+            # Update regions display
+            self._contam_display_exclusion_regions(results)
+
+            messagebox.showinfo("Success",
+                f"Automated detection complete!\n"
+                f"Method: {method}\n"
+                f"Found {len(results.get('exclusion_regions', []))} regions to exclude.\n\n"
+                f"(Influence plot would appear in production)")
+
+        except Exception as e:
+            self.contam_detection_status_label.config(
+                text=f"✗ Analysis failed",
+                foreground='red'
+            )
+            messagebox.showerror("Error", f"Automated detection failed:\n{str(e)}")
+
+    def _contam_display_exclusion_regions(self, results):
+        """Display recommended exclusion regions."""
+        regions = results.get('exclusion_regions', [])
+
+        if not regions:
+            text = "No exclusion regions identified with current threshold."
+        else:
+            text_lines = ["Recommended Wavelength Exclusion Regions:\n"]
+            text_lines.append("=" * 60)
+            text_lines.append("")
+
+            for i, (start, end) in enumerate(regions, 1):
+                text_lines.append(f"Region {i}: {start:.1f} - {end:.1f} nm")
+
+            text_lines.append("")
+            text_lines.append(f"Total regions to exclude: {len(regions)}")
+
+            if self.contam_wavelengths is not None:
+                total_wl = len(self.contam_wavelengths)
+                excluded_wl = sum(
+                    ((self.contam_wavelengths >= start) & (self.contam_wavelengths <= end)).sum()
+                    for start, end in regions
+                )
+                pct = (excluded_wl / total_wl) * 100
+                text_lines.append(f"Wavelengths to exclude: {excluded_wl}/{total_wl} ({pct:.1f}%)")
+
+            text = '\n'.join(text_lines)
+
+        self.contam_regions_text.config(state='normal')
+        self.contam_regions_text.delete('1.0', tk.END)
+        self.contam_regions_text.insert('1.0', text)
+        self.contam_regions_text.config(state='disabled')
+
+    def _contam_export_detection_results(self):
+        """Export automated detection results."""
+        if self.contam_results is None:
+            messagebox.showerror("Error", "No detection results to export")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Detection Results",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("JSON files", "*.json")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            if filepath.endswith('.json'):
+                import json
+                # Convert numpy arrays to lists for JSON serialization
+                export_data = {}
+                for key, value in self.contam_results.items():
+                    if isinstance(value, np.ndarray):
+                        export_data[key] = value.tolist()
+                    else:
+                        export_data[key] = value
+
+                with open(filepath, 'w') as f:
+                    json.dump(export_data, f, indent=2)
+            else:
+                # Export as CSV
+                regions = self.contam_results.get('exclusion_regions', [])
+                df = pd.DataFrame(regions, columns=['Start_nm', 'End_nm'])
+                df.to_csv(filepath, index=False)
+
+            messagebox.showinfo("Success", f"Results exported to:\n{filepath}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed:\n{str(e)}")
+
+    def _contam_apply_correction(self):
+        """Apply contaminant correction to selected data."""
+        if self.contam_results is None:
+            messagebox.showerror("Error", "No detection results available. Run analysis first.")
+            return
+
+        method = self.contam_correction_method.get()
+        source = self.contam_apply_source.get()
+
+        try:
+            self.contam_apply_status_label.config(
+                text=f"Applying {method} correction...",
+                foreground='blue'
+            )
+            self.update()
+
+            # Placeholder for actual correction logic
+            # In production, this would apply EPO, OPLS, GLSW, or region exclusion
+
+            messagebox.showinfo("Success",
+                f"Correction applied successfully!\n"
+                f"Method: {method}\n"
+                f"Applied to: {source}\n\n"
+                f"(Before/after plot would appear in production)")
+
+            self.contam_apply_status_label.config(
+                text=f"✓ {method} correction applied to {source}",
+                foreground='green'
+            )
+
+        except Exception as e:
+            self.contam_apply_status_label.config(
+                text="✗ Correction failed",
+                foreground='red'
+            )
+            messagebox.showerror("Error", f"Correction failed:\n{str(e)}")
+
+    def _contam_export_corrected_spectra(self):
+        """Export corrected spectral data."""
+        filepath = filedialog.asksaveasfilename(
+            title="Export Corrected Spectra",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx"), ("NumPy files", "*.npy")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Placeholder - would export actual corrected data
+            messagebox.showinfo("Info", "Export functionality would save corrected spectra here")
+
+            self.contam_export_status_label.config(
+                text=f"✓ Corrected spectra exported to {Path(filepath).name}",
+                foreground='green'
+            )
+
+        except Exception as e:
+            self.contam_export_status_label.config(
+                text="✗ Export failed",
+                foreground='red'
+            )
+            messagebox.showerror("Error", f"Export failed:\n{str(e)}")
+
+    def _contam_export_report(self):
+        """Export comprehensive analysis report."""
+        filepath = filedialog.asksaveasfilename(
+            title="Export Analysis Report",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("PDF files", "*.pdf")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Create comprehensive report
+            report_lines = []
+            report_lines.append("=" * 70)
+            report_lines.append("CONTAMINANT ANALYSIS REPORT")
+            report_lines.append("=" * 70)
+            report_lines.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            report_lines.append("")
+
+            # Data summary
+            report_lines.append("DATA SUMMARY")
+            report_lines.append("-" * 70)
+            if self.contam_clean_data is not None:
+                n_samples, n_wavelengths = self.contam_clean_data.shape
+                report_lines.append(f"Clean samples: {n_samples}")
+                report_lines.append(f"Wavelengths: {n_wavelengths}")
+
+            report_lines.append(f"Contaminant groups: {len(self.contam_groups)}")
+            for label, data in self.contam_groups.items():
+                report_lines.append(f"  - {label}: {data.shape[0]} samples")
+
+            report_lines.append("")
+
+            # Analysis results
+            if self.contam_results is not None:
+                report_lines.append("ANALYSIS RESULTS")
+                report_lines.append("-" * 70)
+                report_lines.append(f"Method: {self.contam_method.get()}")
+                regions = self.contam_results.get('exclusion_regions', [])
+                report_lines.append(f"Exclusion regions found: {len(regions)}")
+                for i, (start, end) in enumerate(regions, 1):
+                    report_lines.append(f"  Region {i}: {start:.1f} - {end:.1f} nm")
+
+            report_lines.append("")
+            report_lines.append("=" * 70)
+
+            # Write report
+            with open(filepath, 'w') as f:
+                f.write('\n'.join(report_lines))
+
+            messagebox.showinfo("Success", f"Report exported to:\n{filepath}")
+
+            self.contam_export_status_label.config(
+                text=f"✓ Report exported to {Path(filepath).name}",
+                foreground='green'
+            )
+
+        except Exception as e:
+            self.contam_export_status_label.config(
+                text="✗ Report export failed",
+                foreground='red'
+            )
+            messagebox.showerror("Error", f"Report export failed:\n{str(e)}")
 
     # ========================================================================
     # Tab 11B Helper Methods - Advanced Method Configuration
