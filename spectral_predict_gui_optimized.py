@@ -18837,7 +18837,41 @@ class SpectralPredictApp:
         self._refresh_row_tags()
 
     def _on_expert_fit_toggle_changed(self):
-        """Handle expert fit toggle - refresh row styling to show/hide expert choice indicators."""
+        """Handle expert fit toggle - update Rank column to show/hide ★/● symbols."""
+        if self.results_df is None:
+            return
+
+        expert_fit_enabled = self.expert_fit_enabled.get()
+
+        # Get column index for Rank
+        columns = list(self.results_tree['columns'])
+        if 'Rank' not in columns:
+            return
+        rank_col_idx = columns.index('Rank')
+
+        # Update each row's Rank value
+        for row_id in self.results_tree.get_children():
+            idx = int(row_id)
+            current_values = list(self.results_tree.item(row_id, 'values'))
+
+            # Get the numeric rank from DataFrame
+            if idx in self.results_df.index:
+                numeric_rank = self.results_df.loc[idx, 'Rank']
+
+                if expert_fit_enabled and hasattr(self, '_expert_choices') and idx in self._expert_choices:
+                    expert_status = self._expert_choices[idx]
+                    if expert_status == 'expert_choice':
+                        current_values[rank_col_idx] = f"★ {numeric_rank}"
+                    elif expert_status == 'good':
+                        current_values[rank_col_idx] = f"● {numeric_rank}"
+                    else:
+                        current_values[rank_col_idx] = numeric_rank
+                else:
+                    current_values[rank_col_idx] = numeric_rank
+
+                self.results_tree.item(row_id, values=current_values)
+
+        # Also refresh row tags for any other styling
         self._refresh_row_tags()
 
     def _refresh_row_tags(self):
