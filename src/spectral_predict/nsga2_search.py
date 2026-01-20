@@ -2375,6 +2375,8 @@ def _compute_solution_r2(
     task_type: str,
     cv_folds: int = 5,
     random_state: int = 42,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
 ) -> Optional[float]:
     """
     Compute R2 for a single NSGA-II solution via cross-validation.
@@ -2400,6 +2402,10 @@ def _compute_solution_r2(
         Number of CV folds
     random_state : int
         Random state for reproducibility
+    imbalance_method : str, optional
+        Imbalance handling method (e.g., 'smogn', 'smote')
+    imbalance_params : dict, optional
+        Parameters for imbalance method
 
     Returns
     -------
@@ -2470,6 +2476,29 @@ def _compute_solution_r2(
             # Use _build_model for all other models with hyperparams
             model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
 
+        # Build pipeline with imbalance handling if specified
+        # This ensures R2cv matches what Model Development computes
+        if imbalance_method is not None and imbalance_method != 'class_weight':
+            from sklearn.pipeline import Pipeline
+            from spectral_predict.imbalance import build_imbalance_transformer
+
+            imb_params = imbalance_params if imbalance_params else {}
+            imbalance_transformer = build_imbalance_transformer(
+                method=imbalance_method,
+                task_type=task_type,
+                random_state=random_state,
+                **imb_params
+            )
+
+            pipe_steps = [("imbalance", imbalance_transformer), ("model", model)]
+
+            # Use ImbPipeline for resampling methods
+            if _needs_resampling_pipeline(imbalance_method, task_type):
+                from imblearn.pipeline import Pipeline as ImbPipeline
+                model = ImbPipeline(pipe_steps)
+            else:
+                model = Pipeline(pipe_steps)
+
         # Cross-validation for R2 using aggregated predictions (not per-fold averages)
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
         # This matches the method used in search.py for consistency with Model Development
@@ -2493,6 +2522,8 @@ def _compute_display_rmse(
     task_type: str,
     cv_folds: int = 5,
     random_state: int = 42,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
 ) -> Optional[float]:
     """
     Compute RMSE for display, with edge masking to match optimization.
@@ -2518,6 +2549,10 @@ def _compute_display_rmse(
         Number of CV folds
     random_state : int
         Random state for reproducibility
+    imbalance_method : str, optional
+        Imbalance handling method (e.g., 'smogn', 'smote')
+    imbalance_params : dict, optional
+        Parameters for imbalance method
 
     Returns
     -------
@@ -2587,6 +2622,29 @@ def _compute_display_rmse(
             # Use _build_model for all other models with hyperparams
             model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
 
+        # Build pipeline with imbalance handling if specified
+        # This ensures RMSEcv matches what Model Development computes
+        if imbalance_method is not None and imbalance_method != 'class_weight':
+            from sklearn.pipeline import Pipeline
+            from spectral_predict.imbalance import build_imbalance_transformer
+
+            imb_params = imbalance_params if imbalance_params else {}
+            imbalance_transformer = build_imbalance_transformer(
+                method=imbalance_method,
+                task_type=task_type,
+                random_state=random_state,
+                **imb_params
+            )
+
+            pipe_steps = [("imbalance", imbalance_transformer), ("model", model)]
+
+            # Use ImbPipeline for resampling methods
+            if _needs_resampling_pipeline(imbalance_method, task_type):
+                from imblearn.pipeline import Pipeline as ImbPipeline
+                model = ImbPipeline(pipe_steps)
+            else:
+                model = Pipeline(pipe_steps)
+
         # Cross-validation for RMSE
         cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
         with warnings.catch_warnings():
@@ -2609,6 +2667,8 @@ def _compute_classification_cv_metrics(
     model_types: List[str],
     cv_folds: int = 5,
     random_state: int = 42,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, float]:
     """
     Compute classification CV metrics (F1, ROC_AUC, Precision, Recall) for a solution.
@@ -2632,6 +2692,10 @@ def _compute_classification_cv_metrics(
         Number of CV folds
     random_state : int
         Random state for reproducibility
+    imbalance_method : str, optional
+        Imbalance handling method (e.g., 'smote', 'adasyn')
+    imbalance_params : dict, optional
+        Parameters for imbalance method
 
     Returns
     -------
@@ -2699,6 +2763,18 @@ def _compute_classification_cv_metrics(
         # Set averaging method based on number of classes
         average = 'binary' if is_binary else 'macro'
 
+        # Build imbalance transformer if specified
+        imbalance_transformer = None
+        if imbalance_method is not None and imbalance_method != 'class_weight':
+            from spectral_predict.imbalance import build_imbalance_transformer
+            imb_params = imbalance_params if imbalance_params else {}
+            imbalance_transformer = build_imbalance_transformer(
+                method=imbalance_method,
+                task_type='classification',
+                random_state=random_state,
+                **imb_params
+            )
+
         # Manual cross-validation to compute all metrics
         cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
@@ -2711,22 +2787,42 @@ def _compute_classification_cv_metrics(
             X_train, X_test = X_subset[train_idx], X_subset[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
+            # Apply imbalance resampling to training data (inside CV fold)
+            X_train_resampled, y_train_resampled = X_train, y_train
+            if imbalance_transformer is not None and _needs_resampling_pipeline(imbalance_method, 'classification'):
+                try:
+                    from sklearn.base import clone
+                    imb_clone = clone(imbalance_transformer)
+                    X_train_resampled, y_train_resampled = imb_clone.fit_resample(X_train, y_train)
+                except Exception as e:
+                    logger.warning(f"Imbalance resampling failed in fold: {type(e).__name__}: {e}")
+
             # Build model for this fold
             if model_type in ('PLS', 'PLS-DA'):
                 # PLS-DA: PLSTransformer + StandardScaler + LogisticRegression
                 from sklearn.pipeline import Pipeline
                 from sklearn.preprocessing import StandardScaler
                 from sklearn.linear_model import LogisticRegression
-                n_components = min(model_param + 1, 15, X_train.shape[1] - 1, X_train.shape[0] - 1)
+                n_components = min(model_param + 1, 15, X_train_resampled.shape[1] - 1, X_train_resampled.shape[0] - 1)
                 n_components = max(1, n_components)
                 pls_transformer = PLSTransformer(n_components=n_components, scale=False)
+                lr = LogisticRegression(max_iter=1000, random_state=random_state)
+                # Apply class_weight if specified
+                if imbalance_method == 'class_weight':
+                    lr.set_params(class_weight='balanced')
                 model = Pipeline([
                     ('pls', pls_transformer),
                     ('scaler', StandardScaler()),
-                    ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
+                    ('lr', lr)
                 ])
             else:
                 model = _build_model(model_type, model_param, 'classification', random_state, hyperparams)
+                # Apply class_weight if specified and model supports it
+                if imbalance_method == 'class_weight' and model is not None and hasattr(model, 'class_weight'):
+                    try:
+                        model.set_params(class_weight='balanced')
+                    except Exception:
+                        pass
 
             if model is None:
                 continue
@@ -2734,7 +2830,7 @@ def _compute_classification_cv_metrics(
             # Fit and predict
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                model.fit(X_train, y_train)
+                model.fit(X_train_resampled, y_train_resampled)
                 y_pred = model.predict(X_test)
 
             # Compute F1, Precision, Recall
@@ -3190,6 +3286,10 @@ def convert_nsga2_to_v1_format(
             'Is_Knee': i == result['knee_idx'],
         }
 
+        # Get imbalance settings from result for CV metric computation
+        imbalance_method = result.get('imbalance_method')
+        imbalance_params = result.get('imbalance_params')
+
         if task_type == 'regression':
             # Compute calibration metrics (training data)
             if X is not None and y is not None:
@@ -3202,16 +3302,20 @@ def convert_nsga2_to_v1_format(
                 row['RMSE'] = np.nan
                 row['R2'] = np.nan
 
-            # Compute CV metrics (cross-validation)
+            # Compute CV metrics (cross-validation) with imbalance handling
             if X is not None and y is not None:
                 display_rmse = _compute_display_rmse(
-                    X, y, solution, n_wavelengths, model_types, task_type, folds, 42
+                    X, y, solution, n_wavelengths, model_types, task_type, folds, 42,
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params
                 )
                 row['RMSEcv'] = display_rmse if display_rmse is not None else objectives[0]
 
                 if compute_r2:
                     r2_cv = _compute_solution_r2(
-                        X, y, solution, n_wavelengths, model_types, task_type, folds, 42
+                        X, y, solution, n_wavelengths, model_types, task_type, folds, 42,
+                        imbalance_method=imbalance_method,
+                        imbalance_params=imbalance_params
                     )
                     row['R2cv'] = r2_cv
                 else:
@@ -3239,11 +3343,13 @@ def convert_nsga2_to_v1_format(
                 row['Precision'] = np.nan
                 row['Recall'] = np.nan
 
-            # CV metrics: compute actual CV metrics for F1, ROC_AUC, Precision, Recall
+            # CV metrics: compute actual CV metrics for F1, ROC_AUC, Precision, Recall with imbalance handling
             row['Accuracycv'] = 1.0 - objectives[0]  # From optimization objective
             if X is not None and y is not None:
                 cv_metrics = _compute_classification_cv_metrics(
-                    X, y, solution, n_wavelengths, model_types, folds, 42
+                    X, y, solution, n_wavelengths, model_types, folds, 42,
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params
                 )
                 row['ROC_AUCcv'] = cv_metrics.get('ROC_AUCcv')
                 row['F1cv'] = cv_metrics.get('F1cv')
