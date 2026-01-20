@@ -317,8 +317,17 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
 
                 predictions[i] = oof_pred
             except Exception as e:
-                warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
-                predictions[i] = np.zeros(n_samples)
+                # More informative error message to help diagnose sklearn.clone() issues
+                warnings.warn(
+                    f"Model {self.model_names[i]} failed during OOF prediction:\n"
+                    f"  Type: {type(model).__name__}\n"
+                    f"  Error: {e}\n"
+                    f"  This model will be excluded from weight calculation.\n"
+                    f"  If this is a wrapper class, ensure it inherits from sklearn.base.BaseEstimator\n"
+                    f"  and implements get_params()/set_params() for sklearn.clone() compatibility."
+                )
+                # Use NaN to mark as failed - allows excluding from weight calculation
+                predictions[i] = np.full(n_samples, np.nan)
 
         # Define region boundaries
         if self.y_percentiles is not None:
@@ -548,8 +557,17 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
 
                 predictions[i] = oof_pred
             except Exception as e:
-                warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
-                predictions[i] = np.zeros(n_samples)
+                # More informative error message to help diagnose sklearn.clone() issues
+                warnings.warn(
+                    f"Model {self.model_names[i]} failed during OOF prediction:\n"
+                    f"  Type: {type(model).__name__}\n"
+                    f"  Error: {e}\n"
+                    f"  This model will be excluded from weight calculation.\n"
+                    f"  If this is a wrapper class, ensure it inherits from sklearn.base.BaseEstimator\n"
+                    f"  and implements get_params()/set_params() for sklearn.clone() compatibility."
+                )
+                # Use NaN to mark as failed - allows excluding from weight calculation
+                predictions[i] = np.full(n_samples, np.nan)
 
         # Define region boundaries
         if self.y_percentiles is not None:
@@ -770,8 +788,17 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
 
                 meta_features[:, i] = oof_pred
             except Exception as e:
-                warnings.warn(f"Model {self.model_names[i]} failed during OOF: {e}")
-                meta_features[:, i] = np.zeros(n_samples)
+                # More informative error message to help diagnose sklearn.clone() issues
+                warnings.warn(
+                    f"Model {self.model_names[i]} failed during OOF prediction:\n"
+                    f"  Type: {type(model).__name__}\n"
+                    f"  Error: {e}\n"
+                    f"  This model will be excluded from weight calculation.\n"
+                    f"  If this is a wrapper class, ensure it inherits from sklearn.base.BaseEstimator\n"
+                    f"  and implements get_params()/set_params() for sklearn.clone() compatibility."
+                )
+                # Use NaN to mark as failed - allows excluding from weight calculation
+                meta_features[:, i] = np.full(n_samples, np.nan)
 
         # Add region-aware features if enabled
         if self.region_aware:
@@ -1565,6 +1592,92 @@ def select_top_models_per_region(results_df, top_n, task_type, reconstruct_func,
         'models_per_region': models_per_region,
         'model_names_per_region': model_names_per_region,
         'unique_model_count': len(all_selected_indices)
+    }
+
+
+def select_top_models_quartile_flat(results_df: pd.DataFrame,
+                                     top_n_per_quartile: int,
+                                     task_type: str = 'regression') -> dict:
+    """
+    Select top N models from each quartile, returning a flat unique list.
+
+    This function enables an alternative model selection strategy for ensembles:
+    instead of selecting overall top N models by CompositeScore, it selects
+    models that specialize in different Y-value ranges (quartiles).
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Results DataFrame with model performance metrics and regional_rmse column
+    top_n_per_quartile : int
+        Number of top models to select from each quartile (Q1, Q2, Q3, Q4)
+    task_type : str, default='regression'
+        Task type - quartile selection only applies to regression
+
+    Returns
+    -------
+    dict with keys:
+        'indices': list of unique row indices for selected models
+        'model_count': number of unique models (may be less than 4*top_n due to overlap)
+        'coverage': dict mapping quartile -> number of models selected from it
+        'quartile_details': dict mapping quartile -> list of (idx, rmse, rank) tuples
+
+    Notes
+    -----
+    A model may rank highly in multiple quartiles (e.g., a good overall model),
+    so the returned indices are deduplicated. This means the total unique model
+    count may be less than top_n_per_quartile * 4.
+
+    Example
+    -------
+    >>> selection = select_top_models_quartile_flat(results_df, top_n_per_quartile=5)
+    >>> print(f"Selected {selection['model_count']} unique models")
+    >>> print(f"Coverage: {selection['coverage']}")
+    # Could show: Selected 15 unique models (some overlap between quartiles)
+    # Coverage: {'Q1': 5, 'Q2': 5, 'Q3': 5, 'Q4': 5}
+    """
+    if task_type != 'regression':
+        # For classification, quartile-based selection doesn't apply
+        # Return empty result - caller should use overall top N instead
+        return {
+            'indices': [],
+            'model_count': 0,
+            'coverage': {},
+            'quartile_details': {}
+        }
+
+    # Use existing compute_regional_rankings function
+    rankings_result = compute_regional_rankings(results_df, top_n=top_n_per_quartile)
+    rankings = rankings_result['rankings']
+
+    if not rankings:
+        return {
+            'indices': [],
+            'model_count': 0,
+            'coverage': {},
+            'quartile_details': {}
+        }
+
+    # Collect unique indices from all quartiles
+    all_indices = set()
+    coverage = {}
+    quartile_details = {}
+
+    for quartile in ['Q1', 'Q2', 'Q3', 'Q4']:
+        quartile_rankings = rankings.get(quartile, [])
+        top_n_for_quartile = quartile_rankings[:top_n_per_quartile]
+
+        quartile_details[quartile] = top_n_for_quartile
+        coverage[quartile] = len(top_n_for_quartile)
+
+        for idx, rmse, rank in top_n_for_quartile:
+            all_indices.add(idx)
+
+    return {
+        'indices': list(all_indices),
+        'model_count': len(all_indices),
+        'coverage': coverage,
+        'quartile_details': quartile_details
     }
 
 

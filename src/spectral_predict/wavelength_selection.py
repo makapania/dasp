@@ -282,7 +282,7 @@ def cars(
 
         # Build PLS model and evaluate
         try:
-            pls = PLSRegression(n_components=min(pls_components, n_sample-1, X_subset.shape[0]-1))
+            pls = PLSRegression(n_components=min(pls_components, n_sample-1, X_subset.shape[0]-1), scale=False)
 
             # Cross-validation
             kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -486,7 +486,7 @@ def vcpa_iriv(
                 n_comp = min(pls_components, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
                 if n_comp < 1:
                     return np.inf
-                model = PLSRegression(n_components=n_comp)
+                model = PLSRegression(n_components=n_comp, scale=False)
 
             for train_idx, val_idx in kf.split(X_subset):
                 X_train, X_val = X_subset[train_idx], X_subset[val_idx]

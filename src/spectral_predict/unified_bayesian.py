@@ -40,7 +40,7 @@ from optuna.samplers import TPESampler
 from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, r2_score, mean_squared_error, accuracy_score
 from typing import Dict, List, Optional, Callable, Tuple, Any
 
 # Import existing infrastructure
@@ -645,18 +645,24 @@ def create_unified_objective(
                     ('model', model)
                 ])
 
-            # 7. Compute metrics using cross_validate for proper scoring
+            # 7. Compute metrics
             if task_type == 'regression':
-                # Use cross_validate to get both RMSE and R² correctly
+                # Use cross_validate for RMSE (averaging is valid for RMSE)
                 cv_results = cross_validate(
                     model, X_final, y,
                     cv=cv,
-                    scoring={'rmse': 'neg_root_mean_squared_error', 'r2': 'r2'},
+                    scoring={'rmse': 'neg_root_mean_squared_error'},
                     n_jobs=1,
                     error_score='raise'
                 )
                 rmse = -cv_results['test_rmse'].mean()
-                r2 = cv_results['test_r2'].mean()
+
+                # R² must use aggregated predictions (not per-fold averages)
+                # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
+                # This matches the method used in search.py for consistency with Model Development
+                y_pred = cross_val_predict(model, X_final, y, cv=cv, n_jobs=1)
+                r2 = r2_score(y, y_pred)
+
                 metric = rmse  # Minimize RMSE
             else:
                 # Classification: use accuracy and ROC_AUC
@@ -692,12 +698,33 @@ def create_unified_objective(
             trial.set_user_attr('n_vars', n_vars)
             trial.set_user_attr('model_params', str(model_params))
 
+            # Fit on full training data for calibration metrics
+            model.fit(X_final, y)
+            y_pred_cal = model.predict(X_final)
+
             if task_type == 'regression':
-                trial.set_user_attr('RMSE', rmse)
-                trial.set_user_attr('R2', r2)
+                cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))
+                cal_r2 = r2_score(y, y_pred_cal)
+                trial.set_user_attr('RMSE', cal_rmse)      # Calibration
+                trial.set_user_attr('R2', cal_r2)          # Calibration
+                trial.set_user_attr('RMSEcv', rmse)        # CV (was RMSE)
+                trial.set_user_attr('R2cv', r2)            # CV (was R2)
             else:
-                trial.set_user_attr('Accuracy', accuracy)
-                trial.set_user_attr('ROC_AUC', roc_auc)
+                cal_accuracy = accuracy_score(y, y_pred_cal)
+                trial.set_user_attr('Accuracy', cal_accuracy)    # Calibration
+                trial.set_user_attr('Accuracycv', accuracy)      # CV (was Accuracy)
+                try:
+                    if hasattr(model, 'predict_proba'):
+                        y_proba_cal = model.predict_proba(X_final)
+                        n_classes = len(np.unique(y))
+                        if n_classes == 2:
+                            cal_roc_auc = roc_auc_score(y, y_proba_cal[:, 1])
+                        else:
+                            cal_roc_auc = roc_auc_score(y, y_proba_cal, multi_class='ovr', average='weighted')
+                        trial.set_user_attr('ROC_AUC', cal_roc_auc)     # Calibration
+                except Exception:
+                    trial.set_user_attr('ROC_AUC', np.nan)
+                trial.set_user_attr('ROC_AUCcv', roc_auc)          # CV (was ROC_AUC)
 
             # Store selected wavelengths in TRAINING ORDER (importance order)
             # CRITICAL: Do NOT sort - Model Development expects wavelengths in the same
@@ -916,17 +943,17 @@ def run_unified_bayesian(
             print(f"{'='*70}\n")
         else:
             if task_type == 'regression':
-                best_rmse = results_df['RMSE'].min()
-                best_r2 = results_df.loc[results_df['RMSE'].idxmin(), 'R2']
-                print(f"Best RMSE: {best_rmse:.6f}")
-                print(f"Best R2: {best_r2:.6f}")
+                best_rmse_cv = results_df['RMSEcv'].min()
+                best_r2_cv = results_df.loc[results_df['RMSEcv'].idxmin(), 'R2cv']
+                print(f"Best RMSEcv: {best_rmse_cv:.6f}")
+                print(f"Best R2cv: {best_r2_cv:.6f}")
             else:
                 best_acc = results_df['Accuracy'].max()
                 print(f"Best Accuracy: {best_acc:.6f}")
 
             # Show best configuration
             if task_type == 'regression':
-                best_row = results_df.loc[results_df['RMSE'].idxmin()]
+                best_row = results_df.loc[results_df['RMSEcv'].idxmin()]
             else:
                 best_row = results_df.loc[results_df['Accuracy'].idxmax()]
 
@@ -995,15 +1022,19 @@ def convert_study_to_dataframe(
             'Optimization': 'Unified Bayesian'
         }
 
-        # Add metrics
+        # Add metrics - both calibration and CV
         if task_type == 'regression':
-            row['RMSE'] = trial.user_attrs.get('RMSE', trial.value)
-            row['R2'] = trial.user_attrs.get('R2', np.nan)
+            row['RMSE'] = trial.user_attrs.get('RMSE', np.nan)       # Calibration
+            row['R2'] = trial.user_attrs.get('R2', np.nan)           # Calibration
+            row['RMSEcv'] = trial.user_attrs.get('RMSEcv', trial.value)  # CV
+            row['R2cv'] = trial.user_attrs.get('R2cv', np.nan)       # CV
         else:
-            accuracy = trial.user_attrs.get('Accuracy', -trial.value if trial.value else np.nan)
-            row['Accuracy'] = accuracy
-            row['CV Error'] = 1 - accuracy if accuracy is not None and not np.isnan(accuracy) else np.nan
-            row['ROC_AUC'] = trial.user_attrs.get('ROC_AUC', np.nan)
+            row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)       # Calibration
+            accuracycv = trial.user_attrs.get('Accuracycv', -trial.value if trial.value else np.nan)
+            row['Accuracycv'] = accuracycv   # CV
+            row['CV Error'] = 1 - accuracycv if accuracycv is not None and not np.isnan(accuracycv) else np.nan
+            row['ROC_AUC'] = trial.user_attrs.get('ROC_AUC', np.nan)         # Calibration
+            row['ROC_AUCcv'] = trial.user_attrs.get('ROC_AUCcv', np.nan)     # CV
 
         # Add wavelength info
         row['top_vars'] = trial.user_attrs.get('selected_wavelengths', 'N/A')
@@ -1027,14 +1058,14 @@ def convert_study_to_dataframe(
                 'all_vars', 'Window', 'Poly', 'Deriv', 'LVs', 'full_vars', 'SubsetTag',
                 'trial_number', 'Folds', 'Optimization']
         if task_type == 'classification':
-            cols.extend(['Accuracy', 'CV Error', 'ROC_AUC', 'CompositeScore', 'Score'])
+            cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
-            cols.extend(['RMSE', 'R2', 'CompositeScore', 'Score'])
+            cols.extend(['RMSE', 'R2', 'RMSEcv', 'R2cv', 'CompositeScore', 'Score'])
         return pd.DataFrame(columns=cols)
 
-    # Sort by performance
+    # Sort by performance (use CV metrics for model selection)
     if task_type == 'regression':
-        df = df.sort_values('RMSE', ascending=True)
+        df = df.sort_values('RMSEcv', ascending=True)
     else:
         df = df.sort_values('CV Error', ascending=True)  # Lower CV Error is better
 
@@ -1044,9 +1075,9 @@ def convert_study_to_dataframe(
     df.insert(0, 'Rank', range(1, len(df) + 1))
 
     # Add CompositeScore column (required for report.py compatibility)
-    # Lower is better for both regression (RMSE) and classification (CV Error)
+    # Lower is better for both regression (RMSEcv) and classification (CV Error)
     if task_type == 'regression':
-        df['CompositeScore'] = df['RMSE']
+        df['CompositeScore'] = df['RMSEcv']
     else:
         df['CompositeScore'] = df['CV Error']
 
@@ -1054,7 +1085,7 @@ def convert_study_to_dataframe(
     if task_type == 'classification':
         df['Score'] = df['CV Error']
     else:
-        df['Score'] = df['RMSE']
+        df['Score'] = df['RMSEcv']
 
     return df
 

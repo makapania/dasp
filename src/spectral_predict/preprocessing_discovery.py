@@ -47,9 +47,9 @@ PREPROCESSING_CANDIDATES = [
     ('deriv4_snv', 4, True),
 ]
 
-# Window sizes to test (5 representative values for fast discovery)
-# Covers small (7), medium (11, 17), and large (25, 31) windows
-WINDOW_SIZES = [7, 11, 17, 25, 31]
+# Window sizes to test (6 representative values for fast discovery)
+# Covers small (7), medium (11, 17), and large (25, 31, 37) windows
+WINDOW_SIZES = [7, 11, 17, 25, 31, 37]
 
 # Wavelength subset sizes to test
 SUBSET_SIZES = [50, 100, 200, 300]
@@ -716,12 +716,15 @@ def _quick_evaluate(
 
 def score_config(config: Dict, all_configs: List[Dict], task_type: str) -> float:
     """
-    Score a config based on error, complexity, and wavelength count.
+    Score a config based on CV error and preprocessing complexity.
 
     Lower score = better config.
+
+    Note: Wavelength count penalty was removed because wavelength selection
+    is fixed at 200 anyway, so edge loss from larger windows doesn't affect
+    the final model. Let CV results speak for themselves.
     """
     scores = [c['score'] for c in all_configs]
-    wavelengths = [c['n_wavelengths'] for c in all_configs]
 
     # Normalize score (0 = best, 1 = worst)
     if task_type == 'regression':
@@ -739,14 +742,11 @@ def score_config(config: Dict, all_configs: List[Dict], task_type: str) -> float
         else:
             score_norm = 0
 
-    # Wavelength count (prefer fewer)
-    wavelength_norm = config['n_wavelengths'] / max(wavelengths)
-
-    # Preprocessing complexity
+    # Preprocessing complexity (prefer simpler)
     complexity_norm = PREPROCESSING_COMPLEXITY.get(config['preprocessing'], 0.5)
 
-    # Weighted combination (error most important)
-    return 0.6 * score_norm + 0.25 * wavelength_norm + 0.15 * complexity_norm
+    # Weighted combination (CV error most important)
+    return 0.85 * score_norm + 0.15 * complexity_norm
 
 
 def select_diverse_configs(

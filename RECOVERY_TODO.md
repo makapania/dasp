@@ -6,6 +6,112 @@
 
 ---
 
+## 🚨 CRITICAL: Classification (PLS-DA) Broken - No Discrimination (2026-01-16)
+
+**Problem:** PLS-DA classification is completely broken. Run with 3 classes showed:
+- F1 = 0 for Classes 2 and 3 (no discrimination)
+- Only 1 class was colored in highlighting (likely because all models were "best" at the only class with non-zero F1)
+- This **used to work beautifully** before today's changes
+
+**What Was Changed Today (Per-Class Performance Highlighting Feature):**
+
+Files modified:
+1. `src/spectral_predict/search.py`:
+   - Added `classification_report` to imports (line 11)
+   - Added `all_y_test` and `all_y_pred` concatenation in classification branch (lines 3470-3472)
+   - Added per-class metrics computation using `classification_report` (lines 3474-3490)
+   - Added `per_class_metrics`, `class_labels`, and `F1_Class{N}` columns to result dict (lines 3685-3691)
+   - **Added `y_test` and `y_pred` to `_run_single_fold` return for classification** (line 3225-3226)
+
+2. `src/spectral_predict/bayesian_utils.py`:
+   - Propagated `per_class_metrics`, `class_labels`, `F1_Class{N}` columns (lines 728-735)
+
+3. `src/spectral_predict/ensemble.py`:
+   - Added `compute_class_rankings()` function (lines 927-1023)
+
+4. `spectral_predict_gui_optimized.py`:
+   - Added class highlight tag colors (lines 7532-7549)
+   - Modified `_populate_results_table()` to detect classification and use class rankings (lines 7817-7852)
+   - Added `_update_class_legend()` and `_update_quartile_legend()` methods (lines 18035-18096)
+   - Updated `_auto_select_top_by_region()` to handle classification (lines 18098-18181)
+
+**Most Likely Cause:**
+The change to `_run_single_fold` adding `y_test` and `y_pred` to the classification return should NOT have broken anything - it just adds data. However, need to verify:
+1. Was classification already broken before these changes?
+2. Check if `y_pred` is being computed correctly in classification
+3. Check if the CV fold predictions are correct
+
+**Commits to Consider Reverting To:**
+- `72f3a73` - feat: Add regional performance highlighting for ensemble model selection (most recent)
+- `a9a8d55` - refactor: Rename validation metrics to standard chemometrics terminology
+- `2bec037` - fix: Resolve Data Viewer row disappearance when selecting validation samples
+
+**NOTE:** Today's changes are NOT committed yet - they're local modifications only.
+
+**Investigation Steps for Tomorrow:**
+1. First, test if classification works on a CLEAN checkout (revert local changes temporarily)
+2. If clean checkout works, the bug is in today's changes
+3. If clean checkout is also broken, the bug predates today
+4. Check `_run_single_fold` - is `y_pred` being computed correctly for classification?
+5. Check if `pipe_clone.predict(X_test)` is returning correct predictions
+6. Add debug prints to see what's being predicted vs actual
+
+---
+
+## 🔄 TODO: Bayesian PLS R²/RMSE Discrepancy - Deeper Investigation Needed (2026-01-18)
+
+**Problem:** Small R²/RMSE discrepancy between Bayesian optimization and Model Development for PLS models.
+
+**Attempted Fix:** Added `scale=False` to all PLSRegression calls in:
+- `variable_selection.py:1069` (CARS)
+- `preprocessing_discovery.py:233, 708` (VIP importance)
+- `wavelength_selection.py:285, 489`
+- `nsga2_search.py:573`
+- `learned_preprocessing.py:489` (docstring)
+
+**Result:** Fix did NOT resolve the discrepancy. Root cause is elsewhere.
+
+**Next Steps:**
+1. May revert the `scale=False` changes (or keep them for consistency - they don't hurt)
+2. Need deeper investigation into actual R² computation paths:
+   - How does Bayesian optimization compute R² during trials?
+   - How does Model Development compute R² when rebuilding?
+   - Are there differences in CV strategy, data splitting, or metric calculation?
+3. Check if the discrepancy is in the metric computation itself, not the model
+
+**Files Changed (may revert):**
+- `src/spectral_predict/variable_selection.py`
+- `src/spectral_predict/preprocessing_discovery.py`
+- `src/spectral_predict/wavelength_selection.py`
+- `src/spectral_predict/nsga2_search.py`
+- `src/spectral_predict/learned_preprocessing.py`
+
+---
+
+## 🔄 TODO: Verify CatBoost R² Fix (2026-01-17)
+
+**Problem:** CatBoost R² differed by ~0.01 between Results and Model Development tabs.
+
+**Root Cause:** Commit 106e250 added `min_data_in_leaf` and `bootstrap_type` to `model_config.py`, but:
+1. `get_model_grids()` in `models.py` was never updated to use them
+2. Model Development GUI had no widgets for them
+
+**Fix Applied (2026-01-16):**
+1. Added `catboost_min_data_in_leaf_list` and `catboost_bootstrap_type_list` parameters to `get_model_grids()` function signature
+2. Added config fetching for new parameters from tier config
+3. Updated CatBoostRegressor and CatBoostClassifier grid loops to include new params
+4. Added conditional logic: `bagging_temperature` only valid for `bootstrap_type='Bayesian'`
+5. Updated `build_model()` to filter out `bagging_temperature` when bootstrap_type != 'Bayesian'
+
+**GUI already had:** Variable definitions, widgets, trace callbacks, param collection, param loading (verified present)
+
+**Files modified:**
+- `src/spectral_predict/models.py` - Function signature, config fetching, grid loops, build_model()
+
+**Status:** NEEDS VERIFICATION - Run grid search with CatBoost, load result into Model Development, confirm R² matches.
+
+---
+
 ## ✅ CALIBRATION METRICS IN RESULTS (2026-01-14)
 
 **Problem:** R2 and RMSE in results were cross-validation metrics only. Users couldn't see calibration (training) metrics to assess overfitting.
@@ -425,7 +531,7 @@ Models with high accuracy were ranked poorly because ranking used ROC_AUC instea
 **Feature:** Checkbox in Validation subtab to compute and display validation metrics for top N models in Results table.
 
 ### Regression - WORKING
-- `val_R2` and `val_RMSE` columns added to results
+- `Q2` and `RMSEP` columns added to results
 - Verified to match Predict tab exactly (tested to 4+ decimal places)
 - Uses correct preprocessing order: preprocess FULL spectrum THEN subset
 - Uses `ast.literal_eval()` + `set_params()` for model reconstruction
@@ -485,7 +591,7 @@ Models with high accuracy were ranked poorly because ranking used ROC_AUC instea
 2. Window suffix stripping - regex `_w\d+$` strips window from name
 
 **Testing Needed:**
-1. Run NSGA-II with validation enabled - verify val_R2/val_RMSE appear and are reasonable
+1. Run NSGA-II with validation enabled - verify Q2/RMSEP appear and are reasonable
 2. Run Unified Bayesian with validation - same verification
 3. Test with classification data - verify val_Accuracy, val_F1, etc.
 4. Verify Grid Search still works correctly (regression test)

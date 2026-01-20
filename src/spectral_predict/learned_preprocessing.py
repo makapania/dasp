@@ -486,7 +486,7 @@ else:
             X_test_preproc = preprocessor.transform(X_test)
 
             # Use with any sklearn model
-            pls = PLSRegression(n_components=10)
+            pls = PLSRegression(n_components=10, scale=False)
             pls.fit(X_train_preproc, y_train)
             y_pred = pls.predict(X_test_preproc)
 
