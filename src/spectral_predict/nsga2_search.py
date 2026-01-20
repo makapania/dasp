@@ -48,6 +48,10 @@ from .preprocess import SNV, SavgolDerivative
 from .models import get_feature_importances
 from .variable_selection import cars_selection
 
+# Imbalance handling imports
+from imblearn.pipeline import Pipeline as ImbPipeline
+from .imbalance import build_imbalance_transformer, validate_classification_config
+
 # All model libraries are required dependencies
 from lightgbm import LGBMRegressor, LGBMClassifier
 from xgboost import XGBRegressor, XGBClassifier
@@ -105,6 +109,36 @@ MODEL_ACTIVE_GENES = {
     'MLP':          [4],                          # learning_rate
     'NeuralBoosted': [4, 6],                      # lr, reg_lambda
 }
+
+
+def _needs_resampling_pipeline(imbalance_method: Optional[str], task_type: str) -> bool:
+    """Determine if the imbalance method requires imblearn Pipeline.
+
+    Parameters
+    ----------
+    imbalance_method : str or None
+        The imbalance handling method
+    task_type : str
+        'regression' or 'classification'
+
+    Returns
+    -------
+    bool
+        True if the method requires imblearn Pipeline (uses fit_resample)
+    """
+    if imbalance_method is None:
+        return False
+    if imbalance_method == 'class_weight':
+        return False
+
+    if task_type == 'classification':
+        resampling_methods = {'smote', 'adasyn', 'borderline_smote',
+                              'random_undersampler', 'tomek_links', 'smote_tomek'}
+        return imbalance_method.lower().replace('-', '_') in resampling_methods
+    elif task_type == 'regression':
+        resampling_methods = {'undersample', 'oversample', 'smogn', 'smotetomek'}
+        return imbalance_method.lower() in resampling_methods
+    return False
 
 
 class SmartMutation(Mutation):
@@ -1042,6 +1076,8 @@ class SpectralOptimizationProblem(Problem):
         random_state: int = 42,
         cache_enabled: bool = True,
         models: Optional[List[str]] = None,
+        imbalance_method: Optional[str] = None,
+        imbalance_params: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the optimization problem.
@@ -1064,6 +1100,10 @@ class SpectralOptimizationProblem(Problem):
             If True, cache fitness evaluations
         models : list of str, optional
             Model types to consider. If None, uses default MODEL_TYPES.
+        imbalance_method : str, optional
+            Imbalance handling method (e.g., 'smote', 'class_weight')
+        imbalance_params : dict, optional
+            Parameters for the imbalance method
         """
         self.X = X
         self.y = y
@@ -1072,6 +1112,10 @@ class SpectralOptimizationProblem(Problem):
         self.min_wavelengths = min_wavelengths
         self.random_state = random_state
         self.n_wavelengths = X.shape[1]
+
+        # Imbalance handling settings
+        self.imbalance_method = imbalance_method
+        self.imbalance_params = imbalance_params if imbalance_params is not None else {}
 
         # Use user-specified models or defaults
         self.model_types = models if models is not None else MODEL_TYPES
@@ -1291,34 +1335,60 @@ class SpectralOptimizationProblem(Problem):
             # For both tasks: SVC/SVR, MLP, NeuralBoosted need StandardScaler wrapper
             SCALE_SENSITIVE_MODELS = {'SVR', 'MLP', 'NeuralBoosted'}
 
-            # Build pipeline with proper scaling if needed
+            # Build pipeline steps with imbalance handling support
+            from sklearn.pipeline import Pipeline
+            from sklearn.preprocessing import StandardScaler
+            pipe_steps = []
+
+            # Step 1: Add imbalance handling (must be first for fit_resample)
+            if self.imbalance_method is not None and self.imbalance_method != 'class_weight':
+                imbalance_transformer = build_imbalance_transformer(
+                    method=self.imbalance_method,
+                    task_type=self.task_type,
+                    random_state=self.random_state,
+                    **self.imbalance_params
+                )
+                pipe_steps.append(('imbalance', imbalance_transformer))
+
+            # Step 2: Handle class_weight for models that support it
+            if self.imbalance_method == 'class_weight' and self.task_type == 'classification':
+                if hasattr(model, 'class_weight'):
+                    try:
+                        model.set_params(class_weight='balanced')
+                    except Exception:
+                        pass
+
+            # Step 3: Build model pipeline based on model type
             if self.task_type == 'classification' and model_type in ('PLS', 'PLS-DA'):
                 # PLS-DA: PLSTransformer (2D output) + StandardScaler + LogisticRegression
                 # PLSTransformer ensures transform() returns 2D arrays (fixes sklearn 3D output bug)
-                from sklearn.pipeline import Pipeline
-                from sklearn.preprocessing import StandardScaler
                 from sklearn.linear_model import LogisticRegression
                 # CRITICAL: Use CV fold training size, not full dataset size
                 min_train_samples = X_subset.shape[0] * (self.cv_folds - 1) // self.cv_folds
                 n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, min_train_samples - 1)
                 n_components = max(1, n_components)
                 pls_transformer = PLSTransformer(n_components=n_components, scale=False)
-                pipeline_model = Pipeline([
-                    ('pls', pls_transformer),
-                    ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
-                    ('lr', LogisticRegression(max_iter=1000, random_state=self.random_state))
-                ])
+                pipe_steps.append(('pls', pls_transformer))
+                pipe_steps.append(('scaler', StandardScaler()))  # Scale PLS scores for LogisticRegression
+                lr = LogisticRegression(max_iter=1000, random_state=self.random_state)
+                # Apply class_weight to LogisticRegression if specified
+                if self.imbalance_method == 'class_weight':
+                    lr.set_params(class_weight='balanced')
+                pipe_steps.append(('lr', lr))
             elif model_type in SCALE_SENSITIVE_MODELS:
                 # Scale-sensitive models: StandardScaler + Model (matches search.py lines 3427-3429)
-                from sklearn.pipeline import Pipeline
-                from sklearn.preprocessing import StandardScaler
-                pipeline_model = Pipeline([
-                    ('scaler', StandardScaler()),
-                    ('model', model)
-                ])
+                pipe_steps.append(('scaler', StandardScaler()))
+                pipe_steps.append(('model', model))
             else:
                 # Other models don't need scaling
-                pipeline_model = model
+                pipe_steps.append(('model', model))
+
+            # Step 4: Create pipeline with correct class (ImbPipeline for resampling methods)
+            needs_resampling = _needs_resampling_pipeline(self.imbalance_method, self.task_type)
+            if needs_resampling:
+                pipeline_model = ImbPipeline(pipe_steps)
+            else:
+                pipeline_model = Pipeline(pipe_steps)
 
             # Cross-validation
             if self.task_type == 'regression':
@@ -1575,6 +1645,8 @@ def run_nsga2_search(
     controller=None,
     selection_bias: float = 0.0,
     use_guidance: bool = True,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1619,6 +1691,10 @@ def run_nsga2_search(
     use_guidance : bool, default True
         If True, use CARS-Tree importance for guided wavelength selection (SeededWavelengthSampling + SmartMutation).
         If False, use standard NSGA-II (IntegerRandomSampling + PM mutation).
+    imbalance_method : str, optional
+        Imbalance handling method (e.g., 'smote', 'class_weight')
+    imbalance_params : dict, optional
+        Parameters for the imbalance method
 
     Returns
     -------
@@ -1642,6 +1718,26 @@ def run_nsga2_search(
         print(f"  Models: {models}")
         print(f"  Population: {population_size}, Generations: {n_generations}")
         print(f"  CV folds: {cv_folds}, Min wavelengths: {min_wavelengths}")
+        if imbalance_method:
+            print(f"  Imbalance handling: {imbalance_method}")
+
+    # Guard against None params
+    if imbalance_params is None:
+        imbalance_params = {}
+
+    # Validate imbalance configuration for classification
+    if task_type == 'classification' and imbalance_method is not None:
+        # Need to encode y first for validation
+        y_for_validation = y
+        if y.dtype == object or not np.issubdtype(y.dtype, np.number):
+            from sklearn.preprocessing import LabelEncoder as LE
+            y_for_validation = LE().fit_transform(y)
+        validate_classification_config(
+            y=y_for_validation,
+            imbalance_method=imbalance_method,
+            imbalance_params=imbalance_params,
+            n_folds=cv_folds
+        )
 
     # Create problem with user-specified models
     problem = SpectralOptimizationProblem(
@@ -1652,6 +1748,8 @@ def run_nsga2_search(
         min_wavelengths=min_wavelengths,
         random_state=random_state,
         models=models,
+        imbalance_method=imbalance_method,
+        imbalance_params=imbalance_params,
     )
 
     # Encode labels for classification before CARS importance calculation
@@ -1861,6 +1959,8 @@ def run_nsga2_search(
             'model_types': models,
             'label_encoder': problem.label_encoder,
             'cancelled': True,
+            'imbalance_method': imbalance_method,
+            'imbalance_params': imbalance_params,
         }
 
     # Extract results
@@ -1880,6 +1980,8 @@ def run_nsga2_search(
             'model_types': models,
             'label_encoder': problem.label_encoder,
             'cancelled': False,
+            'imbalance_method': imbalance_method,
+            'imbalance_params': imbalance_params,
         }
 
     # Summarize model diversity in Pareto front
@@ -1963,7 +2065,16 @@ def run_nsga2_search(
         'model_types': models,
         'label_encoder': problem.label_encoder,
         'cancelled': False,
+        'imbalance_method': imbalance_method,
+        'imbalance_params': imbalance_params,
     }
+
+
+def _format_imbalance_display(imbalance_method: Optional[str]) -> str:
+    """Format imbalance method for display in Results tab."""
+    if imbalance_method is None:
+        return "—"
+    return imbalance_method
 
 
 def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Optional[List[str]] = None, task_type: str = 'regression', n_samples: int = None) -> Dict[str, Any]:
@@ -3055,7 +3166,9 @@ def convert_nsga2_to_v1_format(
             'Variables': f"nsga2_{decoded['n_wavelengths']}",
             'full_vars': n_wavelengths,  # Total wavelengths available
             'SubsetTag': 'nsga2',
-            'Imbalance': 'none',
+            'Imbalance': _format_imbalance_display(result.get('imbalance_method')),
+            'imbalance_method': result.get('imbalance_method'),
+            'imbalance_params': result.get('imbalance_params'),
             'top_vars': _compute_top_variables(X, y, decoded, model_types, task_type, wavelengths, 30, 42) if (X is not None and y is not None and decoded['selected_indices']) else (_indices_to_wavelength_str(decoded['selected_indices'][:30], wavelengths) if decoded['selected_indices'] else 'N/A'),
             'all_vars': _indices_to_wavelength_str(decoded['selected_indices'], wavelengths) if decoded['selected_indices'] else 'N/A',
             'n_vars': decoded['n_wavelengths'],

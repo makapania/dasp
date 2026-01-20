@@ -17815,7 +17815,9 @@ class SpectralPredictApp:
                             cv_folds=self.folds.get(),
                             random_state=42,  # Fixed seed (hardcoded throughout codebase)
                             verbose=False,
-                            progress_callback=unified_progress_wrapper
+                            progress_callback=unified_progress_wrapper,
+                            imbalance_method=imbalance_method,
+                            imbalance_params=imbalance_params,
                         )
 
                         if len(results_df_model) > 0:
@@ -17948,6 +17950,8 @@ class SpectralPredictApp:
                         self.nsga2_selection_method.get(), 0.0
                     ),
                     use_guidance=(self.nsga2_mode.get() == "NSGA-II w/Guidance"),
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params,
                 )
 
                 # Convert to V1 format for results display

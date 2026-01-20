@@ -51,6 +51,10 @@ from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection
 )
 
+# Imbalance handling imports
+from imblearn.pipeline import Pipeline as ImbPipeline
+from spectral_predict.imbalance import build_imbalance_transformer, validate_classification_config
+
 # Suppress Optuna verbose output
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -67,6 +71,36 @@ SUBSET_SIZES = ['full', 10, 20, 50, 100, 250, 500, 1000]
 
 # Variable selection methods
 VAR_METHODS = ['importance', 'cars', 'region']
+
+
+def _needs_resampling_pipeline(imbalance_method: Optional[str], task_type: str) -> bool:
+    """Determine if the imbalance method requires imblearn Pipeline.
+
+    Parameters
+    ----------
+    imbalance_method : str or None
+        The imbalance handling method
+    task_type : str
+        'regression' or 'classification'
+
+    Returns
+    -------
+    bool
+        True if the method requires imblearn Pipeline (uses fit_resample)
+    """
+    if imbalance_method is None:
+        return False
+    if imbalance_method == 'class_weight':
+        return False
+
+    if task_type == 'classification':
+        resampling_methods = {'smote', 'adasyn', 'borderline_smote',
+                              'random_undersampler', 'tomek_links', 'smote_tomek'}
+        return imbalance_method.lower().replace('-', '_') in resampling_methods
+    elif task_type == 'regression':
+        resampling_methods = {'undersample', 'oversample', 'smogn', 'smotetomek'}
+        return imbalance_method.lower() in resampling_methods
+    return False
 
 
 def _normalize_preprocess_name(name: str) -> str:
@@ -465,7 +499,9 @@ def create_unified_objective(
     cv_folds: int = 5,
     random_state: int = 42,
     n_top_regions: int = 10,
-    progress_callback: Optional[Callable] = None
+    progress_callback: Optional[Callable] = None,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -495,6 +531,10 @@ def create_unified_objective(
         Number of top regions for regional subset selection
     progress_callback : callable, optional
         Progress callback function
+    imbalance_method : str, optional
+        Imbalance handling method (e.g., 'smote', 'class_weight')
+    imbalance_params : dict, optional
+        Parameters for the imbalance method
 
     Returns
     -------
@@ -518,6 +558,9 @@ def create_unified_objective(
     # Determine available subset types
     # Regional subsets are computed dynamically on preprocessed data
     available_methods = ['importance', 'cars', 'region']
+
+    # Guard against None params for imbalance handling
+    _imbalance_params = imbalance_params if imbalance_params is not None else {}
 
     def objective(trial: Trial) -> float:
         """Objective function for a single trial."""
@@ -628,22 +671,57 @@ def create_unified_objective(
             # For scale-sensitive models: StandardScaler + Model (search.py lines 3427-3429)
             SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
 
+            # Build pipeline steps with imbalance handling support
+            pipe_steps = []
+
+            # Step 1: Add imbalance transformer if specified (and not class_weight)
+            if imbalance_method is not None and imbalance_method != 'class_weight':
+                imbalance_transformer = build_imbalance_transformer(
+                    method=imbalance_method,
+                    task_type=task_type,
+                    random_state=random_state,
+                    **_imbalance_params
+                )
+                pipe_steps.append(("imbalance", imbalance_transformer))
+
+            # Step 2: Handle class_weight for classification models that support it
+            if imbalance_method == 'class_weight' and task_type == 'classification':
+                if hasattr(model, 'class_weight'):
+                    try:
+                        model.set_params(class_weight='balanced')
+                    except Exception:
+                        pass
+
+            # Step 3: Build model pipeline based on model type
+            from sklearn.preprocessing import StandardScaler
+
             if task_type == 'classification' and model_name.lower() in ('pls', 'pls-da'):
-                from sklearn.pipeline import Pipeline
                 from sklearn.linear_model import LogisticRegression
-                from sklearn.preprocessing import StandardScaler
-                model = Pipeline([
-                    ('pls', model),
-                    ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
-                    ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
-                ])
+                # PLS-DA: Add PLS, scaler, then LogisticRegression
+                pipe_steps.append(('pls', model))
+                pipe_steps.append(('scaler', StandardScaler()))  # Scale PLS scores for LogisticRegression
+                lr = LogisticRegression(max_iter=1000, random_state=random_state)
+                # Apply class_weight to LogisticRegression if specified
+                if imbalance_method == 'class_weight':
+                    lr.set_params(class_weight='balanced')
+                pipe_steps.append(('lr', lr))
             elif model_name in SCALE_SENSITIVE_MODELS:
-                from sklearn.pipeline import Pipeline
-                from sklearn.preprocessing import StandardScaler
-                model = Pipeline([
-                    ('scaler', StandardScaler()),
-                    ('model', model)
-                ])
+                # Scale-sensitive models: StandardScaler + Model
+                pipe_steps.append(('scaler', StandardScaler()))
+                pipe_steps.append(('model', model))
+            else:
+                # Other models don't need scaling
+                pipe_steps.append(('model', model))
+
+            # Step 4: Create pipeline with correct class (ImbPipeline for resampling methods)
+            needs_resampling = _needs_resampling_pipeline(imbalance_method, task_type)
+            if needs_resampling:
+                pipeline = ImbPipeline(pipe_steps)
+            else:
+                pipeline = Pipeline(pipe_steps)
+
+            # Use the constructed pipeline as the model
+            model = pipeline
 
             # 7. Compute metrics
             if task_type == 'regression':
@@ -765,7 +843,9 @@ def run_unified_bayesian(
     n_top_regions: int = 10,
     random_state: int = 42,
     progress_callback: Optional[Callable] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -796,6 +876,10 @@ def run_unified_bayesian(
         Function called after each trial with progress info
     verbose : bool
         Whether to print progress messages
+    imbalance_method : str, optional
+        Imbalance handling method (e.g., 'smote', 'class_weight')
+    imbalance_params : dict, optional
+        Parameters for the imbalance method
 
     Returns
     -------
@@ -834,6 +918,19 @@ def run_unified_bayesian(
         label_encoder = LabelEncoder()
         y = label_encoder.fit_transform(y)
 
+    # Guard against None params
+    if imbalance_params is None:
+        imbalance_params = {}
+
+    # Validate imbalance configuration for classification
+    if task_type == 'classification' and imbalance_method is not None:
+        validate_classification_config(
+            y=y,
+            imbalance_method=imbalance_method,
+            imbalance_params=imbalance_params,
+            n_folds=cv_folds
+        )
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"Unified Bayesian Optimization")
@@ -859,7 +956,9 @@ def run_unified_bayesian(
         cv_folds=cv_folds,
         random_state=random_state,
         n_top_regions=n_top_regions,
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
+        imbalance_method=imbalance_method,
+        imbalance_params=imbalance_params,
     )
 
     # Create TPE sampler with good defaults
