@@ -2959,7 +2959,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
-                    imbalance_method=imbalance_method
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params
                 )
 
                 # Add ALL results to dataframe (not just one)

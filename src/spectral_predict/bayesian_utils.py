@@ -614,7 +614,8 @@ def convert_optuna_result_to_dasp_format(
     validation_count: int = 0,
     total_samples_original: int = None,
     folds: int = 5,
-    imbalance_method: str = None
+    imbalance_method: str = None,
+    imbalance_params: dict = None
 ):
     """
     Convert Optuna study results to DASP result format.
@@ -707,6 +708,8 @@ def convert_optuna_result_to_dasp_format(
                 'full_vars': n_vars if n_vars is not None else len(wavelengths) if wavelengths is not None else np.nan,
                 'SubsetTag': subset_tag,
                 'Imbalance': imbalance_display,
+                'imbalance_method': imbalance_method,
+                'imbalance_params': imbalance_params or {},
                 'all_vars': config_result.get('all_vars', 'N/A'),
                 'top_vars': config_result.get('top_vars', 'N/A'),
                 'n_trials': len(study.trials),
