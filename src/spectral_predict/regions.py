@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+from itertools import combinations
 from scipy.stats import pearsonr
 
 
@@ -134,7 +135,8 @@ def get_region_variable_indices(regions, return_combined=True):
         return [region['indices'] for region in regions]
 
 
-def create_region_subsets(X, y, wavelengths, n_top_regions=5):
+def create_region_subsets(X, y, wavelengths, n_top_regions=5,
+                          test_all_individual=False, test_pairwise=False):
     """
     Create variable subsets based on spectral regions.
 
@@ -151,6 +153,10 @@ def create_region_subsets(X, y, wavelengths, n_top_regions=5):
         Wavelength values
     n_top_regions : int
         Number of top regions to use (default: 5, can be up to 20)
+    test_all_individual : bool
+        If True, test ALL n_top_regions individually (default: False, tests ~half)
+    test_pairwise : bool
+        If True, test all pairwise combinations of top regions (default: False)
 
     Returns
     -------
@@ -181,7 +187,9 @@ def create_region_subsets(X, y, wavelengths, n_top_regions=5):
     # For n_top_regions=20: test top 10 individual + combinations (13-15 subsets)
 
     # Determine how many individual regions to test
-    if n_top_regions <= 5:
+    if test_all_individual:
+        n_individual = n_top_regions  # Test ALL regions individually
+    elif n_top_regions <= 5:
         n_individual = 3
     elif n_top_regions <= 10:
         n_individual = 5
@@ -221,6 +229,35 @@ def create_region_subsets(X, y, wavelengths, n_top_regions=5):
                     'tag': f'top{combo_size}regions{tag_suffix}',
                     'description': f"Top {combo_size} regions combined (n={len(indices_combo)})"
                 })
+
+    # Pairwise combinations (optional)
+    if test_pairwise and n_top_regions >= 2:
+        for i, j in combinations(range(min(n_top_regions, len(top_regions))), 2):
+            region_i = top_regions[i]
+            region_j = top_regions[j]
+
+            pair_indices = np.unique(np.concatenate([
+                region_i['indices'], region_j['indices']
+            ]))
+
+            if len(pair_indices) > 0:
+                wl_i = f"{region_i['start']:.0f}-{region_i['end']:.0f}"
+                wl_j = f"{region_j['start']:.0f}-{region_j['end']:.0f}"
+                subsets.append({
+                    'indices': pair_indices,
+                    'tag': f'pair_{wl_i}+{wl_j}nm',
+                    'description': f"Pair: {wl_i}nm + {wl_j}nm (n={len(pair_indices)})"
+                })
+
+    # Deduplicate subsets by indices (e.g., R1+R2 pair = Top 2 combined)
+    seen_indices = set()
+    unique_subsets = []
+    for subset in subsets:
+        indices_key = tuple(sorted(subset['indices']))
+        if indices_key not in seen_indices:
+            seen_indices.add(indices_key)
+            unique_subsets.append(subset)
+    subsets = unique_subsets
 
     return subsets
 

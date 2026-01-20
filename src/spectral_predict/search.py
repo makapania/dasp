@@ -659,7 +659,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
                mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
                enable_variable_subsets=True, variable_counts=None,
-               enable_region_subsets=True, n_top_regions=10, progress_callback=None,
+               enable_region_subsets=True, n_top_regions=10,
+               region_test_all_individual=False, region_test_pairwise=False,
+               progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
@@ -1715,7 +1717,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     X_for_models,              # Use filtered+preprocessed data
                     y_np,
                     wavelengths_float,         # Use filtered wavelengths
-                    n_top_regions=n_top_regions
+                    n_top_regions=n_top_regions,
+                    test_all_individual=region_test_all_individual,
+                    test_pairwise=region_test_pairwise
                 )
 
                 if len(region_subsets) > 0:
