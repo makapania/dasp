@@ -3702,6 +3702,10 @@ def _run_single_config(
         "full_vars": full_vars,
         "SubsetTag": subset_tag,
         "Imbalance": imbalance_display,
+        # Store actual imbalance settings for Model Development tab to use
+        # (imbalance_display is for UI, these are for exact pipeline reconstruction)
+        "imbalance_method": imbalance_method,
+        "imbalance_params": imbalance_params,
     }
 
     # Add training configuration for tracking data state

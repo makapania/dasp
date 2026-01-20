@@ -24402,6 +24402,18 @@ F1 Score:  {f1:.4f}
                 baseline_params = {}
             smoothing_enabled, smoothing_window_size, smoothing_poly = self._get_smoothing_params()
 
+            # Get imbalance settings from loaded model config (if present)
+            # This ensures Model Development uses the same imbalance handling as the original search
+            loaded_imbalance_method = None
+            loaded_imbalance_params = None
+            if self.selected_model_config is not None:
+                loaded_imbalance_method = self.selected_model_config.get('imbalance_method')
+                loaded_imbalance_params = self.selected_model_config.get('imbalance_params')
+                if loaded_imbalance_method:
+                    print(f"DEBUG: Using imbalance settings from loaded model config:")
+                    print(f"  imbalance_method: {loaded_imbalance_method}")
+                    print(f"  imbalance_params: {loaded_imbalance_params}")
+
             # === GA PREPROCESSING PATH ===
             # If user selected 'ga_optimized' preprocessing, execute GA variable selection
             if preprocess == 'ga_optimized':
@@ -24496,25 +24508,52 @@ F1 Score:  {f1:.4f}
                         return
 
                 # Build pipeline with ONLY the model (GA preprocessing already applied)
+                # But include imbalance handling if needed (resampling must happen in CV)
+                pipe_steps = []
+
+                # Add imbalance handling if present (must be first, before model)
+                if loaded_imbalance_method is not None:
+                    try:
+                        from spectral_predict.imbalance import build_imbalance_transformer
+                        imb_params = loaded_imbalance_params if loaded_imbalance_params else {}
+                        imbalance_transformer = build_imbalance_transformer(
+                            method=loaded_imbalance_method,
+                            task_type=task_type,
+                            random_state=42,
+                            **imb_params
+                        )
+                        pipe_steps.append(("imbalance", imbalance_transformer))
+                        print(f"DEBUG: Added imbalance step to GA path: {loaded_imbalance_method}")
+                    except ImportError as e:
+                        print(f"WARNING: Could not add imbalance handling: {e}")
+
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
                     from sklearn.preprocessing import StandardScaler
-                    pipe_steps = [
+                    pipe_steps.extend([
                         ('pls', model),
                         ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
                         ('lr', LogisticRegression(max_iter=1000, random_state=42))
-                    ]
+                    ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
                 elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
                     from sklearn.preprocessing import StandardScaler
-                    pipe_steps = [
+                    pipe_steps.extend([
                         ('scaler', StandardScaler()),
                         ('model', model)
-                    ]
+                    ])
                 else:
-                    pipe_steps = [('model', model)]
-                pipe = Pipeline(pipe_steps)
+                    pipe_steps.append(('model', model))
+
+                # Use ImbPipeline if imbalance method requires resampling
+                from spectral_predict.search import _needs_resampling_pipeline
+                if _needs_resampling_pipeline(loaded_imbalance_method, task_type):
+                    from imblearn.pipeline import Pipeline as ImbPipeline
+                    pipe = ImbPipeline(pipe_steps)
+                    print(f"DEBUG: Using ImbPipeline for imbalance method: {loaded_imbalance_method}")
+                else:
+                    pipe = Pipeline(pipe_steps)
 
                 print(f"DEBUG: GA pipeline steps: {[name for name, _ in pipe_steps]} (GA preprocessing already applied)")
 
@@ -24594,26 +24633,53 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: This preserves derivative context from full spectrum.")
 
                 # 5. Build pipeline with ONLY the model (skip preprocessing - already done!)
+                # But include imbalance handling if needed (resampling must happen in CV)
+                pipe_steps = []
+
+                # Add imbalance handling if present (must be first, before model)
+                if loaded_imbalance_method is not None:
+                    try:
+                        from spectral_predict.imbalance import build_imbalance_transformer
+                        imb_params = loaded_imbalance_params if loaded_imbalance_params else {}
+                        imbalance_transformer = build_imbalance_transformer(
+                            method=loaded_imbalance_method,
+                            task_type=task_type,
+                            random_state=42,
+                            **imb_params
+                        )
+                        pipe_steps.append(("imbalance", imbalance_transformer))
+                        print(f"DEBUG: Added imbalance step to Path A: {loaded_imbalance_method}")
+                    except ImportError as e:
+                        print(f"WARNING: Could not add imbalance handling: {e}")
+
                 # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
                     from sklearn.preprocessing import StandardScaler
-                    pipe_steps = [
+                    pipe_steps.extend([
                         ('pls', model),
                         ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
                         ('lr', LogisticRegression(max_iter=1000, random_state=42))
-                    ]
+                    ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
                 elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
                     from sklearn.preprocessing import StandardScaler
-                    pipe_steps = [
+                    pipe_steps.extend([
                         ('scaler', StandardScaler()),
                         ('model', model)
-                    ]
+                    ])
                 else:
-                    pipe_steps = [('model', model)]
-                pipe = Pipeline(pipe_steps)
+                    pipe_steps.append(('model', model))
+
+                # Use ImbPipeline if imbalance method requires resampling
+                from spectral_predict.search import _needs_resampling_pipeline
+                if _needs_resampling_pipeline(loaded_imbalance_method, task_type):
+                    from imblearn.pipeline import Pipeline as ImbPipeline
+                    pipe = ImbPipeline(pipe_steps)
+                    print(f"DEBUG: Using ImbPipeline for imbalance method: {loaded_imbalance_method}")
+                else:
+                    pipe = Pipeline(pipe_steps)
 
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing already applied)")
 
@@ -24626,13 +24692,15 @@ F1 Score:  {f1:.4f}
                 # NOTE: Must pass ALL parameters that search.py passes for exact match
                 wavelengths_for_pipeline = X_base_df.columns.astype(float).values if hasattr(X_base_df, 'columns') else None
 
+                # Use imbalance settings from loaded model config (if present)
+                # This ensures exact replication of the original search pipeline
                 pipe_steps = build_preprocessing_pipeline(
                     preprocess_name,
                     deriv,
                     window,
                     polyorder,
-                    imbalance_method=None,      # GUI handles imbalance separately
-                    imbalance_params=None,
+                    imbalance_method=loaded_imbalance_method,  # Use loaded imbalance settings
+                    imbalance_params=loaded_imbalance_params,
                     task_type=task_type,
                     interference=None,          # Match search.py (interference disabled)
                     wavelengths=wavelengths_for_pipeline,
@@ -24654,7 +24722,16 @@ F1 Score:  {f1:.4f}
                     pipe_steps.append(('model', model))
                 else:
                     pipe_steps.append(('model', model))
-                pipe = Pipeline(pipe_steps)
+
+                # Use ImbPipeline if imbalance method requires resampling
+                # Standard sklearn Pipeline doesn't support fit_resample() methods
+                from spectral_predict.search import _needs_resampling_pipeline
+                if _needs_resampling_pipeline(loaded_imbalance_method, task_type):
+                    from imblearn.pipeline import Pipeline as ImbPipeline
+                    pipe = ImbPipeline(pipe_steps)
+                    print(f"DEBUG: Using ImbPipeline for imbalance method: {loaded_imbalance_method}")
+                else:
+                    pipe = Pipeline(pipe_steps)
 
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
 
