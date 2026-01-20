@@ -1038,7 +1038,9 @@ def run_unified_bayesian(
 
     # Convert results to DataFrame
     results_df = convert_study_to_dataframe(
-        study, model_name, task_type, wavelengths, n_features, cv_folds
+        study, model_name, task_type, wavelengths, n_features, cv_folds,
+        imbalance_method=imbalance_method,
+        imbalance_params=imbalance_params,
     )
 
     if verbose:
@@ -1081,7 +1083,9 @@ def convert_study_to_dataframe(
     task_type: str,
     wavelengths: np.ndarray,
     n_features: int,
-    cv_folds: int
+    cv_folds: int,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -1099,6 +1103,10 @@ def convert_study_to_dataframe(
         Original number of features
     cv_folds : int
         Number of CV folds
+    imbalance_method : str, optional
+        Imbalance handling method used
+    imbalance_params : dict, optional
+        Parameters for the imbalance method
 
     Returns
     -------
@@ -1128,7 +1136,10 @@ def convert_study_to_dataframe(
             'SubsetTag': trial.user_attrs.get('subset_tag', 'full'),
             'trial_number': trial.number,
             'Folds': cv_folds,
-            'Optimization': 'Unified Bayesian'
+            'Optimization': 'Unified Bayesian',
+            'Imbalance': imbalance_method if imbalance_method else '—',
+            'imbalance_method': imbalance_method,
+            'imbalance_params': imbalance_params,
         }
 
         # Add metrics - both calibration and CV
@@ -1165,7 +1176,7 @@ def convert_study_to_dataframe(
     if len(df) == 0:
         cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'n_vars', 'top_vars',
                 'all_vars', 'Window', 'Poly', 'Deriv', 'LVs', 'full_vars', 'SubsetTag',
-                'trial_number', 'Folds', 'Optimization']
+                'trial_number', 'Folds', 'Optimization', 'Imbalance', 'imbalance_method', 'imbalance_params']
         if task_type == 'classification':
             cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
