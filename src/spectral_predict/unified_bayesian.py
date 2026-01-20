@@ -922,6 +922,16 @@ def run_unified_bayesian(
     if imbalance_params is None:
         imbalance_params = {}
 
+    # Substitute regression sample weighting methods that don't work with cross_val_score
+    # These methods (binning, rare_boost, balanced) require manual sample_weight extraction
+    # which is only implemented in Grid Search. Substitute with smogn (SMOTE-style for regression).
+    UNSUPPORTED_REGRESSION_METHODS = {'binning', 'rare_boost', 'balanced'}
+    if task_type == 'regression' and imbalance_method in UNSUPPORTED_REGRESSION_METHODS:
+        original_method = imbalance_method
+        imbalance_method = 'smogn'  # SMOTE-style synthetic oversampling for regression
+        if verbose:
+            print(f"Note: '{original_method}' requires Grid Search. Using 'smogn' instead for Bayesian optimization.")
+
     # Validate imbalance configuration for classification
     if task_type == 'classification' and imbalance_method is not None:
         validate_classification_config(
