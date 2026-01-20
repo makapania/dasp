@@ -233,6 +233,24 @@ class CreateToolTip(object):
             tw.destroy()
 
 
+# ===== EXPERT MODEL SELECTION THRESHOLDS =====
+# Based on spectroscopy literature (Gowen 2011, Williams 2014, Nature Scientific Reports)
+# Used to identify well-generalized models vs overfit models among top performers
+EXPERT_CHOICE_THRESHOLDS = {
+    'r2_gap_excellent': 0.02,     # R2 - R2cv ≤ 2% (Expert's choice - green)
+    'r2_gap_good': 0.05,          # R2 - R2cv ≤ 5% (Good fit - yellow)
+    'rmse_ratio_excellent': 1.15,  # RMSEcv/RMSE ≤ 1.15 (Expert's choice)
+    'rmse_ratio_good': 1.30,       # RMSEcv/RMSE ≤ 1.30 (Good fit)
+    'pls_lv_tolerance': 2,         # Accept LVs within 2 of minimum (parsimony)
+}
+
+EXPERT_CHOICE_COLORS = {
+    'expert_choice': '#27ae60',   # Green - Expert's choice (best generalization)
+    'good': '#f39c12',            # Yellow/Orange - Good but some risk
+    'overfit': '#e74c3c',         # Red - Clearly overfit (still top 3 but risky)
+}
+
+
 # ===== TOOLTIP CONTENT DICTIONARY =====
 # Centralized repository of tooltip descriptions for models and hyperparameters
 TOOLTIP_CONTENT = {
@@ -1402,6 +1420,232 @@ class CombinedPreprocessWrapper(BaseEstimator, RegressorMixin):
         return self
 
 
+# ==================== CLASSIFIER WRAPPERS ====================
+# These are classification-specific versions of the wrappers above.
+# They inherit ClassifierMixin, expose predict_proba(), and have a classes_ property.
+
+
+class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
+    """
+    Sklearn-compatible classifier wrapper that applies wavelength subsetting during fit and predict.
+
+    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
+    and implements get_params/set_params properly.
+    """
+
+    def __init__(self, pipeline=None, wavelength_cols=None):
+        self.pipeline = pipeline
+        self.wavelength_cols = wavelength_cols
+
+    def _subset(self, X):
+        """Subset X to selected wavelengths."""
+        if self.wavelength_cols is None:
+            return X
+
+        if hasattr(X, 'loc'):
+            # DataFrame - use column selection
+            try:
+                return X[self.wavelength_cols]
+            except KeyError:
+                # Column name type mismatch - try matching by string conversion
+                stored_cols_str = [str(c) for c in self.wavelength_cols]
+                str_to_col = {str(col): col for col in X.columns}
+
+                matching_cols = []
+                for stored_str in stored_cols_str:
+                    if stored_str in str_to_col:
+                        matching_cols.append(str_to_col[stored_str])
+                    else:
+                        # Try float comparison for numeric columns
+                        try:
+                            stored_val = float(stored_str)
+                            for col in X.columns:
+                                try:
+                                    if abs(float(col) - stored_val) < 0.5:
+                                        matching_cols.append(col)
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+                        except (ValueError, TypeError):
+                            pass
+
+                if len(matching_cols) == len(self.wavelength_cols):
+                    return X[matching_cols]
+                else:
+                    raise KeyError(
+                        f"Could not match all wavelength columns. "
+                        f"Expected {len(self.wavelength_cols)}, found {len(matching_cols)}"
+                    )
+        else:
+            # numpy array - assume columns are already matched
+            return X
+
+    def fit(self, X, y):
+        X_subset = self._subset(X)
+        self.pipeline.fit(X_subset, y)
+        return self
+
+    def predict(self, X):
+        X_subset = self._subset(X)
+        return self.pipeline.predict(X_subset)
+
+    def predict_proba(self, X):
+        """Return probability predictions for classification."""
+        X_subset = self._subset(X)
+        if hasattr(self.pipeline, 'predict_proba'):
+            return self.pipeline.predict_proba(X_subset)
+        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
+
+    @property
+    def classes_(self):
+        """Return classes from the underlying classifier."""
+        if hasattr(self.pipeline, 'classes_'):
+            return self.pipeline.classes_
+        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
+
+    def get_params(self, deep=True):
+        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+
+class GAPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
+    """
+    Sklearn-compatible classifier wrapper for GA/NSGA preprocessing.
+
+    Stores preprocessing config (not the transform function) so it can be cloned.
+    The transform function is recreated from config when needed.
+    """
+
+    def __init__(self, pipeline=None, preprocess_config=None):
+        self.pipeline = pipeline
+        self.preprocess_config = preprocess_config
+        self._transform = None
+
+    @property
+    def transform(self):
+        """Lazily create transform function from config."""
+        if self._transform is None and self.preprocess_config:
+            self._transform = _build_transform_from_config(self.preprocess_config)
+        return self._transform
+
+    def fit(self, X, y):
+        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+        self.pipeline.fit(X_preproc, y)
+        return self
+
+    def predict(self, X):
+        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+        return self.pipeline.predict(X_preproc)
+
+    def predict_proba(self, X):
+        """Return probability predictions for classification."""
+        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
+        if hasattr(self.pipeline, 'predict_proba'):
+            return self.pipeline.predict_proba(X_preproc)
+        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
+
+    @property
+    def classes_(self):
+        """Return classes from the underlying classifier."""
+        if hasattr(self.pipeline, 'classes_'):
+            return self.pipeline.classes_
+        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
+
+    def get_params(self, deep=True):
+        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        # Reset transform cache if config changes
+        if 'preprocess_config' in params:
+            self._transform = None
+        return self
+
+
+class CombinedPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
+    """
+    Sklearn-compatible classifier wrapper for combined preprocessing + wavelength selection (NSGA-II).
+
+    Stores preprocessing config and column info (not the transform function) so it can be cloned.
+    The transform function is recreated from config when needed.
+    """
+
+    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
+        self.pipeline = pipeline
+        self.preprocess_config = preprocess_config
+        self.wavelength_cols = wavelength_cols
+        self.all_columns = all_columns
+        self._transform = None
+        self._col_indices = None
+
+    @property
+    def transform(self):
+        """Lazily create transform function from config."""
+        if self._transform is None and self.preprocess_config:
+            self._transform = _build_transform_from_config(self.preprocess_config)
+        return self._transform
+
+    @property
+    def col_indices(self):
+        """Lazily compute column indices."""
+        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
+            all_cols_list = list(self.all_columns)
+            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
+        return self._col_indices
+
+    def _preprocess_and_subset(self, X):
+        X_arr = X.values if hasattr(X, 'values') else X
+        X_preproc = self.transform(X_arr)
+        # Subset to selected wavelengths (after preprocessing)
+        return X_preproc[:, self.col_indices]
+
+    def fit(self, X, y):
+        X_processed = self._preprocess_and_subset(X)
+        self.pipeline.fit(X_processed, y)
+        return self
+
+    def predict(self, X):
+        X_processed = self._preprocess_and_subset(X)
+        return self.pipeline.predict(X_processed)
+
+    def predict_proba(self, X):
+        """Return probability predictions for classification."""
+        X_processed = self._preprocess_and_subset(X)
+        if hasattr(self.pipeline, 'predict_proba'):
+            return self.pipeline.predict_proba(X_processed)
+        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
+
+    @property
+    def classes_(self):
+        """Return classes from the underlying classifier."""
+        if hasattr(self.pipeline, 'classes_'):
+            return self.pipeline.classes_
+        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
+
+    def get_params(self, deep=True):
+        return {
+            'pipeline': self.pipeline,
+            'preprocess_config': self.preprocess_config,
+            'wavelength_cols': self.wavelength_cols,
+            'all_columns': self.all_columns
+        }
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        # Reset caches if relevant params change
+        if 'preprocess_config' in params:
+            self._transform = None
+        if 'all_columns' in params or 'wavelength_cols' in params:
+            self._col_indices = None
+        return self
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -1669,6 +1913,7 @@ class SpectralPredictApp:
         self.overfit_filter_enabled = tk.BooleanVar(value=False)   # Toggle overfit marking
         self.overfit_threshold = tk.DoubleVar(value=3.0)           # Overfit threshold in percent
         self.rmse_ratio_filter_enabled = tk.BooleanVar(value=False)  # Toggle RMSE ratio filter
+        self.expert_fit_enabled = tk.BooleanVar(value=True)        # Toggle expert fit indicators (top 3 per model type)
         self.rmse_ratio_threshold = tk.DoubleVar(value=1.2)          # RMSE ratio threshold (RMSEcv/RMSE)
 
         # Tier selection
@@ -2308,6 +2553,10 @@ class SpectralPredictApp:
         self.ensemble_n_regions = tk.IntVar(value=5)  # Number of regions for region-based ensembles
         self.ensemble_top_n = tk.IntVar(value=15)  # Number of top models to include in ensemble
         self.ensemble_results = None  # Store ensemble predictions and metrics
+
+        # Quartile-based ensemble selection (alternative to overall top N)
+        # Quartile ensembles run automatically for regression tasks - no checkbox needed
+        self.ensemble_quartile_top_n = tk.IntVar(value=5)  # Models per quartile (5 per quartile = up to 20 unique)
 
         # Region selection controls for "Select Top by Region" button
         self.select_region_top_n = tk.IntVar(value=3)  # Models per region for selection (lower default)
@@ -7408,68 +7657,111 @@ class SpectralPredictApp:
         ensemble_frame.pack(fill='both', expand=True)
 
         # Enable ensemble checkbox
-        ttk.Checkbutton(ensemble_frame, text="Enable Ensemble Methods - Regression Only (combine top models for better predictions)",
-                       variable=self.enable_ensembles).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 15))
+        self.ensemble_enable_btn = ttk.Checkbutton(ensemble_frame, text="Enable Ensemble Methods - Regression Only (combine top models for better predictions)",
+                       variable=self.enable_ensembles)
+        self.ensemble_enable_btn.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 15))
 
         # Ensemble method selection
         ttk.Label(ensemble_frame, text="Select Ensemble Methods:", style='Subheading.TLabel').grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
 
         # Simple Average (baseline)
-        ttk.Checkbutton(ensemble_frame, text="Simple Average", variable=self.ensemble_simple_average).grid(row=2, column=0, sticky=tk.W, pady=5, padx=(20, 0))
-        ttk.Label(ensemble_frame, text="Equal weight to all models (baseline)",
-                 style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=10)
+        self.ensemble_simple_btn = ttk.Checkbutton(ensemble_frame, text="Simple Average", variable=self.ensemble_simple_average)
+        self.ensemble_simple_btn.grid(row=2, column=0, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_simple_label = ttk.Label(ensemble_frame, text="Equal weight to all models (baseline)",
+                 style='Caption.TLabel')
+        self.ensemble_simple_label.grid(row=2, column=1, sticky=tk.W, padx=10)
 
         # Region-Aware Weighted Ensemble
-        ttk.Checkbutton(ensemble_frame, text="Region-Aware Weighted ⭐", variable=self.ensemble_region_weighted).grid(row=3, column=0, sticky=tk.W, pady=5, padx=(20, 0))
-        ttk.Label(ensemble_frame, text="Dynamic weights based on prediction region",
-                 style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=10)
+        self.ensemble_region_btn = ttk.Checkbutton(ensemble_frame, text="Region-Aware Weighted ⭐", variable=self.ensemble_region_weighted)
+        self.ensemble_region_btn.grid(row=3, column=0, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_region_label = ttk.Label(ensemble_frame, text="Dynamic weights based on prediction region",
+                 style='Caption.TLabel')
+        self.ensemble_region_label.grid(row=3, column=1, sticky=tk.W, padx=10)
 
         # Mixture of Experts
-        ttk.Checkbutton(ensemble_frame, text="Mixture of Experts ⭐", variable=self.ensemble_mixture_experts).grid(row=4, column=0, sticky=tk.W, pady=5, padx=(20, 0))
-        ttk.Label(ensemble_frame, text="Select best model per region",
-                 style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=10)
+        self.ensemble_mixture_btn = ttk.Checkbutton(ensemble_frame, text="Mixture of Experts ⭐", variable=self.ensemble_mixture_experts)
+        self.ensemble_mixture_btn.grid(row=4, column=0, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_mixture_label = ttk.Label(ensemble_frame, text="Select best model per region",
+                 style='Caption.TLabel')
+        self.ensemble_mixture_label.grid(row=4, column=1, sticky=tk.W, padx=10)
 
         # Stacking Ensemble
-        ttk.Checkbutton(ensemble_frame, text="Stacking Ensemble ⭐", variable=self.ensemble_stacking).grid(row=5, column=0, sticky=tk.W, pady=5, padx=(20, 0))
-        ttk.Label(ensemble_frame, text="Meta-learner combines predictions",
-                 style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=10)
+        self.ensemble_stacking_btn = ttk.Checkbutton(ensemble_frame, text="Stacking Ensemble ⭐", variable=self.ensemble_stacking)
+        self.ensemble_stacking_btn.grid(row=5, column=0, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_stacking_label = ttk.Label(ensemble_frame, text="Meta-learner combines predictions",
+                 style='Caption.TLabel')
+        self.ensemble_stacking_label.grid(row=5, column=1, sticky=tk.W, padx=10)
 
         # Stacking with Region Features
-        ttk.Checkbutton(ensemble_frame, text="Stacking + Region Features", variable=self.ensemble_stacking_region).grid(row=6, column=0, sticky=tk.W, pady=5, padx=(20, 0))
-        ttk.Label(ensemble_frame, text="Stacking with region-aware meta-features",
-                 style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=10)
+        self.ensemble_stacking_region_btn = ttk.Checkbutton(ensemble_frame, text="Stacking + Region Features", variable=self.ensemble_stacking_region)
+        self.ensemble_stacking_region_btn.grid(row=6, column=0, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_stacking_region_label = ttk.Label(ensemble_frame, text="Stacking with region-aware meta-features",
+                 style='Caption.TLabel')
+        self.ensemble_stacking_region_label.grid(row=6, column=1, sticky=tk.W, padx=10)
 
         # Number of regions parameter
-        ttk.Label(ensemble_frame, text="Number of Regions:", style='Subheading.TLabel').grid(row=7, column=0, sticky=tk.W, pady=(15, 5), padx=(20, 0))
+        self.ensemble_regions_header = ttk.Label(ensemble_frame, text="Number of Regions:", style='Subheading.TLabel')
+        self.ensemble_regions_header.grid(row=7, column=0, sticky=tk.W, pady=(15, 5), padx=(20, 0))
 
-        regions_frame = ttk.Frame(ensemble_frame)
-        regions_frame.grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_regions_frame = ttk.Frame(ensemble_frame)
+        self.ensemble_regions_frame.grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=5, padx=(20, 0))
 
-        ttk.Radiobutton(regions_frame, text="3", variable=self.ensemble_n_regions, value=3).grid(row=0, column=0, padx=5)
-        ttk.Radiobutton(regions_frame, text="5 ⭐", variable=self.ensemble_n_regions, value=5).grid(row=0, column=1, padx=5)
-        ttk.Radiobutton(regions_frame, text="7", variable=self.ensemble_n_regions, value=7).grid(row=0, column=2, padx=5)
-        ttk.Radiobutton(regions_frame, text="10", variable=self.ensemble_n_regions, value=10).grid(row=0, column=3, padx=5)
+        # Store radio buttons in a list for later enable/disable
+        self.ensemble_region_radios = []
+        radio1 = ttk.Radiobutton(self.ensemble_regions_frame, text="3", variable=self.ensemble_n_regions, value=3)
+        radio1.grid(row=0, column=0, padx=5)
+        self.ensemble_region_radios.append(radio1)
+        radio2 = ttk.Radiobutton(self.ensemble_regions_frame, text="5 ⭐", variable=self.ensemble_n_regions, value=5)
+        radio2.grid(row=0, column=1, padx=5)
+        self.ensemble_region_radios.append(radio2)
+        radio3 = ttk.Radiobutton(self.ensemble_regions_frame, text="7", variable=self.ensemble_n_regions, value=7)
+        radio3.grid(row=0, column=2, padx=5)
+        self.ensemble_region_radios.append(radio3)
+        radio4 = ttk.Radiobutton(self.ensemble_regions_frame, text="10", variable=self.ensemble_n_regions, value=10)
+        radio4.grid(row=0, column=3, padx=5)
+        self.ensemble_region_radios.append(radio4)
 
-        ttk.Label(regions_frame, text="(default: 5)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        self.ensemble_regions_default_label = ttk.Label(self.ensemble_regions_frame, text="(default: 5)", style='Caption.TLabel')
+        self.ensemble_regions_default_label.grid(row=0, column=4, padx=10)
 
         # Model Selection Configuration
-        ttk.Label(ensemble_frame, text="Model Selection:", style='Subheading.TLabel').grid(row=9, column=0, sticky=tk.W, pady=(15, 5), padx=(20, 0))
+        self.ensemble_selection_header = ttk.Label(ensemble_frame, text="Model Selection:", style='Subheading.TLabel')
+        self.ensemble_selection_header.grid(row=9, column=0, sticky=tk.W, pady=(15, 5), padx=(20, 0))
 
-        selection_frame = ttk.Frame(ensemble_frame)
-        selection_frame.grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=5, padx=(20, 0))
+        self.ensemble_selection_frame = ttk.Frame(ensemble_frame)
+        self.ensemble_selection_frame.grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=5, padx=(20, 0))
 
-        ttk.Label(selection_frame, text="Use top").grid(row=0, column=0, padx=(0, 5))
-        ttk.Spinbox(selection_frame, from_=3, to=20, width=5, textvariable=self.ensemble_top_n).grid(row=0, column=1, padx=5)
-        ttk.Label(selection_frame, text="models from ranked list").grid(row=0, column=2, padx=(5, 20))
+        self.ensemble_topn_label1 = ttk.Label(self.ensemble_selection_frame, text="Use top")
+        self.ensemble_topn_label1.grid(row=0, column=0, padx=(0, 5))
+        self.ensemble_topn_spinbox = ttk.Spinbox(self.ensemble_selection_frame, from_=3, to=20, width=5, textvariable=self.ensemble_top_n)
+        self.ensemble_topn_spinbox.grid(row=0, column=1, padx=5)
+        self.ensemble_topn_label2 = ttk.Label(self.ensemble_selection_frame, text="models from ranked list")
+        self.ensemble_topn_label2.grid(row=0, column=2, padx=(5, 20))
 
-        ttk.Label(selection_frame, text="(Auto-trains with top N. Use 🔄 Train Ensemble button for custom selection)",
-                 font=('TkDefaultFont', 8, 'italic')).grid(row=0, column=3, padx=10, sticky='w')
+        self.ensemble_topn_hint = ttk.Label(self.ensemble_selection_frame, text="(Auto-trains with top N. Use 🔄 Train Ensemble button for custom selection)",
+                 font=('TkDefaultFont', 8, 'italic'))
+        self.ensemble_topn_hint.grid(row=0, column=3, padx=10, sticky='w')
+
+        # Quartile-based selection option (row 11)
+        self.ensemble_quartile_header = ttk.Label(ensemble_frame, text="Quartile Specialists (Regression only):", style='Subheading.TLabel')
+        self.ensemble_quartile_header.grid(row=11, column=0, sticky=tk.W, pady=(15, 5), padx=(20, 0))
+
+        self.ensemble_quartile_frame = ttk.Frame(ensemble_frame)
+        self.ensemble_quartile_frame.grid(row=12, column=0, columnspan=4, sticky=tk.W, pady=5, padx=(20, 0))
+
+        ttk.Label(self.ensemble_quartile_frame, text="Models per quartile:").grid(row=0, column=0, padx=(0, 5))
+        self.ensemble_quartile_spinbox = ttk.Spinbox(self.ensemble_quartile_frame, from_=1, to=10, width=5,
+                                                      textvariable=self.ensemble_quartile_top_n)
+        self.ensemble_quartile_spinbox.grid(row=0, column=1, padx=5)
+
+        ttk.Label(self.ensemble_quartile_frame, text="(e.g., 5 per quartile = up to 20 unique models)",
+                 font=('TkDefaultFont', 8, 'italic')).grid(row=0, column=2, padx=10, sticky='w')
 
         # Info labels
         ttk.Label(ensemble_frame, text="💡 Ensembles combine multiple models - more models capture diverse strengths across prediction ranges",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=13, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
         ttk.Label(ensemble_frame, text="💡 Region-based methods identify which models excel at low/mid/high predictions",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=12, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=4, sticky=tk.W, pady=(5, 0))
 
         # Run button - use modern gradient button
         run_btn = self._create_button_with_gradient(content_frame, text="▶ Run Analysis",
@@ -7789,6 +8081,27 @@ class SpectralPredictApp:
             for i, color in enumerate(class_colors):
                 self.results_tree.tag_configure(f'overfit_class{i}', foreground='#888888',
                                                 background=color)
+
+        # Configure expert choice tags for Rank column coloring (top 3 per model type)
+        # Expert's choice (green): well-generalized, minimal overfitting
+        self.results_tree.tag_configure('expert_choice', foreground='#27ae60')
+        # Good fit (yellow): acceptable but some overfitting risk
+        self.results_tree.tag_configure('good_fit', foreground='#f39c12')
+        # Overfit top 3 (red): still top 3 but clearly overfit
+        self.results_tree.tag_configure('overfit_top3', foreground='#e74c3c')
+
+        # Combined expert choice tags with quartile backgrounds
+        quartile_colors = ['#e3f2fd', '#e8f5e9', '#fff3e0', '#fce4ec']
+        for i, bg_color in enumerate(quartile_colors):
+            self.results_tree.tag_configure(f'expert_choice_q{i+1}', foreground='#27ae60', background=bg_color)
+            self.results_tree.tag_configure(f'good_fit_q{i+1}', foreground='#f39c12', background=bg_color)
+            self.results_tree.tag_configure(f'overfit_top3_q{i+1}', foreground='#e74c3c', background=bg_color)
+
+        # Combined expert choice tags with class backgrounds
+        for i, bg_color in enumerate(class_colors):
+            self.results_tree.tag_configure(f'expert_choice_class{i}', foreground='#27ae60', background=bg_color)
+            self.results_tree.tag_configure(f'good_fit_class{i}', foreground='#f39c12', background=bg_color)
+            self.results_tree.tag_configure(f'overfit_top3_class{i}', foreground='#e74c3c', background=bg_color)
 
         # Button frame for actions (inside card)
         button_frame = ttk.Frame(results_card)
@@ -9401,6 +9714,8 @@ class SpectralPredictApp:
                     checkbox_widget.state(['!disabled'])
                 # Refresh tier selection for auto mode
                 self._on_tier_changed()
+                # Update ensemble controls state (disabled for classification)
+                self._update_ensemble_controls_state()
                 return
         else:
             # User explicitly selected task type
@@ -9434,6 +9749,57 @@ class SpectralPredictApp:
 
         # Refresh tier selection to use correct model set
         self._on_tier_changed()
+
+        # Update ensemble controls state (disabled for classification)
+        self._update_ensemble_controls_state()
+
+    def _update_ensemble_controls_state(self):
+        """Enable/disable ensemble controls based on task type.
+
+        Ensemble methods are only supported for regression tasks, so we grey out
+        all ensemble controls when classification is selected.
+        """
+        task_type = self.task_type.get()
+
+        # Determine actual task type (handle "auto" mode)
+        if task_type == "auto" and self.y is not None:
+            # Auto-detection logic: classification if <10 unique values or non-numeric
+            if self.y.nunique() < 10 or self.y.dtype == 'object':
+                actual_task = "classification"
+            else:
+                actual_task = "regression"
+        elif task_type == "auto":
+            # No data loaded yet - assume regression (default enabled state)
+            actual_task = "regression"
+        else:
+            actual_task = task_type
+
+        # Disable if classification
+        is_classification = (actual_task == "classification")
+        state = ['disabled'] if is_classification else ['!disabled']
+
+        # Check if widgets exist (method may be called before GUI is fully built)
+        if not hasattr(self, 'ensemble_enable_btn'):
+            return
+
+        # Update all ensemble checkbox widgets
+        checkboxes = [
+            self.ensemble_enable_btn,
+            self.ensemble_simple_btn,
+            self.ensemble_region_btn,
+            self.ensemble_mixture_btn,
+            self.ensemble_stacking_btn,
+            self.ensemble_stacking_region_btn,
+        ]
+        for widget in checkboxes:
+            widget.state(state)
+
+        # Update spinbox
+        self.ensemble_topn_spinbox.state(state)
+
+        # Update radio buttons in regions frame
+        for radio in self.ensemble_region_radios:
+            radio.state(state)
 
     def _on_target_column_changed(self, event=None):
         """Handle target column change without reloading data.
@@ -10165,6 +10531,9 @@ class SpectralPredictApp:
         # Switch to Import & Preview tab to show the data
         self.notebook.select(1)  # Tab 1 (Import & Preview)
 
+        # Update ensemble controls state (may change if auto-detect is enabled)
+        self._update_ensemble_controls_state()
+
     def _preview_merge(self):
         """Preview merge operation."""
         print("Preview merge button clicked")
@@ -10295,6 +10664,8 @@ class SpectralPredictApp:
             messagebox.showinfo("Success", "Merged dataset loaded for analysis")
             # Switch to Import & Preview tab
             self.notebook.select(1)
+            # Update ensemble controls state (may change if auto-detect is enabled)
+            self._update_ensemble_controls_state()
 
     def _load_merged_to_viewer(self):
         """Load merged dataset into the spreadsheet viewer."""
@@ -14750,12 +15121,21 @@ class SpectralPredictApp:
                     # FIX: Wrapper should apply transform during both fit() and predict()
                     # Previous bug: fitted on transformed data, then wrapper transformed AGAIN during predict
                     # NOTE: Using preprocess_config (not ga_transform) for sklearn cloning support
-                    pipeline = CombinedPreprocessWrapper(
-                        pipeline=pipeline,
-                        preprocess_config=preprocess_config,
-                        wavelength_cols=wavelength_subset,
-                        all_columns=list(X_train.columns)
-                    )
+                    # Use classifier wrapper for classification tasks to expose predict_proba and classes_
+                    if task_type == 'classification':
+                        pipeline = CombinedPreprocessClassifierWrapper(
+                            pipeline=pipeline,
+                            preprocess_config=preprocess_config,
+                            wavelength_cols=wavelength_subset,
+                            all_columns=list(X_train.columns)
+                        )
+                    else:
+                        pipeline = CombinedPreprocessWrapper(
+                            pipeline=pipeline,
+                            preprocess_config=preprocess_config,
+                            wavelength_cols=wavelength_subset,
+                            all_columns=list(X_train.columns)
+                        )
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
                     self._log_progress(f"    [Combined] Preprocessing + {len(wavelength_subset)} wavelength subset")
 
@@ -14765,10 +15145,17 @@ class SpectralPredictApp:
                     # FIX: Fit on RAW data, let wrapper handle preprocessing
                     # Previous bug: fitted on transformed data, then wrapper transformed AGAIN during predict
                     # NOTE: Using preprocess_config (not ga_transform) for sklearn cloning support
-                    pipeline = GAPreprocessWrapper(
-                        pipeline=pipeline,
-                        preprocess_config=preprocess_config
-                    )
+                    # Use classifier wrapper for classification tasks to expose predict_proba and classes_
+                    if task_type == 'classification':
+                        pipeline = GAPreprocessClassifierWrapper(
+                            pipeline=pipeline,
+                            preprocess_config=preprocess_config
+                        )
+                    else:
+                        pipeline = GAPreprocessWrapper(
+                            pipeline=pipeline,
+                            preprocess_config=preprocess_config
+                        )
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
                 elif wavelength_subset is not None:
@@ -14776,7 +15163,11 @@ class SpectralPredictApp:
                     # Subset X_train to selected wavelengths and wrap model
                     X_train_subset = X_train[wavelength_subset]
                     pipeline.fit(X_train_subset, y_train)
-                    pipeline = WavelengthSubsetWrapper(pipeline, wavelength_subset)
+                    # Use classifier wrapper for classification tasks to expose predict_proba and classes_
+                    if task_type == 'classification':
+                        pipeline = WavelengthSubsetClassifierWrapper(pipeline, wavelength_subset)
+                    else:
+                        pipeline = WavelengthSubsetWrapper(pipeline, wavelength_subset)
                 else:
                     # Fit on training data (standard path - full spectrum)
                     pipeline.fit(X_train, y_train)
@@ -15158,7 +15549,38 @@ class SpectralPredictApp:
                     # Calculate RPD (Ratio of Performance to Deviation)
                     rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
 
-                    self._log_progress(f"> {ensemble_name} Results (CV):")
+                    # Compute calibration metrics (ensemble prediction on training data)
+                    cal_predictions = ensemble.predict(X_filtered)
+                    cal_rmse = np.sqrt(mean_squared_error(y_filtered, cal_predictions))
+                    cal_r2 = r2_score(y_filtered, cal_predictions)
+
+                    # Compute validation metrics if validation set is available
+                    val_rmse = None
+                    val_r2 = None
+                    if (self.validation_enabled.get() and
+                        self.validation_X is not None and
+                        self.validation_y is not None and
+                        len(self.validation_X) > 0):
+                        try:
+                            # Get validation data as numpy arrays
+                            X_val = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
+                            y_val = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+
+                            # Predict on validation set
+                            val_predictions = ensemble.predict(X_val)
+
+                            # Calculate validation metrics (RMSEP, Q²)
+                            val_rmse = np.sqrt(mean_squared_error(y_val, val_predictions))
+                            val_r2 = r2_score(y_val, val_predictions)
+                        except Exception as e:
+                            self._log_progress(f"   [Warning] Could not compute validation metrics: {e}")
+
+                    self._log_progress(f"> {ensemble_name} Results:")
+                    self._log_progress(f"   RMSE:   {cal_rmse:.4f} (cal)")
+                    self._log_progress(f"   R²:     {cal_r2:.4f} (cal)")
+                    if val_rmse is not None:
+                        self._log_progress(f"   RMSEP:  {val_rmse:.4f} (val)")
+                        self._log_progress(f"   Q²:     {val_r2:.4f} (val)")
                     self._log_progress(f"   RMSECV: {rmse:.4f}")
                     self._log_progress(f"   R²CV:   {r2:.4f}")
                     self._log_progress(f"   MAECV:  {mae:.4f}")
@@ -15168,8 +15590,12 @@ class SpectralPredictApp:
                     ensemble_results.append({
                         'method': ensemble_name,
                         'type': ensemble_type,
-                        'rmse': rmse,
-                        'r2': r2,
+                        'rmse_cal': cal_rmse,  # Calibration RMSE
+                        'r2_cal': cal_r2,      # Calibration R²
+                        'rmse_val': val_rmse,  # Validation RMSE (RMSEP) - None if no validation set
+                        'r2_val': val_r2,      # Validation R² (Q²) - None if no validation set
+                        'rmse': rmse,          # CV RMSE (displayed as RMSEcv)
+                        'r2': r2,              # CV R² (displayed as R²cv)
                         'mae': mae,
                         'rpd': rpd,
                         'ensemble': ensemble
@@ -15183,6 +15609,147 @@ class SpectralPredictApp:
                     import traceback
                     self._log_progress(f"   {traceback.format_exc()}")
                     continue
+
+            # === Quartile-Based Ensemble Selection (Regression Only) ===
+            # Automatically run quartile ensembles for regression tasks
+            if (task_type == 'regression'
+                and not is_manual_retrain and ensemble_methods):
+
+                self._log_progress(f"\n{'='*70}")
+                self._log_progress(f"QUARTILE-SPECIALIST ENSEMBLES")
+                self._log_progress(f"{'='*70}")
+
+                from spectral_predict.ensemble import select_top_models_quartile_flat
+                from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+                from sklearn.model_selection import KFold
+                import numpy as np
+
+                quartile_top_n = self.ensemble_quartile_top_n.get()
+                quartile_selection = select_top_models_quartile_flat(
+                    results_df, top_n_per_quartile=quartile_top_n, task_type=task_type
+                )
+
+                if quartile_selection['model_count'] < 2:
+                    self._log_progress(f"[!] Quartile selection returned {quartile_selection['model_count']} models "
+                                      f"(need at least 2), skipping quartile ensembles...")
+                else:
+                    # Log quartile coverage
+                    self._log_progress(f"Quartile selection: {quartile_top_n} models per quartile")
+                    self._log_progress(f"Coverage: {quartile_selection['coverage']}")
+                    self._log_progress(f"Total unique models: {quartile_selection['model_count']}")
+
+                    # Get selected model rows
+                    quartile_indices = quartile_selection['indices']
+                    quartile_models_df = results_df.loc[results_df.index.isin(quartile_indices)].copy()
+
+                    self._log_progress(f"\nQuartile-selected models:")
+                    for i, row in enumerate(quartile_models_df.itertuples(), 1):
+                        self._log_progress(f"  {i}. {row.Model} ({row.Preprocess}) - Score: {row.CompositeScore:.4f}")
+
+                    # Reconstruct quartile-selected models
+                    self._log_progress(f"\nReconstructing {len(quartile_models_df)} quartile-selected models...")
+                    X_for_qrecon = X_filtered.copy()
+                    X_for_qrecon.columns = [str(c) for c in X_for_qrecon.columns]
+                    quartile_reconstructed = self._reconstruct_models_from_results(
+                        quartile_models_df, X_for_qrecon, y_filtered, task_type
+                    )
+
+                    if len(quartile_reconstructed) < 2:
+                        self._log_progress(f"[!] Quartile model reconstruction failed (got {len(quartile_reconstructed)}), "
+                                          f"skipping quartile ensembles...")
+                    else:
+                        self._log_progress(f"> Successfully reconstructed {len(quartile_reconstructed)} quartile-selected models")
+
+                        # Extract models and names for quartile ensemble
+                        q_models = [m[0] for m in quartile_reconstructed]
+                        q_model_names = [m[1] for m in quartile_reconstructed]
+
+                        # Run same ensemble methods with "(Quartile)" suffix
+                        for ensemble_type, ensemble_name in ensemble_methods:
+                            quartile_ensemble_name = f"{ensemble_name} (Quartile)"
+                            try:
+                                self._log_progress(f"\n--- Training {quartile_ensemble_name} ---")
+
+                                # Create ensemble with quartile-selected models
+                                q_ensemble = create_ensemble(
+                                    models=q_models,
+                                    model_names=q_model_names,
+                                    X=X_filtered,
+                                    y=y_filtered,
+                                    ensemble_type=ensemble_type,
+                                    n_regions=n_regions,
+                                    cv=min(5, len(y_filtered)),
+                                )
+
+                                # Use cross-validation for realistic metrics
+                                n_cv_folds = min(5, len(y_filtered))
+                                if n_cv_folds >= 2:
+                                    kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
+                                    q_cv_predictions = np.full(len(y_filtered), np.nan)
+
+                                    for train_idx, val_idx in kf.split(X_filtered):
+                                        if hasattr(X_filtered, 'iloc'):
+                                            X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
+                                        else:
+                                            X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
+                                        y_cv_train = y_filtered[train_idx]
+
+                                        q_cv_ensemble = create_ensemble(
+                                            models=q_models,
+                                            model_names=q_model_names,
+                                            X=X_cv_train,
+                                            y=y_cv_train,
+                                            ensemble_type=ensemble_type,
+                                            n_regions=n_regions,
+                                            cv=min(5, len(y_cv_train)),
+                                        )
+                                        q_cv_predictions[val_idx] = q_cv_ensemble.predict(X_cv_val)
+
+                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_cv_predictions))
+                                    q_r2 = r2_score(y_filtered, q_cv_predictions)
+                                    q_mae = mean_absolute_error(y_filtered, q_cv_predictions)
+                                else:
+                                    q_ensemble_pred = q_ensemble.predict(X_filtered)
+                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_ensemble_pred))
+                                    q_r2 = r2_score(y_filtered, q_ensemble_pred)
+                                    q_mae = mean_absolute_error(y_filtered, q_ensemble_pred)
+
+                                q_rpd = np.std(y_filtered) / q_rmse if q_rmse > 0 else 0
+
+                                # Compute calibration metrics
+                                q_cal_predictions = q_ensemble.predict(X_filtered)
+                                q_cal_rmse = np.sqrt(mean_squared_error(y_filtered, q_cal_predictions))
+                                q_cal_r2 = r2_score(y_filtered, q_cal_predictions)
+
+                                self._log_progress(f"> {quartile_ensemble_name} Results:")
+                                self._log_progress(f"   RMSE:   {q_cal_rmse:.4f} (cal)")
+                                self._log_progress(f"   R²:     {q_cal_r2:.4f} (cal)")
+                                self._log_progress(f"   RMSECV: {q_rmse:.4f}")
+                                self._log_progress(f"   R²CV:   {q_r2:.4f}")
+                                self._log_progress(f"   MAECV:  {q_mae:.4f}")
+                                self._log_progress(f"   RPD:    {q_rpd:.2f}")
+
+                                # Store results with quartile suffix
+                                ensemble_results.append({
+                                    'method': quartile_ensemble_name,
+                                    'type': f"{ensemble_type}_quartile",
+                                    'rmse_cal': q_cal_rmse,
+                                    'r2_cal': q_cal_r2,
+                                    'rmse': q_rmse,
+                                    'r2': q_r2,
+                                    'mae': q_mae,
+                                    'rpd': q_rpd,
+                                    'ensemble': q_ensemble
+                                })
+
+                                # Store trained ensemble
+                                trained_ensembles[f"{ensemble_type}_quartile"] = q_ensemble
+
+                            except Exception as e:
+                                self._log_progress(f"[X] {quartile_ensemble_name} failed: {e}")
+                                import traceback
+                                self._log_progress(f"   {traceback.format_exc()}")
+                                continue
 
             # Summary of ensemble results
             if ensemble_results:
@@ -17890,6 +18457,13 @@ class SpectralPredictApp:
                 except Exception as e:
                     print(f"Warning: Could not compute regional rankings: {e}")
 
+            # Compute expert choice indicators for top 3 of each model type
+            try:
+                self._expert_choices = self._compute_expert_choices(results_df)
+            except Exception as e:
+                print(f"Warning: Could not compute expert choices: {e}")
+                self._expert_choices = {}
+
         # Clear existing items
         for item in self.results_tree.get_children():
             self.results_tree.delete(item)
@@ -18086,6 +18660,21 @@ class SpectralPredictApp:
         rmse_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmse_ratio_toggle_changed())
         ttk.Label(rmse_ratio_frame, text=")").pack(side='left')
 
+        # Add Expert Fit toggle and legend (top 3 per model type)
+        expert_fit_frame = ttk.Frame(self.region_legend_frame)
+        expert_fit_frame.pack(side='left', padx=(0, 10))
+        expert_fit_checkbox = ttk.Checkbutton(
+            expert_fit_frame,
+            text="Expert Fit",
+            variable=self.expert_fit_enabled,
+            command=self._on_expert_fit_toggle_changed
+        )
+        expert_fit_checkbox.pack(side='left')
+        # Expert fit color swatches
+        tk.Label(expert_fit_frame, text=" Best", fg='#27ae60', font=('Segoe UI', 8, 'bold')).pack(side='left')
+        tk.Label(expert_fit_frame, text=" Good", fg='#f39c12', font=('Segoe UI', 8)).pack(side='left')
+        tk.Label(expert_fit_frame, text=" Overfit", fg='#e74c3c', font=('Segoe UI', 8)).pack(side='left')
+
         # Color swatches for quartiles
         colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
         for color, label in colors:
@@ -18144,6 +18733,21 @@ class SpectralPredictApp:
         overfit_spinbox.pack(side='left', padx=2)
         ttk.Label(overfit_frame, text="%)").pack(side='left')
 
+        # Add Expert Fit toggle and legend (top 3 per model type)
+        expert_fit_frame = ttk.Frame(self.region_legend_frame)
+        expert_fit_frame.pack(side='left', padx=(0, 10))
+        expert_fit_checkbox = ttk.Checkbutton(
+            expert_fit_frame,
+            text="Expert Fit",
+            variable=self.expert_fit_enabled,
+            command=self._on_expert_fit_toggle_changed
+        )
+        expert_fit_checkbox.pack(side='left')
+        # Expert fit color swatches
+        tk.Label(expert_fit_frame, text=" Best", fg='#27ae60', font=('Segoe UI', 8, 'bold')).pack(side='left')
+        tk.Label(expert_fit_frame, text=" Good", fg='#f39c12', font=('Segoe UI', 8)).pack(side='left')
+        tk.Label(expert_fit_frame, text=" Overfit", fg='#e74c3c', font=('Segoe UI', 8)).pack(side='left')
+
         # Get class labels
         class_labels = self._class_rankings.get('class_labels', []) if self._class_rankings else []
         if not class_labels:
@@ -18201,19 +18805,24 @@ class SpectralPredictApp:
         """Handle RMSE ratio filter toggle - refresh row styling."""
         self._refresh_row_tags()
 
+    def _on_expert_fit_toggle_changed(self):
+        """Handle expert fit toggle - refresh row styling to show/hide expert choice indicators."""
+        self._refresh_row_tags()
+
     def _refresh_row_tags(self):
-        """Refresh all row tags based on current color and overfit filter settings."""
+        """Refresh all row tags based on current color, overfit, and expert fit settings."""
         if self.results_df is None:
             return
 
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
         overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
         rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
+        expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
 
         for row_id in self.results_tree.get_children():
             idx = int(row_id)
-            if color_enabled or overfit_enabled or rmse_ratio_enabled:
-                # Re-apply appropriate tag based on rankings and overfit state
+            if color_enabled or overfit_enabled or rmse_ratio_enabled or expert_fit_enabled:
+                # Re-apply appropriate tag based on rankings, expert choice, and overfit state
                 tag = self._get_highlight_tag_for_row(idx)
                 self.results_tree.item(row_id, tags=tag)
             else:
@@ -18221,7 +18830,11 @@ class SpectralPredictApp:
                 self.results_tree.item(row_id, tags=())
 
     def _get_highlight_tag_for_row(self, idx: int) -> tuple:
-        """Get the appropriate highlight tag for a row based on rankings and overfit filter.
+        """Get the appropriate highlight tag for a row based on rankings, expert choice, and overfit filter.
+
+        Expert choice (green/yellow/red text) is applied to top 3 models of each type based on
+        generalization quality. Region/class highlighting (background color) shows best performers
+        by Y-value region or class.
 
         Args:
             idx: Row index in results_df
@@ -18234,6 +18847,12 @@ class SpectralPredictApp:
         rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
         any_overfit_filter = overfit_enabled or rmse_ratio_enabled
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
+        expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
+
+        # Get expert choice status for this row (if applicable)
+        expert_status = None
+        if expert_fit_enabled and hasattr(self, '_expert_choices'):
+            expert_status = self._expert_choices.get(idx)
 
         # Check classification rankings first
         if hasattr(self, '_class_rankings') and self._class_rankings:
@@ -18242,6 +18861,16 @@ class SpectralPredictApp:
                 class_labels = self._class_rankings.get('class_labels', [])
                 try:
                     class_idx = class_labels.index(str(best_c))
+
+                    # Expert choice takes priority over overfit filter for text coloring
+                    if expert_status and color_enabled:
+                        if expert_status == 'expert_choice':
+                            return (f"expert_choice_class{class_idx}",)
+                        elif expert_status == 'good':
+                            return (f"good_fit_class{class_idx}",)
+                        elif expert_status == 'overfit':
+                            return (f"overfit_top3_class{class_idx}",)
+
                     if color_enabled and any_overfit_filter and is_overfit:
                         return (f"overfit_class{class_idx}",)
                     elif color_enabled:
@@ -18251,6 +18880,7 @@ class SpectralPredictApp:
                     return ()
                 except (ValueError, IndexError):
                     pass
+
         # Check regression rankings
         elif hasattr(self, '_regional_rankings') and self._regional_rankings:
             if idx in self._regional_rankings.get('best_region', {}):
@@ -18258,6 +18888,16 @@ class SpectralPredictApp:
                 # Map region name to quartile number (Q1, Q2, Q3, Q4)
                 quartile_map = {'q1': 1, 'q2': 2, 'q3': 3, 'q4': 4}
                 q_num = quartile_map.get(region.lower(), 0)
+
+                # Expert choice takes priority over overfit filter for text coloring
+                if expert_status and color_enabled and q_num > 0:
+                    if expert_status == 'expert_choice':
+                        return (f"expert_choice_q{q_num}",)
+                    elif expert_status == 'good':
+                        return (f"good_fit_q{q_num}",)
+                    elif expert_status == 'overfit':
+                        return (f"overfit_top3_q{q_num}",)
+
                 if color_enabled and any_overfit_filter and is_overfit and q_num > 0:
                     return (f"overfit_q{q_num}",)
                 elif color_enabled:
@@ -18265,6 +18905,15 @@ class SpectralPredictApp:
                 elif any_overfit_filter and is_overfit:
                     return ("overfit",)
                 return ()
+
+        # No region/class highlighting - check for expert choice without background
+        if expert_status and expert_fit_enabled:
+            if expert_status == 'expert_choice':
+                return ("expert_choice",)
+            elif expert_status == 'good':
+                return ("good_fit",)
+            elif expert_status == 'overfit':
+                return ("overfit_top3",)
 
         # No color highlighting, but check for overfit-only marking
         if any_overfit_filter and is_overfit:
@@ -18334,6 +18983,130 @@ class SpectralPredictApp:
             pass
 
         return False
+
+    def _compute_expert_choices(self, df) -> dict:
+        """Compute expert choice indicators for top 3 models of each model type.
+
+        Based on spectroscopy literature (Gowen 2011, Williams 2014, Nature Scientific Reports),
+        this evaluates models on:
+        - R² gap (R2 - R2cv): Lower is better (less overfitting)
+        - RMSE ratio (RMSEcv/RMSE): Closer to 1.0 is better
+        - PLS parsimony: Fewer LVs for similar performance
+
+        Args:
+            df: Results DataFrame with Model, R2, R2cv, RMSE, RMSEcv, LVs columns
+
+        Returns:
+            Dict mapping row index to expert choice status:
+            'expert_choice' (green), 'good' (yellow), 'overfit' (red), or None
+        """
+        expert_choices = {}
+
+        if df is None or len(df) == 0:
+            return expert_choices
+
+        # Get thresholds from constants
+        r2_gap_excellent = EXPERT_CHOICE_THRESHOLDS['r2_gap_excellent']
+        r2_gap_good = EXPERT_CHOICE_THRESHOLDS['r2_gap_good']
+        rmse_ratio_excellent = EXPERT_CHOICE_THRESHOLDS['rmse_ratio_excellent']
+        rmse_ratio_good = EXPERT_CHOICE_THRESHOLDS['rmse_ratio_good']
+        pls_lv_tolerance = EXPERT_CHOICE_THRESHOLDS['pls_lv_tolerance']
+
+        # Check if we have the required columns (handle both regression and classification)
+        cols = df.columns.tolist()
+        is_regression = 'R2' in cols and 'R2cv' in cols
+        is_classification = 'Accuracy' in cols and ('Accuracycv' in cols or 'AccuracyCV' in cols)
+
+        if not is_regression and not is_classification:
+            return expert_choices
+
+        # Get unique model types
+        if 'Model' not in cols:
+            return expert_choices
+
+        model_types = df['Model'].unique()
+
+        for model_type in model_types:
+            # Get rows for this model type, sorted by Rank (top 3)
+            type_df = df[df['Model'] == model_type]
+            if 'Rank' in cols:
+                type_df = type_df.nsmallest(3, 'Rank')
+            else:
+                # Fallback: just take first 3
+                type_df = type_df.head(3)
+
+            if len(type_df) == 0:
+                continue
+
+            # For PLS: find minimum LVs in this top-3 group for parsimony check
+            min_lvs = None
+            is_pls = model_type in ('PLS', 'PLS-DA')
+            if is_pls and 'LVs' in cols:
+                try:
+                    lvs_values = type_df['LVs'].dropna()
+                    if len(lvs_values) > 0:
+                        min_lvs = float(lvs_values.min())
+                except (ValueError, TypeError):
+                    pass
+
+            for idx, row in type_df.iterrows():
+                try:
+                    if is_regression:
+                        # Get R2 values
+                        r2 = float(row.get('R2', 0))
+                        r2cv = float(row.get('R2cv', 0))
+                        r2_gap = r2 - r2cv
+
+                        # Get RMSE ratio
+                        rmse = float(row.get('RMSE', 0))
+                        rmsecv = float(row.get('RMSEcv', 0))
+                        rmse_ratio = rmsecv / rmse if rmse > 0 else 999
+
+                        # PLS parsimony check
+                        is_parsimonious = True
+                        if is_pls and min_lvs is not None and 'LVs' in cols:
+                            try:
+                                lvs = float(row.get('LVs', 0))
+                                is_parsimonious = (lvs <= min_lvs + pls_lv_tolerance)
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Classify based on thresholds
+                        if r2_gap <= r2_gap_excellent and rmse_ratio <= rmse_ratio_excellent and is_parsimonious:
+                            expert_choices[idx] = 'expert_choice'
+                        elif r2_gap <= r2_gap_good and rmse_ratio <= rmse_ratio_good:
+                            expert_choices[idx] = 'good'
+                        else:
+                            expert_choices[idx] = 'overfit'
+
+                    elif is_classification:
+                        # For classification, use Accuracy gap instead of R2 gap
+                        acc = float(row.get('Accuracy', 0))
+                        acc_cv_col = 'Accuracycv' if 'Accuracycv' in cols else 'AccuracyCV'
+                        acc_cv = float(row.get(acc_cv_col, 0))
+                        acc_gap = acc - acc_cv
+
+                        # PLS-DA parsimony check
+                        is_parsimonious = True
+                        if is_pls and min_lvs is not None and 'LVs' in cols:
+                            try:
+                                lvs = float(row.get('LVs', 0))
+                                is_parsimonious = (lvs <= min_lvs + pls_lv_tolerance)
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Classify (using same thresholds as R2 gap)
+                        if acc_gap <= r2_gap_excellent and is_parsimonious:
+                            expert_choices[idx] = 'expert_choice'
+                        elif acc_gap <= r2_gap_good:
+                            expert_choices[idx] = 'good'
+                        else:
+                            expert_choices[idx] = 'overfit'
+
+                except (ValueError, TypeError, KeyError):
+                    continue
+
+        return expert_choices
 
     def _update_region_filter_options(self):
         """Update the region/class filter combobox options based on task type.
@@ -18565,14 +19338,27 @@ class SpectralPredictApp:
         for item in self.ensemble_tree.get_children():
             self.ensemble_tree.delete(item)
 
-        # Define columns
-        columns = ['Rank', 'Method', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
+        # Check if any ensemble has validation metrics
+        has_validation = any(
+            result.get('rmse_val') is not None
+            for result in self.ensemble_results
+        )
+
+        # Define columns - include validation columns (RMSEP, Q²) if validation metrics exist
+        if has_validation:
+            columns = ['Rank', 'Method', 'RMSE', 'R²', 'RMSEP', 'Q²', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
+        else:
+            columns = ['Rank', 'Method', 'RMSE', 'R²', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
         self.ensemble_tree['columns'] = columns
 
         # Configure columns
         column_widths = {
             'Rank': 60,
             'Method': 200,
+            'RMSE': 100,
+            'R²': 100,
+            'RMSEP': 100,
+            'Q²': 100,
             'RMSEcv': 100,
             'R²cv': 100,
             'MAEcv': 100,
@@ -18609,15 +19395,39 @@ class SpectralPredictApp:
                 # Add rank indicator
                 rank = "🏆 1" if i == 1 else str(i)
 
-                values = (
-                    rank,
-                    result['method'],
-                    f"{result['rmse']:.4f}",
-                    f"{result['r2']:.4f}",
-                    f"{result['mae']:.4f}",
-                    f"{result['rpd']:.2f}",
-                    comparison
-                )
+                # Build values tuple based on whether validation columns exist
+                if has_validation:
+                    # Format validation metrics (use '-' if not available for this ensemble)
+                    rmse_val = result.get('rmse_val')
+                    r2_val = result.get('r2_val')
+                    rmse_val_str = f"{rmse_val:.4f}" if rmse_val is not None else "-"
+                    r2_val_str = f"{r2_val:.4f}" if r2_val is not None else "-"
+
+                    values = (
+                        rank,
+                        result['method'],
+                        f"{result.get('rmse_cal', 0):.4f}",  # RMSE (calibration)
+                        f"{result.get('r2_cal', 0):.4f}",    # R² (calibration)
+                        rmse_val_str,                         # RMSEP (validation)
+                        r2_val_str,                           # Q² (validation)
+                        f"{result['rmse']:.4f}",              # RMSEcv
+                        f"{result['r2']:.4f}",                # R²cv
+                        f"{result['mae']:.4f}",               # MAEcv
+                        f"{result['rpd']:.2f}",               # RPD
+                        comparison
+                    )
+                else:
+                    values = (
+                        rank,
+                        result['method'],
+                        f"{result.get('rmse_cal', 0):.4f}",  # RMSE (calibration)
+                        f"{result.get('r2_cal', 0):.4f}",    # R² (calibration)
+                        f"{result['rmse']:.4f}",              # RMSEcv
+                        f"{result['r2']:.4f}",                # R²cv
+                        f"{result['mae']:.4f}",               # MAEcv
+                        f"{result['rpd']:.2f}",               # RPD
+                        comparison
+                    )
 
                 # Track best ensemble
                 if result['r2'] > best_r2:
