@@ -1241,12 +1241,116 @@ def _build_transform_from_config(config: dict):
     return transform
 
 
+def _match_wavelengths_normalized(requested_cols, available_columns, precision=1):
+    """
+    Match wavelengths using exact precision matching after normalization.
+
+    This function solves the CARS wavelength matching bug where tolerance-based
+    matching (±0.5nm) could match wrong wavelengths or fail silently.
+
+    Instead of tolerance-based matching, this:
+    1. Rounds both requested and available wavelengths to the same precision
+    2. Matches on the normalized string representation
+    3. Tries multiple precision levels if initial match fails
+
+    Args:
+        requested_cols: List of wavelength column names (can be strings or floats)
+        available_columns: Column names from the new DataFrame
+        precision: Decimal places to round to (default 1)
+
+    Returns:
+        List of matched column names from available_columns
+
+    Raises:
+        KeyError: If any wavelength cannot be matched
+    """
+    # Build lookup dict: normalized wavelength string -> original column name
+    col_lookup = {}
+    col_names = list(available_columns)
+
+    for col in col_names:
+        try:
+            col_float = float(col)
+            normalized_key = f"{round(col_float, precision):.{precision}f}"
+            if normalized_key not in col_lookup:
+                col_lookup[normalized_key] = col
+        except (ValueError, TypeError):
+            continue
+
+    # Match each requested wavelength
+    matched_by_index = {}  # index -> matched column
+    missing_by_index = {}  # index -> wavelength
+
+    for idx, req_col in enumerate(requested_cols):
+        try:
+            req_float = float(req_col)
+            normalized_key = f"{round(req_float, precision):.{precision}f}"
+            if normalized_key in col_lookup:
+                matched_by_index[idx] = col_lookup[normalized_key]
+            else:
+                missing_by_index[idx] = req_col
+        except (ValueError, TypeError):
+            # Non-numeric column - try direct string match
+            if req_col in col_names:
+                matched_by_index[idx] = req_col
+            else:
+                missing_by_index[idx] = req_col
+
+    # Try different precision levels for missing wavelengths
+    if missing_by_index:
+        for alt_precision in [0, 2, 3]:
+            if alt_precision == precision:
+                continue
+
+            # Rebuild lookup at alternative precision
+            col_lookup_alt = {}
+            for col in col_names:
+                try:
+                    col_float = float(col)
+                    normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
+                    if normalized_key not in col_lookup_alt:
+                        col_lookup_alt[normalized_key] = col
+                except (ValueError, TypeError):
+                    continue
+
+            # Try matching still-missing wavelengths
+            still_missing = {}
+            for idx, wl in missing_by_index.items():
+                try:
+                    wl_float = float(wl)
+                    normalized_key = f"{round(wl_float, alt_precision):.{alt_precision}f}"
+                    if normalized_key in col_lookup_alt:
+                        matched_by_index[idx] = col_lookup_alt[normalized_key]
+                    else:
+                        still_missing[idx] = wl
+                except (ValueError, TypeError):
+                    still_missing[idx] = wl
+
+            missing_by_index = still_missing
+            if not missing_by_index:
+                break
+
+    # Report any still-missing wavelengths
+    if missing_by_index:
+        missing_wls = list(missing_by_index.values())
+        raise KeyError(
+            f"Could not match all wavelength columns. "
+            f"Missing {len(missing_wls)} wavelengths: {missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
+        )
+
+    # Return matched columns in original order
+    return [matched_by_index[i] for i in range(len(requested_cols))]
+
+
 class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
     """
     Sklearn-compatible wrapper that applies wavelength subsetting during fit and predict.
 
     This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
     and implements get_params/set_params properly.
+
+    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
+    to solve the CARS wavelength mismatch bug in ensembles.
     """
 
     def __init__(self, pipeline=None, wavelength_cols=None):
@@ -1254,7 +1358,12 @@ class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
         self.wavelength_cols = wavelength_cols
 
     def _subset(self, X):
-        """Subset X to selected wavelengths."""
+        """
+        Subset X to selected wavelengths using exact precision matching.
+
+        This method solves the CARS wavelength matching bug where tolerance-based
+        matching (±0.5nm) could match wrong wavelengths or fail silently.
+        """
         if self.wavelength_cols is None:
             return X
 
@@ -1263,35 +1372,12 @@ class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
             try:
                 return X[self.wavelength_cols]
             except KeyError:
-                # Column name type mismatch - try matching by string conversion
-                stored_cols_str = [str(c) for c in self.wavelength_cols]
-                str_to_col = {str(col): col for col in X.columns}
-
-                matching_cols = []
-                for stored_str in stored_cols_str:
-                    if stored_str in str_to_col:
-                        matching_cols.append(str_to_col[stored_str])
-                    else:
-                        # Try float comparison for numeric columns
-                        try:
-                            stored_val = float(stored_str)
-                            for col in X.columns:
-                                try:
-                                    if abs(float(col) - stored_val) < 0.5:
-                                        matching_cols.append(col)
-                                        break
-                                except (ValueError, TypeError):
-                                    continue
-                        except (ValueError, TypeError):
-                            pass
-
-                if len(matching_cols) == len(self.wavelength_cols):
-                    return X[matching_cols]
-                else:
-                    raise KeyError(
-                        f"Could not match all wavelength columns. "
-                        f"Expected {len(self.wavelength_cols)}, found {len(matching_cols)}"
-                    )
+                # Column name type mismatch - use normalized precision matching
+                # This fixes the CARS ensemble bug where float vs string columns caused issues
+                matching_cols = _match_wavelengths_normalized(
+                    self.wavelength_cols, X.columns, precision=1
+                )
+                return X[matching_cols]
         else:
             # numpy array - assume columns are already matched
             return X
@@ -1431,6 +1517,9 @@ class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
 
     This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
     and implements get_params/set_params properly.
+
+    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
+    to solve the CARS wavelength mismatch bug in ensembles.
     """
 
     def __init__(self, pipeline=None, wavelength_cols=None):
@@ -1438,7 +1527,12 @@ class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
         self.wavelength_cols = wavelength_cols
 
     def _subset(self, X):
-        """Subset X to selected wavelengths."""
+        """
+        Subset X to selected wavelengths using exact precision matching.
+
+        This method solves the CARS wavelength matching bug where tolerance-based
+        matching (±0.5nm) could match wrong wavelengths or fail silently.
+        """
         if self.wavelength_cols is None:
             return X
 
@@ -1447,35 +1541,12 @@ class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
             try:
                 return X[self.wavelength_cols]
             except KeyError:
-                # Column name type mismatch - try matching by string conversion
-                stored_cols_str = [str(c) for c in self.wavelength_cols]
-                str_to_col = {str(col): col for col in X.columns}
-
-                matching_cols = []
-                for stored_str in stored_cols_str:
-                    if stored_str in str_to_col:
-                        matching_cols.append(str_to_col[stored_str])
-                    else:
-                        # Try float comparison for numeric columns
-                        try:
-                            stored_val = float(stored_str)
-                            for col in X.columns:
-                                try:
-                                    if abs(float(col) - stored_val) < 0.5:
-                                        matching_cols.append(col)
-                                        break
-                                except (ValueError, TypeError):
-                                    continue
-                        except (ValueError, TypeError):
-                            pass
-
-                if len(matching_cols) == len(self.wavelength_cols):
-                    return X[matching_cols]
-                else:
-                    raise KeyError(
-                        f"Could not match all wavelength columns. "
-                        f"Expected {len(self.wavelength_cols)}, found {len(matching_cols)}"
-                    )
+                # Column name type mismatch - use normalized precision matching
+                # This fixes the CARS ensemble bug where float vs string columns caused issues
+                matching_cols = _match_wavelengths_normalized(
+                    self.wavelength_cols, X.columns, precision=1
+                )
+                return X[matching_cols]
         else:
             # numpy array - assume columns are already matched
             return X
@@ -8164,6 +8235,10 @@ class SpectralPredictApp:
                                        style='Caption.TLabel')
         self.results_status.pack(pady=5)
 
+        # Filter controls frame (always shown when results exist - separate from region/class legend)
+        self.filter_controls_frame = ttk.Frame(results_card)
+        # Don't pack initially - will be shown when results are available
+
         # Legend frame for regional highlighting (hidden until results are loaded)
         self.region_legend_frame = ttk.Frame(results_card)
         # Don't pack initially - will be shown when regional data is available
@@ -14835,9 +14910,102 @@ class SpectralPredictApp:
         # GA preprocessing suffixes
         GA_SUFFIXES = ('_pls', '_neural_svm', '_tree', '_neuralboosted')
 
+        def match_wavelengths_exact(requested_wavelengths, available_columns, precision=1):
+            """
+            Match wavelengths with exact precision after normalization.
+
+            This function solves the CARS wavelength matching bug where tolerance-based
+            matching (±0.5nm) could match wrong wavelengths or fail silently.
+
+            FIXED VERSION - preserves order during multi-precision fallback.
+
+            Args:
+                requested_wavelengths: List of float wavelengths to match
+                available_columns: Column names from X_train (can be strings or floats)
+                precision: Decimal places to round to (default 1)
+
+            Returns:
+                List of matched column names (in order of requested_wavelengths)
+
+            Raises:
+                ValueError: If any wavelength cannot be matched exactly
+            """
+            # Build lookup dict: normalized wavelength string -> original column name
+            col_lookup = {}
+            col_names = list(available_columns)
+
+            for col in col_names:
+                try:
+                    col_float = float(col)
+                    # Round to specified precision and convert to string key
+                    normalized_key = f"{round(col_float, precision):.{precision}f}"
+                    # Store first match only (for duplicate handling)
+                    if normalized_key not in col_lookup:
+                        col_lookup[normalized_key] = col
+                except (ValueError, TypeError):
+                    # Non-numeric column - skip
+                    continue
+
+            # Match each requested wavelength - TRACK MATCHES BY INDEX to preserve order
+            matched_by_index = {}  # index -> matched column
+            missing_by_index = {}  # index -> wavelength
+
+            for idx, wl in enumerate(requested_wavelengths):
+                normalized_key = f"{round(wl, precision):.{precision}f}"
+                if normalized_key in col_lookup:
+                    matched_by_index[idx] = col_lookup[normalized_key]
+                else:
+                    missing_by_index[idx] = wl
+
+            # Try different precision levels for missing wavelengths
+            if missing_by_index:
+                for alt_precision in [0, 2, 3]:
+                    if alt_precision == precision:
+                        continue
+
+                    # Rebuild lookup at alternative precision
+                    col_lookup_alt = {}
+                    for col in col_names:
+                        try:
+                            col_float = float(col)
+                            normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
+                            if normalized_key not in col_lookup_alt:
+                                col_lookup_alt[normalized_key] = col
+                        except (ValueError, TypeError):
+                            continue
+
+                    # Try matching still-missing wavelengths
+                    still_missing = {}
+                    for idx, wl in missing_by_index.items():
+                        normalized_key = f"{round(wl, alt_precision):.{alt_precision}f}"
+                        if normalized_key in col_lookup_alt:
+                            matched_by_index[idx] = col_lookup_alt[normalized_key]  # PRESERVES ORDER
+                        else:
+                            still_missing[idx] = wl
+
+                    missing_by_index = still_missing
+                    if not missing_by_index:
+                        break
+
+            # Report any still-missing wavelengths
+            if missing_by_index:
+                missing_wls = list(missing_by_index.values())
+                raise ValueError(
+                    f"Could not find matching columns for {len(missing_wls)} wavelengths: "
+                    f"{missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
+                )
+
+            # Return matched columns IN ORIGINAL ORDER
+            return [matched_by_index[i] for i in range(len(requested_wavelengths))]
+
         def parse_wavelength_subset(all_vars_str, X_columns):
             """
             Parse wavelength subset from all_vars string and find matching columns.
+
+            Uses exact matching with normalized precision to avoid CARS wavelength
+            mismatch bugs where tolerance-based matching could fail silently.
+
+            FIXED VERSION - no code duplication, uses match_wavelengths_exact() only.
 
             Args:
                 all_vars_str: Comma-separated wavelength values like "1500,1520,1540"
@@ -14853,22 +15021,16 @@ class SpectralPredictApp:
                 # Parse comma-separated wavelengths
                 wavelengths = [float(w.strip()) for w in str(all_vars_str).split(',')]
 
-                # Convert X_columns to floats for matching
-                col_values = []
                 col_names = list(X_columns)
-                for col in col_names:
-                    try:
-                        col_values.append(float(col))
-                    except (ValueError, TypeError):
-                        col_values.append(None)
 
-                # Find matching columns (within tolerance for float comparison)
-                matching_cols = []
-                for wl in wavelengths:
-                    for i, col_val in enumerate(col_values):
-                        if col_val is not None and abs(col_val - wl) < 0.5:
-                            matching_cols.append(col_names[i])
-                            break
+                # Use exact matching with normalized precision
+                try:
+                    matching_cols = match_wavelengths_exact(wavelengths, col_names, precision=1)
+                except ValueError as e:
+                    # Log warning and skip subsetting for this model
+                    self._log_progress(f"    [WARN] Wavelength matching failed: {e}")
+                    self._log_progress(f"    [WARN] Training model without wavelength subsetting")
+                    return None
 
                 # Only return if we found a meaningful subset
                 if len(matching_cols) > 0 and len(matching_cols) < len(col_names):
@@ -14876,7 +15038,8 @@ class SpectralPredictApp:
                 return None
 
             except Exception as e:
-                # If parsing fails, don't subset
+                # If parsing fails, log and don't subset
+                self._log_progress(f"    [WARN] Failed to parse wavelength subset: {e}")
                 return None
 
         # NOTE: WavelengthSubsetWrapper is now defined at module level (sklearn-compatible)
@@ -18591,6 +18754,17 @@ class SpectralPredictApp:
             else:
                 self.btn_select_by_region.config(state='disabled')
 
+        # Always show filter controls when results exist (for all search methods)
+        if hasattr(self, 'filter_controls_frame') and len(results_df) > 0:
+            # Detect classification vs regression from results columns
+            # Classification requires both Accuracy AND Accuracycv/AccuracyCV columns
+            cols = results_df.columns
+            is_classification = 'Accuracy' in cols and ('Accuracycv' in cols or 'AccuracyCV' in cols)
+            self._update_filter_controls(is_classification)
+            self.filter_controls_frame.pack(pady=5, fill='x')
+        elif hasattr(self, 'filter_controls_frame'):
+            self.filter_controls_frame.pack_forget()
+
         # Show/hide legend based on task type and whether ranking data is available
         if hasattr(self, 'region_legend_frame'):
             if hasattr(self, '_class_rankings') and self._class_rankings and self._class_rankings.get('top_models'):
@@ -18632,69 +18806,87 @@ class SpectralPredictApp:
             current_values[0] = '☑' if self.results_df.loc[row_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
 
-    def _update_quartile_legend(self):
-        """Update the legend for regression (quartile-based) results."""
-        # Clear existing legend items (except the header label)
-        for widget in self.region_legend_frame.winfo_children():
-            if widget != getattr(self, '_legend_header', None):
-                widget.destroy()
+    def _update_filter_controls(self, is_classification: bool = False):
+        """Update the filter controls frame (overfitting detection checkboxes).
 
-        # Add header only if it doesn't exist
-        if not hasattr(self, '_legend_header') or self._legend_header is None:
-            legend_label = ttk.Label(self.region_legend_frame, text="Region Legend:", font=('Segoe UI', 9, 'bold'))
-            legend_label.pack(side='left', padx=5)
-            self._legend_header = legend_label
+        This is shown for ALL search methods (Grid, Bayesian, NSGA2).
+        The region/class legend is separate and only shown when regional data exists.
 
-        # Add Color toggle checkbox
-        color_checkbox = ttk.Checkbutton(
-            self.region_legend_frame,
-            text="Color",
-            variable=self.highlight_colors_enabled,
-            command=self._on_color_toggle_changed
-        )
-        color_checkbox.pack(side='left', padx=(0, 10))
+        Args:
+            is_classification: True for classification tasks, False for regression
+        """
+        # Clear existing widgets
+        for widget in self.filter_controls_frame.winfo_children():
+            widget.destroy()
 
-        # Add ΔR² Overfit Filter controls
-        overfit_frame = ttk.Frame(self.region_legend_frame)
-        overfit_frame.pack(side='left', padx=(0, 10))
-        overfit_checkbox = ttk.Checkbutton(
-            overfit_frame,
-            text="ΔR² (>",
-            variable=self.overfit_filter_enabled,
-            command=self._on_overfit_toggle_changed
+        # Add header
+        header_label = ttk.Label(
+            self.filter_controls_frame,
+            text="Filters:",
+            font=('Segoe UI', 9, 'bold')
         )
-        overfit_checkbox.pack(side='left')
-        overfit_spinbox = ttk.Spinbox(
-            overfit_frame, from_=1.0, to=20.0, increment=0.5, width=4,
-            textvariable=self.overfit_threshold,
-            command=self._on_overfit_toggle_changed
-        )
-        overfit_spinbox.pack(side='left', padx=2)
-        ttk.Label(overfit_frame, text="%)").pack(side='left')
+        header_label.pack(side='left', padx=5)
 
-        # Add RMSECV/RMSE ratio filter controls (regression only)
-        rmse_ratio_frame = ttk.Frame(self.region_legend_frame)
-        rmse_ratio_frame.pack(side='left', padx=(0, 10))
-        rmse_ratio_checkbox = ttk.Checkbutton(
-            rmse_ratio_frame,
-            text="RMSECV/RMSE (>",
-            variable=self.rmse_ratio_filter_enabled,
-            command=self._on_rmse_ratio_toggle_changed
-        )
-        rmse_ratio_checkbox.pack(side='left')
-        rmse_ratio_combo = ttk.Combobox(
-            rmse_ratio_frame,
-            textvariable=self.rmse_ratio_threshold,
-            values=["1.1", "1.2", "1.3", "1.4", "1.5", "2.0"],
-            width=4,
-            state="readonly"
-        )
-        rmse_ratio_combo.pack(side='left', padx=2)
-        rmse_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmse_ratio_toggle_changed())
-        ttk.Label(rmse_ratio_frame, text=")").pack(side='left')
+        if is_classification:
+            # Classification: ΔAcc filter
+            overfit_frame = ttk.Frame(self.filter_controls_frame)
+            overfit_frame.pack(side='left', padx=(0, 10))
+            overfit_checkbox = ttk.Checkbutton(
+                overfit_frame,
+                text="ΔAcc (>",
+                variable=self.overfit_filter_enabled,
+                command=self._on_overfit_toggle_changed
+            )
+            overfit_checkbox.pack(side='left')
+            overfit_spinbox = ttk.Spinbox(
+                overfit_frame, from_=1.0, to=20.0, increment=0.5, width=4,
+                textvariable=self.overfit_threshold,
+                command=self._on_overfit_toggle_changed
+            )
+            overfit_spinbox.pack(side='left', padx=2)
+            ttk.Label(overfit_frame, text="%)").pack(side='left')
+        else:
+            # Regression: ΔR² filter
+            overfit_frame = ttk.Frame(self.filter_controls_frame)
+            overfit_frame.pack(side='left', padx=(0, 10))
+            overfit_checkbox = ttk.Checkbutton(
+                overfit_frame,
+                text="ΔR² (>",
+                variable=self.overfit_filter_enabled,
+                command=self._on_overfit_toggle_changed
+            )
+            overfit_checkbox.pack(side='left')
+            overfit_spinbox = ttk.Spinbox(
+                overfit_frame, from_=1.0, to=20.0, increment=0.5, width=4,
+                textvariable=self.overfit_threshold,
+                command=self._on_overfit_toggle_changed
+            )
+            overfit_spinbox.pack(side='left', padx=2)
+            ttk.Label(overfit_frame, text="%)").pack(side='left')
 
-        # Add Expert Fit toggle and legend (best generalized models per type)
-        expert_fit_frame = ttk.Frame(self.region_legend_frame)
+            # Regression only: RMSECV/RMSE ratio filter
+            rmse_ratio_frame = ttk.Frame(self.filter_controls_frame)
+            rmse_ratio_frame.pack(side='left', padx=(0, 10))
+            rmse_ratio_checkbox = ttk.Checkbutton(
+                rmse_ratio_frame,
+                text="RMSECV/RMSE (>",
+                variable=self.rmse_ratio_filter_enabled,
+                command=self._on_rmse_ratio_toggle_changed
+            )
+            rmse_ratio_checkbox.pack(side='left')
+            rmse_ratio_combo = ttk.Combobox(
+                rmse_ratio_frame,
+                textvariable=self.rmse_ratio_threshold,
+                values=["1.1", "1.2", "1.3", "1.4", "1.5", "2.0"],
+                width=4,
+                state="readonly"
+            )
+            rmse_ratio_combo.pack(side='left', padx=2)
+            rmse_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmse_ratio_toggle_changed())
+            ttk.Label(rmse_ratio_frame, text=")").pack(side='left')
+
+        # Expert Fit toggle (both classification and regression)
+        expert_fit_frame = ttk.Frame(self.filter_controls_frame)
         expert_fit_frame.pack(side='left', padx=(0, 10))
         expert_fit_checkbox = ttk.Checkbutton(
             expert_fit_frame,
@@ -18706,6 +18898,31 @@ class SpectralPredictApp:
         # Expert fit symbols (★ Best, ● Good - shown in Rank column)
         tk.Label(expert_fit_frame, text=" ★ Best", font=('Segoe UI', 8, 'bold')).pack(side='left')
         tk.Label(expert_fit_frame, text=" ● Good", font=('Segoe UI', 8)).pack(side='left')
+
+    def _update_quartile_legend(self):
+        """Update the legend for regression (quartile-based) results.
+
+        Note: Filter controls (ΔR², RMSECV/RMSE, Expert Fit) are now in the
+        separate filter_controls_frame which is always shown when results exist.
+        This method only handles the quartile color legend.
+        """
+        # Clear existing legend items
+        for widget in self.region_legend_frame.winfo_children():
+            widget.destroy()
+        self._legend_header = None
+
+        # Add header
+        legend_label = ttk.Label(self.region_legend_frame, text="Region Legend:", font=('Segoe UI', 9, 'bold'))
+        legend_label.pack(side='left', padx=5)
+
+        # Add Color toggle checkbox
+        color_checkbox = ttk.Checkbutton(
+            self.region_legend_frame,
+            text="Color",
+            variable=self.highlight_colors_enabled,
+            command=self._on_color_toggle_changed
+        )
+        color_checkbox.pack(side='left', padx=(0, 10))
 
         # Color swatches for quartiles
         colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
@@ -18728,7 +18945,12 @@ class SpectralPredictApp:
             self.quartile_ranges_label.config(text=ranges_text)
 
     def _update_class_legend(self):
-        """Update the legend for classification (class-based) results."""
+        """Update the legend for classification (class-based) results.
+
+        Note: Filter controls (ΔAcc, Expert Fit) are now in the separate
+        filter_controls_frame which is always shown when results exist.
+        This method only handles the class color legend.
+        """
         # Clear existing legend items and header reference
         for widget in self.region_legend_frame.winfo_children():
             widget.destroy()
@@ -18746,38 +18968,6 @@ class SpectralPredictApp:
             command=self._on_color_toggle_changed
         )
         color_checkbox.pack(side='left', padx=(0, 10))
-
-        # Add ΔAcc Overfit Filter controls (classification only - no RMSE ratio filter)
-        overfit_frame = ttk.Frame(self.region_legend_frame)
-        overfit_frame.pack(side='left', padx=(0, 10))
-        overfit_checkbox = ttk.Checkbutton(
-            overfit_frame,
-            text="ΔAcc (>",
-            variable=self.overfit_filter_enabled,
-            command=self._on_overfit_toggle_changed
-        )
-        overfit_checkbox.pack(side='left')
-        overfit_spinbox = ttk.Spinbox(
-            overfit_frame, from_=1.0, to=20.0, increment=0.5, width=4,
-            textvariable=self.overfit_threshold,
-            command=self._on_overfit_toggle_changed
-        )
-        overfit_spinbox.pack(side='left', padx=2)
-        ttk.Label(overfit_frame, text="%)").pack(side='left')
-
-        # Add Expert Fit toggle and legend (best generalized models per type)
-        expert_fit_frame = ttk.Frame(self.region_legend_frame)
-        expert_fit_frame.pack(side='left', padx=(0, 10))
-        expert_fit_checkbox = ttk.Checkbutton(
-            expert_fit_frame,
-            text="Expert Fit",
-            variable=self.expert_fit_enabled,
-            command=self._on_expert_fit_toggle_changed
-        )
-        expert_fit_checkbox.pack(side='left')
-        # Expert fit symbols (★ Best, ● Good - shown in Rank column)
-        tk.Label(expert_fit_frame, text=" ★ Best", font=('Segoe UI', 8, 'bold')).pack(side='left')
-        tk.Label(expert_fit_frame, text=" ● Good", font=('Segoe UI', 8)).pack(side='left')
 
         # Get class labels
         class_labels = self._class_rankings.get('class_labels', []) if self._class_rankings else []
