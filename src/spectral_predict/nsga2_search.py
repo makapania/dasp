@@ -757,7 +757,7 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
     model : sklearn estimator or None
         Model instance or None if not available
     """
-    if model_type == 'PLS':
+    if model_type in ('PLS', 'PLS-DA'):
         n_components = model_param + 1  # 1-15
         if task_type == 'classification':
             # PLS-DA: PLSTransformer + StandardScaler + LogisticRegression
@@ -1077,11 +1077,12 @@ class SpectralOptimizationProblem(Problem):
         self.model_types = models if models is not None else MODEL_TYPES
 
         # Encode labels for classification
+        # ALWAYS encode classification labels to ensure consistent 0..n-1 range
+        # even for numeric labels (e.g., [1,2,3] -> [0,1,2])
         self.label_encoder = None
         if task_type == 'classification':
-            if y.dtype == object or not np.issubdtype(y.dtype, np.number):
-                self.label_encoder = LabelEncoder()
-                self.y = self.label_encoder.fit_transform(y)
+            self.label_encoder = LabelEncoder()
+            self.y = self.label_encoder.fit_transform(y)
 
         # Fitness cache
         self.cache_enabled = cache_enabled
@@ -1272,8 +1273,11 @@ class SpectralOptimizationProblem(Problem):
             # scale=False matches get_model() in models.py for consistency with Model Development
             # Practical cap: 15 is rarely exceeded in chemometrics
             # n_features - 1 ensures PLS doesn't degenerate to OLS
-            if model_type == 'PLS':
-                n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+            # CRITICAL: Use CV fold training size, not full dataset size
+            # sklearn PLS requires n_components <= min(n_features, n_samples_in_training_fold) - 1
+            if model_type in ('PLS', 'PLS-DA'):
+                min_train_samples = X_subset.shape[0] * (self.cv_folds - 1) // self.cv_folds
+                n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, min_train_samples - 1)
                 n_components = max(1, n_components)
                 model = PLSRegression(n_components=n_components, scale=False)
             else:
@@ -1288,13 +1292,15 @@ class SpectralOptimizationProblem(Problem):
             SCALE_SENSITIVE_MODELS = {'SVR', 'MLP', 'NeuralBoosted'}
 
             # Build pipeline with proper scaling if needed
-            if self.task_type == 'classification' and model_type == 'PLS':
+            if self.task_type == 'classification' and model_type in ('PLS', 'PLS-DA'):
                 # PLS-DA: PLSTransformer (2D output) + StandardScaler + LogisticRegression
                 # PLSTransformer ensures transform() returns 2D arrays (fixes sklearn 3D output bug)
                 from sklearn.pipeline import Pipeline
                 from sklearn.preprocessing import StandardScaler
                 from sklearn.linear_model import LogisticRegression
-                n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+                # CRITICAL: Use CV fold training size, not full dataset size
+                min_train_samples = X_subset.shape[0] * (self.cv_folds - 1) // self.cv_folds
+                n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, min_train_samples - 1)
                 n_components = max(1, n_components)
                 pls_transformer = PLSTransformer(n_components=n_components, scale=False)
                 pipeline_model = Pipeline([
@@ -1372,7 +1378,7 @@ class SpectralOptimizationProblem(Problem):
         # Model complexity (0-1)
         # Values: Fixed ordering + 50% reduction to allow tree models to compete fairly
         model_type = self.model_types[min(model_idx, len(self.model_types) - 1)]
-        if model_type == 'PLS':
+        if model_type in ('PLS', 'PLS-DA'):
             # PLS: 1 LV = 0, 15 LVs = 0.25 (capped, linear model shouldn't be most complex)
             model_complexity = (model_param / 14.0) * 0.25
         elif model_type == 'Ridge':
@@ -2028,7 +2034,7 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
     n_selected_features = int(np.sum(wavelength_mask))
 
     # Compute NSGA-specific parameter overrides
-    if model_type == 'PLS':
+    if model_type in ('PLS', 'PLS-DA'):
         # Apply constraints: n_components <= min(n_features, n_samples - 1)
         n_components = _get_constrained_pls_components(model_param, n_selected_features, n_samples)
         nsga_overrides = {'n_components': n_components}
@@ -2332,8 +2338,10 @@ def _compute_solution_r2(
         # For PLS, limit n_components to valid range and use scale=False to match Model Development
         # Practical cap: 15 is rarely exceeded in chemometrics
         # n_features - 1 ensures PLS doesn't degenerate to OLS
-        if model_type == 'PLS':
-            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+        # CRITICAL: Use CV fold training size, not full dataset size
+        if model_type in ('PLS', 'PLS-DA'):
+            min_train_samples = X_subset.shape[0] * (cv_folds - 1) // cv_folds
+            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, min_train_samples - 1)
             n_components = max(1, n_components)
             # scale=False matches get_model() in models.py for consistent R² between NSGA and Model Development
             model = PLSRegression(n_components=n_components, scale=False)
@@ -2448,8 +2456,10 @@ def _compute_display_rmse(
         # For PLS, limit n_components to valid range and use scale=False to match Model Development
         # Practical cap: 15 is rarely exceeded in chemometrics
         # n_features - 1 ensures PLS doesn't degenerate to OLS
-        if model_type == 'PLS':
-            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+        # CRITICAL: Use CV fold training size, not full dataset size
+        if model_type in ('PLS', 'PLS-DA'):
+            min_train_samples = X_subset.shape[0] * (cv_folds - 1) // cv_folds
+            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, min_train_samples - 1)
             n_components = max(1, n_components)
             model = PLSRegression(n_components=n_components, scale=False)
         else:
@@ -2468,6 +2478,175 @@ def _compute_display_rmse(
 
     except Exception:
         return None
+
+
+def _compute_classification_cv_metrics(
+    X: np.ndarray,
+    y: np.ndarray,
+    solution: np.ndarray,
+    n_wavelengths: int,
+    model_types: List[str],
+    cv_folds: int = 5,
+    random_state: int = 42,
+) -> Dict[str, float]:
+    """
+    Compute classification CV metrics (F1, ROC_AUC, Precision, Recall) for a solution.
+
+    This performs manual cross-validation to compute all metrics within each fold,
+    then returns the mean values. This matches how Grid Search computes CV metrics.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data (n_samples, n_wavelengths)
+    y : np.ndarray
+        Target values (class labels)
+    solution : np.ndarray
+        Chromosome encoding the solution
+    n_wavelengths : int
+        Total number of wavelengths
+    model_types : list of str
+        List of model types used in optimization
+    cv_folds : int
+        Number of CV folds
+    random_state : int
+        Random state for reproducibility
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with CV metrics: {'F1cv', 'ROC_AUCcv', 'Precisioncv', 'Recallcv'}
+        Values are None if computation failed.
+    """
+    from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score
+    from sklearn.model_selection import StratifiedKFold
+
+    try:
+        # Encode labels for classification (PLS-DA requires numeric y)
+        le = LabelEncoder()
+        y = le.fit_transform(y)
+
+        # Decode solution
+        preproc_idx = int(solution[0])
+        window_idx = int(solution[1])
+        model_idx = int(solution[2])
+        model_param = int(solution[3])
+        lr_gene = int(solution[4])
+        reg_alpha_gene = int(solution[5])
+        reg_lambda_gene = int(solution[6])
+        l1_gene = int(solution[7])
+        subsample_gene = int(solution[8])
+        colsample_gene = int(solution[9])
+        min_samples_gene = int(solution[10])
+        gamma_gene = int(solution[11])
+        max_features_gene = int(solution[12])
+        wavelength_mask = solution[13:].astype(bool)
+
+        # Apply edge masking (same as _compute_prediction_error)
+        edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+        if edge_zone > 0:
+            wavelength_mask = wavelength_mask.copy()
+            wavelength_mask[:edge_zone] = False
+            wavelength_mask[-edge_zone:] = False
+
+        # Decode hyperparameter genes
+        hyperparams = _decode_hyperparameter_genes(
+            lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
+            subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
+        )
+
+        # Apply preprocessing
+        transform = _get_preprocessing_transform(preproc_idx, window_idx)
+        if transform is not None:
+            X_proc = transform(X)
+        else:
+            X_proc = X.copy()
+
+        # Select wavelengths
+        X_subset = X_proc[:, wavelength_mask]
+
+        if X_subset.shape[1] == 0:
+            return {'F1cv': None, 'ROC_AUCcv': None, 'Precisioncv': None, 'Recallcv': None}
+
+        # Get model type
+        model_type = model_types[min(model_idx, len(model_types) - 1)]
+
+        # Detect binary vs multiclass
+        n_classes = len(np.unique(y))
+        is_binary = n_classes == 2
+
+        # Set averaging method based on number of classes
+        average = 'binary' if is_binary else 'macro'
+
+        # Manual cross-validation to compute all metrics
+        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+
+        f1_scores = []
+        roc_auc_scores = []
+        precision_scores = []
+        recall_scores = []
+
+        for train_idx, test_idx in cv.split(X_subset, y):
+            X_train, X_test = X_subset[train_idx], X_subset[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # Build model for this fold
+            if model_type in ('PLS', 'PLS-DA'):
+                # PLS-DA: PLSTransformer + StandardScaler + LogisticRegression
+                from sklearn.pipeline import Pipeline
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.linear_model import LogisticRegression
+                n_components = min(model_param + 1, 15, X_train.shape[1] - 1, X_train.shape[0] - 1)
+                n_components = max(1, n_components)
+                pls_transformer = PLSTransformer(n_components=n_components, scale=False)
+                model = Pipeline([
+                    ('pls', pls_transformer),
+                    ('scaler', StandardScaler()),
+                    ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
+                ])
+            else:
+                model = _build_model(model_type, model_param, 'classification', random_state, hyperparams)
+
+            if model is None:
+                continue
+
+            # Fit and predict
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+
+            # Compute F1, Precision, Recall
+            try:
+                f1_scores.append(f1_score(y_test, y_pred, average=average, zero_division=0))
+                precision_scores.append(precision_score(y_test, y_pred, average=average, zero_division=0))
+                recall_scores.append(recall_score(y_test, y_pred, average=average, zero_division=0))
+            except Exception as e:
+                logger.warning(f"F1/Precision/Recall failed in fold: {type(e).__name__}: {e}")
+
+            # Compute ROC_AUC if model has predict_proba
+            try:
+                if hasattr(model, 'predict_proba'):
+                    y_proba = model.predict_proba(X_test)
+                    if is_binary:
+                        roc_auc_scores.append(roc_auc_score(y_test, y_proba[:, 1]))
+                    else:
+                        # Multi-class: use ovr average
+                        roc_auc_scores.append(roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro'))
+            except Exception as e:
+                logger.warning(f"ROC_AUC failed in fold: {type(e).__name__}: {e}")
+
+        # Return mean values
+        return {
+            'F1cv': float(np.mean(f1_scores)) if f1_scores else np.nan,
+            'ROC_AUCcv': float(np.mean(roc_auc_scores)) if roc_auc_scores else np.nan,
+            'Precisioncv': float(np.mean(precision_scores)) if precision_scores else np.nan,
+            'Recallcv': float(np.mean(recall_scores)) if recall_scores else np.nan,
+        }
+
+    except Exception as e:
+        logger.debug(f"_compute_classification_cv_metrics failed: {type(e).__name__}: {e}")
+        return {'F1cv': np.nan, 'ROC_AUCcv': np.nan, 'Precisioncv': np.nan, 'Recallcv': np.nan}
 
 
 def _indices_to_wavelength_str(indices: List[int], wavelengths: np.ndarray = None) -> str:
@@ -2667,6 +2846,11 @@ def _compute_calibration_metrics(
     )
 
     try:
+        # Encode labels for classification (PLS-DA requires numeric y)
+        if task_type == 'classification':
+            le = LabelEncoder()
+            y = le.fit_transform(y)
+
         # Decode solution directly (same pattern as _compute_display_rmse)
         preproc_idx = int(solution[0])
         window_idx = int(solution[1])
@@ -2719,7 +2903,7 @@ def _compute_calibration_metrics(
         # For PLS, limit n_components to valid range
         # Practical cap: 15 is rarely exceeded in chemometrics
         # n_features - 1 ensures PLS doesn't degenerate to OLS
-        if model_type == 'PLS':
+        if model_type in ('PLS', 'PLS-DA'):
             n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
             n_components = max(1, n_components)
             if task_type == 'classification':
@@ -2738,6 +2922,14 @@ def _compute_calibration_metrics(
                 model = PLSRegression(n_components=n_components, scale=False)
         else:
             model = _build_model(model_type, model_param, task_type, 42, hyperparams)
+
+        # Check if model was built successfully
+        if model is None:
+            logger.error(f"_build_model returned None for {model_type} in _compute_calibration_metrics")
+            if task_type == 'regression':
+                return {'RMSE': np.nan, 'R2': np.nan}
+            else:
+                return {'Accuracy': np.nan, 'ROC_AUC': np.nan, 'F1': np.nan, 'Precision': np.nan, 'Recall': np.nan}
 
         # Fit on full training data
         model.fit(X_subset, y)
@@ -2780,7 +2972,10 @@ def _compute_calibration_metrics(
         return metrics
 
     except Exception as e:
-        # Return empty dict on failure
+        # Log the error for diagnostics before returning empty dict
+        logger.error(f"_compute_calibration_metrics FAILED: task={task_type}, model_idx={int(solution[2])}, error={type(e).__name__}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {}
 
 
@@ -2921,13 +3116,21 @@ def convert_nsga2_to_v1_format(
                 row['Precision'] = np.nan
                 row['Recall'] = np.nan
 
-            # CV metrics (for now, use the optimization objectives)
-            # TODO: Could add proper CV metrics for classification if needed
-            row['Accuracycv'] = 1.0 - objectives[0]
-            row['ROC_AUCcv'] = None
-            row['F1cv'] = None
-            row['Precisioncv'] = None
-            row['Recallcv'] = None
+            # CV metrics: compute actual CV metrics for F1, ROC_AUC, Precision, Recall
+            row['Accuracycv'] = 1.0 - objectives[0]  # From optimization objective
+            if X is not None and y is not None:
+                cv_metrics = _compute_classification_cv_metrics(
+                    X, y, solution, n_wavelengths, model_types, folds, 42
+                )
+                row['ROC_AUCcv'] = cv_metrics.get('ROC_AUCcv')
+                row['F1cv'] = cv_metrics.get('F1cv')
+                row['Precisioncv'] = cv_metrics.get('Precisioncv')
+                row['Recallcv'] = cv_metrics.get('Recallcv')
+            else:
+                row['ROC_AUCcv'] = None
+                row['F1cv'] = None
+                row['Precisioncv'] = None
+                row['Recallcv'] = None
 
             row['CompositeScore'] = row['Accuracycv']  # Use CV accuracy as composite
 
