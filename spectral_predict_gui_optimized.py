@@ -235,7 +235,7 @@ class CreateToolTip(object):
 
 # ===== EXPERT MODEL SELECTION THRESHOLDS =====
 # Based on spectroscopy literature (Gowen 2011, Williams 2014, Nature Scientific Reports)
-# Used to identify well-generalized models vs overfit models among top performers
+# Used to identify well-generalized models across ALL models (ignores Rank)
 EXPERT_CHOICE_THRESHOLDS = {
     'r2_gap_excellent': 0.02,     # R2 - R2cv ≤ 2% (Expert's choice - green)
     'r2_gap_good': 0.05,          # R2 - R2cv ≤ 5% (Good fit - yellow)
@@ -247,7 +247,7 @@ EXPERT_CHOICE_THRESHOLDS = {
 EXPERT_CHOICE_COLORS = {
     'expert_choice': '#27ae60',   # Green - Expert's choice (best generalization)
     'good': '#f39c12',            # Yellow/Orange - Good but some risk
-    'overfit': '#e74c3c',         # Red - Clearly overfit (still top 3 but risky)
+    'overfit': '#e74c3c',         # Red - Unused (overfit models are simply not marked)
 }
 
 
@@ -1987,6 +1987,8 @@ class SpectralPredictApp:
         self.enable_variable_subsets = tk.BooleanVar(value=True)  # Top-N variable analysis
         self.enable_region_subsets = tk.BooleanVar(value=True)  # Spectral region analysis
         self.n_top_regions = tk.IntVar(value=10)  # Number of top regions to analyze (5, 10, 15, 20)
+        self.region_test_all_individual = tk.BooleanVar(value=False)  # Test all N regions individually
+        self.region_test_pairwise = tk.BooleanVar(value=False)  # Test pairwise region combinations
 
         # Top-N variable counts (checkboxes for each)
         self.var_10 = tk.BooleanVar(value=True)
@@ -6129,12 +6131,30 @@ class SpectralPredictApp:
         ttk.Radiobutton(region_depth_frame, text="Deep (15 regions)", variable=self.n_top_regions, value=15).grid(row=0, column=2, padx=5)
         ttk.Radiobutton(region_depth_frame, text="Thorough (20 regions)", variable=self.n_top_regions, value=20).grid(row=0, column=3, padx=5)
 
+        # Advanced region options
+        ttk.Label(subset_frame, text="Advanced Region Options:",
+                  style='Caption.TLabel').grid(row=6, column=0, columnspan=4,
+                  sticky=tk.W, padx=(20, 0), pady=(10, 2))
+
+        region_opts = ttk.Frame(subset_frame)
+        region_opts.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=(20, 0))
+
+        ttk.Checkbutton(region_opts, text="Test all regions individually",
+                        variable=self.region_test_all_individual).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(region_opts, text="(default tests ~half)",
+                  style='Caption.TLabel').grid(row=0, column=1, padx=5)
+
+        ttk.Checkbutton(region_opts, text="Test pairwise combinations",
+                        variable=self.region_test_pairwise).grid(row=1, column=0, sticky=tk.W)
+        ttk.Label(region_opts, text="(45 pairs for Top 10)",
+                  style='Caption.TLabel').grid(row=1, column=1, padx=5)
+
         # Top-N variable counts
-        ttk.Label(subset_frame, text="Top-N Variable Counts:", style='Subheading.TLabel').grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
-        ttk.Label(subset_frame, text="Select which N values to test (default: 10, 20, 50, 100, 250)", style='Caption.TLabel').grid(row=7, column=0, columnspan=4, sticky=tk.W)
+        ttk.Label(subset_frame, text="Top-N Variable Counts:", style='Subheading.TLabel').grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(15, 5))
+        ttk.Label(subset_frame, text="Select which N values to test (default: 10, 20, 50, 100, 250)", style='Caption.TLabel').grid(row=9, column=0, columnspan=4, sticky=tk.W)
 
         var_frame = ttk.Frame(subset_frame)
-        var_frame.grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=5)
+        var_frame.grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(var_frame, text="N=10 ⭐", variable=self.var_10).grid(row=0, column=0, padx=5, pady=2)
         ttk.Checkbutton(var_frame, text="N=20 ⭐", variable=self.var_20).grid(row=0, column=1, padx=5, pady=2)
@@ -6145,7 +6165,7 @@ class SpectralPredictApp:
         ttk.Checkbutton(var_frame, text="N=1000", variable=self.var_1000).grid(row=1, column=2, padx=5, pady=2)
 
         ttk.Label(subset_frame, text="💡 More subsets = more comprehensive results but longer runtime",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # === Variable Selection Methods ===
         self._create_section_header(content_frame, "Variable Selection Methods", row=row, columnspan=2)
@@ -8082,7 +8102,7 @@ class SpectralPredictApp:
                 self.results_tree.tag_configure(f'overfit_class{i}', foreground='#888888',
                                                 background=color)
 
-        # Configure expert choice tags for Rank column coloring (top 3 per model type)
+        # Configure expert choice tags for Rank column coloring (best generalized models)
         # Expert's choice (green): well-generalized, minimal overfitting
         self.results_tree.tag_configure('expert_choice', foreground='#27ae60')
         # Good fit (yellow): acceptable but some overfitting risk
@@ -17929,6 +17949,8 @@ class SpectralPredictApp:
                 variable_counts=variable_counts if variable_counts else None,
                 enable_region_subsets=enable_region_subsets,
                 n_top_regions=self.n_top_regions.get(),
+                region_test_all_individual=self.region_test_all_individual.get(),
+                region_test_pairwise=self.region_test_pairwise.get(),
                 progress_callback=self._progress_callback,
                 # Variable selection parameters (NEW - supports multiple methods)
                 variable_selection_methods=selected_varsel_methods,
@@ -18507,12 +18529,23 @@ class SpectralPredictApp:
                                      command=lambda c=col: self._sort_results_by_column(c))
 
         # Insert data rows with regional/class highlighting
+        expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
         for idx, row in results_df.iterrows():
             values = []
             for col in columns:
                 if col == 'Select':
                     # Convert boolean to checkbox symbol
                     values.append('☑' if row[col] else '☐')
+                elif col == 'Rank' and expert_fit_enabled and hasattr(self, '_expert_choices') and idx in self._expert_choices:
+                    # Add symbol prefix to Rank for expert choices
+                    expert_status = self._expert_choices[idx]
+                    rank_val = row[col]
+                    if expert_status == 'expert_choice':
+                        values.append(f"★ {rank_val}")  # Star for best
+                    elif expert_status == 'good':
+                        values.append(f"● {rank_val}")  # Dot for good
+                    else:
+                        values.append(rank_val)
                 else:
                     values.append(row[col])
 
@@ -18660,7 +18693,7 @@ class SpectralPredictApp:
         rmse_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmse_ratio_toggle_changed())
         ttk.Label(rmse_ratio_frame, text=")").pack(side='left')
 
-        # Add Expert Fit toggle and legend (top 3 per model type)
+        # Add Expert Fit toggle and legend (best generalized models per type)
         expert_fit_frame = ttk.Frame(self.region_legend_frame)
         expert_fit_frame.pack(side='left', padx=(0, 10))
         expert_fit_checkbox = ttk.Checkbutton(
@@ -18670,10 +18703,9 @@ class SpectralPredictApp:
             command=self._on_expert_fit_toggle_changed
         )
         expert_fit_checkbox.pack(side='left')
-        # Expert fit color swatches
-        tk.Label(expert_fit_frame, text=" Best", fg='#27ae60', font=('Segoe UI', 8, 'bold')).pack(side='left')
-        tk.Label(expert_fit_frame, text=" Good", fg='#f39c12', font=('Segoe UI', 8)).pack(side='left')
-        tk.Label(expert_fit_frame, text=" Overfit", fg='#e74c3c', font=('Segoe UI', 8)).pack(side='left')
+        # Expert fit symbols (★ Best, ● Good - shown in Rank column)
+        tk.Label(expert_fit_frame, text=" ★ Best", font=('Segoe UI', 8, 'bold')).pack(side='left')
+        tk.Label(expert_fit_frame, text=" ● Good", font=('Segoe UI', 8)).pack(side='left')
 
         # Color swatches for quartiles
         colors = [('#e3f2fd', 'Q1 (Low Y)'), ('#e8f5e9', 'Q2'), ('#fff3e0', 'Q3'), ('#fce4ec', 'Q4 (High Y)')]
@@ -18733,7 +18765,7 @@ class SpectralPredictApp:
         overfit_spinbox.pack(side='left', padx=2)
         ttk.Label(overfit_frame, text="%)").pack(side='left')
 
-        # Add Expert Fit toggle and legend (top 3 per model type)
+        # Add Expert Fit toggle and legend (best generalized models per type)
         expert_fit_frame = ttk.Frame(self.region_legend_frame)
         expert_fit_frame.pack(side='left', padx=(0, 10))
         expert_fit_checkbox = ttk.Checkbutton(
@@ -18743,10 +18775,9 @@ class SpectralPredictApp:
             command=self._on_expert_fit_toggle_changed
         )
         expert_fit_checkbox.pack(side='left')
-        # Expert fit color swatches
-        tk.Label(expert_fit_frame, text=" Best", fg='#27ae60', font=('Segoe UI', 8, 'bold')).pack(side='left')
-        tk.Label(expert_fit_frame, text=" Good", fg='#f39c12', font=('Segoe UI', 8)).pack(side='left')
-        tk.Label(expert_fit_frame, text=" Overfit", fg='#e74c3c', font=('Segoe UI', 8)).pack(side='left')
+        # Expert fit symbols (★ Best, ● Good - shown in Rank column)
+        tk.Label(expert_fit_frame, text=" ★ Best", font=('Segoe UI', 8, 'bold')).pack(side='left')
+        tk.Label(expert_fit_frame, text=" ● Good", font=('Segoe UI', 8)).pack(side='left')
 
         # Get class labels
         class_labels = self._class_rankings.get('class_labels', []) if self._class_rankings else []
@@ -18830,11 +18861,10 @@ class SpectralPredictApp:
                 self.results_tree.item(row_id, tags=())
 
     def _get_highlight_tag_for_row(self, idx: int) -> tuple:
-        """Get the appropriate highlight tag for a row based on rankings, expert choice, and overfit filter.
+        """Get the appropriate highlight tag for a row based on rankings and overfit filter.
 
-        Expert choice (green/yellow/red text) is applied to top 3 models of each type based on
-        generalization quality. Region/class highlighting (background color) shows best performers
-        by Y-value region or class.
+        Region/class highlighting (background color) shows best performers by Y-value region or class.
+        Expert choice is indicated via symbol prefix in Rank column (★/●), not row coloring.
 
         Args:
             idx: Row index in results_df
@@ -18847,12 +18877,6 @@ class SpectralPredictApp:
         rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
         any_overfit_filter = overfit_enabled or rmse_ratio_enabled
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
-        expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
-
-        # Get expert choice status for this row (if applicable)
-        expert_status = None
-        if expert_fit_enabled and hasattr(self, '_expert_choices'):
-            expert_status = self._expert_choices.get(idx)
 
         # Check classification rankings first
         if hasattr(self, '_class_rankings') and self._class_rankings:
@@ -18861,15 +18885,6 @@ class SpectralPredictApp:
                 class_labels = self._class_rankings.get('class_labels', [])
                 try:
                     class_idx = class_labels.index(str(best_c))
-
-                    # Expert choice takes priority over overfit filter for text coloring
-                    if expert_status and color_enabled:
-                        if expert_status == 'expert_choice':
-                            return (f"expert_choice_class{class_idx}",)
-                        elif expert_status == 'good':
-                            return (f"good_fit_class{class_idx}",)
-                        elif expert_status == 'overfit':
-                            return (f"overfit_top3_class{class_idx}",)
 
                     if color_enabled and any_overfit_filter and is_overfit:
                         return (f"overfit_class{class_idx}",)
@@ -18889,15 +18904,6 @@ class SpectralPredictApp:
                 quartile_map = {'q1': 1, 'q2': 2, 'q3': 3, 'q4': 4}
                 q_num = quartile_map.get(region.lower(), 0)
 
-                # Expert choice takes priority over overfit filter for text coloring
-                if expert_status and color_enabled and q_num > 0:
-                    if expert_status == 'expert_choice':
-                        return (f"expert_choice_q{q_num}",)
-                    elif expert_status == 'good':
-                        return (f"good_fit_q{q_num}",)
-                    elif expert_status == 'overfit':
-                        return (f"overfit_top3_q{q_num}",)
-
                 if color_enabled and any_overfit_filter and is_overfit and q_num > 0:
                     return (f"overfit_q{q_num}",)
                 elif color_enabled:
@@ -18905,15 +18911,6 @@ class SpectralPredictApp:
                 elif any_overfit_filter and is_overfit:
                     return ("overfit",)
                 return ()
-
-        # No region/class highlighting - check for expert choice without background
-        if expert_status and expert_fit_enabled:
-            if expert_status == 'expert_choice':
-                return ("expert_choice",)
-            elif expert_status == 'good':
-                return ("good_fit",)
-            elif expert_status == 'overfit':
-                return ("overfit_top3",)
 
         # No color highlighting, but check for overfit-only marking
         if any_overfit_filter and is_overfit:
@@ -18985,20 +18982,24 @@ class SpectralPredictApp:
         return False
 
     def _compute_expert_choices(self, df) -> dict:
-        """Compute expert choice indicators for top 3 models of each model type.
+        """Find well-generalized models that an expert spectroscopist would recommend.
 
-        Based on spectroscopy literature (Gowen 2011, Williams 2014, Nature Scientific Reports),
-        this evaluates models on:
-        - R² gap (R2 - R2cv): Lower is better (less overfitting)
-        - RMSE ratio (RMSEcv/RMSE): Closer to 1.0 is better
-        - PLS parsimony: Fewer LVs for similar performance
+        IGNORES existing Rank. Selects based purely on generalization quality:
+        - Expert tier: R² gap ≤ 2%, RMSE ratio ≤ 1.15 (and PLS parsimony)
+        - Good tier: R² gap ≤ 5%, RMSE ratio ≤ 1.30
+
+        Models that don't meet these thresholds are NOT marked - they're overfit
+        and not recommended. The absence of highlighting tells the user that
+        model type is not suitable for their data.
+
+        Based on spectroscopy literature (Gowen 2011, Williams 2014, Nature Scientific Reports).
 
         Args:
             df: Results DataFrame with Model, R2, R2cv, RMSE, RMSEcv, LVs columns
 
         Returns:
             Dict mapping row index to expert choice status:
-            'expert_choice' (green), 'good' (yellow), 'overfit' (red), or None
+            'expert_choice' (green) or 'good' (yellow). Overfit models are NOT included.
         """
         expert_choices = {}
 
@@ -19027,18 +19028,13 @@ class SpectralPredictApp:
         model_types = df['Model'].unique()
 
         for model_type in model_types:
-            # Get rows for this model type, sorted by Rank (top 3)
+            # Get ALL rows for this model type (ignore Rank)
             type_df = df[df['Model'] == model_type]
-            if 'Rank' in cols:
-                type_df = type_df.nsmallest(3, 'Rank')
-            else:
-                # Fallback: just take first 3
-                type_df = type_df.head(3)
 
             if len(type_df) == 0:
                 continue
 
-            # For PLS: find minimum LVs in this top-3 group for parsimony check
+            # For PLS: find minimum LVs across ALL models of this type for parsimony check
             min_lvs = None
             is_pls = model_type in ('PLS', 'PLS-DA')
             if is_pls and 'LVs' in cols:
@@ -19048,6 +19044,10 @@ class SpectralPredictApp:
                         min_lvs = float(lvs_values.min())
                 except (ValueError, TypeError):
                     pass
+
+            # Evaluate ALL models for generalization quality
+            expert_tier = []  # Best: R² gap ≤ 2%, RMSE ratio ≤ 1.15
+            good_tier = []    # Good: R² gap ≤ 5%, RMSE ratio ≤ 1.30
 
             for idx, row in type_df.iterrows():
                 try:
@@ -19071,13 +19071,13 @@ class SpectralPredictApp:
                             except (ValueError, TypeError):
                                 pass
 
-                        # Classify based on thresholds
+                        # Classify by quality (NOT by rank)
                         if r2_gap <= r2_gap_excellent and rmse_ratio <= rmse_ratio_excellent and is_parsimonious:
-                            expert_choices[idx] = 'expert_choice'
+                            # Sort by R²cv to pick best performers within quality tier
+                            expert_tier.append((idx, r2cv))
                         elif r2_gap <= r2_gap_good and rmse_ratio <= rmse_ratio_good:
-                            expert_choices[idx] = 'good'
-                        else:
-                            expert_choices[idx] = 'overfit'
+                            good_tier.append((idx, r2cv))
+                        # else: overfit - NOT marked (not recommended)
 
                     elif is_classification:
                         # For classification, use Accuracy gap instead of R2 gap
@@ -19095,16 +19095,33 @@ class SpectralPredictApp:
                             except (ValueError, TypeError):
                                 pass
 
-                        # Classify (using same thresholds as R2 gap)
+                        # Classify by quality (NOT by rank)
                         if acc_gap <= r2_gap_excellent and is_parsimonious:
-                            expert_choices[idx] = 'expert_choice'
+                            expert_tier.append((idx, acc_cv))
                         elif acc_gap <= r2_gap_good:
-                            expert_choices[idx] = 'good'
-                        else:
-                            expert_choices[idx] = 'overfit'
+                            good_tier.append((idx, acc_cv))
+                        # else: overfit - NOT marked (not recommended)
 
                 except (ValueError, TypeError, KeyError):
                     continue
+
+            # Select up to 3 models, prioritizing expert tier
+            # Sort by R²cv/Accuracy_cv descending (best CV performance among qualified models)
+            expert_tier.sort(key=lambda x: x[1], reverse=True)  # Best CV score first
+            good_tier.sort(key=lambda x: x[1], reverse=True)
+
+            selected = 0
+            for idx, _ in expert_tier[:3]:
+                expert_choices[idx] = 'expert_choice'
+                selected += 1
+
+            # Fill remaining slots from good tier
+            remaining_slots = 3 - selected
+            for idx, _ in good_tier[:remaining_slots]:
+                expert_choices[idx] = 'good'
+
+            # If NO qualified models for this type: don't mark anything
+            # (User sees no green/yellow = this model type is not reliable for their data)
 
         return expert_choices
 
