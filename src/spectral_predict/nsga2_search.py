@@ -3062,7 +3062,7 @@ def convert_nsga2_to_v1_format(
             'Deriv': deriv_order,
             'Window': window_size,
             'Poly': deriv_order + 1 if deriv_order else None,  # polyorder = deriv + 1
-            'LVs': _get_constrained_pls_components(int(solution[3]), decoded['n_wavelengths'], n_samples) if decoded['model'] == 'PLS' else None,
+            'LVs': _get_constrained_pls_components(int(solution[3]), decoded['n_wavelengths'], n_samples) if decoded['model'] in ('PLS', 'PLS-DA') else None,
             'Complexity': objectives[2],
             'Is_Knee': i == result['knee_idx'],
         }
@@ -3197,7 +3197,7 @@ def convert_nsga2_to_v1_format(
                     'Deriv': deriv_order,
                     'Window': window_size,
                     'Poly': polyorder,
-                    'LVs': knee_sol.get('model_params', {}).get('n_components') if knee_sol.get('model') == 'PLS' else None,
+                    'LVs': knee_sol.get('model_params', {}).get('n_components') if knee_sol.get('model') in ('PLS', 'PLS-DA') else None,
                     'Complexity': knee_sol['objectives'].get('complexity', 0),
                     'Is_Knee': False,
                     'Is_Best_Error': True,  # Mark this as the minimum error solution
