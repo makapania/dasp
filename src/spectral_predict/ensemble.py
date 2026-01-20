@@ -202,7 +202,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
     that varies based on the predicted value.
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None):
+    def __init__(self, models, model_names=None, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None, refit_base_models=True):
         """
         Parameters
         ----------
@@ -225,6 +225,11 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
             will be used for region assignment instead of computing from predictions.
             This ensures consistent region assignment between selection (based on
             TRUE Y) and routing (based on these boundaries).
+        refit_base_models : bool, default=True
+            If True, clone and refit base models on each CV fold (standard behavior).
+            If False, use the original pre-fitted models directly without refitting.
+            Set to False when models are wrapped (e.g., WavelengthSubsetWrapper from
+            CARS/NSGA-II) to avoid StandardScaler divergence that causes ~0.03 R² loss.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -233,6 +238,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
         self.y_percentiles = y_percentiles
+        self.refit_base_models = refit_base_models
         self.regional_weights_ = None
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
 
@@ -307,9 +313,14 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
                     else:
                         X_train_proc, X_val_proc = X_train, X_val
 
-                    # Clone and fit model on this fold
-                    fold_model = clone(model)
-                    fold_model.fit(X_train_proc, y_train)
+                    # Clone and fit model on this fold (or use original if refit disabled)
+                    if self.refit_base_models:
+                        fold_model = clone(model)
+                        fold_model.fit(X_train_proc, y_train)
+                    else:
+                        # Use original pre-fitted model (preserves scaler stats)
+                        # This avoids StandardScaler divergence for wrapped models
+                        fold_model = model
 
                     # Predict on validation fold
                     pred = fold_model.predict(X_val_proc)
@@ -442,7 +453,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
     Optionally uses soft gating (weighted combination).
     """
 
-    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None):
+    def __init__(self, models, model_names=None, n_regions=5, soft_gating=True, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None, refit_base_models=True):
         """
         Parameters
         ----------
@@ -464,6 +475,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
             will be used for region assignment instead of computing from predictions.
             This ensures consistent region assignment between selection (based on
             TRUE Y) and routing (based on these boundaries).
+        refit_base_models : bool, default=True
+            If True, clone and refit base models on each CV fold (standard behavior).
+            If False, use the original pre-fitted models directly without refitting.
+            Set to False when models are wrapped (e.g., WavelengthSubsetWrapper from
+            CARS/NSGA-II) to avoid StandardScaler divergence that causes ~0.03 R² loss.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -473,6 +489,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
         self.y_percentiles = y_percentiles
+        self.refit_base_models = refit_base_models
         self.expert_assignment_ = None  # Which model is best for each region
         self.expert_weights_ = None  # Soft weights if soft_gating=True
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions)
@@ -547,9 +564,14 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
                     else:
                         X_train_proc, X_val_proc = X_train, X_val
 
-                    # Clone and fit model on this fold
-                    fold_model = clone(model)
-                    fold_model.fit(X_train_proc, y_train)
+                    # Clone and fit model on this fold (or use original if refit disabled)
+                    if self.refit_base_models:
+                        fold_model = clone(model)
+                        fold_model.fit(X_train_proc, y_train)
+                    else:
+                        # Use original pre-fitted model (preserves scaler stats)
+                        # This avoids StandardScaler divergence for wrapped models
+                        fold_model = model
 
                     # Predict on validation fold
                     pred = fold_model.predict(X_val_proc)
@@ -672,7 +694,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
     """
 
     def __init__(self, models, model_names=None, meta_model=None,
-                 region_aware=True, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None):
+                 region_aware=True, n_regions=5, cv=5, preprocessors=None, preprocessor_configs=None, y_percentiles=None, refit_base_models=True):
         """
         Parameters
         ----------
@@ -696,6 +718,11 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             will be used for region assignment instead of computing from predictions.
             This ensures consistent region assignment between selection (based on
             TRUE Y) and routing (based on these boundaries).
+        refit_base_models : bool, default=True
+            If True, clone and refit base models on each CV fold (standard behavior).
+            If False, use the original pre-fitted models directly without refitting.
+            Set to False when models are wrapped (e.g., WavelengthSubsetWrapper from
+            CARS/NSGA-II) to avoid StandardScaler divergence that causes ~0.03 R² loss.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -706,6 +733,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         self.preprocessors = preprocessors
         self.preprocessor_configs = preprocessor_configs
         self.y_percentiles = y_percentiles
+        self.refit_base_models = refit_base_models
         self.analyzer_ = RegionBasedAnalyzer(n_regions=n_regions) if region_aware else None
 
     @property
@@ -778,9 +806,14 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
                     else:
                         X_train_proc, X_val_proc = X_train, X_val
 
-                    # Clone and fit model on this fold
-                    fold_model = clone(model)
-                    fold_model.fit(X_train_proc, y_train)
+                    # Clone and fit model on this fold (or use original if refit disabled)
+                    if self.refit_base_models:
+                        fold_model = clone(model)
+                        fold_model.fit(X_train_proc, y_train)
+                    else:
+                        # Use original pre-fitted model (preserves scaler stats)
+                        # This avoids StandardScaler divergence for wrapped models
+                        fold_model = model
 
                     # Predict on validation fold
                     pred = fold_model.predict(X_val_proc)
@@ -1288,6 +1321,9 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
         - cv : int, cross-validation folds
         - soft_gating : bool, for mixture_experts
         - meta_model : estimator, for stacking
+        - refit_base_models : bool, default=True
+            If True, clone and refit base models on each CV fold.
+            If False, use original pre-fitted models (for wrapped CARS/NSGA-II models).
 
     Returns
     -------

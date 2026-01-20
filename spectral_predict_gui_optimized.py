@@ -1717,6 +1717,33 @@ class CombinedPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
         return self
 
 
+def _is_wrapped_model(model):
+    """
+    Check if a model is a CARS/NSGA-II wrapped model.
+
+    These wrappers contain pipelines with StandardScaler whose parameters
+    should be preserved during ensemble CV. When models are wrapped, ensemble
+    methods should use refit_base_models=False to prevent StandardScaler
+    divergence that causes ~0.03 R² loss.
+
+    Parameters
+    ----------
+    model : object
+        A fitted model to check
+
+    Returns
+    -------
+    bool
+        True if the model is a wrapped model that should not be refitted
+    """
+    WRAPPED_TYPES = (
+        'WavelengthSubsetWrapper', 'WavelengthSubsetClassifierWrapper',
+        'GAPreprocessWrapper', 'GAPreprocessClassifierWrapper',
+        'CombinedPreprocessWrapper', 'CombinedPreprocessClassifierWrapper'
+    )
+    return type(model).__name__ in WRAPPED_TYPES
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -15640,6 +15667,12 @@ class SpectralPredictApp:
             models = [m[0] for m in reconstructed]
             model_names = [m[1] for m in reconstructed]
 
+            # Detect wrapped models (CARS/NSGA-II) - these should not be refitted during
+            # ensemble CV to avoid StandardScaler divergence that causes ~0.03 R² loss
+            any_wrapped = any(_is_wrapped_model(m) for m in models)
+            if any_wrapped:
+                self._log_progress(f"[*] Detected wrapped models (CARS/NSGA-II) - using original fitted models")
+
             # NOTE: We do NOT extract preprocessor_configs here because the reconstructed
             # models are already wrapped with preprocessing (GAPreprocessWrapper,
             # CombinedPreprocessWrapper, WavelengthSubsetWrapper). Passing preprocessor_configs
@@ -15677,6 +15710,7 @@ class SpectralPredictApp:
 
                     # Create ensemble
                     # NOTE: No preprocessor_configs - models already have preprocessing built-in
+                    # For wrapped models (CARS/NSGA-II), disable refitting to preserve scaler stats
                     ensemble = create_ensemble(
                         models=models,
                         model_names=model_names,
@@ -15685,6 +15719,7 @@ class SpectralPredictApp:
                         ensemble_type=ensemble_type,
                         n_regions=n_regions,
                         cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
+                        refit_base_models=not any_wrapped,  # False for wrapped models
                     )
 
                     # Use cross-validation to get realistic metrics (comparable to RMSECV)
@@ -15715,6 +15750,7 @@ class SpectralPredictApp:
                                 ensemble_type=ensemble_type,
                                 n_regions=n_regions,
                                 cv=min(5, len(y_cv_train)),
+                                refit_base_models=not any_wrapped,  # False for wrapped models
                             )
                             cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
 
@@ -25377,7 +25413,14 @@ Configuration:
                 'validation_set_enabled': self.validation_enabled.get(),
                 'validation_indices': list(self.validation_indices) if self.validation_indices else [],
                 'validation_size': len(self.validation_indices) if self.validation_indices else 0,
-                'validation_algorithm': self.validation_algorithm.get() if self.validation_enabled.get() else None
+                'validation_algorithm': self.validation_algorithm.get() if self.validation_enabled.get() else None,
+                # Model hyperparameters (from results table)
+                'params': self.selected_model_config.get('Params', {}) if self.selected_model_config else {},
+                # Preprocessing details
+                'polyorder': self.selected_model_config.get('Poly') if self.selected_model_config else None,
+                # Imbalance handling
+                'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
+                'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
             }
 
             # Add coupled optimization params if present
