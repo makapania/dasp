@@ -63,6 +63,36 @@ SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
 
 
+def _r2_score_with_calibration_mean(y_true, y_pred, calibration_mean: float) -> float:
+    """
+    Compute R² using calibration mean for SS_tot (Unscrambler-compatible).
+
+    sklearn's r2_score uses mean(y_true) for SS_tot.
+    Unscrambler uses the calibration (training) set mean.
+
+    Parameters
+    ----------
+    y_true : array-like
+        True values (test/validation set)
+    y_pred : array-like
+        Predicted values
+    calibration_mean : float
+        Mean of the full calibration/training set
+
+    Returns
+    -------
+    float
+        R² value using calibration mean for SS_tot
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - calibration_mean) ** 2)
+    if ss_tot == 0:
+        return 0.0  # Avoid division by zero
+    return 1 - (ss_res / ss_tot)
+
+
 def _apply_edge_mask(importances: np.ndarray, preprocess_cfg: dict) -> np.ndarray:
     """Zero out edge importances affected by Savitzky-Golay derivatives.
 
@@ -696,7 +726,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                X_validation=None,
                y_validation=None,
                compute_validation=False,
-               validation_top_n=100):
+               validation_top_n=100,
+               # R² calculation mode
+               r2_calibration_mean_mode=False):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -773,6 +805,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     wavelengths = X.columns.values
     n_features = X_np.shape[1]
     n_samples = X_np.shape[0]
+
+    # Compute calibration mean for Unscrambler-compatible R² (regression only)
+    # Store the mean of the full calibration set for use in R² calculation
+    calibration_mean = float(np.mean(y_np)) if (r2_calibration_mean_mode and task_type == "regression") else None
 
     # Handle categorical labels for classification
     label_encoder = None
@@ -1784,13 +1820,13 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
                 progress_msg = f"Testing {model_name} ({param_str}) + {prep_name}"
 
-                # Add best model so far to progress
+                # Add best model so far to progress (show CV metrics for consistency with ranking)
                 best_info = ""
                 if best_model_so_far is not None:
                     if task_type == "regression":
-                        best_info = f" | Best: R²={best_model_so_far['R2']:.3f}, RMSE={best_model_so_far['RMSE']:.3f}"
+                        best_info = f" | Best CV: R²cv={best_model_so_far['R2cv']:.3f}, RMSEcv={best_model_so_far['RMSEcv']:.3f}"
                     else:
-                        best_info = f" | Best: AUC={best_model_so_far.get('ROC_AUC', 0):.3f}"
+                        best_info = f" | Best CV: AUCcv={best_model_so_far.get('ROC_AUCcv', 0):.3f}"
 
                 print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
 
@@ -1829,24 +1865,26 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=n_jobs,
                     wavelength_restriction_active=wavelength_restriction_active,
+                    r2_calibration_mean_mode=r2_calibration_mean_mode,
+                    calibration_mean=calibration_mean,
                 )
                 df_results = add_result(df_results, result)
 
-                # Show full model result
+                # Show full model result (CV metrics for consistency)
                 if task_type == "regression":
-                    print(f"     Full model: R²={result['R2']:.3f}, RMSE={result['RMSE']:.3f}")
+                    print(f"     Full model: R²cv={result['R2cv']:.3f}, RMSEcv={result['RMSEcv']:.3f}")
                 else:
-                    print(f"     Full model: AUC={result.get('ROC_AUC', 0):.3f}, Acc={result.get('Accuracy', 0):.3f}")
+                    print(f"     Full model: AUCcv={result.get('ROC_AUCcv', 0):.3f}, Acccv={result.get('Accuracycv', 0):.3f}")
 
-                # Update best model tracker
+                # Update best model tracker (use CV metrics for consistency with ranking)
                 if best_model_so_far is None:
                     best_model_so_far = result
                 else:
                     if task_type == "regression":
-                        if result["RMSE"] < best_model_so_far["RMSE"]:
+                        if result["RMSEcv"] < best_model_so_far["RMSEcv"]:
                             best_model_so_far = result
                     else:  # classification
-                        if result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                        if result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
                             best_model_so_far = result
 
                 # For models that support feature importance: compute importances and run subsets
@@ -1966,6 +2004,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
+                                            calibration_mean=calibration_mean,
                                         )
                                     else:
                                         subset_result = _run_single_config(
@@ -1986,6 +2026,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
+                                            calibration_mean=calibration_mean,
                                         )
 
                                     df_results = add_result(df_results, subset_result)
@@ -2277,6 +2319,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
+                                            calibration_mean=calibration_mean,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -2306,6 +2350,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
+                                            calibration_mean=calibration_mean,
                                         )
 
                                     # Track if uniform fallback was used for this result
@@ -2314,21 +2360,21 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     df_results = add_result(df_results, subset_result)
                                     results_added_for_method += 1
 
-                                    # Show result immediately
+                                    # Show result immediately (CV metrics for consistency)
                                     if task_type == "regression":
-                                        print(f"R²={subset_result['R2']:.3f}, RMSE={subset_result['RMSE']:.3f}")
+                                        print(f"R²cv={subset_result['R2cv']:.3f}, RMSEcv={subset_result['RMSEcv']:.3f}")
                                     else:
-                                        print(f"AUC={subset_result.get('ROC_AUC', 0):.3f}, Acc={subset_result.get('Accuracy', 0):.3f}")
+                                        print(f"AUCcv={subset_result.get('ROC_AUCcv', 0):.3f}, Acccv={subset_result.get('Accuracycv', 0):.3f}")
 
-                                    # Update best model tracker for subset results
+                                    # Update best model tracker for subset results (use CV metrics for consistency)
                                     if best_model_so_far is None:
                                         best_model_so_far = subset_result
                                     else:
                                         if task_type == "regression":
-                                            if subset_result["RMSE"] < best_model_so_far["RMSE"]:
+                                            if subset_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
                                                 best_model_so_far = subset_result
                                         else:  # classification
-                                            if subset_result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                                            if subset_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
                                                 best_model_so_far = subset_result
 
                                 # Summary for this variable selection method
@@ -2373,24 +2419,26 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             full_vars_original=n_original_wavelengths,
                             n_jobs_cv=n_jobs,
                             wavelength_restriction_active=wavelength_restriction_active,
+                            r2_calibration_mean_mode=r2_calibration_mean_mode,
+                            calibration_mean=calibration_mean,
                         )
                         df_results = add_result(df_results, region_result)
 
-                        # Show result immediately
+                        # Show result immediately (CV metrics for consistency)
                         if task_type == "regression":
-                            print(f"R²={region_result['R2']:.3f}, RMSE={region_result['RMSE']:.3f}")
+                            print(f"R²cv={region_result['R2cv']:.3f}, RMSEcv={region_result['RMSEcv']:.3f}")
                         else:
-                            print(f"AUC={region_result.get('ROC_AUC', 0):.3f}, Acc={region_result.get('Accuracy', 0):.3f}")
+                            print(f"AUCcv={region_result.get('ROC_AUCcv', 0):.3f}, Acccv={region_result.get('Accuracycv', 0):.3f}")
 
-                        # Update best model tracker for region subset results
+                        # Update best model tracker for region subset results (use CV metrics for consistency)
                         if best_model_so_far is None:
                             best_model_so_far = region_result
                         else:
                             if task_type == "regression":
-                                if region_result["RMSE"] < best_model_so_far["RMSE"]:
+                                if region_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
                                     best_model_so_far = region_result
                             else:  # classification
-                                if region_result.get("ROC_AUC", 0) > best_model_so_far.get("ROC_AUC", 0):
+                                if region_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
                                     best_model_so_far = region_result
 
     # Compute composite scores and rank
@@ -3008,9 +3056,9 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     if len(df_ranked) > 0:
         best_model = df_ranked.iloc[0]
         if task_type == 'regression':
-            print(f"  Best model: {best_model['Model']} (RMSE={best_model['RMSE']:.4f}, R²={best_model['R2']:.4f})")
+            print(f"  Best model: {best_model['Model']} (RMSEcv={best_model['RMSEcv']:.4f}, R²cv={best_model['R2cv']:.4f})")
         else:
-            print(f"  Best model: {best_model['Model']} (Accuracy={best_model['Accuracy']:.4f}, ROC_AUC={best_model['ROC_AUC']:.4f})")
+            print(f"  Best model: {best_model['Model']} (Accuracycv={best_model['Accuracycv']:.4f}, ROC_AUCcv={best_model['ROC_AUCcv']:.4f})")
 
     print(f"{'='*70}\n")
 
@@ -3292,6 +3340,8 @@ def _run_single_config(
     full_vars_original=None,
     n_jobs_cv=1,
     wavelength_restriction_active=False,
+    r2_calibration_mean_mode=False,
+    calibration_mean=None,
 ):
     """
     Run a single model configuration with CV.
@@ -3304,6 +3354,10 @@ def _run_single_config(
     wavelength_restriction_active : bool, default=False
         If True, skip edge masking for importance calculation. Used when wavelengths
         are restricted to a subset of the spectrum (from middle, not edges).
+    r2_calibration_mean_mode : bool, default=False
+        If True, use calibration mean for R² calculation (Unscrambler-compatible).
+    calibration_mean : float or None, default=None
+        Mean of the full calibration set for Unscrambler-compatible R² calculation.
 
     Returns
     -------
@@ -3486,7 +3540,12 @@ def _run_single_config(
 
         # Compute R² from aggregated predictions (not per-fold averages)
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
-        mean_r2 = r2_score(all_y_test, all_y_pred)
+        if r2_calibration_mean_mode and calibration_mean is not None:
+            # Unscrambler-compatible: use calibration set mean for SS_tot
+            mean_r2 = _r2_score_with_calibration_mean(all_y_test, all_y_pred, calibration_mean)
+        else:
+            # Default sklearn behavior: use test set mean for SS_tot
+            mean_r2 = r2_score(all_y_test, all_y_pred)
 
         # Compute quartiles based on TRUE Y values
         # Regional selection identifies which models excel in different value ranges
