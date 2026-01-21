@@ -999,9 +999,9 @@ def run_unified_bayesian(
 
             if trial.value is not None:
                 if task_type == 'regression':
-                    progress_info['message'] += f" - RMSE: {trial.value:.4f}"
+                    progress_info['message'] += f" - RMSEcv: {trial.value:.4f}"
                 else:
-                    progress_info['message'] += f" - Acc: {-trial.value:.4f}"
+                    progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
             # Add best model tracking for "Best Model So Far" display
             if study.best_trial is not None:
@@ -1012,11 +1012,11 @@ def run_unified_bayesian(
                     'n_vars': best.params.get('n_vars', 'N/A'),
                 }
                 if task_type == 'regression':
-                    best_model['RMSE'] = best.value
-                    # R² not available (only RMSE optimized), use placeholder
-                    best_model['R2'] = 0.0
+                    best_model['RMSEcv'] = best.value
+                    # R²cv not available (only RMSE optimized), use placeholder
+                    best_model['R2cv'] = 0.0
                 else:
-                    best_model['Accuracy'] = -best.value
+                    best_model['Accuracycv'] = -best.value
                 progress_info['best_model'] = best_model
 
             progress_callback(progress_info)
@@ -1024,9 +1024,9 @@ def run_unified_bayesian(
         if verbose and (trial.number + 1) % 10 == 0:
             if trial.value is not None and trial.value < 1e9:
                 if task_type == 'regression':
-                    print(f"  Trial {trial.number + 1}/{n_trials}: RMSE={trial.value:.4f}")
+                    print(f"  Trial {trial.number + 1}/{n_trials}: RMSEcv={trial.value:.4f}")
                 else:
-                    print(f"  Trial {trial.number + 1}/{n_trials}: Acc={-trial.value:.4f}")
+                    print(f"  Trial {trial.number + 1}/{n_trials}: Acccv={-trial.value:.4f}")
 
     # Run optimization
     study.optimize(
