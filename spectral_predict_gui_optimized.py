@@ -2158,7 +2158,7 @@ class SpectralPredictApp:
 
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
-        self.ga_preprocess_method = tk.StringVar(value="ga")  # 'ga' or 'exhaustive'
+        self.ga_preprocess_method = tk.StringVar(value="smart")  # 'smart', 'exhaustive', or 'ga'
         self.ga_preprocess_population = tk.IntVar(value=48)
         self.ga_preprocess_generations = tk.IntVar(value=30)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
@@ -5948,11 +5948,10 @@ class SpectralPredictApp:
         ttk.Label(custom_wl_frame, text="Custom Regions:").pack(side=tk.LEFT, padx=(0, 5))
         self.analysis_wl_custom_entry = ttk.Entry(custom_wl_frame, textvariable=self.analysis_wl_custom, width=45)
         self.analysis_wl_custom_entry.pack(side=tk.LEFT, padx=2)
-
-        # Example text
-        ttk.Label(options_frame,
-                 text='Examples: "2000-2330" or "2000-2100, 2200-2300" (comma-separated ranges)',
-                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=12, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
+        # Example hint (to the right of entry)
+        ttk.Label(custom_wl_frame,
+                 text='e.g. "2000-2300" or "2000-2100, 2200-2300"',
+                 style='Caption.TLabel', foreground=self.colors['text_light']).pack(side=tk.LEFT, padx=(8, 0))
 
         # Preview label for selected wavelengths
         self.wl_custom_preview_label = ttk.Label(options_frame,
@@ -6136,7 +6135,7 @@ class SpectralPredictApp:
 
         # === GA Preprocessing Optimization ===
         # ===== SMART PREPROCESSING DISCOVERY (NEW) =====
-        smart_preproc_card_outer, smart_preproc_card = self._create_card(content_frame, title="Smart Preprocessing Discovery",
+        smart_preproc_card_outer, smart_preproc_card = self._create_card(content_frame, title="Basic Preprocessing Discovery",
                                                                      subtitle="Automatically find optimal preprocessing + wavelengths using NSGA-II-style intelligence")
         smart_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
@@ -6144,7 +6143,7 @@ class SpectralPredictApp:
         smart_preproc_frame.pack(fill='both', expand=True)
 
         # Enable Smart Preprocessing checkbox
-        self.smart_preproc_checkbox = ttk.Checkbutton(smart_preproc_frame, text="Enable Smart Preprocessing Discovery",
+        self.smart_preproc_checkbox = ttk.Checkbutton(smart_preproc_frame, text="Enable Basic Preprocessing Discovery",
                                                     variable=self.enable_smart_preprocessing,
                                                     command=self._toggle_smart_preprocessing_options)
         self.smart_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
@@ -6194,33 +6193,28 @@ class SpectralPredictApp:
         # Initially hide options
         self.smart_preproc_options_frame.grid_remove()
 
-        # ===== LEGACY GA PREPROCESSING (kept for backward compatibility) =====
-        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="Legacy GA Preprocessing",
-                                                                     subtitle="Original genetic algorithm (deprecated - use Smart Preprocessing above)")
+        # ===== GA AND SMART PREPROCESSING =====
+        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA and Smart Preprocessing",
+                                                                     subtitle="Genetic algorithm with smart initialization and multi-seed robustness")
         ga_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         ga_preproc_frame = tk.Frame(ga_preproc_card, bg=self.colors['card_bg'])
         ga_preproc_frame.pack(fill='both', expand=True)
 
         # Enable GA Preprocessing checkbox
-        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable Legacy GA Preprocessing",
+        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA and Smart Preprocessing",
                                                     variable=self.enable_ga_preprocessing,
                                                     command=self._toggle_ga_preprocessing_options)
         self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
-        # Warning about legacy status
-        ttk.Label(ga_preproc_frame,
-                 text="NOTE: This is deprecated and may not work correctly. Use Smart Preprocessing instead.",
-                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-
         # GA parameters frame (hidden when disabled)
         self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
-        self.ga_preproc_options_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
+        self.ga_preproc_options_frame.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
 
         # Search method dropdown
         ttk.Label(self.ga_preproc_options_frame, text="Search Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         method_combo = ttk.Combobox(self.ga_preproc_options_frame, textvariable=self.ga_preprocess_method,
-                                     values=["ga", "exhaustive"], state="readonly", width=12)
+                                     values=["smart", "exhaustive", "ga"], state="readonly", width=12)
         method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
 
         ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
