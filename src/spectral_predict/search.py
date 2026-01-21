@@ -471,57 +471,60 @@ def compute_validation_metrics_for_top_models(
                 preprocess_cache[cache_key] = (X_train_preprocessed, X_val_preprocessed)
 
             # === STEP 3: Parse wavelength selection ===
-            # Priority: smart_selected_wavelengths > all_vars > full spectrum
-            model_wavelengths = None
+            # Priority: smart_selected_wavelengths (indices) > all_vars (wavelengths) > full spectrum
+            col_indices = None
 
-            # Check for Smart preprocessing wavelength selection
-            smart_wavelengths_raw = row.get('smart_selected_wavelengths', None)
-            if smart_wavelengths_raw is not None and not pd.isna(smart_wavelengths_raw):
+            # Check for Smart preprocessing wavelength selection (stored as COLUMN INDICES)
+            smart_indices_raw = row.get('smart_selected_wavelengths', None)
+            if smart_indices_raw is not None and not pd.isna(smart_indices_raw):
                 try:
                     import ast
-                    if isinstance(smart_wavelengths_raw, str):
-                        smart_wavelengths = ast.literal_eval(smart_wavelengths_raw)
+                    if isinstance(smart_indices_raw, str):
+                        smart_indices = ast.literal_eval(smart_indices_raw)
                     else:
-                        smart_wavelengths = smart_wavelengths_raw
-                    # Convert to list of floats (wavelength values)
-                    model_wavelengths = [float(w) for w in smart_wavelengths]
+                        smart_indices = smart_indices_raw
+                    # Smart preprocessing stores column indices directly (integers)
+                    col_indices = [int(idx) for idx in smart_indices]
                 except Exception as e:
                     print(f"  [Warning] Could not parse smart_selected_wavelengths for model {i+1}: {e}")
-                    model_wavelengths = None
+                    col_indices = None
 
-            # Fallback to all_vars if no smart wavelengths
-            if model_wavelengths is None:
+            # Fallback to all_vars if no smart indices (all_vars stores wavelength VALUES)
+            if col_indices is None:
                 all_vars_str = row.get('all_vars', 'N/A')
                 if all_vars_str != 'N/A' and all_vars_str and isinstance(all_vars_str, str):
                     # Parse wavelengths from all_vars (e.g., "1520.0, 1540.0, 1560.0, ...")
                     try:
                         model_wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                        # Create mapping from wavelength to column index
+                        # CRITICAL: Do NOT sort - preserve the order from all_vars
+                        wl_to_idx = {float(wl): idx_wl for idx_wl, wl in enumerate(wavelengths)}
+                        # Get column indices for model wavelengths (in order)
+                        col_indices = []
+                        for wl in model_wavelengths:
+                            if wl in wl_to_idx:
+                                col_indices.append(wl_to_idx[wl])
+                        if len(col_indices) != len(model_wavelengths):
+                            print(f"  [Warning] Only found {len(col_indices)}/{len(model_wavelengths)} wavelengths for model {i+1}")
+                        if not col_indices:
+                            col_indices = None
                     except Exception as e:
                         print(f"  [Warning] Could not parse all_vars for model {i+1}: {e}")
-                        model_wavelengths = None
+                        col_indices = None
 
             # Subset AFTER preprocessing (matching Model Dev behavior)
-            if model_wavelengths is not None and len(model_wavelengths) > 0:
-                # Create mapping from wavelength to column index
-                # CRITICAL: Do NOT sort - preserve the order from all_vars
-                wl_to_idx = {float(wl): idx_wl for idx_wl, wl in enumerate(wavelengths)}
-
-                # Get column indices for model wavelengths (in order)
-                col_indices = []
-                for wl in model_wavelengths:
-                    if wl in wl_to_idx:
-                        col_indices.append(wl_to_idx[wl])
-
-                if len(col_indices) != len(model_wavelengths):
-                    print(f"  [Warning] Only found {len(col_indices)}/{len(model_wavelengths)} wavelengths for model {i+1}")
-
-                if not col_indices:
-                    print(f"  [Warning] No wavelengths found for model {i+1}, skipping")
+            if col_indices is not None and len(col_indices) > 0:
+                # Validate indices are within bounds
+                max_idx = X_train_preprocessed.shape[1] - 1
+                valid_indices = [idx for idx in col_indices if 0 <= idx <= max_idx]
+                if len(valid_indices) != len(col_indices):
+                    print(f"  [Warning] {len(col_indices) - len(valid_indices)} indices out of bounds for model {i+1}")
+                if not valid_indices:
+                    print(f"  [Warning] No valid indices for model {i+1}, skipping")
                     continue
-
-                # Subset the PREPROCESSED data to selected wavelengths
-                X_train_final = X_train_preprocessed[:, col_indices]
-                X_val_final = X_val_preprocessed[:, col_indices]
+                # Subset the PREPROCESSED data to selected columns
+                X_train_final = X_train_preprocessed[:, valid_indices]
+                X_val_final = X_val_preprocessed[:, valid_indices]
             else:
                 # Full spectrum model - use all preprocessed data
                 X_train_final = X_train_preprocessed
