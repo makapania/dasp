@@ -26,11 +26,11 @@ MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"]
 @dataclass
 class TransferModel:
     """
-    Encapsulates a calibration transfer mapping from a slave instrument
-    to a master instrument on a common wavelength grid.
+    Encapsulates a calibration transfer mapping from a satellite instrument
+    to a primary instrument on a common wavelength grid.
     """
-    master_id: str
-    slave_id: str
+    primary_id: str
+    satellite_id: str
     method: MethodType                  # "ds" or "pds"
     wavelengths_common: np.ndarray      # 1D array of wavelengths for both
     params: Dict                        # e.g. {"A": ds_matrix} or {"B": B, "window": 11}
@@ -74,20 +74,20 @@ def resample_to_grid(
 
 
 def estimate_ds(
-    X_master: np.ndarray,
-    X_slave: np.ndarray,
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
     lam: float = 0.0,
 ) -> np.ndarray:
     """
     Estimate a Direct Standardization (DS) matrix A such that:
-        X_slave @ A ≈ X_master
+        X_satellite @ A ≈ X_primary
 
     Parameters
     ----------
-    X_master : np.ndarray
-        Master instrument spectra on common grid, shape (n_samples, p).
-    X_slave : np.ndarray
-        Slave instrument spectra on common grid, shape (n_samples, p).
+    X_primary : np.ndarray
+        Primary instrument spectra on common grid, shape (n_samples, p).
+    X_satellite : np.ndarray
+        Satellite instrument spectra on common grid, shape (n_samples, p).
     lam : float
         Optional ridge regularization parameter.
 
@@ -96,20 +96,20 @@ def estimate_ds(
     np.ndarray
         DS matrix A of shape (p, p).
     """
-    # Solve for A: X_slave @ A = X_master
-    # A = (X_slave^T @ X_slave + lam*I)^-1 @ X_slave^T @ X_master
+    # Solve for A: X_satellite @ A = X_primary
+    # A = (X_satellite^T @ X_satellite + lam*I)^-1 @ X_satellite^T @ X_primary
 
-    p = X_slave.shape[1]
+    p = X_satellite.shape[1]
 
-    # Compute X_slave^T @ X_slave
-    XtX = X_slave.T @ X_slave
+    # Compute X_satellite^T @ X_satellite
+    XtX = X_satellite.T @ X_satellite
 
     # Add ridge regularization
     if lam > 0:
         XtX += lam * np.eye(p)
 
-    # Compute X_slave^T @ X_master
-    XtY = X_slave.T @ X_master
+    # Compute X_satellite^T @ X_primary
+    XtY = X_satellite.T @ X_primary
 
     # Solve for A
     A = np.linalg.solve(XtX, XtY)
@@ -117,21 +117,21 @@ def estimate_ds(
     return A
 
 
-def apply_ds(X_slave_new: np.ndarray, A: np.ndarray) -> np.ndarray:
+def apply_ds(X_satellite_new: np.ndarray, A: np.ndarray) -> np.ndarray:
     """
-    Apply a previously estimated DS matrix A to new slave spectra.
+    Apply a previously estimated DS matrix A to new satellite spectra.
 
     Returns
     -------
     np.ndarray
-        Transformed spectra in master instrument domain.
+        Transformed spectra in primary instrument domain.
     """
-    return X_slave_new @ A
+    return X_satellite_new @ A
 
 
 def estimate_pds(
-    X_master: np.ndarray,
-    X_slave: np.ndarray,
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
     window: int = 11,
 ) -> np.ndarray:
     """
@@ -139,10 +139,10 @@ def estimate_pds(
 
     Parameters
     ----------
-    X_master : np.ndarray
-        Master spectra on common grid, shape (n_samples, p).
-    X_slave : np.ndarray
-        Slave spectra on common grid, shape (n_samples, p).
+    X_primary : np.ndarray
+        Primary spectra on common grid, shape (n_samples, p).
+    X_satellite : np.ndarray
+        Satellite spectra on common grid, shape (n_samples, p).
     window : int
         Window size (odd integer) for local regression around each wavelength.
 
@@ -151,7 +151,7 @@ def estimate_pds(
     np.ndarray
         PDS coefficient array B of shape (p, window).
     """
-    n_samples, p = X_slave.shape
+    n_samples, p = X_satellite.shape
     half_window = window // 2
 
     B = np.zeros((p, window))
@@ -161,11 +161,11 @@ def estimate_pds(
         start = max(0, i - half_window)
         end = min(p, i + half_window + 1)
 
-        # Extract window from slave spectra
-        X_window = X_slave[:, start:end]
+        # Extract window from satellite spectra
+        X_window = X_satellite[:, start:end]
 
-        # Extract target from master spectra (single wavelength)
-        y_target = X_master[:, i]
+        # Extract target from primary spectra (single wavelength)
+        y_target = X_primary[:, i]
 
         # Solve least squares: X_window @ b = y_target
         # b = (X_window^T @ X_window)^-1 @ X_window^T @ y_target
@@ -185,30 +185,30 @@ def estimate_pds(
 
 
 def apply_pds(
-    X_slave_new: np.ndarray,
+    X_satellite_new: np.ndarray,
     B: np.ndarray,
     window: int = 11,
 ) -> np.ndarray:
     """
-    Apply previously estimated PDS coefficients B to new slave spectra.
+    Apply previously estimated PDS coefficients B to new satellite spectra.
 
     Returns
     -------
     np.ndarray
-        Transformed spectra in master instrument domain.
+        Transformed spectra in primary instrument domain.
     """
-    n_samples, p = X_slave_new.shape
+    n_samples, p = X_satellite_new.shape
     half_window = window // 2
 
-    X_transformed = np.zeros_like(X_slave_new)
+    X_transformed = np.zeros_like(X_satellite_new)
 
     for i in range(p):
         # Determine window boundaries
         start = max(0, i - half_window)
         end = min(p, i + half_window + 1)
 
-        # Extract window from slave spectra
-        X_window = X_slave_new[:, start:end]
+        # Extract window from satellite spectra
+        X_window = X_satellite_new[:, start:end]
 
         # Get coefficients for this wavelength
         offset = start - (i - half_window)
@@ -236,7 +236,7 @@ def save_transfer_model(
         Target directory (will be created if needed).
     name : str, optional
         Optional base filename (without extension). If None, derive from
-        master_id, slave_id, and method.
+        primary_id, satellite_id, and method.
 
     Returns
     -------
@@ -250,14 +250,14 @@ def save_transfer_model(
 
     # Generate filename if not provided
     if name is None:
-        name = f"{transfer_model.master_id}_from_{transfer_model.slave_id}_{transfer_model.method}"
+        name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}"
 
     path_prefix = directory / name
 
     # Save metadata to JSON
     metadata = {
-        "master_id": transfer_model.master_id,
-        "slave_id": transfer_model.slave_id,
+        "primary_id": transfer_model.primary_id,
+        "satellite_id": transfer_model.satellite_id,
         "method": transfer_model.method,
         "meta": transfer_model.meta,
     }
@@ -328,8 +328,8 @@ def load_transfer_model(path_prefix: Path | str) -> TransferModel:
             params[param_name] = value
 
     return TransferModel(
-        master_id=metadata["master_id"],
-        slave_id=metadata["slave_id"],
+        primary_id=metadata["primary_id"],
+        satellite_id=metadata["satellite_id"],
         method=metadata["method"],
         wavelengths_common=wavelengths_common,
         params=params,
@@ -342,8 +342,8 @@ def load_transfer_model(path_prefix: Path | str) -> TransferModel:
 # ==============================================================================
 
 def estimate_tsr(
-    X_master: np.ndarray,
-    X_slave: np.ndarray,
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
     transfer_indices: np.ndarray,
     slope_bias_correction: bool = True,
     regularization: float = 0.0,
@@ -356,9 +356,9 @@ def estimate_tsr(
     set of transfer samples measured on both instruments.
 
     Algorithm:
-    1. Extract transfer samples from master and slave datasets
+    1. Extract transfer samples from primary and satellite datasets
     2. For each wavelength λ:
-       - Fit linear regression: X_master[λ] = slope[λ] * X_slave[λ] + bias[λ]
+       - Fit linear regression: X_primary[λ] = slope[λ] * X_satellite[λ] + bias[λ]
        - Store slope and bias coefficients
     3. Return parameters for applying correction to new samples
 
@@ -368,11 +368,11 @@ def estimate_tsr(
 
     Parameters
     ----------
-    X_master : np.ndarray, shape (n_samples, n_wavelengths)
-        Master instrument spectra on common wavelength grid.
-    X_slave : np.ndarray, shape (n_samples, n_wavelengths)
-        Slave instrument spectra on common wavelength grid.
-        Must have same number of samples as X_master.
+    X_primary : np.ndarray, shape (n_samples, n_wavelengths)
+        Primary instrument spectra on common wavelength grid.
+    X_satellite : np.ndarray, shape (n_samples, n_wavelengths)
+        Satellite instrument spectra on common wavelength grid.
+        Must have same number of samples as X_primary.
     transfer_indices : np.ndarray, shape (n_transfer,)
         Indices of samples to use for building transfer mapping.
         Typically 12-13 samples selected via Kennard-Stone or SPXY.
@@ -405,23 +405,23 @@ def estimate_tsr(
     >>> from spectral_predict.calibration_transfer import estimate_tsr, apply_tsr
     >>> from spectral_predict.sample_selection import kennard_stone
     >>>
-    >>> # Generate synthetic master/slave spectra
+    >>> # Generate synthetic primary/satellite spectra
     >>> n_samples, n_wavelengths = 100, 200
-    >>> X_master = np.random.randn(n_samples, n_wavelengths)
-    >>> X_slave = 0.9 * X_master + 0.1  # Slave has offset
+    >>> X_primary = np.random.randn(n_samples, n_wavelengths)
+    >>> X_satellite = 0.9 * X_primary + 0.1  # Satellite has offset
     >>>
     >>> # Select 12 transfer samples using Kennard-Stone
-    >>> transfer_idx = kennard_stone(X_master, n_samples=12)
+    >>> transfer_idx = kennard_stone(X_primary, n_samples=12)
     >>>
     >>> # Estimate TSR model
-    >>> params = estimate_tsr(X_master, X_slave, transfer_idx)
+    >>> params = estimate_tsr(X_primary, X_satellite, transfer_idx)
     >>>
     >>> print(f"Mean R²: {params['mean_r_squared']:.4f}")
     >>> print(f"Slope range: {params['slope'].min():.3f} to {params['slope'].max():.3f}")
     >>>
-    >>> # Apply to new slave spectra
-    >>> X_slave_new = np.random.randn(50, n_wavelengths)
-    >>> X_transferred = apply_tsr(X_slave_new, params)
+    >>> # Apply to new satellite spectra
+    >>> X_satellite_new = np.random.randn(50, n_wavelengths)
+    >>> X_transferred = apply_tsr(X_satellite_new, params)
 
     References
     ----------
@@ -431,7 +431,7 @@ def estimate_tsr(
 
     Notes
     -----
-    - TSR assumes linear relationship between master and slave at each wavelength
+    - TSR assumes linear relationship between primary and satellite at each wavelength
     - Performance depends heavily on transfer sample selection quality
     - Use Kennard-Stone, DUPLEX, or SPXY for optimal sample selection
     - Typically requires 12-13 samples for best performance
@@ -443,13 +443,13 @@ def estimate_tsr(
     apply_tsr : Apply TSR transformation to new spectra
     estimate_ctai : Alternative method requiring no transfer samples
     """
-    n_samples, n_wavelengths = X_master.shape
+    n_samples, n_wavelengths = X_primary.shape
 
     # Validation
-    if X_slave.shape != X_master.shape:
+    if X_satellite.shape != X_primary.shape:
         raise ValueError(
-            f"X_master and X_slave must have same shape: "
-            f"{X_master.shape} vs {X_slave.shape}"
+            f"X_primary and X_satellite must have same shape: "
+            f"{X_primary.shape} vs {X_satellite.shape}"
         )
 
     if len(transfer_indices) < 2:
@@ -464,8 +464,8 @@ def estimate_tsr(
         )
 
     # Extract transfer samples
-    X_master_transfer = X_master[transfer_indices]
-    X_slave_transfer = X_slave[transfer_indices]
+    X_primary_transfer = X_primary[transfer_indices]
+    X_satellite_transfer = X_satellite[transfer_indices]
 
     n_transfer = len(transfer_indices)
 
@@ -476,8 +476,8 @@ def estimate_tsr(
 
     # Fit linear regression for each wavelength
     for i in range(n_wavelengths):
-        x = X_slave_transfer[:, i]  # Slave values at wavelength i
-        y = X_master_transfer[:, i]  # Master values at wavelength i
+        x = X_satellite_transfer[:, i]  # Satellite values at wavelength i
+        y = X_primary_transfer[:, i]  # Primary values at wavelength i
 
         if slope_bias_correction:
             # Full linear regression: y = slope * x + bias
@@ -540,37 +540,37 @@ def estimate_tsr(
     return params
 
 
-def apply_tsr(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
+def apply_tsr(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply TSR calibration transfer to new slave instrument spectra.
+    Apply TSR calibration transfer to new satellite instrument spectra.
 
-    Transforms slave spectra to master instrument domain using previously
+    Transforms satellite spectra to primary instrument domain using previously
     estimated slope and bias corrections.
 
     Parameters
     ----------
-    X_slave_new : np.ndarray, shape (n_samples, n_wavelengths)
-        New slave instrument spectra to transform.
+    X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
+        New satellite instrument spectra to transform.
     params : dict
         TSR parameters from estimate_tsr, containing 'slope' and 'bias'.
 
     Returns
     -------
     X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
-        Transformed spectra in master instrument domain.
+        Transformed spectra in primary instrument domain.
 
     Examples
     --------
     >>> # After estimating TSR model (see estimate_tsr examples)
-    >>> X_slave_new = np.random.randn(50, 200)
-    >>> X_transferred = apply_tsr(X_slave_new, params)
+    >>> X_satellite_new = np.random.randn(50, 200)
+    >>> X_transferred = apply_tsr(X_satellite_new, params)
     >>>
-    >>> # Can now use master instrument's calibration model on X_transferred
-    >>> y_predicted = master_model.predict(X_transferred)
+    >>> # Can now use primary instrument's calibration model on X_transferred
+    >>> y_predicted = primary_model.predict(X_transferred)
 
     Notes
     -----
-    - Transformation is simply: X_transferred = slope * X_slave + bias
+    - Transformation is simply: X_transferred = slope * X_satellite + bias
     - Very fast computation (element-wise operations)
     - No additional parameters needed beyond slope and bias
     """
@@ -579,15 +579,15 @@ def apply_tsr(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
 
     # Validate dimensions
     n_wavelengths = len(slope)
-    if X_slave_new.shape[1] != n_wavelengths:
+    if X_satellite_new.shape[1] != n_wavelengths:
         raise ValueError(
-            f"X_slave_new has {X_slave_new.shape[1]} wavelengths "
+            f"X_satellite_new has {X_satellite_new.shape[1]} wavelengths "
             f"but model expects {n_wavelengths}"
         )
 
-    # Apply transformation: X_master = slope * X_slave + bias
+    # Apply transformation: X_primary = slope * X_satellite + bias
     # Broadcasting handles this efficiently
-    X_transferred = X_slave_new * slope + bias
+    X_transferred = X_satellite_new * slope + bias
 
     return X_transferred
 
@@ -597,8 +597,8 @@ def apply_tsr(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
 # ==============================================================================
 
 def estimate_ctai(
-    X_master: np.ndarray,
-    X_slave: np.ndarray,
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
     n_components: int | None = None,
     explained_variance_threshold: float = 0.99,
 ) -> Dict:
@@ -611,8 +611,8 @@ def estimate_ctai(
     when transfer standards are unavailable or expensive to measure.
 
     Algorithm (simplified):
-    1. Mean-center both master and slave datasets
-    2. Estimate affine transformation: X_master ≈ X_slave @ M + T
+    1. Mean-center both primary and satellite datasets
+    2. Estimate affine transformation: X_primary ≈ X_satellite @ M + T
     3. Use SVD/PCA to find optimal transformation in reduced-rank space
     4. Validate transformation quality via reconstruction error
 
@@ -622,11 +622,11 @@ def estimate_ctai(
 
     Parameters
     ----------
-    X_master : np.ndarray, shape (n_samples, n_wavelengths)
-        Master instrument spectra on common wavelength grid.
-    X_slave : np.ndarray, shape (n_samples, n_wavelengths)
-        Slave instrument spectra on common wavelength grid.
-        Need not be the same samples as X_master.
+    X_primary : np.ndarray, shape (n_samples, n_wavelengths)
+        Primary instrument spectra on common wavelength grid.
+    X_satellite : np.ndarray, shape (n_samples, n_wavelengths)
+        Satellite instrument spectra on common wavelength grid.
+        Need not be the same samples as X_primary.
     n_components : int, optional
         Number of principal components to use for transformation.
         If None, automatically selected based on explained_variance_threshold.
@@ -647,37 +647,37 @@ def estimate_ctai(
             Fraction of variance explained by transformation
         - 'reconstruction_error' : float
             RMSE of reconstruction on input data
-        - 'master_mean' : np.ndarray
-            Mean of master spectra (for centering)
-        - 'slave_mean' : np.ndarray
-            Mean of slave spectra (for centering)
+        - 'primary_mean' : np.ndarray
+            Mean of primary spectra (for centering)
+        - 'satellite_mean' : np.ndarray
+            Mean of satellite spectra (for centering)
 
     Examples
     --------
     >>> import numpy as np
     >>> from spectral_predict.calibration_transfer import estimate_ctai, apply_ctai
     >>>
-    >>> # Generate master and slave spectra (different samples!)
-    >>> n_master, n_slave, n_wavelengths = 100, 120, 200
+    >>> # Generate primary and satellite spectra (different samples!)
+    >>> n_primary, n_satellite, n_wavelengths = 100, 120, 200
     >>>
-    >>> # Master dataset
-    >>> X_master = np.random.randn(n_master, n_wavelengths)
+    >>> # Primary dataset
+    >>> X_primary = np.random.randn(n_primary, n_wavelengths)
     >>>
-    >>> # Slave dataset (different samples, with affine transformation)
-    >>> X_slave_base = np.random.randn(n_slave, n_wavelengths)
+    >>> # Satellite dataset (different samples, with affine transformation)
+    >>> X_satellite_base = np.random.randn(n_satellite, n_wavelengths)
     >>> true_slope = 0.95
     >>> true_bias = 0.05
-    >>> X_slave = true_slope * X_slave_base + true_bias
+    >>> X_satellite = true_slope * X_satellite_base + true_bias
     >>>
     >>> # Estimate CTAI - no transfer samples needed!
-    >>> params = estimate_ctai(X_master, X_slave)
+    >>> params = estimate_ctai(X_primary, X_satellite)
     >>>
     >>> print(f"Explained variance: {params['explained_variance']:.4f}")
     >>> print(f"Reconstruction RMSE: {params['reconstruction_error']:.6f}")
     >>>
-    >>> # Apply to new slave spectra
-    >>> X_slave_new = np.random.randn(50, n_wavelengths)
-    >>> X_transferred = apply_ctai(X_slave_new, params)
+    >>> # Apply to new satellite spectra
+    >>> X_satellite_new = np.random.randn(50, n_wavelengths)
+    >>> X_transferred = apply_ctai(X_satellite_new, params)
 
     References
     ----------
@@ -689,7 +689,7 @@ def estimate_ctai(
     -----
     - **Major advantage**: No transfer samples required!
     - Assumes spectral differences follow affine transformation
-    - Works best when master and slave have similar spectral characteristics
+    - Works best when primary and satellite have similar spectral characteristics
     - Achieves lowest prediction errors in many benchmark studies
     - Computational complexity: O(n * p^2) for SVD, quite fast
     - More robust than PDS with limited transfer samples
@@ -706,106 +706,106 @@ def estimate_ctai(
     """
     from scipy.linalg import svd
 
-    n_samples_master, n_wavelengths = X_master.shape
-    n_samples_slave = X_slave.shape[0]
+    n_samples_primary, n_wavelengths = X_primary.shape
+    n_samples_satellite = X_satellite.shape[0]
 
     # Enhanced validation with debug logging
     print("\n=== CTAI Debug Information ===")
-    print(f"  Input shapes: Master {X_master.shape}, Slave {X_slave.shape}")
+    print(f"  Input shapes: Primary {X_primary.shape}, Satellite {X_satellite.shape}")
 
-    if X_slave.shape[1] != n_wavelengths:
+    if X_satellite.shape[1] != n_wavelengths:
         raise ValueError(
-            f"X_master and X_slave must have same number of wavelengths: "
-            f"{n_wavelengths} vs {X_slave.shape[1]}"
+            f"X_primary and X_satellite must have same number of wavelengths: "
+            f"{n_wavelengths} vs {X_satellite.shape[1]}"
         )
 
-    if n_samples_master < 2 or n_samples_slave < 2:
+    if n_samples_primary < 2 or n_samples_satellite < 2:
         raise ValueError(
-            "Need at least 2 samples in both master and slave datasets"
+            "Need at least 2 samples in both primary and satellite datasets"
         )
 
     # Check for NaN/inf values
-    if np.any(np.isnan(X_master)):
-        n_nan = np.sum(np.isnan(X_master))
-        raise ValueError(f"X_master contains {n_nan} NaN values")
-    if np.any(np.isinf(X_master)):
-        n_inf = np.sum(np.isinf(X_master))
-        raise ValueError(f"X_master contains {n_inf} infinite values")
-    if np.any(np.isnan(X_slave)):
-        n_nan = np.sum(np.isnan(X_slave))
-        raise ValueError(f"X_slave contains {n_nan} NaN values")
-    if np.any(np.isinf(X_slave)):
-        n_inf = np.sum(np.isinf(X_slave))
-        raise ValueError(f"X_slave contains {n_inf} infinite values")
+    if np.any(np.isnan(X_primary)):
+        n_nan = np.sum(np.isnan(X_primary))
+        raise ValueError(f"X_primary contains {n_nan} NaN values")
+    if np.any(np.isinf(X_primary)):
+        n_inf = np.sum(np.isinf(X_primary))
+        raise ValueError(f"X_primary contains {n_inf} infinite values")
+    if np.any(np.isnan(X_satellite)):
+        n_nan = np.sum(np.isnan(X_satellite))
+        raise ValueError(f"X_satellite contains {n_nan} NaN values")
+    if np.any(np.isinf(X_satellite)):
+        n_inf = np.sum(np.isinf(X_satellite))
+        raise ValueError(f"X_satellite contains {n_inf} infinite values")
 
     print(f"  Data validation: PASSED (no NaN/inf values)")
-    print(f"  Master data range: [{np.min(X_master):.6f}, {np.max(X_master):.6f}]")
-    print(f"  Slave data range: [{np.min(X_slave):.6f}, {np.max(X_slave):.6f}]")
+    print(f"  Primary data range: [{np.min(X_primary):.6f}, {np.max(X_primary):.6f}]")
+    print(f"  Satellite data range: [{np.min(X_satellite):.6f}, {np.max(X_satellite):.6f}]")
 
     # Step 1: Mean-center both datasets
-    master_mean = np.mean(X_master, axis=0)
-    slave_mean = np.mean(X_slave, axis=0)
+    primary_mean = np.mean(X_primary, axis=0)
+    satellite_mean = np.mean(X_satellite, axis=0)
 
-    X_master_centered = X_master - master_mean
-    X_slave_centered = X_slave - slave_mean
+    X_primary_centered = X_primary - primary_mean
+    X_satellite_centered = X_satellite - satellite_mean
 
     print(f"  Step 1: Mean centering complete")
-    print(f"    Master mean range: [{np.min(master_mean):.6f}, {np.max(master_mean):.6f}]")
-    print(f"    Slave mean range: [{np.min(slave_mean):.6f}, {np.max(slave_mean):.6f}]")
+    print(f"    Primary mean range: [{np.min(primary_mean):.6f}, {np.max(primary_mean):.6f}]")
+    print(f"    Satellite mean range: [{np.min(satellite_mean):.6f}, {np.max(satellite_mean):.6f}]")
 
     # Step 2: Estimate affine transformation using PCA-regularized regression
-    # We want: X_master ≈ X_slave @ M + T (in data space, not covariance space!)
+    # We want: X_primary ≈ X_satellite @ M + T (in data space, not covariance space!)
     # CTAI's key insight: Use PCA to find low-rank approximation for stability
 
     # Check if we have paired samples
-    have_paired_samples = (n_samples_master == n_samples_slave)
+    have_paired_samples = (n_samples_primary == n_samples_satellite)
 
     if not have_paired_samples:
         raise ValueError(
             f"CTAI requires paired samples (same samples on both instruments).\n"
-            f"Got {n_samples_master} master samples and {n_samples_slave} slave samples.\n"
+            f"Got {n_samples_primary} primary samples and {n_samples_satellite} satellite samples.\n"
             f"For unpaired samples, use TSR, DS, or PDS instead."
         )
 
-    print(f"  Detected paired samples ({n_samples_master} samples on both instruments)")
+    print(f"  Detected paired samples ({n_samples_primary} samples on both instruments)")
 
-    # Step 2a: Perform SVD on mean-centered slave data to find principal directions
-    print(f"  Step 2: Computing SVD of slave data...")
+    # Step 2a: Perform SVD on mean-centered satellite data to find principal directions
+    print(f"  Step 2: Computing SVD of satellite data...")
     try:
-        U_slave, S_slave, Vt_slave = svd(X_slave_centered, full_matrices=False)
-        print(f"    SVD successful: U{U_slave.shape}, S{S_slave.shape}, Vt{Vt_slave.shape}")
-        print(f"    Singular values range: [{np.min(S_slave):.6e}, {np.max(S_slave):.6e}]")
-        if S_slave[-1] > 0:
-            print(f"    Condition number: {S_slave[0]/S_slave[-1]:.2e}")
+        U_satellite, S_satellite, Vt_satellite = svd(X_satellite_centered, full_matrices=False)
+        print(f"    SVD successful: U{U_satellite.shape}, S{S_satellite.shape}, Vt{Vt_satellite.shape}")
+        print(f"    Singular values range: [{np.min(S_satellite):.6e}, {np.max(S_satellite):.6e}]")
+        if S_satellite[-1] > 0:
+            print(f"    Condition number: {S_satellite[0]/S_satellite[-1]:.2e}")
     except np.linalg.LinAlgError as e:
         raise ValueError(f"SVD failed: {e}. Check if data has sufficient variance.")
 
     # Step 2b: Determine number of components (for regularization)
     if n_components is None:
         # Auto-select based on explained variance
-        explained_var_cumsum = np.cumsum(S_slave**2) / np.sum(S_slave**2)
+        explained_var_cumsum = np.cumsum(S_satellite**2) / np.sum(S_satellite**2)
         n_components = np.searchsorted(explained_var_cumsum, explained_variance_threshold) + 1
-        n_components = min(n_components, min(n_samples_slave, n_wavelengths))
+        n_components = min(n_components, min(n_samples_satellite, n_wavelengths))
         print(f"  Step 3: Auto-selected {n_components} components (threshold={explained_variance_threshold})")
     else:
-        n_components = min(n_components, len(S_slave))
+        n_components = min(n_components, len(S_satellite))
         print(f"  Step 3: Using {n_components} components (user-specified)")
 
     # Step 2c: Project data onto principal components
     # This is the key: work in reduced-rank space for numerical stability
-    V_truncated = Vt_slave[:n_components, :].T  # Shape: (n_wavelengths, n_components)
-    S_truncated = S_slave[:n_components]
+    V_truncated = Vt_satellite[:n_components, :].T  # Shape: (n_wavelengths, n_components)
+    S_truncated = S_satellite[:n_components]
 
-    # Project slave and master data onto slave's principal components
-    X_slave_projected = X_slave_centered @ V_truncated  # (n_samples, n_components)
-    X_master_projected = X_master_centered @ V_truncated  # (n_samples, n_components)
+    # Project satellite and primary data onto satellite's principal components
+    X_satellite_projected = X_satellite_centered @ V_truncated  # (n_samples, n_components)
+    X_primary_projected = X_primary_centered @ V_truncated  # (n_samples, n_components)
 
     print(f"  Step 4: Computing transformation in {n_components}-D PC space...")
 
     # Step 2d: Solve for transformation in reduced space
-    # X_master_proj ≈ X_slave_proj @ M_reduced
+    # X_primary_proj ≈ X_satellite_proj @ M_reduced
     # This is well-conditioned because we only use significant components
-    M_reduced = np.linalg.lstsq(X_slave_projected, X_master_projected, rcond=None)[0]
+    M_reduced = np.linalg.lstsq(X_satellite_projected, X_primary_projected, rcond=None)[0]
     print(f"    M_reduced shape: {M_reduced.shape} (PCA space transformation)")
 
     # Step 2e: Transform back to full wavelength space
@@ -823,31 +823,31 @@ def estimate_ctai(
         raise ValueError(f"Transformation matrix M contains infinite values! This indicates numerical instability.")
 
     # Translation vector handles mean differences
-    # T = mean(X_master) - mean(X_slave @ M)
-    T = master_mean - slave_mean @ M
+    # T = mean(X_primary) - mean(X_satellite @ M)
+    T = primary_mean - satellite_mean @ M
 
     print(f"    T (translation) range: [{np.min(T):.6f}, {np.max(T):.6f}]")
     print(f"    T mean: {np.mean(T):.6f}")
 
     # Step 3: Validate transformation quality
-    # Apply to slave data and compare to master distribution
+    # Apply to satellite data and compare to primary distribution
     print(f"  Step 5: Validating transformation quality...")
-    X_slave_transformed = X_slave @ M + T
+    X_satellite_transformed = X_satellite @ M + T
 
     # Check for NaN/inf in transformed data
-    if np.any(np.isnan(X_slave_transformed)):
+    if np.any(np.isnan(X_satellite_transformed)):
         raise ValueError(f"Transformed data contains NaN values! Transformation failed.")
-    if np.any(np.isinf(X_slave_transformed)):
+    if np.any(np.isinf(X_satellite_transformed)):
         raise ValueError(f"Transformed data contains infinite values! Transformation failed.")
 
-    print(f"    Transformed data range: [{np.min(X_slave_transformed):.6f}, {np.max(X_slave_transformed):.6f}]")
+    print(f"    Transformed data range: [{np.min(X_satellite_transformed):.6f}, {np.max(X_satellite_transformed):.6f}]")
 
-    X_master_sample = X_master[:min(n_samples_master, n_samples_slave)]
-    X_slave_sample = X_slave_transformed[:min(n_samples_master, n_samples_slave)]
+    X_primary_sample = X_primary[:min(n_samples_primary, n_samples_satellite)]
+    X_satellite_sample = X_satellite_transformed[:min(n_samples_primary, n_samples_satellite)]
 
-    reconstruction_error = np.sqrt(np.mean((X_master_sample - X_slave_sample) ** 2))
+    reconstruction_error = np.sqrt(np.mean((X_primary_sample - X_satellite_sample) ** 2))
 
-    explained_variance = np.sum(S_truncated**2) / np.sum(S_slave**2) if len(S_slave) > 0 else 1.0
+    explained_variance = np.sum(S_truncated**2) / np.sum(S_satellite**2) if len(S_satellite) > 0 else 1.0
 
     print(f"\n  === CTAI Results ===")
     print(f"  Components: {n_components}")
@@ -862,45 +862,45 @@ def estimate_ctai(
         'n_components': n_components,
         'explained_variance': explained_variance,
         'reconstruction_error': reconstruction_error,
-        'master_mean': master_mean,
-        'slave_mean': slave_mean,
+        'primary_mean': primary_mean,
+        'satellite_mean': satellite_mean,
         'eigenvalues': S_truncated,
     }
 
     return params
 
 
-def apply_ctai(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
+def apply_ctai(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply CTAI calibration transfer to new slave instrument spectra.
+    Apply CTAI calibration transfer to new satellite instrument spectra.
 
-    Transforms slave spectra to master instrument domain using affine
+    Transforms satellite spectra to primary instrument domain using affine
     transformation estimated via CTAI.
 
     Parameters
     ----------
-    X_slave_new : np.ndarray, shape (n_samples, n_wavelengths)
-        New slave instrument spectra to transform.
+    X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
+        New satellite instrument spectra to transform.
     params : dict
         CTAI parameters from estimate_ctai, containing 'M' and 'T'.
 
     Returns
     -------
     X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
-        Transformed spectra in master instrument domain.
+        Transformed spectra in primary instrument domain.
 
     Examples
     --------
     >>> # After estimating CTAI model (see estimate_ctai examples)
-    >>> X_slave_new = np.random.randn(50, 200)
-    >>> X_transferred = apply_ctai(X_slave_new, params)
+    >>> X_satellite_new = np.random.randn(50, 200)
+    >>> X_transferred = apply_ctai(X_satellite_new, params)
     >>>
-    >>> # Can now use master instrument's calibration model
-    >>> y_predicted = master_model.predict(X_transferred)
+    >>> # Can now use primary instrument's calibration model
+    >>> y_predicted = primary_model.predict(X_transferred)
 
     Notes
     -----
-    - Transformation: X_transferred = X_slave @ M + T
+    - Transformation: X_transferred = X_satellite @ M + T
     - M is transformation matrix, T is translation vector
     - Computationally efficient (matrix multiplication)
     - No iterative optimization needed
@@ -910,14 +910,14 @@ def apply_ctai(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
 
     # Validate dimensions
     n_wavelengths = M.shape[0]
-    if X_slave_new.shape[1] != n_wavelengths:
+    if X_satellite_new.shape[1] != n_wavelengths:
         raise ValueError(
-            f"X_slave_new has {X_slave_new.shape[1]} wavelengths "
+            f"X_satellite_new has {X_satellite_new.shape[1]} wavelengths "
             f"but model expects {n_wavelengths}"
         )
 
-    # Apply affine transformation: X_master = X_slave @ M + T
-    X_transferred = X_slave_new @ M + T
+    # Apply affine transformation: X_primary = X_satellite @ M + T
+    X_transferred = X_satellite_new @ M + T
 
     return X_transferred
 
@@ -927,8 +927,8 @@ def apply_ctai(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
 # ==============================================================================
 
 def estimate_nspfce(
-    X_master: np.ndarray,
-    X_slave: np.ndarray,
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
     wavelengths: np.ndarray,
     use_wavelength_selection: bool = True,
     wavelength_selector: str = 'vcpa-iriv',
@@ -957,11 +957,11 @@ def estimate_nspfce(
 
     Parameters
     ----------
-    X_master : np.ndarray, shape (n_samples_master, n_wavelengths)
-        Master instrument spectra on common wavelength grid.
-    X_slave : np.ndarray, shape (n_samples_slave, n_wavelengths)
-        Slave instrument spectra on common wavelength grid.
-        Need not be the same samples as X_master.
+    X_primary : np.ndarray, shape (n_samples_primary, n_wavelengths)
+        Primary instrument spectra on common wavelength grid.
+    X_satellite : np.ndarray, shape (n_samples_satellite, n_wavelengths)
+        Satellite instrument spectra on common wavelength grid.
+        Need not be the same samples as X_primary.
     wavelengths : np.ndarray, shape (n_wavelengths,)
         Wavelength grid (used for wavelength selection).
     use_wavelength_selection : bool, default=True
@@ -1001,24 +1001,24 @@ def estimate_nspfce(
     >>> import numpy as np
     >>> from spectral_predict.calibration_transfer import estimate_nspfce, apply_nspfce
     >>>
-    >>> # Generate master and slave spectra (different samples)
-    >>> n_master, n_slave, n_wavelengths = 100, 120, 200
+    >>> # Generate primary and satellite spectra (different samples)
+    >>> n_primary, n_satellite, n_wavelengths = 100, 120, 200
     >>> wavelengths = np.linspace(1000, 2500, n_wavelengths)
     >>>
-    >>> X_master = np.random.randn(n_master, n_wavelengths)
-    >>> X_slave = 0.9 * np.random.randn(n_slave, n_wavelengths) + 0.1
+    >>> X_primary = np.random.randn(n_primary, n_wavelengths)
+    >>> X_satellite = 0.9 * np.random.randn(n_satellite, n_wavelengths) + 0.1
     >>>
     >>> # Estimate NS-PFCE model (with wavelength selection)
-    >>> params = estimate_nspfce(X_master, X_slave, wavelengths,
+    >>> params = estimate_nspfce(X_primary, X_satellite, wavelengths,
     ...                          use_wavelength_selection=True,
     ...                          wavelength_selector='vcpa-iriv')
     >>>
     >>> print(f"Selected {len(params['selected_wavelengths'])} wavelengths")
     >>> print(f"Converged in {params['convergence_iterations']} iterations")
     >>>
-    >>> # Apply to new slave spectra
-    >>> X_slave_new = np.random.randn(50, n_wavelengths)
-    >>> X_transferred = apply_nspfce(X_slave_new, params)
+    >>> # Apply to new satellite spectra
+    >>> X_satellite_new = np.random.randn(50, n_wavelengths)
+    >>> X_transferred = apply_nspfce(X_satellite_new, params)
 
     References
     ----------
@@ -1035,7 +1035,7 @@ def estimate_nspfce(
 
     Limitations:
     - Wavelength selection adds significant computation time
-    - May struggle if master/slave have very different spectral characteristics
+    - May struggle if primary/satellite have very different spectral characteristics
     - Requires sufficient spectral diversity in both datasets
 
     See Also
@@ -1043,14 +1043,14 @@ def estimate_nspfce(
     apply_nspfce : Apply NS-PFCE transformation to new spectra
     estimate_ctai : Alternative parameter-free method (faster)
     """
-    n_samples_master, n_wavelengths = X_master.shape
-    n_samples_slave = X_slave.shape[0]
+    n_samples_primary, n_wavelengths = X_primary.shape
+    n_samples_satellite = X_satellite.shape[0]
 
     # Validation
-    if X_slave.shape[1] != n_wavelengths:
+    if X_satellite.shape[1] != n_wavelengths:
         raise ValueError(
-            f"X_master and X_slave must have same number of wavelengths: "
-            f"{n_wavelengths} vs {X_slave.shape[1]}"
+            f"X_primary and X_satellite must have same number of wavelengths: "
+            f"{n_wavelengths} vs {X_satellite.shape[1]}"
         )
 
     if wavelengths.shape[0] != n_wavelengths:
@@ -1068,29 +1068,29 @@ def estimate_nspfce(
 
         # Need pseudo-Y for wavelength selection
         # Use spectral mean or first principal component as proxy
-        y_pseudo_master = np.mean(X_master, axis=1)
-        y_pseudo_slave = np.mean(X_slave, axis=1)
+        y_pseudo_primary = np.mean(X_primary, axis=1)
+        y_pseudo_satellite = np.mean(X_satellite, axis=1)
 
-        # Combine for wavelength selection (use master primarily)
+        # Combine for wavelength selection (use primary for selection)
         from .wavelength_selection import vcpa_iriv, cars, spa
 
         try:
             if wavelength_selector == 'vcpa-iriv':
                 wl_result = vcpa_iriv(
-                    X_master, y_pseudo_master,
+                    X_primary, y_pseudo_primary,
                     n_outer_iterations=5,
                     n_inner_iterations=30,
                     random_state=42
                 )
             elif wavelength_selector == 'cars':
                 wl_result = cars(
-                    X_master, y_pseudo_master,
+                    X_primary, y_pseudo_primary,
                     n_iterations=40,
                     random_state=42
                 )
             elif wavelength_selector == 'spa':
                 target_n = min(50, n_wavelengths // 4)
-                wl_result = spa(X_master, y_pseudo_master, n_vars=target_n)
+                wl_result = spa(X_primary, y_pseudo_primary, n_vars=target_n)
             else:
                 raise ValueError(f"Unknown wavelength_selector: {wavelength_selector}")
 
@@ -1098,38 +1098,38 @@ def estimate_nspfce(
             print(f"  NS-PFCE: Selected {len(selected_wavelengths)}/{n_wavelengths} wavelengths")
 
             # Reduce matrices to selected wavelengths
-            X_master_sel = X_master[:, selected_wavelengths]
-            X_slave_sel = X_slave[:, selected_wavelengths]
+            X_primary_sel = X_primary[:, selected_wavelengths]
+            X_satellite_sel = X_satellite[:, selected_wavelengths]
             n_selected = len(selected_wavelengths)
 
         except Exception as e:
             print(f"  NS-PFCE: Wavelength selection failed ({str(e)}), using all wavelengths")
-            X_master_sel = X_master
-            X_slave_sel = X_slave
+            X_primary_sel = X_primary
+            X_satellite_sel = X_satellite
             n_selected = n_wavelengths
             selected_wavelengths = np.arange(n_wavelengths)
 
     else:
-        X_master_sel = X_master
-        X_slave_sel = X_slave
+        X_primary_sel = X_primary
+        X_satellite_sel = X_satellite
         n_selected = n_wavelengths
         selected_wavelengths = np.arange(n_wavelengths)
 
     # Step 2: Initialize transformation
     # Simple initialization: mean normalization
-    master_mean = np.mean(X_master_sel, axis=0)
-    slave_mean = np.mean(X_slave_sel, axis=0)
-    master_std = np.std(X_master_sel, axis=0) + 1e-10
-    slave_std = np.std(X_slave_sel, axis=0) + 1e-10
+    primary_mean = np.mean(X_primary_sel, axis=0)
+    satellite_mean = np.mean(X_satellite_sel, axis=0)
+    primary_std = np.std(X_primary_sel, axis=0) + 1e-10
+    satellite_std = np.std(X_satellite_sel, axis=0) + 1e-10
 
-    # Initial transformation: normalize slave to master scale
-    # T = diag(master_std / slave_std)
-    scale_factors = master_std / slave_std
+    # Initial transformation: normalize satellite to primary scale
+    # T = diag(primary_std / satellite_std)
+    scale_factors = primary_std / satellite_std
     T = np.diag(scale_factors)
-    offset = master_mean - slave_mean * scale_factors
+    offset = primary_mean - satellite_mean * scale_factors
 
     # Step 3: Iterative optimization
-    # Objective: minimize ||X_master - (X_slave @ T + offset)||_F
+    # Objective: minimize ||X_primary - (X_satellite @ T + offset)||_F
     # Use coordinate descent or gradient-based optimization
 
     convergence_iterations = 0
@@ -1137,10 +1137,10 @@ def estimate_nspfce(
 
     for iteration in range(max_iterations):
         # Current objective value
-        X_slave_transformed = X_slave_sel @ T + offset
+        X_satellite_transformed = X_satellite_sel @ T + offset
         # Use a sample for objective (computational efficiency)
-        n_compare = min(n_samples_master, n_samples_slave, 100)
-        obj = np.mean((X_master_sel[:n_compare] - X_slave_transformed[:n_compare]) ** 2)
+        n_compare = min(n_samples_primary, n_samples_satellite, 100)
+        obj = np.mean((X_primary_sel[:n_compare] - X_satellite_transformed[:n_compare]) ** 2)
         objective_history.append(obj)
 
         # Check convergence
@@ -1152,29 +1152,29 @@ def estimate_nspfce(
 
         # Update transformation
         # Use pseudo-inverse approach for stability
-        # Solve: X_master ≈ X_slave @ T + offset
-        # T_new = (X_slave^T X_slave)^-1 X_slave^T (X_master - offset)
+        # Solve: X_primary ≈ X_satellite @ T + offset
+        # T_new = (X_satellite^T X_satellite)^-1 X_satellite^T (X_primary - offset)
 
-        X_slave_centered = X_slave_sel - offset
-        X_master_centered = X_master_sel
+        X_satellite_centered = X_satellite_sel - offset
+        X_primary_centered = X_primary_sel
 
         # Use regularized least squares
         reg_param = 1e-6
-        XtX = X_slave_sel.T @ X_slave_sel + reg_param * np.eye(n_selected)
-        XtY = X_slave_sel.T @ X_master_sel
+        XtX = X_satellite_sel.T @ X_satellite_sel + reg_param * np.eye(n_selected)
+        XtY = X_satellite_sel.T @ X_primary_sel
 
         try:
             T_new = np.linalg.solve(XtX, XtY)
         except np.linalg.LinAlgError:
-            T_new = np.linalg.pinv(X_slave_sel) @ X_master_sel
+            T_new = np.linalg.pinv(X_satellite_sel) @ X_primary_sel
 
         # Adaptive update (damping for stability)
         damping = 0.5
         T = damping * T_new + (1 - damping) * T
 
         # Update offset
-        X_slave_transformed = X_slave_sel @ T
-        offset = np.mean(X_master_sel - X_slave_transformed, axis=0)
+        X_satellite_transformed = X_satellite_sel @ T
+        offset = np.mean(X_primary_sel - X_satellite_transformed, axis=0)
 
         # Optional normalization step
         if normalize and iteration % 10 == 0:
@@ -1189,9 +1189,9 @@ def estimate_nspfce(
         convergence_iterations = max_iterations
 
     # Final objective
-    X_slave_transformed = X_slave_sel @ T + offset
-    n_compare = min(n_samples_master, n_samples_slave)
-    final_objective = np.sqrt(np.mean((X_master_sel[:n_compare] - X_slave_transformed[:n_compare]) ** 2))
+    X_satellite_transformed = X_satellite_sel @ T + offset
+    n_compare = min(n_samples_primary, n_samples_satellite)
+    final_objective = np.sqrt(np.mean((X_primary_sel[:n_compare] - X_satellite_transformed[:n_compare]) ** 2))
 
     print(f"  NS-PFCE: Converged in {convergence_iterations} iterations")
     print(f"  NS-PFCE: Final RMSE: {final_objective:.6f}")
@@ -1223,76 +1223,76 @@ def estimate_nspfce(
     return params
 
 
-def apply_nspfce(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
+def apply_nspfce(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply NS-PFCE calibration transfer to new slave instrument spectra.
+    Apply NS-PFCE calibration transfer to new satellite instrument spectra.
 
-    Transforms slave spectra to master instrument domain using previously
+    Transforms satellite spectra to primary instrument domain using previously
     estimated NS-PFCE transformation.
 
     Parameters
     ----------
-    X_slave_new : np.ndarray, shape (n_samples, n_wavelengths)
-        New slave instrument spectra to transform.
+    X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
+        New satellite instrument spectra to transform.
     params : dict
         NS-PFCE parameters from estimate_nspfce.
 
     Returns
     -------
     X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
-        Transformed spectra in master instrument domain.
+        Transformed spectra in primary instrument domain.
 
     Examples
     --------
     >>> # After estimating NS-PFCE model (see estimate_nspfce examples)
-    >>> X_slave_new = np.random.randn(50, 200)
-    >>> X_transferred = apply_nspfce(X_slave_new, params)
+    >>> X_satellite_new = np.random.randn(50, 200)
+    >>> X_transferred = apply_nspfce(X_satellite_new, params)
     >>>
-    >>> # Can now use master instrument's calibration model
-    >>> y_predicted = master_model.predict(X_transferred)
+    >>> # Can now use primary instrument's calibration model
+    >>> y_predicted = primary_model.predict(X_transferred)
 
     Notes
     -----
     - If wavelength selection was used, transformation is applied only
       to selected wavelengths
     - Other wavelengths are preserved or interpolated
-    - Transformation: X_transferred = X_slave @ T + offset
+    - Transformation: X_transferred = X_satellite @ T + offset
     """
     T = params['transformation_matrix']
     offset = params['offset']
     selected_wavelengths = params['selected_wavelengths']
     use_wl_selection = params['use_wavelength_selection']
 
-    n_wavelengths_full = X_slave_new.shape[1]
+    n_wavelengths_full = X_satellite_new.shape[1]
 
     if use_wl_selection and selected_wavelengths is not None:
         # Apply transformation only to selected wavelengths
-        X_slave_selected = X_slave_new[:, selected_wavelengths]
-        X_transformed_selected = X_slave_selected @ T + offset
+        X_satellite_selected = X_satellite_new[:, selected_wavelengths]
+        X_transformed_selected = X_satellite_selected @ T + offset
 
         # Reconstruct full spectrum
         # Simple approach: keep non-selected wavelengths unchanged
-        X_transferred = X_slave_new.copy()
+        X_transferred = X_satellite_new.copy()
         X_transferred[:, selected_wavelengths] = X_transformed_selected
 
     else:
         # Validate dimensions
         n_wavelengths_expected = T.shape[0]
-        if X_slave_new.shape[1] != n_wavelengths_expected:
+        if X_satellite_new.shape[1] != n_wavelengths_expected:
             raise ValueError(
-                f"X_slave_new has {X_slave_new.shape[1]} wavelengths "
+                f"X_satellite_new has {X_satellite_new.shape[1]} wavelengths "
                 f"but model expects {n_wavelengths_expected}"
             )
 
         # Apply transformation to all wavelengths
-        X_transferred = X_slave_new @ T + offset
+        X_transferred = X_satellite_new @ T + offset
 
     return X_transferred
 
 
 def estimate_jypls_inv(
-    X_master: np.ndarray,
-    X_slave: np.ndarray,
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
     y_transfer: np.ndarray,
     transfer_indices: np.ndarray,
     n_components: int | None = None,
@@ -1302,22 +1302,22 @@ def estimate_jypls_inv(
     """
     Estimate JYPLS-inv (Joint-Y PLS with inversion) calibration transfer.
 
-    JYPLS-inv uses a joint PLS model where master and slave transfer samples
+    JYPLS-inv uses a joint PLS model where primary and satellite transfer samples
     are combined in an augmented X matrix with shared Y values. The PLS model
     learns a common latent structure, and the transformation is derived from
-    the PLS components to map slave spectra to master space.
+    the PLS components to map satellite spectra to primary space.
 
     Parameters
     ----------
-    X_master : np.ndarray, shape (n_samples, n_wavelengths)
-        Master instrument spectra.
-    X_slave : np.ndarray, shape (n_samples, n_wavelengths)
-        Slave instrument spectra (same samples as X_master).
+    X_primary : np.ndarray, shape (n_samples, n_wavelengths)
+        Primary instrument spectra.
+    X_satellite : np.ndarray, shape (n_samples, n_wavelengths)
+        Satellite instrument spectra (same samples as X_primary).
     y_transfer : np.ndarray, shape (n_transfer,)
         Reference values for transfer samples.
         Used for PLS modeling to find optimal transformation.
     transfer_indices : np.ndarray, shape (n_transfer,)
-        Indices of transfer samples in X_master and X_slave.
+        Indices of transfer samples in X_primary and X_satellite.
         Typically 12-13 samples selected by Kennard-Stone or SPXY.
     n_components : int | None, optional
         Number of PLS components. If None, determined by cross-validation.
@@ -1334,7 +1334,7 @@ def estimate_jypls_inv(
     params : dict
         Dictionary containing:
         - 'transformation_matrix' : np.ndarray, shape (n_wavelengths, n_wavelengths)
-            Matrix B such that X_master ≈ X_slave @ B
+            Matrix B such that X_primary ≈ X_satellite @ B
         - 'n_components' : int
             Number of PLS components used
         - 'cv_rmse' : float
@@ -1351,16 +1351,16 @@ def estimate_jypls_inv(
     Notes
     -----
     Algorithm:
-    1. Extract transfer samples from master and slave
-    2. Create augmented X = [X_master_transfer; X_slave_transfer]
+    1. Extract transfer samples from primary and satellite
+    2. Create augmented X = [X_primary_transfer; X_satellite_transfer]
     3. Create augmented Y = [y_transfer; y_transfer] (shared Y)
     4. Fit PLS(X_aug, Y_aug) with optimal number of components
-    5. Extract separate PLS scores for master (T_m) and slave (T_s)
+    5. Extract separate PLS scores for primary (T_m) and satellite (T_s)
     6. Compute transformation: B = W @ (T_s^T T_s)^{-1} @ T_s^T @ T_m @ P^T
        where W = PLS X-weights, P = PLS X-loadings
     7. Simplified approach: B derived from PLS regression coefficients
 
-    The transformation maps slave spectra into master space while preserving
+    The transformation maps satellite spectra into primary space while preserving
     the PLS latent structure that predicts Y.
 
     References
@@ -1376,25 +1376,25 @@ def estimate_jypls_inv(
     >>> import numpy as np
     >>> from spectral_predict.sample_selection import kennard_stone
     >>>
-    >>> # Simulate master and slave spectra
+    >>> # Simulate primary and satellite spectra
     >>> np.random.seed(42)
     >>> n_samples, n_wavelengths = 100, 200
-    >>> X_master = np.random.randn(n_samples, n_wavelengths)
-    >>> X_slave = 0.95 * X_master + 0.05  # Slave with bias/scale
-    >>> y = 2.0 * X_master[:, 50] - 1.5 * X_master[:, 100] + np.random.randn(n_samples) * 0.1
+    >>> X_primary = np.random.randn(n_samples, n_wavelengths)
+    >>> X_satellite = 0.95 * X_primary + 0.05  # Satellite with bias/scale
+    >>> y = 2.0 * X_primary[:, 50] - 1.5 * X_primary[:, 100] + np.random.randn(n_samples) * 0.1
     >>>
     >>> # Select 12 transfer samples with Kennard-Stone
-    >>> transfer_idx = kennard_stone(X_master, n_samples=12)
+    >>> transfer_idx = kennard_stone(X_primary, n_samples=12)
     >>> y_transfer = y[transfer_idx]
     >>>
     >>> # Estimate JYPLS-inv model
-    >>> params = estimate_jypls_inv(X_master, X_slave, y_transfer, transfer_idx, n_components=5)
+    >>> params = estimate_jypls_inv(X_primary, X_satellite, y_transfer, transfer_idx, n_components=5)
     >>> print(f"PLS Components: {params['n_components']}")
     >>> print(f"CV RMSE: {params['cv_rmse']:.6f}")
     >>>
     >>> # Apply transformation
-    >>> X_transferred = apply_jypls_inv(X_slave, params)
-    >>> rmse_improvement = np.sqrt(np.mean((X_slave - X_master)**2)) / np.sqrt(np.mean((X_transferred - X_master)**2))
+    >>> X_transferred = apply_jypls_inv(X_satellite, params)
+    >>> rmse_improvement = np.sqrt(np.mean((X_satellite - X_primary)**2)) / np.sqrt(np.mean((X_transferred - X_primary)**2))
     >>> print(f"RMSE improvement: {rmse_improvement:.2f}x")
     """
     try:
@@ -1404,8 +1404,8 @@ def estimate_jypls_inv(
         raise ImportError("scikit-learn is required for JYPLS-inv. Install with: pip install scikit-learn")
 
     # Validate inputs
-    if X_master.shape != X_slave.shape:
-        raise ValueError(f"X_master and X_slave must have same shape. Got {X_master.shape} and {X_slave.shape}")
+    if X_primary.shape != X_satellite.shape:
+        raise ValueError(f"X_primary and X_satellite must have same shape. Got {X_primary.shape} and {X_satellite.shape}")
 
     if len(transfer_indices) != len(y_transfer):
         raise ValueError(f"Number of transfer_indices ({len(transfer_indices)}) must match y_transfer length ({len(y_transfer)})")
@@ -1413,19 +1413,19 @@ def estimate_jypls_inv(
     if len(transfer_indices) < 2:
         raise ValueError("Need at least 2 transfer samples for JYPLS-inv")
 
-    n_samples, n_wavelengths = X_master.shape
+    n_samples, n_wavelengths = X_primary.shape
 
     # Extract transfer samples
-    X_master_transfer = X_master[transfer_indices]
-    X_slave_transfer = X_slave[transfer_indices]
+    X_primary_transfer = X_primary[transfer_indices]
+    X_satellite_transfer = X_satellite[transfer_indices]
 
     # Create augmented matrices
-    # X_aug = [X_master_transfer]  <- master samples
-    #         [X_slave_transfer]   <- slave samples (to be mapped to master)
-    X_aug = np.vstack([X_master_transfer, X_slave_transfer])
+    # X_aug = [X_primary_transfer]  <- primary samples
+    #         [X_satellite_transfer]   <- satellite samples (to be mapped to primary)
+    X_aug = np.vstack([X_primary_transfer, X_satellite_transfer])
 
-    # Y_aug = [y_transfer]  <- same Y for master
-    #         [y_transfer]  <- same Y for slave (joint-Y approach)
+    # Y_aug = [y_transfer]  <- same Y for primary
+    #         [y_transfer]  <- same Y for satellite (joint-Y approach)
     Y_aug = np.concatenate([y_transfer, y_transfer]).reshape(-1, 1)
 
     # Determine optimal number of PLS components via cross-validation
@@ -1469,37 +1469,37 @@ def estimate_jypls_inv(
     pls = PLSRegression(n_components=n_components, scale=False)
     pls.fit(X_aug, Y_aug)
 
-    # Extract PLS scores for master and slave separately
+    # Extract PLS scores for primary and satellite separately
     T_all = pls.transform(X_aug)  # shape: (2*n_transfer, n_components)
     n_transfer = len(transfer_indices)
-    T_master = T_all[:n_transfer, :]  # Master scores
-    T_slave = T_all[n_transfer:, :]   # Slave scores
+    T_primary = T_all[:n_transfer, :]  # Primary scores
+    T_satellite = T_all[n_transfer:, :]   # Satellite scores
 
     # Compute transformation matrix
-    # Approach: Find B such that T_master ≈ T_slave in PLS space
+    # Approach: Find B such that T_primary ≈ T_satellite in PLS space
     # Then map back to original space using PLS loadings
     #
     # Simplified: Use PLS regression coefficients to build transformation
     # The PLS model learns: Y_aug = X_aug @ coef
-    # We want to transform slave → master in X space
+    # We want to transform satellite → primary in X space
     #
     # Transformation derived from PLS structure:
-    # X_master ≈ X_slave @ B
+    # X_primary ≈ X_satellite @ B
     # B is computed using PLS weights (W) and loadings (P)
     #
     # Method: Compute transformation in score space, then project back
-    # B = W @ inv(T_slave^T @ T_slave) @ (T_slave^T @ T_master) @ P^T
+    # B = W @ inv(T_satellite^T @ T_satellite) @ (T_satellite^T @ T_primary) @ P^T
     # where W = X-weights, P = X-loadings
 
     W = pls.x_weights_  # shape: (n_wavelengths, n_components)
     P = pls.x_loadings_  # shape: (n_wavelengths, n_components)
 
-    # Compute score transformation: T_master = T_slave @ M
-    # M = inv(T_slave^T @ T_slave) @ (T_slave^T @ T_master)
-    T_slave_T = T_slave.T  # (n_components, n_transfer)
-    T_slave_cov = T_slave_T @ T_slave + 1e-6 * np.eye(n_components)  # Regularization
-    T_slave_cov_inv = np.linalg.inv(T_slave_cov)
-    M_scores = T_slave_cov_inv @ (T_slave_T @ T_master)  # (n_components, n_components)
+    # Compute score transformation: T_primary = T_satellite @ M
+    # M = inv(T_satellite^T @ T_satellite) @ (T_satellite^T @ T_primary)
+    T_satellite_T = T_satellite.T  # (n_components, n_transfer)
+    T_satellite_cov = T_satellite_T @ T_satellite + 1e-6 * np.eye(n_components)  # Regularization
+    T_satellite_cov_inv = np.linalg.inv(T_satellite_cov)
+    M_scores = T_satellite_cov_inv @ (T_satellite_T @ T_primary)  # (n_components, n_components)
 
     # Map back to original space
     # B = W @ M_scores @ P^T
@@ -1518,8 +1518,8 @@ def estimate_jypls_inv(
         'transfer_indices': transfer_indices,
         'pls_x_weights': W,
         'pls_x_loadings': P,
-        'pls_scores_master': T_master,
-        'pls_scores_slave': T_slave,
+        'pls_scores_primary': T_primary,
+        'pls_scores_satellite': T_satellite,
         'score_transformation': M_scores,
         'explained_variance_ratio': explained_variance_ratio,
         'n_transfer_samples': len(transfer_indices)
@@ -1528,43 +1528,43 @@ def estimate_jypls_inv(
     return params
 
 
-def apply_jypls_inv(X_slave_new: np.ndarray, params: Dict) -> np.ndarray:
+def apply_jypls_inv(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply JYPLS-inv transformation to new slave spectra.
+    Apply JYPLS-inv transformation to new satellite spectra.
 
     Parameters
     ----------
-    X_slave_new : np.ndarray, shape (n_samples, n_wavelengths)
-        New slave spectra to transfer to master domain.
+    X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
+        New satellite spectra to transfer to primary domain.
     params : dict
         Parameters from estimate_jypls_inv().
 
     Returns
     -------
     X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
-        Transferred spectra in master domain.
+        Transferred spectra in primary domain.
 
     Examples
     --------
     >>> # After estimating JYPLS-inv model
-    >>> X_transferred = apply_jypls_inv(X_slave_new, jypls_params)
+    >>> X_transferred = apply_jypls_inv(X_satellite_new, jypls_params)
     >>> print(f"Transferred shape: {X_transferred.shape}")
     """
     B = params['transformation_matrix']
 
-    if X_slave_new.shape[1] != B.shape[0]:
+    if X_satellite_new.shape[1] != B.shape[0]:
         raise ValueError(
-            f"X_slave_new has {X_slave_new.shape[1]} wavelengths, "
+            f"X_satellite_new has {X_satellite_new.shape[1]} wavelengths, "
             f"but transformation matrix expects {B.shape[0]}"
         )
 
-    # Apply transformation: X_master ≈ X_slave @ B
-    X_transferred = X_slave_new @ B
+    # Apply transformation: X_primary ≈ X_satellite @ B
+    X_transferred = X_satellite_new @ B
 
     return X_transferred
 
 
-def apply_transfer_dispatch(X_slave: np.ndarray, transfer_model: TransferModel) -> np.ndarray:
+def apply_transfer_dispatch(X_satellite: np.ndarray, transfer_model: TransferModel) -> np.ndarray:
     """
     Unified dispatcher for applying any transfer model type.
 
@@ -1573,8 +1573,8 @@ def apply_transfer_dispatch(X_slave: np.ndarray, transfer_model: TransferModel) 
 
     Parameters
     ----------
-    X_slave : np.ndarray
-        Slave instrument spectra to transform, shape (n_samples, n_wavelengths).
+    X_satellite : np.ndarray
+        Satellite instrument spectra to transform, shape (n_samples, n_wavelengths).
         The wavelengths should match the transfer model's common wavelength grid.
     transfer_model : TransferModel
         Transfer model object containing the method type, parameters, and
@@ -1583,7 +1583,7 @@ def apply_transfer_dispatch(X_slave: np.ndarray, transfer_model: TransferModel) 
     Returns
     -------
     np.ndarray
-        Transformed spectra in master instrument space, shape (n_samples, n_wavelengths).
+        Transformed spectra in primary instrument space, shape (n_samples, n_wavelengths).
 
     Raises
     ------
@@ -1595,25 +1595,25 @@ def apply_transfer_dispatch(X_slave: np.ndarray, transfer_model: TransferModel) 
     >>> # Load a transfer model
     >>> transfer_model = load_transfer_model("path/to/model")
     >>>
-    >>> # Apply to new slave spectra
-    >>> X_slave_new = load_spectra("slave_data.csv")
-    >>> X_master_space = apply_transfer_dispatch(X_slave_new, transfer_model)
+    >>> # Apply to new satellite spectra
+    >>> X_satellite_new = load_spectra("satellite_data.csv")
+    >>> X_primary_space = apply_transfer_dispatch(X_satellite_new, transfer_model)
     """
     method = transfer_model.method.lower()
     params = transfer_model.params
 
     if method == 'ds':
-        return apply_ds(X_slave, params['A'])
+        return apply_ds(X_satellite, params['A'])
     elif method == 'pds':
-        return apply_pds(X_slave, params['B'], params['window'])
+        return apply_pds(X_satellite, params['B'], params['window'])
     elif method == 'tsr':
-        return apply_tsr(X_slave, params)
+        return apply_tsr(X_satellite, params)
     elif method == 'ctai':
-        return apply_ctai(X_slave, params)
+        return apply_ctai(X_satellite, params)
     elif method == 'ns-pfce' or method == 'nspfce':
-        return apply_nspfce(X_slave, params)
+        return apply_nspfce(X_satellite, params)
     elif method == 'jypls-inv':
-        return apply_jypls_inv(X_slave, params)
+        return apply_jypls_inv(X_satellite, params)
     else:
         raise ValueError(
             f"Unknown transfer method: {method}. "
@@ -1639,25 +1639,25 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     print("\nTesting TSR:")
-    X_master = np.random.randn(50, 100)
-    X_slave = 0.95 * X_master + 0.05
+    X_primary = np.random.randn(50, 100)
+    X_satellite = 0.95 * X_primary + 0.05
     transfer_idx = np.array([0, 10, 20, 30, 40])  # Simple selection
 
-    tsr_params = estimate_tsr(X_master, X_slave, transfer_idx)
+    tsr_params = estimate_tsr(X_primary, X_satellite, transfer_idx)
     print(f"  Mean R²: {tsr_params['mean_r_squared']:.4f}")
     print(f"  Slope range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
 
-    X_transferred_tsr = apply_tsr(X_slave, tsr_params)
-    print(f"  Transfer RMSE: {np.sqrt(np.mean((X_transferred_tsr - X_master)**2)):.6f}")
+    X_transferred_tsr = apply_tsr(X_satellite, tsr_params)
+    print(f"  Transfer RMSE: {np.sqrt(np.mean((X_transferred_tsr - X_primary)**2)):.6f}")
 
     print("\nTesting CTAI:")
-    ctai_params = estimate_ctai(X_master, X_slave)
+    ctai_params = estimate_ctai(X_primary, X_satellite)
     print(f"  Explained variance: {ctai_params['explained_variance']:.4f}")
     print(f"  N components: {ctai_params['n_components']}")
     print(f"  Reconstruction error: {ctai_params['reconstruction_error']:.6f}")
 
-    X_transferred_ctai = apply_ctai(X_slave, ctai_params)
-    print(f"  Transfer RMSE: {np.sqrt(np.mean((X_transferred_ctai - X_master)**2)):.6f}")
+    X_transferred_ctai = apply_ctai(X_satellite, ctai_params)
+    print(f"  Transfer RMSE: {np.sqrt(np.mean((X_transferred_ctai - X_primary)**2)):.6f}")
 
     print("\n" + "=" * 60)
     print("All methods loaded successfully!")
