@@ -8693,6 +8693,10 @@ class SpectralPredictApp:
         ttk.Label(window_frame, text="Custom:", style='TLabel').pack(side='left', padx=(15, 5))
         ttk.Entry(window_frame, textvariable=self.refine_window_custom, width=8).pack(side='left', padx=5)
 
+        # Bind traces to sync radio buttons and custom entry
+        self.refine_window_custom.trace_add('write', self._on_window_custom_change)
+        self.refine_window.trace_add('write', self._on_window_preset_change)
+
         # === Model Selection ===
         model_frame = ttk.LabelFrame(content_frame, text="Model Selection", padding="20")
         model_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
@@ -10115,6 +10119,23 @@ class SpectralPredictApp:
                 self.refine_model_type.set('PLS-DA')
             else:
                 self.refine_model_type.set('PLS')
+
+    def _on_window_custom_change(self, *args):
+        """Clear radio selection when custom window value is entered."""
+        if hasattr(self, 'refine_window_custom') and hasattr(self, 'refine_window'):
+            custom_value = self.refine_window_custom.get().strip()
+            if custom_value:
+                # User entered a custom value, deselect all radio buttons
+                # Set to 0 which doesn't match any preset (7, 11, 17, 19)
+                self.refine_window.set(0)
+
+    def _on_window_preset_change(self, *args):
+        """Clear custom field when a preset radio button is selected."""
+        if hasattr(self, 'refine_window') and hasattr(self, 'refine_window_custom'):
+            preset_value = self.refine_window.get()
+            # Only clear if a valid preset is selected (not 0)
+            if preset_value in [7, 11, 17, 19]:
+                self.refine_window_custom.set('')
 
     def _on_hyperparam_modified(self, *args):
         """
@@ -17922,12 +17943,12 @@ class SpectralPredictApp:
 
                         if current_best is None:
                             is_better = True
-                        elif 'RMSE' in best_model:
-                            # Regression: lower RMSE is better
-                            is_better = best_model['RMSE'] < current_best.get('RMSE', float('inf'))
-                        elif 'Accuracy' in best_model:
-                            # Classification: higher Accuracy is better
-                            is_better = best_model['Accuracy'] > current_best.get('Accuracy', 0)
+                        elif 'RMSEcv' in best_model:
+                            # Regression: lower RMSEcv is better (use CV metrics for consistency)
+                            is_better = best_model['RMSEcv'] < current_best.get('RMSEcv', float('inf'))
+                        elif 'Accuracycv' in best_model:
+                            # Classification: higher Accuracycv is better (use CV metrics for consistency)
+                            is_better = best_model['Accuracycv'] > current_best.get('Accuracycv', 0)
 
                         if is_better:
                             unified_best_overall[0] = best_model.copy()
@@ -18511,26 +18532,27 @@ class SpectralPredictApp:
 
         # Update best model display
         if best_model:
-            # Determine task type from best_model dict
-            if 'RMSE' in best_model:
-                # Regression
+            # Determine task type from best_model dict (use CV metrics for consistency with ranking)
+            if 'RMSEcv' in best_model:
+                # Regression - show CV metrics
                 model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
                 if best_model.get('Deriv'):
                     model_text += f" (d{best_model['Deriv']})"
-                model_text += f"\nRMSE: {best_model['RMSE']:.4f} | R²: {best_model['R2']:.4f}"
+                model_text += f"\nRMSEcv: {best_model['RMSEcv']:.4f} | R²cv: {best_model['R2cv']:.4f}"
 
                 # Add top wavelengths if available
                 if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
                     top_vars = best_model['top_vars'].split(',')[:5]  # First 5
                     model_text += f"\nTop λ: {', '.join(top_vars)} nm"
             else:
-                # Classification
+                # Classification - show CV metrics
                 model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
                 if best_model.get('Deriv'):
                     model_text += f" (d{best_model['Deriv']})"
-                model_text += f"\nAcc: {best_model['Accuracy']:.4f}"
-                if 'ROC_AUC' in best_model and not np.isnan(best_model['ROC_AUC']):
-                    model_text += f" | AUC: {best_model['ROC_AUC']:.4f}"
+                model_text += f"\nAcccv: {best_model.get('Accuracycv', best_model.get('Accuracy', 0)):.4f}"
+                auc_cv = best_model.get('ROC_AUCcv', best_model.get('ROC_AUC'))
+                if auc_cv is not None and not np.isnan(auc_cv):
+                    model_text += f" | AUCcv: {auc_cv:.4f}"
 
                 # Add top wavelengths if available
                 if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
@@ -24425,15 +24447,17 @@ F1 Score:  {f1:.4f}
             # Get user-selected preprocessing method and map to build_preprocessing_pipeline format
             preprocess = self.refine_preprocess.get()
 
-            # Get window size (check custom first)
+            # Get window size (check custom first, then preset, then default)
             if self.refine_window_custom.get().strip():
                 try:
                     window = int(self.refine_window_custom.get().strip())
                 except ValueError:
-                    self._log_progress(f"Warning: Invalid custom window size '{self.refine_window_custom.get()}', using selected radio button value")
-                    window = self.refine_window.get()
+                    self._log_progress(f"Warning: Invalid custom window size '{self.refine_window_custom.get()}', using default value 17")
+                    window = 17
             else:
-                window = self.refine_window.get()
+                preset = self.refine_window.get()
+                # Use preset if valid, otherwise default to 17
+                window = preset if preset in [7, 11, 17, 19] else 17
 
             # Map GUI preprocessing names to search.py format
             preprocess_name_map = {
@@ -37830,11 +37854,9 @@ Configuration:
         source_frame.pack(fill='x', pady=(0, 10))
 
         ttk.Label(source_frame, text="Apply to:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
-        self.contam_apply_source = tk.StringVar(value='Clean Data')
-        ttk.Radiobutton(source_frame, text="Clean Data", variable=self.contam_apply_source,
-                       value='Clean Data', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(source_frame, text="All Groups", variable=self.contam_apply_source,
-                       value='All Groups', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+        self.contam_apply_source = tk.StringVar(value='Contaminant Groups')
+        ttk.Radiobutton(source_frame, text="Contaminant Groups", variable=self.contam_apply_source,
+                       value='Contaminant Groups', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(source_frame, text="Main Dataset (Tab 1)", variable=self.contam_apply_source,
                        value='Main Dataset', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
 
