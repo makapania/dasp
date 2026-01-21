@@ -700,7 +700,11 @@ def create_unified_objective(
                 # PLS-DA: Add PLS, scaler, then LogisticRegression
                 pipe_steps.append(('pls', model))
                 pipe_steps.append(('scaler', StandardScaler()))  # Scale PLS scores for LogisticRegression
-                lr = LogisticRegression(max_iter=1000, random_state=random_state)
+                # Extract LogisticRegression parameters (prefixed with lr_) if available
+                lr_C = model_params.get('lr_C', 1.0) if model_params else 1.0
+                lr_solver = model_params.get('lr_solver', 'lbfgs') if model_params else 'lbfgs'
+                lr_max_iter = model_params.get('lr_max_iter', 1000) if model_params else 1000
+                lr = LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=random_state)
                 # Apply class_weight to LogisticRegression if specified
                 if imbalance_method == 'class_weight':
                     lr.set_params(class_weight='balanced')

@@ -505,6 +505,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
                     n_estimators_list=None, learning_rates=None,
                     neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
                     pls_max_iter_list=None, pls_tol_list=None,
+                    plsda_lr_C_list=None, plsda_lr_solver_list=None, plsda_lr_max_iter_list=None,
                     rf_n_trees_list=None,
                     rf_max_depth_list=None, rf_min_samples_split_list=None,
                     rf_min_samples_leaf_list=None, rf_max_features_list=None,
@@ -810,6 +811,15 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
     if pls_tol_list is None:
         pls_config = get_hyperparameters('PLS', tier)
         pls_tol_list = pls_config.get('tol', [1e-6])
+
+    # PLS-DA LogisticRegression hyperparameters (for classification only)
+    # These control the LogisticRegression classifier that follows PLS transformation
+    if plsda_lr_C_list is None:
+        plsda_lr_C_list = [1.0]  # sklearn default
+    if plsda_lr_solver_list is None:
+        plsda_lr_solver_list = ['lbfgs']  # sklearn default
+    if plsda_lr_max_iter_list is None:
+        plsda_lr_max_iter_list = [1000]  # current default
 
     if task_type == "regression":
         # PLS Regression (only if in enabled_models)
@@ -1297,26 +1307,37 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
 
     else:  # classification
         # PLS-DA (PLS + LogisticRegression) - tier-aware
+        # Stage 1: PLSTransformer (n_components, max_iter, tol)
+        # Stage 2: LogisticRegression (lr_C, lr_solver, lr_max_iter)
         if 'PLS-DA' in enabled_models or 'PLS' in enabled_models:
             pls_da_configs = []
             for nc in pls_components:
                 for max_iter_val in pls_max_iter_list:
                     for tol_val in pls_tol_list:
-                        pls_da_configs.append(
-                            (
-                                PLSTransformer(
-                                    n_components=nc,
-                                    max_iter=max_iter_val,
-                                    tol=tol_val,
-                                    scale=False
-                                ),
-                                {
-                                    "n_components": nc,
-                                    "max_iter": max_iter_val,
-                                    "tol": tol_val
-                                }
-                            )
-                        )
+                        for lr_C in plsda_lr_C_list:
+                            for lr_solver in plsda_lr_solver_list:
+                                for lr_max_iter in plsda_lr_max_iter_list:
+                                    pls_da_configs.append(
+                                        (
+                                            PLSTransformer(
+                                                n_components=nc,
+                                                max_iter=max_iter_val,
+                                                tol=tol_val,
+                                                scale=False
+                                            ),
+                                            {
+                                                # PLS parameters (Stage 1)
+                                                "n_components": nc,
+                                                "max_iter": max_iter_val,
+                                                "tol": tol_val,
+                                                # LogisticRegression parameters (Stage 2)
+                                                # Prefixed with lr_ to distinguish from PLS params
+                                                "lr_C": lr_C,
+                                                "lr_solver": lr_solver,
+                                                "lr_max_iter": lr_max_iter
+                                            }
+                                        )
+                                    )
             grids["PLS-DA"] = pls_da_configs
 
         # Random Forest Classifier - tier-aware

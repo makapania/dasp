@@ -63,36 +63,6 @@ SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
 
 
-def _r2_score_with_calibration_mean(y_true, y_pred, calibration_mean: float) -> float:
-    """
-    Compute R² using calibration mean for SS_tot (Unscrambler-compatible).
-
-    sklearn's r2_score uses mean(y_true) for SS_tot.
-    Unscrambler uses the calibration (training) set mean.
-
-    Parameters
-    ----------
-    y_true : array-like
-        True values (test/validation set)
-    y_pred : array-like
-        Predicted values
-    calibration_mean : float
-        Mean of the full calibration/training set
-
-    Returns
-    -------
-    float
-        R² value using calibration mean for SS_tot
-    """
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - calibration_mean) ** 2)
-    if ss_tot == 0:
-        return 0.0  # Avoid division by zero
-    return 1 - (ss_res / ss_tot)
-
-
 def _apply_edge_mask(importances: np.ndarray, preprocess_cfg: dict) -> np.ndarray:
     """Zero out edge importances affected by Savitzky-Golay derivatives.
 
@@ -323,14 +293,20 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str):
             print(f"  [Warning] Could not apply params {model_kwargs}: {e}")
 
     # For PLS-DA classification, wrap PLSTransformer with LogisticRegression
-    # This matches how PLS-DA is built during search (search.py:2933-2940)
+    # This matches how PLS-DA is built during search (search.py:3420-3443)
     if task_type == 'classification' and model_name == 'PLS-DA':
         from sklearn.pipeline import Pipeline
         from sklearn.linear_model import LogisticRegression
+
+        # Extract LogisticRegression parameters from config (prefixed with lr_)
+        lr_C = model_kwargs.get('lr_C', 1.0)
+        lr_solver = model_kwargs.get('lr_solver', 'lbfgs')
+        lr_max_iter = model_kwargs.get('lr_max_iter', 1000)
+
         pls_lr_pipeline = Pipeline([
             ('pls', model),
             ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
-            ('lr', LogisticRegression(max_iter=1000, random_state=42))
+            ('lr', LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42))
         ])
         return pls_lr_pipeline
 
@@ -390,12 +366,12 @@ def compute_validation_metrics_for_top_models(
     Returns
     -------
     pd.DataFrame
-        Results with RMSEP, Q2 (or val_Accuracy) columns added
+        Results with RMSEP, R2pred (or val_Accuracy) columns added
     """
     # Initialize columns
     if task_type == 'regression':
         df_results['RMSEP'] = np.nan
-        df_results['Q2'] = np.nan
+        df_results['R2pred'] = np.nan
     else:
         df_results['val_Accuracy'] = np.nan
         df_results['val_ROC_AUC'] = np.nan
@@ -511,9 +487,9 @@ def compute_validation_metrics_for_top_models(
             # === STEP 5: Calculate metrics ===
             if task_type == 'regression':
                 rmsep = np.sqrt(mean_squared_error(y_val, y_pred))
-                q2 = r2_score(y_val, y_pred)
+                r2pred = r2_score(y_val, y_pred)
                 df_results.loc[idx, 'RMSEP'] = rmsep
-                df_results.loc[idx, 'Q2'] = q2
+                df_results.loc[idx, 'R2pred'] = r2pred
             else:
                 # Accuracy
                 val_acc = accuracy_score(y_val, y_pred)
@@ -616,12 +592,12 @@ def compute_validation_metrics_for_top_models(
     # Calibration metrics first, then validation metrics
     cols = list(df_results.columns)
     if task_type == 'regression' and 'RMSEP' in cols and 'R2' in cols:
-        # Move RMSEP and Q2 after R2
+        # Move RMSEP and R2pred after R2
         cols.remove('RMSEP')
-        cols.remove('Q2')
+        cols.remove('R2pred')
         r2_idx = cols.index('R2')
         cols.insert(r2_idx + 1, 'RMSEP')
-        cols.insert(r2_idx + 2, 'Q2')
+        cols.insert(r2_idx + 2, 'R2pred')
         df_results = df_results[cols]
     elif task_type == 'classification':
         # Order: Accuracy, ROC_AUC, F1, Precision, Recall (calibration)
@@ -665,6 +641,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
                pls_max_iter_list=None, pls_tol_list=None,
+               plsda_lr_C_list=None, plsda_lr_solver_list=None, plsda_lr_max_iter_list=None,
                rf_n_trees_list=None, rf_max_depth_list=None,
                rf_min_samples_split_list=None, rf_min_samples_leaf_list=None,
                rf_max_features_list=None, rf_bootstrap_list=None,
@@ -726,9 +703,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                X_validation=None,
                y_validation=None,
                compute_validation=False,
-               validation_top_n=100,
-               # R² calculation mode
-               r2_calibration_mean_mode=False):
+               validation_top_n=100):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -805,10 +780,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     wavelengths = X.columns.values
     n_features = X_np.shape[1]
     n_samples = X_np.shape[0]
-
-    # Compute calibration mean for Unscrambler-compatible R² (regression only)
-    # Store the mean of the full calibration set for use in R² calculation
-    calibration_mean = float(np.mean(y_np)) if (r2_calibration_mean_mode and task_type == "regression") else None
 
     # Handle categorical labels for classification
     label_encoder = None
@@ -917,6 +888,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                    neuralboosted_hidden_sizes=neuralboosted_hidden_sizes,
                                    neuralboosted_activations=neuralboosted_activations,
                                    pls_max_iter_list=pls_max_iter_list, pls_tol_list=pls_tol_list,
+                                   plsda_lr_C_list=plsda_lr_C_list, plsda_lr_solver_list=plsda_lr_solver_list,
+                                   plsda_lr_max_iter_list=plsda_lr_max_iter_list,
                                    rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list,
                                    rf_min_samples_split_list=rf_min_samples_split_list,
                                    rf_min_samples_leaf_list=rf_min_samples_leaf_list,
@@ -1865,8 +1838,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=n_jobs,
                     wavelength_restriction_active=wavelength_restriction_active,
-                    r2_calibration_mean_mode=r2_calibration_mean_mode,
-                    calibration_mean=calibration_mean,
                 )
                 df_results = add_result(df_results, result)
 
@@ -2004,8 +1975,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
-                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
-                                            calibration_mean=calibration_mean,
                                         )
                                     else:
                                         subset_result = _run_single_config(
@@ -2026,8 +1995,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
-                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
-                                            calibration_mean=calibration_mean,
                                         )
 
                                     df_results = add_result(df_results, subset_result)
@@ -2319,8 +2286,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
-                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
-                                            calibration_mean=calibration_mean,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -2350,8 +2315,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=n_jobs,
                                             wavelength_restriction_active=wavelength_restriction_active,
-                                            r2_calibration_mean_mode=r2_calibration_mean_mode,
-                                            calibration_mean=calibration_mean,
                                         )
 
                                     # Track if uniform fallback was used for this result
@@ -2419,8 +2382,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             full_vars_original=n_original_wavelengths,
                             n_jobs_cv=n_jobs,
                             wavelength_restriction_active=wavelength_restriction_active,
-                            r2_calibration_mean_mode=r2_calibration_mean_mode,
-                            calibration_mean=calibration_mean,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -3340,8 +3301,6 @@ def _run_single_config(
     full_vars_original=None,
     n_jobs_cv=1,
     wavelength_restriction_active=False,
-    r2_calibration_mean_mode=False,
-    calibration_mean=None,
 ):
     """
     Run a single model configuration with CV.
@@ -3354,10 +3313,6 @@ def _run_single_config(
     wavelength_restriction_active : bool, default=False
         If True, skip edge masking for importance calculation. Used when wavelengths
         are restricted to a subset of the spectrum (from middle, not edges).
-    r2_calibration_mean_mode : bool, default=False
-        If True, use calibration mean for R² calculation (Unscrambler-compatible).
-    calibration_mean : float or None, default=None
-        Mean of the full calibration set for Unscrambler-compatible R² calculation.
 
     Returns
     -------
@@ -3476,11 +3431,25 @@ def _run_single_config(
     if model_name == "PLS-DA":
         pipe_steps.append(("pls", model))
         pipe_steps.append(("scaler", StandardScaler()))  # Scale PLS scores for LogisticRegression
+
+        # Extract LogisticRegression parameters from config (prefixed with lr_)
+        lr_C = params.get('lr_C', 1.0) if params else 1.0
+        lr_solver = params.get('lr_solver', 'lbfgs') if params else 'lbfgs'
+        lr_max_iter = params.get('lr_max_iter', 1000) if params else 1000
+
+        # Build LogisticRegression with configurable parameters
+        lr_kwargs = {
+            'C': lr_C,
+            'solver': lr_solver,
+            'max_iter': lr_max_iter,
+            'random_state': random_state
+        }
+
         # Apply class_weight to LogisticRegression if requested
         if imbalance_method == 'class_weight' and task_type == 'classification':
-            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=random_state, class_weight='balanced')))
-        else:
-            pipe_steps.append(("lr", LogisticRegression(max_iter=1000, random_state=random_state)))
+            lr_kwargs['class_weight'] = 'balanced'
+
+        pipe_steps.append(("lr", LogisticRegression(**lr_kwargs)))
     # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler before model
     # These use gradient descent or kernel methods that are sensitive to feature scale
     elif model_name in SCALE_SENSITIVE_MODELS:
@@ -3540,12 +3509,7 @@ def _run_single_config(
 
         # Compute R² from aggregated predictions (not per-fold averages)
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
-        if r2_calibration_mean_mode and calibration_mean is not None:
-            # Unscrambler-compatible: use calibration set mean for SS_tot
-            mean_r2 = _r2_score_with_calibration_mean(all_y_test, all_y_pred, calibration_mean)
-        else:
-            # Default sklearn behavior: use test set mean for SS_tot
-            mean_r2 = r2_score(all_y_test, all_y_pred)
+        mean_r2 = r2_score(all_y_test, all_y_pred)
 
         # Compute quartiles based on TRUE Y values
         # Regional selection identifies which models excel in different value ranges

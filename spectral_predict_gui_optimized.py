@@ -2046,9 +2046,6 @@ class SpectralPredictApp:
         self.show_validation_metrics = tk.BooleanVar(value=True)  # Show val metrics in results
         self.validation_top_n = tk.IntVar(value=100)  # Number of top models for validation
 
-        # R² calculation mode (Unscrambler compatibility)
-        self.r2_calibration_mean_mode = tk.BooleanVar(value=False)  # Use calibration mean for R²
-
         # Result display options
         self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors
         self.overfit_filter_enabled = tk.BooleanVar(value=False)   # Toggle overfit marking
@@ -2361,6 +2358,24 @@ class SpectralPredictApp:
         self.pls_tol_1e6 = tk.BooleanVar(value=True)   # 1e-6 ⭐ standard (default)
         self.pls_tol_1e5 = tk.BooleanVar(value=False)  # 1e-5 comprehensive
         self.pls_tol_custom = tk.StringVar(value="")
+
+        # PLS-DA LogisticRegression Hyperparameters (Stage 2 of PLS-DA pipeline)
+        # C (inverse regularization strength) - smaller C = stronger regularization
+        self.plsda_lr_C_001 = tk.BooleanVar(value=False)  # 0.01 comprehensive
+        self.plsda_lr_C_01 = tk.BooleanVar(value=False)   # 0.1 comprehensive
+        self.plsda_lr_C_1 = tk.BooleanVar(value=True)     # 1.0 ⭐ standard (sklearn default)
+        self.plsda_lr_C_10 = tk.BooleanVar(value=False)   # 10.0 comprehensive
+        self.plsda_lr_C_custom = tk.StringVar(value="")
+
+        # solver (optimization algorithm)
+        self.plsda_lr_solver_lbfgs = tk.BooleanVar(value=True)     # lbfgs ⭐ standard (sklearn default)
+        self.plsda_lr_solver_liblinear = tk.BooleanVar(value=False) # liblinear comprehensive
+
+        # max_iter (maximum iterations for solver)
+        self.plsda_lr_max_iter_500 = tk.BooleanVar(value=False)   # 500 comprehensive
+        self.plsda_lr_max_iter_1000 = tk.BooleanVar(value=True)   # 1000 ⭐ standard (current default)
+        self.plsda_lr_max_iter_2000 = tk.BooleanVar(value=False)  # 2000 comprehensive
+        self.plsda_lr_max_iter_custom = tk.StringVar(value="")
 
         # LightGBM Hyperparameters
         # n_estimators
@@ -5865,34 +5880,23 @@ class SpectralPredictApp:
         ttk.Label(options_frame, text="💡 Penalties affect ranking gently at low values (exploration-friendly). 0 = rank only by performance, 5 = balanced, 10 = strongly prefer simplicity",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
-        # === R² Calculation Mode (Unscrambler Compatibility) ===
-        r2_mode_checkbox = ttk.Checkbutton(options_frame,
-                                           text="Use calibration mean for R² (Unscrambler-compatible)",
-                                           variable=self.r2_calibration_mean_mode)
-        r2_mode_checkbox.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(15, 0))
-        CreateToolTip(r2_mode_checkbox,
-                     text="When checked, R² is calculated using the calibration set mean for SS_tot, "
-                          "matching Unscrambler's method. Default (unchecked) uses sklearn's method "
-                          "with test set mean. RMSE is unaffected.",
-                     delay=500)
-
         # === Wavelength Restriction for Analysis ===
-        ttk.Separator(options_frame, orient='horizontal').grid(row=8, column=0, columnspan=3, sticky='ew', pady=(20, 10))
+        ttk.Separator(options_frame, orient='horizontal').grid(row=7, column=0, columnspan=3, sticky='ew', pady=(20, 10))
 
         # Enable/disable checkbox
         self.wl_restrict_checkbox = ttk.Checkbutton(options_frame,
                                                      text="Restrict wavelengths for model training",
                                                      variable=self.enable_analysis_wl_restriction)
-        self.wl_restrict_checkbox.grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+        self.wl_restrict_checkbox.grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
         # Help text explaining the difference from import filter
         ttk.Label(options_frame,
                  text="Further restrict wavelength range for analysis only (does not affect data import or plots)",
-                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=10, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=9, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
 
         # Wavelength range inputs
         wl_restrict_subframe = ttk.Frame(options_frame)
-        wl_restrict_subframe.grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
+        wl_restrict_subframe.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
         ttk.Label(wl_restrict_subframe, text="Analysis Range:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Entry(wl_restrict_subframe, textvariable=self.analysis_wl_min, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Label(wl_restrict_subframe, text="to").pack(side=tk.LEFT, padx=5)
@@ -7121,6 +7125,62 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
         ttk.Label(pls_content_frame, text="   Standard defaults (500, 1e-6) work well for most spectral data.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
+
+        # --- PLS-DA LogisticRegression Parameters (Classification Only) ---
+        ttk.Separator(pls_content_frame, orient='horizontal').grid(row=9, column=0, columnspan=6, sticky=(tk.W, tk.E), pady=(15, 10))
+        ttk.Label(pls_content_frame, text="PLS-DA LogisticRegression Parameters (Classification Only)",
+                 style='Subheading.TLabel').grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        ttk.Label(pls_content_frame, text="These parameters tune the LogisticRegression classifier that follows PLS transformation.",
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(0, 10))
+
+        # C (inverse regularization strength)
+        plsda_C_label = ttk.Label(pls_content_frame, text="C (Inverse Regularization):", style='Subheading.TLabel')
+        plsda_C_label.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(5, 5))
+
+        plsda_C_frame = ttk.Frame(pls_content_frame)
+        plsda_C_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(plsda_C_frame, text="0.01", variable=self.plsda_lr_C_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(plsda_C_frame, text="0.1", variable=self.plsda_lr_C_01).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(plsda_C_frame, text="1.0 ⭐", variable=self.plsda_lr_C_1).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(plsda_C_frame, text="10.0", variable=self.plsda_lr_C_10).grid(row=0, column=3, padx=5)
+        ttk.Label(plsda_C_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(plsda_C_frame, textvariable=self.plsda_lr_C_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(plsda_C_frame, text="(default: 1.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+
+        ttk.Label(pls_content_frame, text="💡 Smaller C = stronger regularization. Try 0.01-0.1 for high-dimensional data.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
+
+        # solver (optimization algorithm)
+        plsda_solver_label = ttk.Label(pls_content_frame, text="Solver:", style='Subheading.TLabel')
+        plsda_solver_label.grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+
+        plsda_solver_frame = ttk.Frame(pls_content_frame)
+        plsda_solver_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(plsda_solver_frame, text="lbfgs ⭐", variable=self.plsda_lr_solver_lbfgs).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(plsda_solver_frame, text="liblinear", variable=self.plsda_lr_solver_liblinear).grid(row=0, column=1, padx=5)
+        ttk.Label(plsda_solver_frame, text="(default: lbfgs)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        ttk.Label(pls_content_frame, text="💡 lbfgs is fast for small datasets; liblinear may be faster for very large datasets.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
+
+        # max_iter (LogisticRegression iterations)
+        plsda_maxiter_label = ttk.Label(pls_content_frame, text="LR Max Iterations:", style='Subheading.TLabel')
+        plsda_maxiter_label.grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+
+        plsda_maxiter_frame = ttk.Frame(pls_content_frame)
+        plsda_maxiter_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
+
+        ttk.Checkbutton(plsda_maxiter_frame, text="500", variable=self.plsda_lr_max_iter_500).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(plsda_maxiter_frame, text="1000 ⭐", variable=self.plsda_lr_max_iter_1000).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(plsda_maxiter_frame, text="2000", variable=self.plsda_lr_max_iter_2000).grid(row=0, column=2, padx=5)
+        ttk.Label(plsda_maxiter_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(plsda_maxiter_frame, textvariable=self.plsda_lr_max_iter_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(plsda_maxiter_frame, text="(default: 1000)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        ttk.Label(pls_content_frame, text="💡 Increase if convergence warnings occur. Usually 1000 is sufficient.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(2, 0))
 
         # XGBoost Hyperparameters - collapsible
         xgb_section, xgb_content = self._create_collapsible_section(content_frame,
@@ -15925,7 +15985,7 @@ class SpectralPredictApp:
                             # Predict on validation set
                             val_predictions = ensemble.predict(X_val)
 
-                            # Calculate validation metrics (RMSEP, Q²)
+                            # Calculate validation metrics (RMSEP, R²pred)
                             val_rmse = np.sqrt(mean_squared_error(y_val, val_predictions))
                             val_r2 = r2_score(y_val, val_predictions)
                         except Exception as e:
@@ -15936,7 +15996,7 @@ class SpectralPredictApp:
                     self._log_progress(f"   R²:     {cal_r2:.4f} (cal)")
                     if val_rmse is not None:
                         self._log_progress(f"   RMSEP:  {val_rmse:.4f} (val)")
-                        self._log_progress(f"   Q²:     {val_r2:.4f} (val)")
+                        self._log_progress(f"   R²pred: {val_r2:.4f} (val)")
                     self._log_progress(f"   RMSECV: {rmse:.4f}")
                     self._log_progress(f"   R²CV:   {r2:.4f}")
                     self._log_progress(f"   MAECV:  {mae:.4f}")
@@ -15949,7 +16009,7 @@ class SpectralPredictApp:
                         'rmse_cal': cal_rmse,  # Calibration RMSE
                         'r2_cal': cal_r2,      # Calibration R²
                         'rmse_val': val_rmse,  # Validation RMSE (RMSEP) - None if no validation set
-                        'r2_val': val_r2,      # Validation R² (Q²) - None if no validation set
+                        'r2_val': val_r2,      # Validation R² (R²pred) - None if no validation set
                         'rmse': rmse,          # CV RMSE (displayed as RMSEcv)
                         'r2': r2,              # CV R² (displayed as R²cv)
                         'mae': mae,
@@ -16807,6 +16867,72 @@ class SpectralPredictApp:
 
             # Sort for consistent ordering
             pls_tols_list = sorted(pls_tols_list)
+
+            # Collect PLS-DA LogisticRegression hyperparameters (for classification only)
+            # C (inverse regularization strength)
+            plsda_lr_C_list = []
+            if self.plsda_lr_C_001.get():
+                plsda_lr_C_list.append(0.01)
+            if self.plsda_lr_C_01.get():
+                plsda_lr_C_list.append(0.1)
+            if self.plsda_lr_C_1.get():
+                plsda_lr_C_list.append(1.0)
+            if self.plsda_lr_C_10.get():
+                plsda_lr_C_list.append(10.0)
+
+            # Add custom C if provided
+            custom_plsda_C = self.plsda_lr_C_custom.get().strip()
+            if custom_plsda_C:
+                try:
+                    custom_val = float(custom_plsda_C)
+                    if custom_val > 0 and custom_val not in plsda_lr_C_list:
+                        plsda_lr_C_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom PLS-DA LR C '{custom_plsda_C}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom PLS-DA LR C '{custom_plsda_C}', ignoring")
+
+            # Default to [1.0] if none selected (sklearn default)
+            if not plsda_lr_C_list:
+                plsda_lr_C_list = [1.0]
+            plsda_lr_C_list = sorted(plsda_lr_C_list)
+
+            # solver (optimization algorithm)
+            plsda_lr_solver_list = []
+            if self.plsda_lr_solver_lbfgs.get():
+                plsda_lr_solver_list.append('lbfgs')
+            if self.plsda_lr_solver_liblinear.get():
+                plsda_lr_solver_list.append('liblinear')
+
+            # Default to ['lbfgs'] if none selected (sklearn default)
+            if not plsda_lr_solver_list:
+                plsda_lr_solver_list = ['lbfgs']
+
+            # max_iter (LogisticRegression iterations)
+            plsda_lr_max_iter_list = []
+            if self.plsda_lr_max_iter_500.get():
+                plsda_lr_max_iter_list.append(500)
+            if self.plsda_lr_max_iter_1000.get():
+                plsda_lr_max_iter_list.append(1000)
+            if self.plsda_lr_max_iter_2000.get():
+                plsda_lr_max_iter_list.append(2000)
+
+            # Add custom max_iter if provided
+            custom_plsda_maxiter = self.plsda_lr_max_iter_custom.get().strip()
+            if custom_plsda_maxiter:
+                try:
+                    custom_val = int(custom_plsda_maxiter)
+                    if custom_val > 0 and custom_val not in plsda_lr_max_iter_list:
+                        plsda_lr_max_iter_list.append(custom_val)
+                    elif custom_val <= 0:
+                        print(f"WARNING: Invalid custom PLS-DA LR max_iter '{custom_plsda_maxiter}' (must be > 0), ignoring")
+                except ValueError:
+                    print(f"WARNING: Invalid custom PLS-DA LR max_iter '{custom_plsda_maxiter}', ignoring")
+
+            # Default to [1000] if none selected (current default)
+            if not plsda_lr_max_iter_list:
+                plsda_lr_max_iter_list = [1000]
+            plsda_lr_max_iter_list = sorted(plsda_lr_max_iter_list)
 
             # Collect XGBoost hyperparameters
             # n_estimators
@@ -18245,6 +18371,9 @@ class SpectralPredictApp:
                 elasticnet_tol_list=elasticnet_tol_list,
                 pls_max_iter_list=pls_max_iters_list,
                 pls_tol_list=pls_tols_list,
+                plsda_lr_C_list=plsda_lr_C_list,
+                plsda_lr_solver_list=plsda_lr_solver_list,
+                plsda_lr_max_iter_list=plsda_lr_max_iter_list,
                 xgb_n_estimators_list=xgb_n_estimators_list,
                 xgb_learning_rates=xgb_learning_rates,
                 xgb_max_depths=xgb_max_depths,
@@ -18344,9 +18473,7 @@ class SpectralPredictApp:
                     self.show_validation_metrics.get() and
                     self.validation_X is not None
                 ),
-                validation_top_n=self.validation_top_n.get(),
-                # R² calculation mode (Unscrambler compatibility)
-                r2_calibration_mean_mode=self.r2_calibration_mean_mode.get()
+                validation_top_n=self.validation_top_n.get()
             )
 
             # Store label_encoder for saving with models
@@ -19767,9 +19894,9 @@ class SpectralPredictApp:
             for result in self.ensemble_results
         )
 
-        # Define columns - include validation columns (RMSEP, Q²) if validation metrics exist
+        # Define columns - include validation columns (RMSEP, R²pred) if validation metrics exist
         if has_validation:
-            columns = ['Rank', 'Method', 'RMSE', 'R²', 'RMSEP', 'Q²', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
+            columns = ['Rank', 'Method', 'RMSE', 'R²', 'RMSEP', 'R²pred', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
         else:
             columns = ['Rank', 'Method', 'RMSE', 'R²', 'RMSEcv', 'R²cv', 'MAEcv', 'RPD', 'vs Best Individual']
         self.ensemble_tree['columns'] = columns
@@ -19781,7 +19908,7 @@ class SpectralPredictApp:
             'RMSE': 100,
             'R²': 100,
             'RMSEP': 100,
-            'Q²': 100,
+            'R²pred': 100,
             'RMSEcv': 100,
             'R²cv': 100,
             'MAEcv': 100,
@@ -19832,7 +19959,7 @@ class SpectralPredictApp:
                         f"{result.get('rmse_cal', 0):.4f}",  # RMSE (calibration)
                         f"{result.get('r2_cal', 0):.4f}",    # R² (calibration)
                         rmse_val_str,                         # RMSEP (validation)
-                        r2_val_str,                           # Q² (validation)
+                        r2_val_str,                           # R²pred (validation)
                         f"{result['rmse']:.4f}",              # RMSEcv
                         f"{result['r2']:.4f}",                # R²cv
                         f"{result['mae']:.4f}",               # MAEcv

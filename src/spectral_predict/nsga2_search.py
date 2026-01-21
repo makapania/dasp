@@ -798,11 +798,17 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
             from sklearn.pipeline import Pipeline
             from sklearn.preprocessing import StandardScaler
             from sklearn.linear_model import LogisticRegression
+
+            # Extract LogisticRegression parameters from hyperparams (prefixed with lr_)
+            lr_C = hyperparams.get('lr_C', 1.0) if hyperparams else 1.0
+            lr_solver = hyperparams.get('lr_solver', 'lbfgs') if hyperparams else 'lbfgs'
+            lr_max_iter = hyperparams.get('lr_max_iter', 1000) if hyperparams else 1000
+
             pls_transformer = PLSTransformer(n_components=n_components, scale=False)
             return Pipeline([
                 ('pls', pls_transformer),
                 ('scaler', StandardScaler()),
-                ('lr', LogisticRegression(max_iter=1000, random_state=random_state))
+                ('lr', LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=random_state))
             ])
         else:
             # Regression: use PLSRegression directly
@@ -1078,6 +1084,10 @@ class SpectralOptimizationProblem(Problem):
         models: Optional[List[str]] = None,
         imbalance_method: Optional[str] = None,
         imbalance_params: Optional[Dict[str, Any]] = None,
+        # PLS-DA LogisticRegression parameters (Stage 2)
+        plsda_lr_C: float = 1.0,
+        plsda_lr_solver: str = 'lbfgs',
+        plsda_lr_max_iter: int = 1000,
     ):
         """
         Initialize the optimization problem.
@@ -1104,6 +1114,12 @@ class SpectralOptimizationProblem(Problem):
             Imbalance handling method (e.g., 'smote', 'class_weight')
         imbalance_params : dict, optional
             Parameters for the imbalance method
+        plsda_lr_C : float, default=1.0
+            LogisticRegression inverse regularization strength for PLS-DA
+        plsda_lr_solver : str, default='lbfgs'
+            LogisticRegression solver for PLS-DA
+        plsda_lr_max_iter : int, default=1000
+            LogisticRegression maximum iterations for PLS-DA
         """
         self.X = X
         self.y = y
@@ -1116,6 +1132,11 @@ class SpectralOptimizationProblem(Problem):
         # Imbalance handling settings
         self.imbalance_method = imbalance_method
         self.imbalance_params = imbalance_params if imbalance_params is not None else {}
+
+        # PLS-DA LogisticRegression parameters (Stage 2)
+        self.plsda_lr_C = plsda_lr_C
+        self.plsda_lr_solver = plsda_lr_solver
+        self.plsda_lr_max_iter = plsda_lr_max_iter
 
         # Use user-specified models or defaults
         self.model_types = models if models is not None else MODEL_TYPES
@@ -1370,7 +1391,13 @@ class SpectralOptimizationProblem(Problem):
                 pls_transformer = PLSTransformer(n_components=n_components, scale=False)
                 pipe_steps.append(('pls', pls_transformer))
                 pipe_steps.append(('scaler', StandardScaler()))  # Scale PLS scores for LogisticRegression
-                lr = LogisticRegression(max_iter=1000, random_state=self.random_state)
+                # Use configurable LogisticRegression parameters (Stage 2 of PLS-DA)
+                lr = LogisticRegression(
+                    C=self.plsda_lr_C,
+                    solver=self.plsda_lr_solver,
+                    max_iter=self.plsda_lr_max_iter,
+                    random_state=self.random_state
+                )
                 # Apply class_weight to LogisticRegression if specified
                 if self.imbalance_method == 'class_weight':
                     lr.set_params(class_weight='balanced')
@@ -2806,7 +2833,11 @@ def _compute_classification_cv_metrics(
                 n_components = min(model_param + 1, 15, X_train_resampled.shape[1] - 1, X_train_resampled.shape[0] - 1)
                 n_components = max(1, n_components)
                 pls_transformer = PLSTransformer(n_components=n_components, scale=False)
-                lr = LogisticRegression(max_iter=1000, random_state=random_state)
+                # Extract LogisticRegression parameters from hyperparams (prefixed with lr_)
+                lr_C = hyperparams.get('lr_C', 1.0) if hyperparams else 1.0
+                lr_solver = hyperparams.get('lr_solver', 'lbfgs') if hyperparams else 'lbfgs'
+                lr_max_iter = hyperparams.get('lr_max_iter', 1000) if hyperparams else 1000
+                lr = LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=random_state)
                 # Apply class_weight if specified
                 if imbalance_method == 'class_weight':
                     lr.set_params(class_weight='balanced')
@@ -3129,10 +3160,14 @@ def _compute_calibration_metrics(
                 from sklearn.preprocessing import StandardScaler
                 from sklearn.linear_model import LogisticRegression
                 pls_transformer = PLSTransformer(n_components=n_components, scale=False)
+                # Extract LogisticRegression parameters from hyperparams (prefixed with lr_)
+                lr_C = hyperparams.get('lr_C', 1.0) if hyperparams else 1.0
+                lr_solver = hyperparams.get('lr_solver', 'lbfgs') if hyperparams else 'lbfgs'
+                lr_max_iter = hyperparams.get('lr_max_iter', 1000) if hyperparams else 1000
                 model = Pipeline([
                     ('pls', pls_transformer),
                     ('scaler', StandardScaler()),
-                    ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                    ('lr', LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42))
                 ])
             else:
                 # Regression: use PLSRegression directly

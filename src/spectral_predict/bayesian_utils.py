@@ -336,13 +336,17 @@ def create_objective_function(
                 SCALE_SENSITIVE_MODELS = {'SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted'}
 
                 # Build pipeline with proper scaling (data is already preprocessed)
-                # For PLS-DA: PLS + StandardScaler + LogisticRegression (matches search.py lines 3417-3424)
-                # For scale-sensitive models: StandardScaler + Model (matches search.py lines 3427-3429)
+                # For PLS-DA: PLS + StandardScaler + LogisticRegression (matches search.py lines 3420-3443)
+                # For scale-sensitive models: StandardScaler + Model (matches search.py lines 3444-3447)
                 if model_name == "PLS-DA" and task_type == 'classification':
+                    # Extract LogisticRegression parameters (prefixed with lr_) if available
+                    lr_C = params.get('lr_C', 1.0) if params else 1.0
+                    lr_solver = params.get('lr_solver', 'lbfgs') if params else 'lbfgs'
+                    lr_max_iter = params.get('lr_max_iter', 1000) if params else 1000
                     pipe_steps = [
                         ("pls", model),
                         ("scaler", StandardScaler()),  # Scale PLS scores for LogisticRegression
-                        ("lr", LogisticRegression(max_iter=1000, random_state=42))
+                        ("lr", LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42))
                     ]
                 elif model_name in SCALE_SENSITIVE_MODELS:
                     # Apply to both regression and classification
