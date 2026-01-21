@@ -24001,13 +24001,19 @@ F1 Score:  {f1:.4f}
 
         # Mark selected value with vertical line
         selected_idx = data.get('selected_idx', data.get('optimal_idx', 0))
+        optimal_idx = data.get('optimal_idx', 0)
+
         if selected_idx < len(param_values):
             selected_val = param_values[selected_idx]
+            # If selected equals optimal, show combined label
+            if selected_idx == optimal_idx:
+                label = f'Selected (Optimal): {selected_val:.4g}'
+            else:
+                label = f'Selected: {selected_val:.4g}'
             ax.axvline(x=selected_val, color='green', linestyle='--', linewidth=2,
-                      label=f'Selected: {selected_val:.4g}')
+                      label=label)
 
         # Mark optimal value if different from selected
-        optimal_idx = data.get('optimal_idx', 0)
         if optimal_idx != selected_idx and optimal_idx < len(param_values):
             optimal_val = param_values[optimal_idx]
             ax.axvline(x=optimal_val, color='red', linestyle=':', linewidth=2,
@@ -38561,7 +38567,7 @@ Configuration:
                 text=f"Applying {method} correction...",
                 foreground='blue'
             )
-            self.update()
+            self.root.update()
 
             # Placeholder for actual correction logic
             # In production, this would apply EPO, OPLS, GLSW, or region exclusion
