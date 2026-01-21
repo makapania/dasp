@@ -18795,7 +18795,9 @@ class SpectralPredictApp:
         for item in self.results_tree.get_children():
             self.results_tree.delete(item)
 
-        columns = list(results_df.columns)
+        # Filter out internal metadata columns (used by Model Dev but not for display)
+        INTERNAL_COLUMNS = {'imbalance_method', 'imbalance_params'}
+        columns = [c for c in results_df.columns if c not in INTERNAL_COLUMNS]
 
         # Only configure columns on first load (not during sorting) to prevent jumping
         if not is_sorted:
@@ -38397,7 +38399,7 @@ Configuration:
                 text=f"Running {method} analysis...",
                 foreground='blue'
             )
-            self.update()
+            self.root.update()
 
             # Run analysis based on method
             if len(self.contam_groups) == 1:
@@ -38409,6 +38411,7 @@ Configuration:
                     results = analyze_contaminant_influence(
                         self.contam_clean_data,
                         contam_data,
+                        wavelengths=self.contam_wavelengths,
                         method='estimated_epo',
                         n_components=n_components,
                         threshold=threshold
@@ -38417,6 +38420,7 @@ Configuration:
                     results = analyze_contaminant_influence(
                         self.contam_clean_data,
                         contam_data,
+                        wavelengths=self.contam_wavelengths,
                         method='opls_da',
                         n_components=n_components,
                         threshold=threshold
@@ -38425,6 +38429,7 @@ Configuration:
                     results = analyze_contaminant_influence(
                         self.contam_clean_data,
                         contam_data,
+                        wavelengths=self.contam_wavelengths,
                         method='glsw',
                         threshold=threshold
                     )
@@ -38437,6 +38442,7 @@ Configuration:
                 results = analyze_multiple_contaminants(
                     self.contam_clean_data,
                     self.contam_groups,
+                    wavelengths=self.contam_wavelengths,
                     method=method.lower().replace(' ', '_').replace('-', '_'),
                     n_components=n_components,
                     threshold=threshold,
@@ -38479,7 +38485,8 @@ Configuration:
             text_lines.append("=" * 60)
             text_lines.append("")
 
-            for i, (start, end) in enumerate(regions, 1):
+            for i, region in enumerate(regions, 1):
+                start, end = region[0], region[1]
                 text_lines.append(f"Region {i}: {start:.1f} - {end:.1f} nm")
 
             text_lines.append("")
@@ -38488,8 +38495,8 @@ Configuration:
             if self.contam_wavelengths is not None:
                 total_wl = len(self.contam_wavelengths)
                 excluded_wl = sum(
-                    ((self.contam_wavelengths >= start) & (self.contam_wavelengths <= end)).sum()
-                    for start, end in regions
+                    ((self.contam_wavelengths >= region[0]) & (self.contam_wavelengths <= region[1])).sum()
+                    for region in regions
                 )
                 pct = (excluded_wl / total_wl) * 100
                 text_lines.append(f"Wavelengths to exclude: {excluded_wl}/{total_wl} ({pct:.1f}%)")
