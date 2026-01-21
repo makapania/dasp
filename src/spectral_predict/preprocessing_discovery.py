@@ -742,11 +742,9 @@ def score_config(config: Dict, all_configs: List[Dict], task_type: str) -> float
         else:
             score_norm = 0
 
-    # Preprocessing complexity (prefer simpler)
-    complexity_norm = PREPROCESSING_COMPLEXITY.get(config['preprocessing'], 0.5)
-
-    # Weighted combination (CV error most important)
-    return 0.85 * score_norm + 0.15 * complexity_norm
+    # Performance only - no complexity penalty
+    # (Complexity weight was causing raw to rank above better-performing methods)
+    return score_norm
 
 
 def select_diverse_configs(
@@ -789,6 +787,9 @@ def select_diverse_configs(
                 selected.append(config)
                 if len(selected) >= n_top:
                     break
+
+    # Re-sort by combined score so display order matches quality
+    selected = sorted(selected, key=lambda c: c['_combined_score'])
 
     # Clean up temporary score
     for config in selected:
