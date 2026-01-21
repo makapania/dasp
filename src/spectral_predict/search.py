@@ -402,50 +402,103 @@ def compute_validation_metrics_for_top_models(
             window = row.get('Window', None)
             poly = row.get('Poly', None)
 
-            # Convert to proper types
-            deriv = int(deriv) if deriv and not pd.isna(deriv) and deriv > 0 else None
-            window = int(window) if window and not pd.isna(window) and window > 0 else None
-            poly = int(poly) if poly and not pd.isna(poly) and poly > 0 else None
+            # Check for GA preprocessing genes (needs reconstruction)
+            ga_genes_str = row.get('ga_genes', None)
+            use_ga_transform = False
+            ga_transform = None
+            ga_genes = None
+
+            if ga_genes_str is not None and ga_genes_str != '' and not pd.isna(ga_genes_str):
+                try:
+                    # Parse genes from string (stored as list representation)
+                    import ast
+                    if isinstance(ga_genes_str, str):
+                        ga_genes = np.array(ast.literal_eval(ga_genes_str))
+                    else:
+                        ga_genes = np.array(ga_genes_str)
+
+                    # Import GA reconstruction function
+                    from spectral_predict.ga_preprocessing import chromosome_to_transform
+
+                    # Reconstruct transform from genes
+                    _, ga_transform = chromosome_to_transform(ga_genes)
+                    use_ga_transform = True
+                except Exception as e:
+                    genes_preview = str(ga_genes_str)[:100] if isinstance(ga_genes_str, str) else str(ga_genes_str)
+                    print(f"  [Warning] Could not reconstruct GA transform: {e}")
+                    print(f"            GA genes data: {genes_preview}")
+                    use_ga_transform = False
+
+            # Convert to proper types (only needed if not using GA transform)
+            if not use_ga_transform:
+                deriv = int(deriv) if deriv and not pd.isna(deriv) and deriv > 0 else None
+                window = int(window) if window and not pd.isna(window) and window > 0 else None
+                poly = int(poly) if poly and not pd.isna(poly) and poly > 0 else None
 
             # Create cache key
-            cache_key = (preprocess_name, deriv, window, poly)
+            if use_ga_transform:
+                # GA preprocessing: cache by genes hash
+                cache_key = ('ga', tuple(ga_genes))
+            else:
+                cache_key = (preprocess_name, deriv, window, poly)
 
             # === STEP 2: Preprocess FULL spectrum (matching search.py and Model Dev) ===
             if cache_key in preprocess_cache:
                 X_train_preprocessed, X_val_preprocessed = preprocess_cache[cache_key]
             else:
-                # Build preprocessing pipeline
-                prep_steps = build_preprocessing_pipeline(
-                    preprocess_name,
-                    deriv=deriv,
-                    window=window,
-                    polyorder=poly
-                )
-
-                if prep_steps:
-                    prep_pipeline = Pipeline(list(prep_steps))
-                    X_train_preprocessed = prep_pipeline.fit_transform(X_train)
-                    X_val_preprocessed = prep_pipeline.transform(X_val)
+                if use_ga_transform:
+                    # Apply GA transform directly
+                    X_train_preprocessed = ga_transform(X_train)
+                    X_val_preprocessed = ga_transform(X_val)
                 else:
-                    X_train_preprocessed = X_train
-                    X_val_preprocessed = X_val
+                    # Build standard preprocessing pipeline
+                    prep_steps = build_preprocessing_pipeline(
+                        preprocess_name,
+                        deriv=deriv,
+                        window=window,
+                        polyorder=poly
+                    )
+
+                    if prep_steps:
+                        prep_pipeline = Pipeline(list(prep_steps))
+                        X_train_preprocessed = prep_pipeline.fit_transform(X_train)
+                        X_val_preprocessed = prep_pipeline.transform(X_val)
+                    else:
+                        X_train_preprocessed = X_train
+                        X_val_preprocessed = X_val
 
                 # Cache for reuse
                 preprocess_cache[cache_key] = (X_train_preprocessed, X_val_preprocessed)
 
-            # === STEP 3: Parse all_vars and subset to model wavelengths ===
-            all_vars_str = row.get('all_vars', 'N/A')
+            # === STEP 3: Parse wavelength selection ===
+            # Priority: smart_selected_wavelengths > all_vars > full spectrum
+            model_wavelengths = None
 
-            if all_vars_str != 'N/A' and all_vars_str and isinstance(all_vars_str, str):
-                # Parse wavelengths from all_vars (e.g., "1520.0, 1540.0, 1560.0, ...")
+            # Check for Smart preprocessing wavelength selection
+            smart_wavelengths_raw = row.get('smart_selected_wavelengths', None)
+            if smart_wavelengths_raw is not None and not pd.isna(smart_wavelengths_raw):
                 try:
-                    model_wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                    import ast
+                    if isinstance(smart_wavelengths_raw, str):
+                        smart_wavelengths = ast.literal_eval(smart_wavelengths_raw)
+                    else:
+                        smart_wavelengths = smart_wavelengths_raw
+                    # Convert to list of floats (wavelength values)
+                    model_wavelengths = [float(w) for w in smart_wavelengths]
                 except Exception as e:
-                    print(f"  [Warning] Could not parse all_vars for model {i+1}: {e}")
+                    print(f"  [Warning] Could not parse smart_selected_wavelengths for model {i+1}: {e}")
                     model_wavelengths = None
-            else:
-                # Full spectrum model - use all wavelengths
-                model_wavelengths = None
+
+            # Fallback to all_vars if no smart wavelengths
+            if model_wavelengths is None:
+                all_vars_str = row.get('all_vars', 'N/A')
+                if all_vars_str != 'N/A' and all_vars_str and isinstance(all_vars_str, str):
+                    # Parse wavelengths from all_vars (e.g., "1520.0, 1540.0, 1560.0, ...")
+                    try:
+                        model_wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                    except Exception as e:
+                        print(f"  [Warning] Could not parse all_vars for model {i+1}: {e}")
+                        model_wavelengths = None
 
             # Subset AFTER preprocessing (matching Model Dev behavior)
             if model_wavelengths is not None and len(model_wavelengths) > 0:
@@ -591,13 +644,13 @@ def compute_validation_metrics_for_top_models(
     # Reorder columns to place metrics in logical order:
     # Calibration metrics first, then validation metrics
     cols = list(df_results.columns)
-    if task_type == 'regression' and 'RMSEP' in cols and 'R2' in cols:
-        # Move RMSEP and R2pred after R2
+    if task_type == 'regression' and 'RMSEP' in cols and 'R2cv' in cols:
+        # Move RMSEP and R2pred after R2cv
         cols.remove('RMSEP')
         cols.remove('R2pred')
-        r2_idx = cols.index('R2')
-        cols.insert(r2_idx + 1, 'RMSEP')
-        cols.insert(r2_idx + 2, 'R2pred')
+        r2cv_idx = cols.index('R2cv')
+        cols.insert(r2cv_idx + 1, 'RMSEP')
+        cols.insert(r2cv_idx + 2, 'R2pred')
         df_results = df_results[cols]
     elif task_type == 'classification':
         # Order: Accuracy, ROC_AUC, F1, Precision, Recall (calibration)
@@ -1752,24 +1805,13 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
             # ═══════════════════════════════════════════════════════════════════════════
             # GA PREPROCESSING: Skip incompatible preprocessing configs
-            # When GA preprocessing is enabled, only use the config appropriate for this model group
+            # When GA preprocessing is enabled, only use the config optimized for this specific model
+            # Each model gets its own set of top-N preprocessing configs from GA optimization
             # ═══════════════════════════════════════════════════════════════════════════
             if ga_preprocess and 'ga_model_type' in preprocess_cfg:
-                # Determine this model's group
-                if model_name in PLS_MODELS:
-                    required_ga_type = "pls"
-                elif model_name in NEURAL_SVM_MODELS:
-                    required_ga_type = "neural_svm"
-                elif model_name in TREE_MODELS:
-                    required_ga_type = "tree"
-                elif model_name in NEURALBOOSTED_MODELS:
-                    required_ga_type = "neuralboosted"
-                else:
-                    # Unknown model type, use pls by default
-                    required_ga_type = "pls"
-
-                # Skip if this preprocessing config doesn't match the model group
-                if preprocess_cfg['ga_model_type'] != required_ga_type:
+                # Skip if this preprocessing config was optimized for a different model
+                # ga_model_type stores the actual model name (e.g., "LightGBM", "PLS")
+                if preprocess_cfg['ga_model_type'] != model_name:
                     continue
 
             for model, params in model_configs:
@@ -2812,24 +2854,13 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         for preprocess_cfg in preprocessing_methods:
             # ═══════════════════════════════════════════════════════════════════════════
             # GA PREPROCESSING: Skip incompatible preprocessing configs
-            # When GA preprocessing is enabled, only use the config appropriate for this model group
+            # When GA preprocessing is enabled, only use the config optimized for this specific model
+            # Each model gets its own set of top-N preprocessing configs from GA optimization
             # ═══════════════════════════════════════════════════════════════════════════
             if ga_preprocess and 'ga_model_type' in preprocess_cfg:
-                # Determine this model's group
-                if model_name in PLS_MODELS:
-                    required_ga_type = "pls"
-                elif model_name in NEURAL_SVM_MODELS:
-                    required_ga_type = "neural_svm"
-                elif model_name in TREE_MODELS:
-                    required_ga_type = "tree"
-                elif model_name in NEURALBOOSTED_MODELS:
-                    required_ga_type = "neuralboosted"
-                else:
-                    # Unknown model type, use pls by default
-                    required_ga_type = "pls"
-
-                # Skip if this preprocessing config doesn't match the model group
-                if preprocess_cfg['ga_model_type'] != required_ga_type:
+                # Skip if this preprocessing config was optimized for a different model
+                # ga_model_type stores the actual model name (e.g., "LightGBM", "PLS")
+                if preprocess_cfg['ga_model_type'] != model_name:
                     continue
 
             current_task += 1
@@ -3749,6 +3780,14 @@ def _run_single_config(
         result["ga_genes"] = preprocess_cfg['ga_genes'].tolist()  # Serialize numpy array
         result["ga_model_type"] = preprocess_cfg.get("ga_model_type", "linear")
         result["ga_config"] = preprocess_cfg.get("ga_config", "")
+
+    # Store Smart preprocessing metadata if present (for validation reconstruction)
+    if 'smart_selected_wavelengths' in preprocess_cfg and preprocess_cfg['smart_selected_wavelengths'] is not None:
+        result["smart_selected_wavelengths"] = preprocess_cfg['smart_selected_wavelengths']
+        result["smart_n_wavelengths"] = preprocess_cfg.get("smart_n_wavelengths")
+        result["smart_score"] = preprocess_cfg.get("smart_score")
+        result["smart_importance_method"] = preprocess_cfg.get("smart_importance_method")
+        result["smart_model_name"] = preprocess_cfg.get("smart_model_name")
 
     if task_type == "regression":
         # Calibration metrics (training data)
