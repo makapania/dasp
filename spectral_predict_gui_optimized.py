@@ -636,6 +636,140 @@ TOOLTIP_CONTENT = {
             "Large gamma = close reach (complex decision boundary, may overfit). "
             "scale = 1/(n_features × X.var()) - good default. auto = 1/n_features. Tune via cross-validation."
         ),
+        'svr_epsilon': (
+            "Epsilon-insensitive tube width. No penalty is given to errors within this tolerance margin. "
+            "Smaller epsilon = tighter fit (more support vectors, may overfit). "
+            "Larger epsilon = looser fit (fewer support vectors, more generalization). "
+            "0.1 is a common default. Scale to your target variable range for best results."
+        ),
+        'svr_degree': (
+            "Degree of the polynomial kernel function (only used with kernel='poly'). "
+            "Higher degrees = more complex decision boundary but risk overfitting. "
+            "2 = quadratic, 3 = cubic (default). Values above 5 rarely useful and slow to compute."
+        ),
+        'svr_coef0': (
+            "Independent term in kernel function (used with poly and sigmoid kernels). "
+            "Affects where the kernel function is shifted. 0.0 = no shift (default). "
+            "Higher values shift the kernel activation point."
+        ),
+
+        # Ridge additional
+        'ridge_solver': (
+            "Algorithm to compute Ridge regression solution. "
+            "auto = automatic choice based on data type. "
+            "svd = Singular Value Decomposition - stable for dense data. "
+            "cholesky = Cholesky decomposition - fast for small datasets. "
+            "lsqr = Iterative least squares - good for large sparse data. "
+            "sag/saga = Stochastic gradient methods - fastest for large datasets."
+        ),
+        'ridge_tol': (
+            "Convergence tolerance for iterative solvers (sag, lsqr). "
+            "Smaller values = more precision but longer computation. "
+            "1e-4 is standard for most applications."
+        ),
+
+        # Lasso additional
+        'lasso_selection': (
+            "Coordinate descent algorithm for Lasso optimization. "
+            "cyclic = iterate through features sequentially (default, deterministic). "
+            "random = randomly select features each iteration (can be faster for large problems). "
+            "cyclic is more reproducible; random may escape local optima."
+        ),
+        'lasso_tol': (
+            "Convergence tolerance for the coordinate descent algorithm. "
+            "Smaller = more precision but longer computation. "
+            "1e-4 is standard. Use 1e-5 for high precision or 1e-3 for faster results."
+        ),
+
+        # ElasticNet additional
+        'elasticnet_selection': (
+            "Coordinate descent algorithm for ElasticNet optimization. "
+            "cyclic = iterate through features sequentially (default, deterministic). "
+            "random = randomly select features each iteration (can be faster). "
+            "Same behavior as Lasso selection parameter."
+        ),
+        'elasticnet_tol': (
+            "Convergence tolerance for the coordinate descent algorithm. "
+            "Smaller = more precision but longer computation. 1e-4 is standard."
+        ),
+
+        # PLS-DA LogisticRegression parameters
+        'plsda_C': (
+            "Inverse regularization strength for LogisticRegression classifier in PLS-DA. "
+            "Smaller C = stronger regularization (simpler, more robust model). "
+            "Larger C = weaker regularization (fits training data more closely). "
+            "Default 1.0 is balanced. Try 0.01-0.1 for high-dimensional PLS features."
+        ),
+        'plsda_solver': (
+            "Optimization algorithm for LogisticRegression in PLS-DA. "
+            "lbfgs = Limited-memory BFGS (default) - fast, handles multinomial well. "
+            "liblinear = Library for Large Linear Classification - good for binary, small datasets. "
+            "lbfgs recommended for most spectroscopy applications."
+        ),
+        'plsda_max_iter': (
+            "Maximum iterations for LogisticRegression solver to converge. "
+            "Higher values ensure convergence but may increase training time. "
+            "500-2000 typically sufficient. Increase if you see convergence warnings."
+        ),
+
+        # MLP additional
+        'mlp_hidden_layer_sizes': (
+            "Architecture of the neural network - defines number and size of hidden layers. "
+            "(64,) = single layer with 64 neurons (simple, fast). "
+            "(128,64) = two layers with 128 then 64 neurons (more complex patterns). "
+            "(100,50,25) = three layers, progressively smaller (deep network). "
+            "Larger/deeper networks need more training data to avoid overfitting."
+        ),
+        'mlp_learning_rate_init': (
+            "Initial learning rate for weight updates during training. "
+            "Controls how much weights change each iteration. "
+            "0.001 is a common default. Lower (0.0001) = slower but more stable. "
+            "Higher (0.01) = faster but may overshoot optimal weights."
+        ),
+        'mlp_batch_size': (
+            "Number of samples per mini-batch for stochastic optimizers (adam, sgd). "
+            "auto = min(200, n_samples) - good default. "
+            "Smaller batches (32-64) = more noise, may generalize better. "
+            "Larger batches (128-256) = smoother, faster training. "
+            "Only affects training speed and gradient estimates."
+        ),
+        'mlp_max_iter': (
+            "Maximum number of training iterations (epochs) for the neural network. "
+            "Higher = better convergence but longer training. "
+            "100-500 typical for spectral data. Increase if training doesn't converge."
+        ),
+        'mlp_learning_rate': (
+            "Learning rate schedule for weight updates. "
+            "constant = fixed learning rate throughout training. "
+            "invscaling = gradually decreasing rate (lr / t^power_t). "
+            "adaptive = keeps rate constant until loss stops improving, then divides by 5. "
+            "adaptive often works best for spectroscopy data."
+        ),
+        'mlp_momentum': (
+            "Momentum for gradient descent update (only used with solver='sgd'). "
+            "Adds fraction of previous update to current update. "
+            "0.9 is standard. Higher (0.95-0.99) = more momentum, may escape local minima. "
+            "Lower = more responsive to current gradients."
+        ),
+
+        # CatBoost additional
+        'catboost_iterations': (
+            "Number of boosting rounds (trees) to build. Each iteration adds a new tree "
+            "that corrects errors from previous trees. More iterations = better fit but "
+            "slower training and risk of overfitting. 100-200 works well for most spectroscopy."
+        ),
+        'catboost_learning_rate': (
+            "Step size shrinkage for each boosting iteration. Controls how much each tree contributes. "
+            "Lower values (0.01-0.05) = conservative, needs more iterations. "
+            "Higher values (0.1-0.3) = aggressive, fewer iterations needed but may overfit. "
+            "CatBoost auto-tunes this if not specified."
+        ),
+        'catboost_depth': (
+            "Maximum depth of each tree. Controls model complexity. "
+            "Shallow (4-6) = simple patterns, less overfitting, faster. "
+            "Deep (8-10) = complex patterns, more overfitting risk. "
+            "CatBoost typically performs well with depth 4-6 for spectroscopy."
+        ),
 
         # CatBoost
         'catboost_l2_leaf_reg': (
@@ -812,7 +946,199 @@ TOOLTIP_CONTENT = {
             "highly collinear spectral data. Less thorough than VCPA-IRIV. "
             "Default vcpa-iriv works well for most spectroscopy applications."
         ),
-    }
+    },
+
+    # ===== VARIABLE SELECTION METHODS =====
+    'variable_selection': {
+        'UVE': (
+            "Uninformative Variable Elimination (UVE) removes noisy, uninformative wavelengths by comparing "
+            "real variables to random noise variables. Uses PLS cross-validation to identify which wavelengths "
+            "contribute more signal than noise. Fast preprocessing step that can dramatically reduce "
+            "dimensionality while preserving predictive power. Best used before other selection methods."
+        ),
+        'SPA': (
+            "Successive Projections Algorithm (SPA) selects wavelengths with minimal collinearity by iteratively "
+            "projecting variables onto orthogonal subspaces. Produces a compact set of uncorrelated wavelengths "
+            "that span the spectral information space. Very fast (O(n*k) complexity). Excellent for reducing "
+            "multicollinearity in linear models (PLS, Ridge). Typically selects 5-30 wavelengths."
+        ),
+        'iPLS': (
+            "Interval PLS (iPLS) divides the spectrum into equal intervals and evaluates each interval's "
+            "predictive power independently. Identifies which spectral regions are most informative for "
+            "your target property. Useful for understanding which molecular bands matter. Can combine best "
+            "intervals for improved performance. Interval size trades off resolution vs. computation."
+        ),
+        'CARS': (
+            "Competitive Adaptive Reweighted Sampling (CARS) is a sophisticated iterative method that "
+            "progressively removes uninformative variables through an adaptive weighted sampling process. "
+            "Uses PLS regression and cross-validation to evaluate variable importance at each iteration. "
+            "Excellent for finding compact, high-performing wavelength subsets. Slower than UVE/SPA but "
+            "often produces better results. Best for linear models."
+        ),
+        'CARS_Tree': (
+            "CARS-Tree Hybrid combines CARS variable weighting with tree-based importance scores. "
+            "Leverages both PLS coefficients and ensemble tree feature importance for more robust "
+            "variable selection. Better suited for tree-based models (RandomForest, LightGBM, XGBoost) "
+            "than pure CARS. Produces wavelength subsets optimized for nonlinear modeling."
+        ),
+        'VCPA': (
+            "Variable Combination Population Analysis (VCPA) with Iteratively Retaining Informative Variables "
+            "(IRIV). Advanced method that explores combinations of variables using population-based optimization. "
+            "Most thorough variable selection method but slowest. Recommended when you need the best possible "
+            "wavelength subset regardless of computation time."
+        ),
+        'GA': (
+            "Genetic Algorithm (GA) for variable selection uses evolutionary optimization to find optimal "
+            "wavelength subsets. Maintains a population of candidate solutions that evolve through selection, "
+            "crossover, and mutation. Can escape local optima that greedy methods might miss. Highly flexible "
+            "but requires tuning (population size, generations). Use 'Quick' mode for faster initial exploration."
+        ),
+        'UVE_SPA': (
+            "UVE-SPA Hybrid applies UVE first to remove noise, then SPA to minimize collinearity. "
+            "Two-stage approach combines the strengths of both methods: noise reduction followed by "
+            "orthogonal variable selection. Typically produces very compact, high-quality wavelength sets. "
+            "Recommended for datasets with significant noise."
+        ),
+    },
+
+    # ===== OUTLIER DETECTION METHODS =====
+    'outlier_detection': {
+        'pca_method': (
+            "Principal Component Analysis for outlier detection. Projects data onto principal components "
+            "and identifies samples that don't follow the main spectral variation patterns. Detects both "
+            "systematic outliers (different sample type) and random outliers (measurement errors). "
+            "Standard first step in spectroscopy quality control."
+        ),
+        'hotelling_t2': (
+            "Hotelling's T² statistic measures distance from the center of the PCA model in score space. "
+            "High T² indicates a sample that is different from typical samples but still within the model's "
+            "explanatory power. Common threshold: 95% or 99% confidence limit based on F-distribution. "
+            "Detects samples with unusual concentrations or properties."
+        ),
+        'q_residuals': (
+            "Q-Residuals (also called SPE - Squared Prediction Error) measures the unexplained spectral "
+            "variance for each sample. High Q indicates a sample with spectral features not captured by "
+            "the PCA model - often measurement errors, contamination, or different sample types. "
+            "Complementary to Hotelling's T² for comprehensive outlier detection."
+        ),
+        'mahalanobis': (
+            "Mahalanobis distance measures multivariate distance accounting for correlations between "
+            "variables. More robust than Euclidean distance for correlated spectral data. Identifies "
+            "samples that are statistically unusual considering the full covariance structure. "
+            "Useful when you want a single outlier metric without PCA decomposition."
+        ),
+        'leverage': (
+            "Leverage measures how influential each sample is in the model. High leverage samples have "
+            "unusual X-values (spectra) that strongly affect model coefficients. Not necessarily bad - "
+            "some high leverage samples are valuable edge cases. Very high leverage combined with "
+            "high residuals indicates problematic influential outliers."
+        ),
+    },
+
+    # ===== ENSEMBLE METHODS =====
+    'ensemble': {
+        'stacking': (
+            "Stacking Ensemble trains a meta-model on the predictions of base models. First, base models "
+            "(e.g., PLS, Ridge, RF) are trained on the original data. Then a meta-learner (often Ridge) "
+            "learns optimal weights to combine base predictions. More sophisticated than simple averaging - "
+            "can learn which models work best for which prediction ranges. Requires careful cross-validation "
+            "to avoid overfitting."
+        ),
+        'voting': (
+            "Voting Ensemble averages predictions from multiple models with equal or custom weights. "
+            "Simple but effective - reduces variance by combining diverse models. Works best when base "
+            "models are accurate but make different types of errors. Soft voting uses probability/prediction "
+            "averaging. More robust than any single model."
+        ),
+        'quartile': (
+            "Quartile Ensemble selects best-performing models for different Y-value ranges. Divides the "
+            "target into quartiles (Q1-Q4) and identifies which models perform best in each range. "
+            "Useful when different models excel at different concentration levels. Final predictions use "
+            "the best specialist model for each sample's predicted range."
+        ),
+        'blending': (
+            "Blending uses a holdout validation set instead of cross-validation to train the meta-model. "
+            "Simpler and faster than stacking but uses less data. Split data into training (for base models), "
+            "blending (for meta-model training), and test sets. Good for large datasets where holdout "
+            "validation is acceptable."
+        ),
+    },
+
+    # ===== RESULTS INTERPRETATION =====
+    'results': {
+        'expert_choice': (
+            "Expert's Choice (green rank) indicates models with excellent generalization - the gap between "
+            "calibration R² and cross-validation R² is ≤2%. These models are unlikely to overfit and should "
+            "perform reliably on new samples. Prioritize these for deployment."
+        ),
+        'good_fit': (
+            "Good Fit (yellow rank) indicates models with acceptable generalization - gap between R² and "
+            "R²cv is 2-5%. Some overfitting risk but still usable. Consider these if Expert's Choice models "
+            "don't meet your accuracy requirements."
+        ),
+        'overfit_warning': (
+            "Overfit Warning (gray strikethrough) indicates significant overfitting - calibration performance "
+            "much better than cross-validation. These models may perform poorly on new samples. Avoid for "
+            "deployment unless you understand and accept the overfitting risk."
+        ),
+        'quartile_highlighting': (
+            "Quartile highlighting shows which models perform best for different Y-value ranges. "
+            "Blue (Q1) = low Y values, Green (Q2), Orange (Q3), Pink (Q4) = high Y values. "
+            "Helps identify if certain models are specialists for particular concentration ranges. "
+            "Useful for building quartile ensembles."
+        ),
+        'rank_column': (
+            "Rank combines performance metrics with parsimony penalties. Lower rank = better model. "
+            "Considers R² (or Accuracy for classification), RMSE, variable count penalty, and complexity "
+            "penalty. Color-coded: green = expert choice, yellow = good fit, red = overfit but in top 3."
+        ),
+    },
+
+    # ===== DATA MANAGEMENT =====
+    'data_management': {
+        'merge_intersection': (
+            "Intersection merge keeps only wavelengths common to all datasets. Ensures consistent feature "
+            "space but may lose some spectral information. Recommended when merging data from different "
+            "instruments with overlapping but not identical wavelength ranges."
+        ),
+        'merge_union': (
+            "Union merge keeps all wavelengths from all datasets, filling gaps with NaN or interpolation. "
+            "Preserves all spectral information but may introduce missing data issues. Use when you need "
+            "the full spectral range and can handle or impute missing values."
+        ),
+        'duplicate_handling': (
+            "Duplicate sample handling determines what to do when sample IDs appear multiple times. "
+            "'Keep first' = use first occurrence only. 'Keep last' = use last occurrence. "
+            "'Average' = compute mean spectrum for duplicates. 'Remove' = exclude all duplicates. "
+            "Choose based on whether duplicates are errors or intentional replicates."
+        ),
+        'wavelength_matching': (
+            "Wavelength matching tolerance for combining datasets with slightly different wavelength grids. "
+            "Specifies how close wavelengths must be to be considered the same. Smaller tolerance = stricter "
+            "matching but may fail if instruments have different resolutions. Typical: 0.1-1.0 nm."
+        ),
+    },
+
+    # ===== CROSS-VALIDATION =====
+    'cross_validation': {
+        'cv_folds': (
+            "Number of cross-validation folds (K) for model evaluation. Data is split into K parts; each "
+            "part is held out once for testing while the others train the model. More folds = less bias "
+            "but more variance and computation. Recommendations: 5 folds for 50-100 samples, "
+            "10 folds for 100+ samples, Leave-One-Out for <50 samples."
+        ),
+        'stratified': (
+            "Stratified cross-validation ensures each fold has similar target value distribution. "
+            "Critical for classification (maintains class proportions) and helpful for regression "
+            "with skewed distributions. Always use for classification; consider for regression with "
+            "uneven Y-value distributions."
+        ),
+        'shuffle': (
+            "Shuffle samples before splitting into folds. Recommended when data may have hidden ordering "
+            "(e.g., measured sequentially). Set random_state for reproducibility. Not needed if data "
+            "is already randomized."
+        ),
+    },
 }
 
 
@@ -3881,6 +4207,182 @@ class SpectralPredictApp:
                         pady=4)
         return badge
 
+    def _create_inline_hint(self, parent, text, icon="info"):
+        """Create always-visible inline hint label with icon.
+
+        Args:
+            parent: Parent widget
+            text: Hint text to display
+            icon: Icon type ('info', 'tip', 'warning', 'help')
+
+        Returns:
+            tk.Label: The hint label widget
+        """
+        icon_map = {
+            'info': 'i',
+            'tip': '*',
+            'warning': '!',
+            'help': '?'
+        }
+        icon_char = icon_map.get(icon, 'i')
+
+        hint_frame = tk.Frame(parent, bg=self.colors['card_bg'])
+
+        # Icon circle
+        icon_label = tk.Label(
+            hint_frame,
+            text=icon_char,
+            font=('Segoe UI', 8, 'bold'),
+            fg='white',
+            bg=self.colors['accent'],
+            width=2,
+            height=1
+        )
+        icon_label.pack(side='left', padx=(0, 5))
+
+        # Hint text
+        text_label = tk.Label(
+            hint_frame,
+            text=text,
+            font=('Segoe UI', 9),
+            fg=self.colors['text_light'],
+            bg=self.colors['card_bg'],
+            anchor='w'
+        )
+        text_label.pack(side='left', fill='x')
+
+        return hint_frame
+
+    def _create_help_panel(self, parent, title, content, collapsed=True):
+        """Create collapsible help section with title and content.
+
+        Args:
+            parent: Parent widget
+            title: Section title (shown when collapsed)
+            content: Help text content (shown when expanded)
+            collapsed: Initial state (True = collapsed)
+
+        Returns:
+            tuple: (outer_frame, content_frame) for further customization
+        """
+        outer_frame = tk.Frame(parent, bg=self.colors['card_bg'])
+
+        # Header with toggle
+        header_frame = tk.Frame(outer_frame, bg=self.colors['bg_secondary'], cursor='hand2')
+        header_frame.pack(fill='x')
+
+        # Toggle indicator
+        is_expanded = tk.BooleanVar(value=not collapsed)
+        toggle_label = tk.Label(
+            header_frame,
+            text="v " if not collapsed else "> ",
+            font=('Consolas', 10),
+            fg=self.colors['accent'],
+            bg=self.colors['bg_secondary']
+        )
+        toggle_label.pack(side='left', padx=5)
+
+        # Title
+        title_label = tk.Label(
+            header_frame,
+            text=title,
+            font=('Segoe UI', 10, 'bold'),
+            fg=self.colors['text'],
+            bg=self.colors['bg_secondary']
+        )
+        title_label.pack(side='left', padx=5, pady=5)
+
+        # Content frame
+        content_frame = tk.Frame(outer_frame, bg=self.colors['card_bg'])
+        if not collapsed:
+            content_frame.pack(fill='x', padx=20, pady=10)
+
+        # Add content text if provided
+        if content:
+            content_label = tk.Label(
+                content_frame,
+                text=content,
+                font=('Segoe UI', 9),
+                fg=self.colors['text_light'],
+                bg=self.colors['card_bg'],
+                justify='left',
+                anchor='w',
+                wraplength=500
+            )
+            content_label.pack(fill='x')
+
+        # Toggle function
+        def toggle():
+            if is_expanded.get():
+                content_frame.pack_forget()
+                toggle_label.config(text="> ")
+                is_expanded.set(False)
+            else:
+                content_frame.pack(fill='x', padx=20, pady=10)
+                toggle_label.config(text="v ")
+                is_expanded.set(True)
+
+        header_frame.bind('<Button-1>', lambda e: toggle())
+        toggle_label.bind('<Button-1>', lambda e: toggle())
+        title_label.bind('<Button-1>', lambda e: toggle())
+
+        return outer_frame, content_frame
+
+    def _create_legend_card(self, parent, items, title="Legend"):
+        """Create color-coded legend card with swatches.
+
+        Args:
+            parent: Parent widget
+            items: List of tuples [(color, label), ...]
+            title: Legend title
+
+        Returns:
+            tk.Frame: The legend card frame
+        """
+        legend_frame = tk.Frame(parent, bg=self.colors['card_bg'], padx=10, pady=8)
+
+        # Title row
+        title_label = tk.Label(
+            legend_frame,
+            text=title,
+            font=('Segoe UI', 10, 'bold'),
+            fg=self.colors['text'],
+            bg=self.colors['card_bg']
+        )
+        title_label.pack(anchor='w', pady=(0, 5))
+
+        # Items row
+        items_frame = tk.Frame(legend_frame, bg=self.colors['card_bg'])
+        items_frame.pack(fill='x')
+
+        for color, label in items:
+            item_frame = tk.Frame(items_frame, bg=self.colors['card_bg'])
+            item_frame.pack(side='left', padx=(0, 15))
+
+            # Color swatch
+            swatch = tk.Label(
+                item_frame,
+                text="  ",
+                bg=color,
+                width=2,
+                height=1,
+                relief='solid',
+                borderwidth=1
+            )
+            swatch.pack(side='left', padx=(0, 3))
+
+            # Label
+            text_label = tk.Label(
+                item_frame,
+                text=label,
+                font=('Segoe UI', 9),
+                fg=self.colors['text_light'],
+                bg=self.colors['card_bg']
+            )
+            text_label.pack(side='left')
+
+        return legend_frame
+
     def _create_grid_layout(self, parent, num_columns=2):
         """Create a responsive grid layout container."""
         grid_frame = tk.Frame(parent, bg=self.colors['bg'])
@@ -5865,8 +6367,14 @@ class SpectralPredictApp:
         self.analysis_target_combo.bind('<<ComboboxSelected>>', self._on_target_column_changed)
 
         # CV Folds
-        ttk.Label(options_frame, text="CV Folds:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        cv_folds_label = ttk.Label(options_frame, text="CV Folds:")
+        cv_folds_label.grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        CreateToolTip(cv_folds_label, text=TOOLTIP_CONTENT['cross_validation']['cv_folds'], delay=500)
         ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=1, column=1, sticky=tk.W)
+
+        # CV Folds inline hint
+        ttk.Label(options_frame, text="50+ samples: 5-fold | 100+ samples: 10-fold | <50 samples: Leave-One-Out",
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
 
         # NEW: Variable Count Penalty (0-10 scale)
         var_penalty_label = ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel')
@@ -6003,6 +6511,25 @@ class SpectralPredictApp:
                                                                      subtitle="Choose spectral preprocessing techniques")
         preprocess_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
+
+        # ===== PREPROCESSING SELECTION GUIDE (Collapsible) =====
+        preproc_guide_content = (
+            "Method      | Removes              | Best For\n"
+            "------------|----------------------|---------------------------\n"
+            "Raw         | Nothing              | Baseline comparison\n"
+            "SNV         | Scatter, baseline    | Solid samples (NIR)\n"
+            "SG1 (1st)   | Baseline offset      | Peak enhancement\n"
+            "SG2 (2nd)   | Baseline + drift     | Overlapping peaks\n"
+            "deriv_snv   | Combined effects     | Complex baseline issues"
+        )
+        preproc_guide, _ = self._create_help_panel(
+            preprocess_card,
+            title="Preprocessing Selection Guide (click to expand)",
+            content=preproc_guide_content,
+            collapsed=True
+        )
+        preproc_guide.pack(fill='x', pady=(0, 10))
+
         # Inner frame for grid layout within card
         preprocess_frame = tk.Frame(preprocess_card, bg=self.colors['card_bg'])
         preprocess_frame.pack(fill='both', expand=True)
@@ -6337,6 +6864,29 @@ class SpectralPredictApp:
                                                              subtitle="Sophisticated wavelength selection techniques")
         varsel_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
+
+        # ===== VARIABLE SELECTION DECISION MATRIX (Collapsible) =====
+        varsel_guide_content = (
+            "Method      | Speed    | Best For\n"
+            "------------|----------|--------------------------------\n"
+            "Importance  | Fast     | Quick ranking, interpretable\n"
+            "UVE         | Fast     | Quick noise elimination\n"
+            "SPA         | Fast     | Minimal collinearity\n"
+            "UVE-SPA     | Fast     | Noise + collinearity\n"
+            "iPLS        | Medium   | Region-based interpretation\n"
+            "CARS        | Slow     | High accuracy, linear models\n"
+            "CARS-Tree   | Slow     | Tree models (RF, LightGBM)\n"
+            "VCPA-IRIV   | Slowest  | Best compact subset\n"
+            "GA          | Slowest  | Comprehensive search"
+        )
+        varsel_guide, _ = self._create_help_panel(
+            varsel_card,
+            title="Method Comparison (click to expand)",
+            content=varsel_guide_content,
+            collapsed=True
+        )
+        varsel_guide.pack(fill='x', pady=(0, 10))
+
         # Inner frame for grid layout within card
         varsel_frame = tk.Frame(varsel_card, bg=self.colors['card_bg'])
         varsel_frame.pack(fill='both', expand=True)
@@ -6891,7 +7441,7 @@ class SpectralPredictApp:
         # Alpha (regularization strength) options
         ridge_alpha_label = ttk.Label(ridge_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel')
         ridge_alpha_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
-        # CreateToolTip(ridge_alpha_label, text="Controls the strength of L2 regularization", delay=500)
+        CreateToolTip(ridge_alpha_label, text=TOOLTIP_CONTENT['hyperparameters']['ridge_alpha'], delay=500)
         ridge_alpha_frame = ttk.Frame(ridge_content_frame)
         ridge_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -6907,6 +7457,7 @@ class SpectralPredictApp:
         # Solver (optimization algorithm)
         ridge_solver_label = ttk.Label(ridge_content_frame, text="Solver (Optimization Algorithm):", style='Subheading.TLabel')
         ridge_solver_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(ridge_solver_label, text=TOOLTIP_CONTENT['hyperparameters']['ridge_solver'], delay=500)
         ridge_solver_frame = ttk.Frame(ridge_content_frame)
         ridge_solver_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -6920,6 +7471,7 @@ class SpectralPredictApp:
         # Tolerance (convergence criterion)
         ridge_tol_label = ttk.Label(ridge_content_frame, text="Tolerance (Convergence Criterion):", style='Subheading.TLabel')
         ridge_tol_label.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(ridge_tol_label, text=TOOLTIP_CONTENT['hyperparameters']['ridge_tol'], delay=500)
         ridge_tol_frame = ttk.Frame(ridge_content_frame)
         ridge_tol_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -6953,7 +7505,7 @@ class SpectralPredictApp:
         # Alpha (regularization strength) options
         lasso_alpha_label = ttk.Label(lasso_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel')
         lasso_alpha_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
-        # CreateToolTip() - missing parameters
+        CreateToolTip(lasso_alpha_label, text=TOOLTIP_CONTENT['hyperparameters']['lasso_alpha'], delay=500)
         lasso_alpha_frame = ttk.Frame(lasso_content_frame)
         lasso_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -6968,6 +7520,7 @@ class SpectralPredictApp:
         # Selection (coordinate descent algorithm)
         lasso_selection_label = ttk.Label(lasso_content_frame, text="Selection (Coordinate Descent Algorithm):", style='Subheading.TLabel')
         lasso_selection_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(lasso_selection_label, text=TOOLTIP_CONTENT['hyperparameters']['lasso_selection'], delay=500)
         lasso_selection_frame = ttk.Frame(lasso_content_frame)
         lasso_selection_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -6978,6 +7531,7 @@ class SpectralPredictApp:
         # Tolerance (convergence criterion)
         lasso_tol_label = ttk.Label(lasso_content_frame, text="Tolerance (Convergence Criterion):", style='Subheading.TLabel')
         lasso_tol_label.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(lasso_tol_label, text=TOOLTIP_CONTENT['hyperparameters']['lasso_tol'], delay=500)
         lasso_tol_frame = ttk.Frame(lasso_content_frame)
         lasso_tol_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7011,7 +7565,7 @@ class SpectralPredictApp:
         # Alpha (regularization strength) options
         elasticnet_alpha_label = ttk.Label(elasticnet_content_frame, text="Alpha (Regularization Strength):", style='Subheading.TLabel')
         elasticnet_alpha_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
-        # CreateToolTip() - missing parameters
+        CreateToolTip(elasticnet_alpha_label, text=TOOLTIP_CONTENT['hyperparameters']['elasticnet_alpha'], delay=500)
         elasticnet_alpha_frame = ttk.Frame(elasticnet_content_frame)
         elasticnet_alpha_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7025,7 +7579,7 @@ class SpectralPredictApp:
         # L1 ratio options
         elasticnet_l1_label = ttk.Label(elasticnet_content_frame, text="L1 Ratio (L1 vs L2 mix):", style='Subheading.TLabel')
         elasticnet_l1_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
-        # CreateToolTip() - missing parameters
+        CreateToolTip(elasticnet_l1_label, text=TOOLTIP_CONTENT['hyperparameters']['elasticnet_l1_ratio'], delay=500)
         elasticnet_l1_frame = ttk.Frame(elasticnet_content_frame)
         elasticnet_l1_frame.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7039,6 +7593,7 @@ class SpectralPredictApp:
         # Selection (coordinate descent algorithm)
         elasticnet_selection_label = ttk.Label(elasticnet_content_frame, text="Selection (Coordinate Descent Algorithm):", style='Subheading.TLabel')
         elasticnet_selection_label.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(elasticnet_selection_label, text=TOOLTIP_CONTENT['hyperparameters']['elasticnet_selection'], delay=500)
         elasticnet_selection_frame = ttk.Frame(elasticnet_content_frame)
         elasticnet_selection_frame.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7049,6 +7604,7 @@ class SpectralPredictApp:
         # Tolerance (convergence criterion)
         elasticnet_tol_label = ttk.Label(elasticnet_content_frame, text="Tolerance (Convergence Criterion):", style='Subheading.TLabel')
         elasticnet_tol_label.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(elasticnet_tol_label, text=TOOLTIP_CONTENT['hyperparameters']['elasticnet_tol'], delay=500)
         elasticnet_tol_frame = ttk.Frame(elasticnet_content_frame)
         elasticnet_tol_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7084,7 +7640,7 @@ class SpectralPredictApp:
         # Max Latent Variables (n_components)
         pls_ncomp_label = ttk.Label(pls_content_frame, text="Max Latent Variables (n_components):", style='Subheading.TLabel')
         pls_ncomp_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
-        # CreateToolTip() - missing parameters
+        CreateToolTip(pls_ncomp_label, text=TOOLTIP_CONTENT['hyperparameters']['pls_max_n_components'], delay=500)
         max_comp_frame = ttk.Frame(pls_content_frame)
         max_comp_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7098,7 +7654,7 @@ class SpectralPredictApp:
         # max_iter options
         pls_maxiter_label = ttk.Label(pls_content_frame, text="Max Iterations:", style='Subheading.TLabel')
         pls_maxiter_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
-        # CreateToolTip() - missing parameters
+        CreateToolTip(pls_maxiter_label, text=TOOLTIP_CONTENT['hyperparameters']['pls_max_iter'], delay=500)
         pls_maxiter_frame = ttk.Frame(pls_content_frame)
         pls_maxiter_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7111,7 +7667,7 @@ class SpectralPredictApp:
         # tol options
         pls_tol_label = ttk.Label(pls_content_frame, text="Tolerance:", style='Subheading.TLabel')
         pls_tol_label.grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
-        # CreateToolTip() - missing parameters
+        CreateToolTip(pls_tol_label, text=TOOLTIP_CONTENT['hyperparameters']['pls_tol'], delay=500)
         pls_tol_frame = ttk.Frame(pls_content_frame)
         pls_tol_frame.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7138,6 +7694,7 @@ class SpectralPredictApp:
         # C (inverse regularization strength)
         plsda_C_label = ttk.Label(pls_content_frame, text="C (Inverse Regularization):", style='Subheading.TLabel')
         plsda_C_label.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(5, 5))
+        CreateToolTip(plsda_C_label, text=TOOLTIP_CONTENT['hyperparameters']['plsda_C'], delay=500)
 
         plsda_C_frame = ttk.Frame(pls_content_frame)
         plsda_C_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
@@ -7156,6 +7713,7 @@ class SpectralPredictApp:
         # solver (optimization algorithm)
         plsda_solver_label = ttk.Label(pls_content_frame, text="Solver:", style='Subheading.TLabel')
         plsda_solver_label.grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        CreateToolTip(plsda_solver_label, text=TOOLTIP_CONTENT['hyperparameters']['plsda_solver'], delay=500)
 
         plsda_solver_frame = ttk.Frame(pls_content_frame)
         plsda_solver_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
@@ -7170,6 +7728,7 @@ class SpectralPredictApp:
         # max_iter (LogisticRegression iterations)
         plsda_maxiter_label = ttk.Label(pls_content_frame, text="LR Max Iterations:", style='Subheading.TLabel')
         plsda_maxiter_label.grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(10, 5))
+        CreateToolTip(plsda_maxiter_label, text=TOOLTIP_CONTENT['hyperparameters']['plsda_max_iter'], delay=500)
 
         plsda_maxiter_frame = ttk.Frame(pls_content_frame)
         plsda_maxiter_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
@@ -7502,7 +8061,9 @@ class SpectralPredictApp:
         catboost_content_frame.pack(fill='both', expand=True)
 
         # iterations (number of boosting rounds, equivalent to n_estimators)
-        ttk.Label(catboost_content_frame, text="Number of Boosting Rounds (iterations):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        catboost_iter_label = ttk.Label(catboost_content_frame, text="Number of Boosting Rounds (iterations):", style='Subheading.TLabel')
+        catboost_iter_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(catboost_iter_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_iterations'], delay=500)
         catboost_iterations_frame = ttk.Frame(catboost_content_frame)
         catboost_iterations_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7516,7 +8077,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # learning_rate (step size shrinkage)
-        ttk.Label(catboost_content_frame, text="Learning Rate (learning_rate):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_lr_label = ttk.Label(catboost_content_frame, text="Learning Rate (learning_rate):", style='Subheading.TLabel')
+        catboost_lr_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(catboost_lr_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_learning_rate'], delay=500)
         catboost_lr_frame = ttk.Frame(catboost_content_frame)
         catboost_lr_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7530,7 +8093,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # depth (tree depth)
-        ttk.Label(catboost_content_frame, text="Tree Depth (depth):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_depth_label = ttk.Label(catboost_content_frame, text="Tree Depth (depth):", style='Subheading.TLabel')
+        catboost_depth_label.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(catboost_depth_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_depth'], delay=500)
         catboost_depth_frame = ttk.Frame(catboost_content_frame)
         catboost_depth_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7544,7 +8109,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # l2_leaf_reg (L2 regularization coefficient)
-        ttk.Label(catboost_content_frame, text="L2 Leaf Regularization (l2_leaf_reg):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_l2_label = ttk.Label(catboost_content_frame, text="L2 Leaf Regularization (l2_leaf_reg):", style='Subheading.TLabel')
+        catboost_l2_label.grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(catboost_l2_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_l2_leaf_reg'], delay=500)
         catboost_l2_leaf_reg_frame = ttk.Frame(catboost_content_frame)
         catboost_l2_leaf_reg_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7557,7 +8124,9 @@ class SpectralPredictApp:
         ttk.Label(catboost_l2_leaf_reg_frame, text="(default: 3.0)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         # border_count (number of splits for numerical features)
-        ttk.Label(catboost_content_frame, text="Border Count (border_count):", style='Subheading.TLabel').grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_bc_label = ttk.Label(catboost_content_frame, text="Border Count (border_count):", style='Subheading.TLabel')
+        catboost_bc_label.grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(catboost_bc_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_border_count'], delay=500)
         catboost_border_count_frame = ttk.Frame(catboost_content_frame)
         catboost_border_count_frame.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7573,7 +8142,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # bagging_temperature (Bayesian bagging intensity)
-        ttk.Label(catboost_content_frame, text="Bagging Temperature (bagging_temperature):", style='Subheading.TLabel').grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_bt_label = ttk.Label(catboost_content_frame, text="Bagging Temperature (bagging_temperature):", style='Subheading.TLabel')
+        catboost_bt_label.grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(catboost_bt_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_bagging_temperature'], delay=500)
         catboost_bagging_temp_frame = ttk.Frame(catboost_content_frame)
         catboost_bagging_temp_frame.grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7589,7 +8160,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # random_strength (randomness for scoring splits)
-        ttk.Label(catboost_content_frame, text="Random Strength (random_strength):", style='Subheading.TLabel').grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        catboost_rs_label = ttk.Label(catboost_content_frame, text="Random Strength (random_strength):", style='Subheading.TLabel')
+        catboost_rs_label.grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(catboost_rs_label, text=TOOLTIP_CONTENT['hyperparameters']['catboost_random_strength'], delay=500)
         catboost_random_strength_frame = ttk.Frame(catboost_content_frame)
         catboost_random_strength_frame.grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7618,7 +8191,9 @@ class SpectralPredictApp:
         mlp_content_frame.pack(fill='both', expand=True)
 
         # Hidden layer sizes (network architecture)
-        ttk.Label(mlp_content_frame, text="Hidden Layer Sizes (hidden_layer_sizes):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        mlp_hidden_label = ttk.Label(mlp_content_frame, text="Hidden Layer Sizes (hidden_layer_sizes):", style='Subheading.TLabel')
+        mlp_hidden_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(mlp_hidden_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_hidden_layer_sizes'], delay=500)
         mlp_hidden_frame = ttk.Frame(mlp_content_frame)
         mlp_hidden_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7632,7 +8207,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Alpha (L2 regularization penalty)
-        ttk.Label(mlp_content_frame, text="L2 Regularization (alpha):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_alpha_label = ttk.Label(mlp_content_frame, text="L2 Regularization (alpha):", style='Subheading.TLabel')
+        mlp_alpha_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_alpha_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_alpha'], delay=500)
         mlp_alpha_frame = ttk.Frame(mlp_content_frame)
         mlp_alpha_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7645,7 +8222,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Learning rate initial value
-        ttk.Label(mlp_content_frame, text="Initial Learning Rate (learning_rate_init):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_lr_init_label = ttk.Label(mlp_content_frame, text="Initial Learning Rate (learning_rate_init):", style='Subheading.TLabel')
+        mlp_lr_init_label.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_lr_init_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_learning_rate_init'], delay=500)
         mlp_lr_init_frame = ttk.Frame(mlp_content_frame)
         mlp_lr_init_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7658,7 +8237,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Activation function
-        ttk.Label(mlp_content_frame, text="Activation Function:", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_act_label = ttk.Label(mlp_content_frame, text="Activation Function:", style='Subheading.TLabel')
+        mlp_act_label.grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_act_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_activation'], delay=500)
         mlp_activation_frame = ttk.Frame(mlp_content_frame)
         mlp_activation_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7672,7 +8253,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Solver
-        ttk.Label(mlp_content_frame, text="Weight Optimization Solver:", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_solver_label = ttk.Label(mlp_content_frame, text="Weight Optimization Solver:", style='Subheading.TLabel')
+        mlp_solver_label.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_solver_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_solver'], delay=500)
         mlp_solver_frame = ttk.Frame(mlp_content_frame)
         mlp_solver_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7685,7 +8268,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Batch size
-        ttk.Label(mlp_content_frame, text="Batch Size (mini-batches):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_batch_label = ttk.Label(mlp_content_frame, text="Batch Size (mini-batches):", style='Subheading.TLabel')
+        mlp_batch_label.grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_batch_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_batch_size'], delay=500)
         mlp_batch_frame = ttk.Frame(mlp_content_frame)
         mlp_batch_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7700,7 +8285,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=17, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Learning rate schedule
-        ttk.Label(mlp_content_frame, text="Learning Rate Schedule:", style='Subheading.TLabel').grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_lr_sched_label = ttk.Label(mlp_content_frame, text="Learning Rate Schedule:", style='Subheading.TLabel')
+        mlp_lr_sched_label.grid(row=18, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_lr_sched_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_learning_rate'], delay=500)
         mlp_lr_sched_frame = ttk.Frame(mlp_content_frame)
         mlp_lr_sched_frame.grid(row=19, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7713,7 +8300,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Momentum (for SGD solver)
-        ttk.Label(mlp_content_frame, text="Momentum (for SGD solver only):", style='Subheading.TLabel').grid(row=21, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_momentum_label = ttk.Label(mlp_content_frame, text="Momentum (for SGD solver only):", style='Subheading.TLabel')
+        mlp_momentum_label.grid(row=21, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_momentum_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_momentum'], delay=500)
         mlp_momentum_frame = ttk.Frame(mlp_content_frame)
         mlp_momentum_frame.grid(row=22, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7728,7 +8317,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=23, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Max Iterations
-        ttk.Label(mlp_content_frame, text="Max Iterations:", style='Subheading.TLabel').grid(row=24, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        mlp_maxiter_label = ttk.Label(mlp_content_frame, text="Max Iterations:", style='Subheading.TLabel')
+        mlp_maxiter_label.grid(row=24, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(mlp_maxiter_label, text=TOOLTIP_CONTENT['hyperparameters']['mlp_max_iter'], delay=500)
         mlp_maxiter_frame = ttk.Frame(mlp_content_frame)
         mlp_maxiter_frame.grid(row=25, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7756,7 +8347,9 @@ class SpectralPredictApp:
         svr_content_frame.pack(fill='both', expand=True)
 
         # Kernel type
-        ttk.Label(svr_content_frame, text="Kernel Type (kernel):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        svr_kernel_label = ttk.Label(svr_content_frame, text="Kernel Type (kernel):", style='Subheading.TLabel')
+        svr_kernel_label.grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(svr_kernel_label, text=TOOLTIP_CONTENT['hyperparameters']['svr_kernel'], delay=500)
         svr_kernel_frame = ttk.Frame(svr_content_frame)
         svr_kernel_frame.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7768,7 +8361,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # C (regularization parameter)
-        ttk.Label(svr_content_frame, text="Regularization Parameter (C):", style='Subheading.TLabel').grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_C_label = ttk.Label(svr_content_frame, text="Regularization Parameter (C):", style='Subheading.TLabel')
+        svr_C_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(svr_C_label, text=TOOLTIP_CONTENT['hyperparameters']['svr_C'], delay=500)
         svr_C_frame = ttk.Frame(svr_content_frame)
         svr_C_frame.grid(row=4, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7782,7 +8377,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=5, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Gamma (kernel coefficient)
-        ttk.Label(svr_content_frame, text="Gamma (kernel coefficient):", style='Subheading.TLabel').grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_gamma_label = ttk.Label(svr_content_frame, text="Gamma (kernel coefficient):", style='Subheading.TLabel')
+        svr_gamma_label.grid(row=6, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(svr_gamma_label, text=TOOLTIP_CONTENT['hyperparameters']['svr_gamma'], delay=500)
         svr_gamma_frame = ttk.Frame(svr_content_frame)
         svr_gamma_frame.grid(row=7, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7796,7 +8393,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Epsilon
-        ttk.Label(svr_content_frame, text="Epsilon (epsilon-insensitive tube width):", style='Subheading.TLabel').grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_epsilon_label = ttk.Label(svr_content_frame, text="Epsilon (epsilon-insensitive tube width):", style='Subheading.TLabel')
+        svr_epsilon_label.grid(row=9, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(svr_epsilon_label, text=TOOLTIP_CONTENT['hyperparameters']['svr_epsilon'], delay=500)
         svr_epsilon_frame = ttk.Frame(svr_content_frame)
         svr_epsilon_frame.grid(row=10, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7811,7 +8410,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=11, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Degree (for polynomial kernel)
-        ttk.Label(svr_content_frame, text="Degree (for polynomial kernel only):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_degree_label = ttk.Label(svr_content_frame, text="Degree (for polynomial kernel only):", style='Subheading.TLabel')
+        svr_degree_label.grid(row=12, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(svr_degree_label, text=TOOLTIP_CONTENT['hyperparameters']['svr_degree'], delay=500)
         svr_degree_frame = ttk.Frame(svr_content_frame)
         svr_degree_frame.grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -7825,7 +8426,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
         # Coef0 (independent term in kernel)
-        ttk.Label(svr_content_frame, text="Coef0 (independent term in kernel function):", style='Subheading.TLabel').grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        svr_coef0_label = ttk.Label(svr_content_frame, text="Coef0 (independent term in kernel function):", style='Subheading.TLabel')
+        svr_coef0_label.grid(row=15, column=0, columnspan=6, sticky=tk.W, pady=(15, 5))
+        CreateToolTip(svr_coef0_label, text=TOOLTIP_CONTENT['hyperparameters']['svr_coef0'], delay=500)
         svr_coef0_frame = ttk.Frame(svr_content_frame)
         svr_coef0_frame.grid(row=16, column=0, columnspan=6, sticky=tk.W, pady=5)
 
@@ -8239,6 +8842,58 @@ class SpectralPredictApp:
         results_card_outer, results_card = self._create_card(content_frame, title="Model Performance Results",
                                                               subtitle="All tested models ranked by performance. Click on any result row to load it into the 'Model Development' tab for further tuning.")
         results_card_outer.pack(fill='both', expand=True, pady=10, padx=5)
+
+        # ===== RESULTS LEGEND (Always Visible) =====
+        # Create an always-visible legend explaining result colors and styles
+        legend_outer_frame = tk.Frame(results_card, bg=self.colors['card_bg'])
+        legend_outer_frame.pack(fill='x', pady=(0, 15))
+
+        # Quartile colors legend
+        quartile_legend = self._create_legend_card(
+            legend_outer_frame,
+            items=[
+                ('#e3f2fd', 'Q1 Low Y'),
+                ('#e8f5e9', 'Q2'),
+                ('#fff3e0', 'Q3'),
+                ('#fce4ec', 'Q4 High Y'),
+            ],
+            title="Region Colors (highlights best models per Y-range)"
+        )
+        quartile_legend.pack(side='left', padx=(0, 30))
+
+        # Rank indicator legend
+        rank_legend = self._create_legend_card(
+            legend_outer_frame,
+            items=[
+                ('#27ae60', 'Expert Choice'),
+                ('#f39c12', 'Good Fit'),
+                ('#e74c3c', 'Overfit Risk'),
+            ],
+            title="Rank Colors (generalization quality)"
+        )
+        rank_legend.pack(side='left', padx=(0, 30))
+
+        # Style indicators
+        style_frame = tk.Frame(legend_outer_frame, bg=self.colors['card_bg'], padx=10, pady=8)
+        style_frame.pack(side='left')
+
+        style_title = tk.Label(
+            style_frame,
+            text="Style Indicators",
+            font=('Segoe UI', 10, 'bold'),
+            fg=self.colors['text'],
+            bg=self.colors['card_bg']
+        )
+        style_title.pack(anchor='w', pady=(0, 5))
+
+        style_text = tk.Label(
+            style_frame,
+            text="Strikethrough = Overfit warning (R² >> R²cv)",
+            font=('Segoe UI', 9),
+            fg=self.colors['text_light'],
+            bg=self.colors['card_bg']
+        )
+        style_text.pack(anchor='w')
 
         # Create frame for treeview and scrollbars
         tree_frame = ttk.Frame(results_card)
@@ -34850,6 +35505,36 @@ Configuration:
 
         main_frame = ttk.Frame(scrollable_frame, style='TFrame', padding="30")
         main_frame.pack(fill='both', expand=True)
+
+        # ===== CALIBRATION TRANSFER DECISION GUIDE (Always Visible) =====
+        ct_guide_frame = tk.Frame(main_frame, bg=self.colors['card_bg'], padx=15, pady=12)
+        ct_guide_frame.pack(fill='x', pady=(0, 15))
+
+        ct_guide_title = tk.Label(
+            ct_guide_frame,
+            text="Quick Method Selection Guide",
+            font=('Segoe UI', 11, 'bold'),
+            fg=self.colors['accent'],
+            bg=self.colors['card_bg']
+        )
+        ct_guide_title.pack(anchor='w', pady=(0, 8))
+
+        ct_decision_content = (
+            "Same wavelength range + 10+ standards:  PDS (Piecewise Direct Standardization)\n"
+            "Same wavelength range + <10 standards:  DS (Direct Standardization)\n"
+            "Different wavelength ranges:            CTAI (Cross-Transfer Adaptive Interpolation)\n"
+            "No transfer standards available:        Feature-based matching methods"
+        )
+        ct_decision_label = tk.Label(
+            ct_guide_frame,
+            text=ct_decision_content,
+            font=('Consolas', 9),
+            fg=self.colors['text'],
+            bg=self.colors['card_bg'],
+            justify='left',
+            anchor='w'
+        )
+        ct_decision_label.pack(anchor='w')
 
         # ===================================================================
         # SECTION A: Radio Buttons - Load Existing vs Build New
