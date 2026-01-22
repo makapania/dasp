@@ -181,8 +181,8 @@ class CodeGenerator:
         if self.options.include_variable_selection and self.variable_indices is not None:
             sections.append(self._render_variable_selection_application())
 
-        # 7. Imbalance handling (if classification)
-        if self.imbalance_method and self.task_type == 'classification':
+        # 7. Imbalance handling (classification or regression)
+        if self.imbalance_method:
             sections.append(self._render_imbalance_handling())
 
         # 8. Model instantiation
@@ -235,8 +235,9 @@ class CodeGenerator:
         # Colab pip install cell (if requested)
         if self.options.colab_ready:
             cells.append(self._make_markdown_cell(
-                "## 0. Install Dependencies (Colab Only)\n\n"
-                "Run this cell if using Google Colab."
+                "## 0. Install Dependencies\n\n"
+                "Run this cell first if using Google Colab, jupyter.org, or other online environments.\n"
+                "Skip if running locally with packages already installed."
             ))
             pip_packages = self._get_pip_packages()
             cells.append(self._make_code_cell(f"!pip install -q {' '.join(pip_packages)}"))
@@ -282,6 +283,12 @@ class CodeGenerator:
             section_num += 1
             cells.append(self._make_markdown_cell(f"## {section_num}. Apply Variable Selection"))
             cells.append(self._make_code_cell(self._render_variable_selection_application()))
+
+        # Imbalance handling (classification or regression)
+        if self.imbalance_method:
+            section_num += 1
+            cells.append(self._make_markdown_cell(f"## {section_num}. Imbalance Handling"))
+            cells.append(self._make_code_cell(self._render_imbalance_handling()))
 
         # Model and cross-validation
         section_num += 1
@@ -345,7 +352,12 @@ class CodeGenerator:
         if self.options.include_visualization:
             packages.append('matplotlib')
 
-        if self.imbalance_method and self.imbalance_method.lower() == 'smote':
+        # Add imbalanced-learn for classification resampling methods
+        classification_resample_methods = [
+            'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+            'tomek_links', 'smote_tomek'
+        ]
+        if self.imbalance_method and self.imbalance_method.lower() in classification_resample_methods:
             packages.append('imbalanced-learn')
 
         return packages
@@ -554,6 +566,10 @@ def _decode_embedded_data(encoded_str):
         if self.options.include_visualization:
             imports.append('import matplotlib.pyplot as plt')
 
+        # Imbalance handling imports
+        if self.imbalance_method and self.imbalance_method.lower() == 'smote':
+            imports.append('from imblearn.over_sampling import SMOTE')
+
         return '\n'.join(imports)
 
     def _render_preprocessing_functions(self) -> str:
@@ -672,17 +688,23 @@ def _decode_embedded_data(encoded_str):
         )
 
     def _render_imbalance_handling(self) -> str:
-        """Render imbalance handling code for classification."""
+        """Render imbalance handling code for classification or regression."""
         if not self.imbalance_method:
             return ''
 
         method = self.imbalance_method.lower()
+
+        # =====================================================================
+        # CLASSIFICATION IMBALANCE METHODS
+        # =====================================================================
 
         if method == 'smote':
             return '''
 # =============================================================================
 # IMBALANCE HANDLING: SMOTE
 # =============================================================================
+
+from imblearn.over_sampling import SMOTE
 
 # Apply SMOTE to handle class imbalance
 smote = SMOTE(k_neighbors=5, random_state=42)
@@ -698,6 +720,122 @@ print(f"SMOTE applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} 
 X_final = X_balanced
 y = y_balanced
 '''
+
+        elif method == 'adasyn':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: ADASYN
+# =============================================================================
+
+from imblearn.over_sampling import ADASYN
+
+# Apply ADASYN (Adaptive Synthetic Sampling) to handle class imbalance
+adasyn = ADASYN(n_neighbors=5, random_state=42)
+
+# Determine which variable to use
+X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
+
+# Apply ADASYN
+X_balanced, y_balanced = adasyn.fit_resample(X_to_balance, y)
+print(f"ADASYN applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
+
+# Update variable names to use balanced data
+X_final = X_balanced
+y = y_balanced
+'''
+
+        elif method == 'borderline_smote':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: BorderlineSMOTE
+# =============================================================================
+
+from imblearn.over_sampling import BorderlineSMOTE
+
+# Apply BorderlineSMOTE (focuses on borderline samples) to handle class imbalance
+borderline_smote = BorderlineSMOTE(k_neighbors=5, random_state=42)
+
+# Determine which variable to use
+X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
+
+# Apply BorderlineSMOTE
+X_balanced, y_balanced = borderline_smote.fit_resample(X_to_balance, y)
+print(f"BorderlineSMOTE applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
+
+# Update variable names to use balanced data
+X_final = X_balanced
+y = y_balanced
+'''
+
+        elif method == 'random_undersampler':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: Random Undersampling
+# =============================================================================
+
+from imblearn.under_sampling import RandomUnderSampler
+
+# Apply random undersampling to balance classes
+undersampler = RandomUnderSampler(random_state=42)
+
+# Determine which variable to use
+X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
+
+# Apply undersampling
+X_balanced, y_balanced = undersampler.fit_resample(X_to_balance, y)
+print(f"Random undersampling applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
+
+# Update variable names to use balanced data
+X_final = X_balanced
+y = y_balanced
+'''
+
+        elif method == 'tomek_links':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: Tomek Links
+# =============================================================================
+
+from imblearn.under_sampling import TomekLinks
+
+# Apply Tomek Links to remove noisy boundary samples
+tomek = TomekLinks()
+
+# Determine which variable to use
+X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
+
+# Apply Tomek Links removal
+X_balanced, y_balanced = tomek.fit_resample(X_to_balance, y)
+print(f"Tomek Links applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
+
+# Update variable names to use balanced data
+X_final = X_balanced
+y = y_balanced
+'''
+
+        elif method == 'smote_tomek':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: SMOTETomek
+# =============================================================================
+
+from imblearn.combine import SMOTETomek
+
+# Apply SMOTETomek (combined oversampling + undersampling)
+smote_tomek = SMOTETomek(random_state=42)
+
+# Determine which variable to use
+X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
+
+# Apply SMOTETomek
+X_balanced, y_balanced = smote_tomek.fit_resample(X_to_balance, y)
+print(f"SMOTETomek applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
+
+# Update variable names to use balanced data
+X_final = X_balanced
+y = y_balanced
+'''
+
         elif method == 'class_weight':
             # Note: class_weight='balanced' is set directly in model params
             return '''
@@ -708,6 +846,156 @@ y = y_balanced
 # Note: Model will use class_weight='balanced' parameter
 # This automatically adjusts weights inversely proportional to class frequencies
 '''
+
+        # =====================================================================
+        # REGRESSION IMBALANCE METHODS
+        # =====================================================================
+
+        elif method in ['smogn', 'smotetomek', 'oversample', 'undersample']:
+            # Regression imbalance methods - use custom RegressionResampler
+            return f'''
+# =============================================================================
+# IMBALANCE HANDLING: {method.upper()} (Regression)
+# =============================================================================
+
+def regression_resampler(X, y, method='{method}', n_bins=5, k_neighbors=5):
+    """
+    Simple regression resampling for imbalanced continuous targets.
+    Bins continuous target into groups and applies SMOTE-like oversampling.
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    # Bin the continuous target
+    bin_edges = np.linspace(y.min(), y.max(), n_bins + 1)
+    bin_indices = np.digitize(y, bins=bin_edges[:-1], right=False) - 1
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+    # Count samples per bin
+    bin_counts = np.bincount(bin_indices, minlength=n_bins)
+    max_count = bin_counts.max()
+
+    X_res, y_res = [X.copy()], [y.copy()]
+
+    for bin_idx in range(n_bins):
+        bin_mask = bin_indices == bin_idx
+        if bin_counts[bin_idx] < max_count and bin_counts[bin_idx] >= k_neighbors:
+            X_bin = X[bin_mask]
+            y_bin = y[bin_mask]
+            n_synthetic = max_count - bin_counts[bin_idx]
+
+            # Generate synthetic samples using interpolation
+            nn = NearestNeighbors(n_neighbors=min(k_neighbors, len(X_bin)))
+            nn.fit(X_bin)
+
+            for _ in range(n_synthetic):
+                idx = np.random.randint(len(X_bin))
+                _, neighbor_indices = nn.kneighbors([X_bin[idx]])
+                neighbor_idx = np.random.choice(neighbor_indices[0][1:])
+
+                # Interpolate
+                alpha = np.random.random()
+                X_new = X_bin[idx] + alpha * (X_bin[neighbor_idx] - X_bin[idx])
+                y_new = y_bin[idx] + alpha * (y_bin[neighbor_idx] - y_bin[idx])
+
+                X_res.append(X_new.reshape(1, -1))
+                y_res.append(np.array([y_new]))
+
+    return np.vstack(X_res), np.concatenate(y_res)
+
+# Determine which variable to use
+X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
+
+# Apply regression resampling
+X_balanced, y_balanced = regression_resampler(X_to_balance, y, method='{method}')
+print(f"Regression resampling applied: {{X_to_balance.shape[0]}} -> {{X_balanced.shape[0]}} samples")
+
+# Update variable names
+X_final = X_balanced
+y = y_balanced
+'''
+
+        elif method == 'binning':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: Target Binning with Sample Weights (Regression)
+# =============================================================================
+
+from sklearn.utils import compute_sample_weight
+
+# Bin continuous target into n_bins groups
+n_bins = 5
+bin_edges = np.linspace(y.min(), y.max(), n_bins + 1)
+bin_indices = np.digitize(y, bins=bin_edges, right=False)
+bin_indices = np.clip(bin_indices, 1, n_bins)  # Ensure valid bin indices
+
+# Compute inverse frequency weights for each bin
+sample_weights = np.zeros(len(y))
+for bin_idx in range(1, n_bins + 1):
+    mask = bin_indices == bin_idx
+    n_in_bin = mask.sum()
+    if n_in_bin > 0:
+        # Weight inversely proportional to bin frequency
+        sample_weights[mask] = len(y) / (n_bins * n_in_bin)
+
+# Normalize weights to mean=1
+sample_weights = sample_weights / sample_weights.mean()
+
+print(f"Target binning applied: {n_bins} bins, weight range: {sample_weights.min():.2f}-{sample_weights.max():.2f}")
+print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, y, sample_weight=sample_weights))")
+'''
+
+        elif method == 'rare_boost':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: Rare-Value Boosting (Regression)
+# =============================================================================
+
+# Exponentially boost rare target values (far from median)
+median_y = np.median(y)
+std_y = np.std(y)
+
+if std_y > 0:
+    # Distance from median (normalized by std)
+    distances = np.abs(y - median_y) / std_y
+    # Exponential boost: samples farther from median get higher weight
+    boost_factor = 2.0
+    sample_weights = 1.0 + (boost_factor - 1.0) * (distances / distances.max())
+else:
+    # No variation in target - equal weights
+    sample_weights = np.ones(len(y))
+
+# Normalize weights to mean=1
+sample_weights = sample_weights / sample_weights.mean()
+
+print(f"Rare-value boosting applied: boost_factor={boost_factor}, weight range: {sample_weights.min():.2f}-{sample_weights.max():.2f}")
+print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, y, sample_weight=sample_weights))")
+'''
+
+        elif method == 'balanced':
+            return '''
+# =============================================================================
+# IMBALANCE HANDLING: Balanced Sample Weighting (Regression)
+# =============================================================================
+
+from sklearn.utils import compute_sample_weight
+
+# Treat continuous targets as discrete for weighting
+# (rounds to nearest integer or quantizes into bins)
+n_bins = 10
+bin_edges = np.linspace(y.min(), y.max(), n_bins + 1)
+y_binned = np.digitize(y, bins=bin_edges, right=False)
+y_binned = np.clip(y_binned, 1, n_bins)
+
+# Compute balanced weights (inverse frequency)
+sample_weights = compute_sample_weight('balanced', y_binned)
+
+# Normalize weights to mean=1
+sample_weights = sample_weights / sample_weights.mean()
+
+print(f"Balanced weighting applied: {n_bins} bins, weight range: {sample_weights.min():.2f}-{sample_weights.max():.2f}")
+print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, y, sample_weight=sample_weights))")
+'''
+
         else:
             return f'\n# Imbalance method: {self.imbalance_method} (not implemented in export)\n'
 
