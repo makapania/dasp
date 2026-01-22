@@ -2166,7 +2166,7 @@ class SpectralPredictApp:
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
         self.enable_smart_preprocessing = tk.BooleanVar(value=False)
         self.smart_preprocess_importance = tk.StringVar(value="model_specific")
-        self.smart_preprocess_n_top = tk.IntVar(value=10)
+        self.smart_preprocess_n_top = tk.IntVar(value=7)
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
@@ -5165,7 +5165,7 @@ class SpectralPredictApp:
 
         # Plot spectra
         for i in indices:
-            if i in self.excluded_spectra:
+            if self.X.index[i] in self.excluded_spectra:
                 current_alpha = 0.05
                 current_linewidth = 0.5
             else:
@@ -5174,7 +5174,8 @@ class SpectralPredictApp:
 
             line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
                           color=color, linewidth=current_linewidth)
-            line.set_gid(str(i))
+            # Store DataFrame index label as GID (not positional index)
+            line.set_gid(str(self.X.index[i]))
             line.set_picker(5)
 
         ax.set_xlabel('Wavelength (nm)', fontsize=12)
@@ -5188,7 +5189,14 @@ class SpectralPredictApp:
         # Add click handler for toggling exclusion
         def on_pick(event):
             if event.artist.get_gid():
-                sample_idx = int(event.artist.get_gid())
+                gid = event.artist.get_gid()
+                # Convert GID back to original index type
+                # Try to convert to int if it looks like one, otherwise keep as string
+                try:
+                    sample_idx = int(gid) if gid.lstrip('-').isdigit() else gid
+                except (ValueError, AttributeError):
+                    sample_idx = gid
+
                 if sample_idx in self.excluded_spectra:
                     self.excluded_spectra.discard(sample_idx)
                     event.artist.set_alpha(alpha)
@@ -6176,7 +6184,7 @@ class SpectralPredictApp:
         n_top_spinbox = ttk.Spinbox(self.smart_preproc_options_frame, from_=3, to=20,
                                       textvariable=self.smart_preprocess_n_top, width=8)
         n_top_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-        ttk.Label(self.smart_preproc_options_frame, text="Number of preprocessing configs to pass to grid search (default: 10)",
+        ttk.Label(self.smart_preproc_options_frame, text="Number of preprocessing configs to pass to grid search (default: 7)",
                   style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=5, pady=(5, 0))
 
         # Info about what smart preprocessing does
@@ -12694,13 +12702,28 @@ class SpectralPredictApp:
     def _on_spectrum_click(self, event):
         """Handle clicking on a spectrum line to toggle its visibility and show info."""
         line = event.artist
-        sample_idx = int(line.get_gid())  # Get stored sample index
+        gid = line.get_gid()
+        # Convert GID back to original index type
+        # Try to convert to int if it looks like one, otherwise keep as string
+        try:
+            sample_idx = int(gid) if gid.lstrip('-').isdigit() else gid
+        except (ValueError, AttributeError):
+            sample_idx = gid
+
+        # Get positional index for accessing values array
+        if isinstance(sample_idx, int) and sample_idx in range(len(self.X)):
+            # If sample_idx is already a positional integer, use it directly
+            pos_idx = sample_idx
+        else:
+            # Otherwise, find the position of this index label in the DataFrame
+            pos_idx = self.X.index.get_loc(sample_idx)
 
         # Get Y value for this sample
-        y_value = self.y.values[sample_idx] if self.y is not None else None
+        y_value = self.y.values[pos_idx] if self.y is not None else None
 
         # Format and display specimen information
-        info_text = self._format_specimen_info(sample_idx, y_value=y_value)
+        # Pass positional index to _format_specimen_info (it expects positional index)
+        info_text = self._format_specimen_info(pos_idx, y_value=y_value)
 
         # Get click coordinates from the line data
         xdata = line.get_xdata()
@@ -13093,7 +13116,7 @@ class SpectralPredictApp:
         # Plot with interactive features (only for raw spectra to keep it simple)
         for i in indices:
             # Determine if this spectrum is currently excluded
-            if i in self.excluded_spectra:
+            if self.X.index[i] in self.excluded_spectra:
                 current_alpha = 0.05
                 current_linewidth = 0.5
             else:
@@ -13104,7 +13127,8 @@ class SpectralPredictApp:
                           color=color, linewidth=current_linewidth)
 
             # Make clickable for all spectra (raw and derivatives)
-            line.set_gid(str(i))  # Store sample index as gid
+            # Store DataFrame index label as GID (not positional index)
+            line.set_gid(str(self.X.index[i]))
             line.set_picker(5)  # Enable picking with 5-point tolerance
 
         ax.set_xlabel('Wavelength (nm)', fontsize=12)
@@ -13869,7 +13893,16 @@ class SpectralPredictApp:
 
             for idx, row in moderate_conf.iterrows():
                 for item in self.outlier_tree.get_children():
-                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index']:
+                    # Sample_Index is now DataFrame index label (could be int or string)
+                    tree_value = self.outlier_tree.item(item, 'values')[0]
+                    # Convert tree value to match type of Sample_Index
+                    try:
+                        # Try to convert to int if it looks like one
+                        tree_sample_idx = int(tree_value) if str(tree_value).lstrip('-').isdigit() else tree_value
+                    except (ValueError, AttributeError):
+                        tree_sample_idx = tree_value
+
+                    if tree_sample_idx == row['Sample_Index']:
                         self.outlier_tree.selection_add(item)
                         break
 
@@ -13892,7 +13925,15 @@ class SpectralPredictApp:
         added_count = 0
         for item in selected:
             values = self.outlier_tree.item(item, 'values')
-            sample_idx = int(values[0])
+            # Sample_Index is now DataFrame index label (could be int or string)
+            # Convert from string to appropriate type
+            sample_idx_str = values[0]
+            try:
+                # Try to convert to int if it looks like one
+                sample_idx = int(sample_idx_str) if str(sample_idx_str).lstrip('-').isdigit() else sample_idx_str
+            except (ValueError, AttributeError):
+                sample_idx = sample_idx_str
+
             if sample_idx not in self.excluded_spectra:
                 self.excluded_spectra.add(sample_idx)
                 added_count += 1
@@ -17769,7 +17810,8 @@ class SpectralPredictApp:
             # Run search
             # Filter out excluded spectra
             if self.excluded_spectra:
-                mask = ~np.isin(np.arange(len(self.X)), list(self.excluded_spectra))
+                # Use DataFrame index labels for filtering (not positional indices)
+                mask = ~self.X.index.isin(self.excluded_spectra)
                 X_filtered = self.X[mask]
                 y_filtered = self.y[mask]
 
@@ -24499,20 +24541,20 @@ F1 Score:  {f1:.4f}
                 X_source = self.X_original
 
             # Align sample selection with the main analysis (respect excluded spectra)
-            total_samples = len(X_source)
-            excluded_indices = sorted(idx for idx in self.excluded_spectra if 0 <= idx < total_samples)
-            if excluded_indices:
-                excluded_set = set(excluded_indices)
-                include_indices = [i for i in range(total_samples) if i not in excluded_set]
-                if len(include_indices) < n_folds:
+            # Use DataFrame index labels (not positional indices) for exclusion
+            if self.excluded_spectra:
+                mask = ~X_source.index.isin(self.excluded_spectra)
+                n_excluded = (~mask).sum()
+                n_remaining = mask.sum()
+                if n_remaining < n_folds:
                     raise ValueError(
-                        f"Only {len(include_indices)} samples remain after exclusions; "
+                        f"Only {n_remaining} samples remain after exclusions; "
                         f"{n_folds}-fold CV requires at least {n_folds} samples."
                     )
-                print(f"DEBUG: Applying {len(excluded_indices)} excluded spectra for refinement "
-                      f"({len(include_indices)} samples remain).")
-                X_base_df = X_source.iloc[include_indices]
-                y_series = self.y.iloc[include_indices]
+                print(f"DEBUG: Applying {n_excluded} excluded spectra for refinement "
+                      f"({n_remaining} samples remain).")
+                X_base_df = X_source[mask]
+                y_series = self.y[mask]
             else:
                 X_base_df = X_source
                 y_series = self.y
@@ -24548,7 +24590,7 @@ F1 Score:  {f1:.4f}
             print(f"  Random State: 42 (fixed)")
             print(f"\nData Filtering:")
             print(f"  Total samples in dataset: {len(X_source)}")
-            print(f"  Excluded samples: {len(excluded_indices) if excluded_indices else 0}")
+            print(f"  Excluded samples: {len(self.excluded_spectra) if self.excluded_spectra else 0}")
             print(f"  Validation enabled: {self.validation_enabled.get()}")
             print(f"  Validation samples: {len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0}")
             print(f"  -> Calibration samples for CV: {len(X_base_df)}")
@@ -27085,7 +27127,7 @@ Configuration:
         ttk.Radiobutton(source_frame, text="Directory (ASD/SPC)",
                        variable=self.pred_data_source, value='directory',
                        command=self._on_pred_source_change).pack(side='left', padx=5)
-        ttk.Radiobutton(source_frame, text="CSV File",
+        ttk.Radiobutton(source_frame, text="CSV/Excel File",
                        variable=self.pred_data_source, value='csv',
                        command=self._on_pred_source_change).pack(side='left', padx=5)
         ttk.Radiobutton(source_frame, text="Use Pre-Selected Validation Set 🔬",
@@ -27484,10 +27526,15 @@ Configuration:
 
         if source == 'directory':
             path = filedialog.askdirectory(title="Select Spectral Data Directory")
-        else:  # csv
+        else:  # csv or excel
             path = filedialog.askopenfilename(
-                title="Select CSV File",
-                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+                title="Select CSV or Excel File",
+                filetypes=[
+                    ("Supported files", "*.csv;*.xlsx;*.xls"),
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx;*.xls"),
+                    ("All files", "*.*")
+                ]
             )
 
         if path:
@@ -27586,10 +27633,15 @@ Configuration:
                         "No supported spectral files found in the selected directory.\n"
                         "Supported formats: ASD, SPC, JCAMP-DX (.jdx/.dx), ASCII (.dpt/.dat/.asc)")
                     return
-            else:  # csv
-                self.pred_status.config(text="Loading CSV file...")
-                self.root.update()
-                self.prediction_data, _ = read_csv_spectra(str(path))  # Unpack tuple, discard metadata
+            else:  # csv or excel
+                if str(path).lower().endswith(('.xlsx', '.xls')):
+                    self.pred_status.config(text="Loading Excel file...")
+                    self.root.update()
+                    self.prediction_data = pd.read_excel(str(path))
+                else:
+                    self.pred_status.config(text="Loading CSV file...")
+                    self.root.update()
+                    self.prediction_data, _ = read_csv_spectra(str(path))  # Unpack tuple, discard metadata
 
             # Update status
             n_samples = len(self.prediction_data)

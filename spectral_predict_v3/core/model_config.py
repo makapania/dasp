@@ -13,7 +13,7 @@ from typing import List, Dict, Any
 MODEL_TIERS = {
     'quick': {
         'description': 'Minimal set for rapid testing',
-        'models': ['PLS', 'Ridge', 'ElasticNet'],
+        'models': ['PLS', 'RandomForest'],
         'recommended_for': 'Quick tests, preliminary analysis, daily QC'
     },
 
@@ -38,7 +38,7 @@ MODEL_TIERS = {
 CLASSIFICATION_TIERS = {
     'quick': {
         'description': 'Minimal set for rapid classification testing',
-        'models': ['PLS-DA', 'LightGBM', 'RandomForest'],
+        'models': ['PLS-DA', 'RandomForest'],
         'recommended_for': 'Quick tests, preliminary analysis, daily QC'
     },
 
