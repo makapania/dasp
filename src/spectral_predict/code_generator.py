@@ -135,9 +135,17 @@ class CodeGenerator:
             return 0.0
 
         # Estimate: serialize to JSON, compress, base64 encode
-        total_elements = self.options.data_X.size + self.options.data_y.size
+        # Handle both numpy arrays and lists
+        def get_size(obj):
+            if hasattr(obj, 'size'):
+                return obj.size
+            elif hasattr(obj, '__len__'):
+                return len(obj)
+            return 0
+
+        total_elements = get_size(self.options.data_X) + get_size(self.options.data_y)
         if self.options.wavelengths is not None:
-            total_elements += self.options.wavelengths.size
+            total_elements += get_size(self.options.wavelengths)
 
         # Rough estimate: 8 bytes per float * compression ratio * base64 overhead
         estimated_bytes = total_elements * 8 * 0.3 * 1.33  # ~30% compression, 33% base64 overhead
@@ -378,10 +386,15 @@ class CodeGenerator:
     # =========================================================================
 
     @staticmethod
-    def _encode_array(arr: np.ndarray) -> str:
-        """Encode numpy array to base64+gzip string."""
+    def _encode_array(arr) -> str:
+        """Encode array (numpy or list) to base64+gzip string."""
         # Convert to JSON-serializable format
-        data_bytes = json.dumps(arr.tolist()).encode('utf-8')
+        # Handle both numpy arrays and lists
+        if hasattr(arr, 'tolist'):
+            data = arr.tolist()
+        else:
+            data = list(arr)
+        data_bytes = json.dumps(data).encode('utf-8')
         # Compress with gzip
         compressed = gzip.compress(data_bytes, compresslevel=9)
         # Encode to base64
