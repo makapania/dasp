@@ -18,16 +18,44 @@ y_pred_cv = cross_val_predict(model, X_final, y, cv=cv)
 
 CROSS_VALIDATION_REGRESSION_TEMPLATE = '''
 # =============================================================================
-# CROSS-VALIDATION
+# CROSS-VALIDATION (Per-fold averaging - matches Unscrambler)
 # =============================================================================
 
-from sklearn.model_selection import cross_val_predict, KFold
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.base import clone
 
 # Set up cross-validation
 cv = KFold(n_splits={cv_folds}, shuffle=True, random_state=42)
 
-# Get cross-validated predictions
-y_pred_cv = cross_val_predict(model, X_final, y, cv=cv)
+# Store per-fold metrics and predictions
+fold_rmse = []
+fold_r2 = []
+fold_mae = []
+y_pred_cv = np.zeros_like(y, dtype=float)
+
+for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
+    X_train, X_test = X_final[train_idx], X_final[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Clone and fit model for this fold
+    fold_model = clone(model)
+    fold_model.fit(X_train, y_train)
+    y_pred_fold = fold_model.predict(X_test).ravel()
+
+    # Store predictions
+    y_pred_cv[test_idx] = y_pred_fold
+
+    # Calculate per-fold metrics
+    fold_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred_fold)))
+    fold_r2.append(r2_score(y_test, y_pred_fold))
+    fold_mae.append(mean_absolute_error(y_test, y_pred_fold))
+
+# Average metrics across folds (chemometrics standard)
+rmse = np.mean(fold_rmse)
+r2 = np.mean(fold_r2)
+mae = np.mean(fold_mae)
+rpd = np.std(y) / rmse
 '''
 
 CROSS_VALIDATION_CLASSIFICATION_TEMPLATE = '''
@@ -49,22 +77,18 @@ y_pred_cv = cross_val_predict(model, X_final, y, cv=cv)
 
 METRICS_TEMPLATE = '''
 # =============================================================================
-# EVALUATION METRICS
+# EVALUATION METRICS (averaged across folds)
 # =============================================================================
 
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-
-# Calculate regression metrics
-rmse = np.sqrt(mean_squared_error(y, y_pred_cv))
-r2 = r2_score(y, y_pred_cv)
-mae = mean_absolute_error(y, y_pred_cv)
-rpd = np.std(y) / rmse  # Ratio of Performance to Deviation
-
-print(f"\\nCross-validation Results ({cv_folds}-fold):")
+print(f"\\nCross-validation Results ({cv_folds}-fold, per-fold averaging):")
 print(f"  RMSE: {{rmse:.4f}}")
 print(f"  R²:   {{r2:.4f}}")
 print(f"  MAE:  {{mae:.4f}}")
 print(f"  RPD:  {{rpd:.2f}}")
+
+# Per-fold details
+print(f"\\nPer-fold RMSE: {{[f'{{x:.4f}}' for x in fold_rmse]}}")
+print(f"Per-fold R²:   {{[f'{{x:.4f}}' for x in fold_r2]}}")
 '''
 
 METRICS_CLASSIFICATION_TEMPLATE = '''
