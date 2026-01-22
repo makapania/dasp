@@ -2467,7 +2467,8 @@ class SpectralPredictApp:
         self.window_7 = tk.BooleanVar(value=False)
         self.window_11 = tk.BooleanVar(value=False)
         self.window_17 = tk.BooleanVar(value=True)
-        self.window_19 = tk.BooleanVar(value=False)
+        self.window_23 = tk.BooleanVar(value=False)
+        self.window_31 = tk.BooleanVar(value=False)
         self.window_custom = tk.StringVar(value="")  # Custom window size
 
         # Pre-processing steps (optional, applied before transforms)
@@ -6580,10 +6581,11 @@ class SpectralPredictApp:
         ttk.Checkbutton(window_frame, text="Window=7", variable=self.window_7).grid(row=0, column=0, padx=5, pady=2)
         ttk.Checkbutton(window_frame, text="Window=11", variable=self.window_11).grid(row=0, column=1, padx=5, pady=2)
         ttk.Checkbutton(window_frame, text="Window=17 ⭐", variable=self.window_17).grid(row=0, column=2, padx=5, pady=2)
-        ttk.Checkbutton(window_frame, text="Window=19", variable=self.window_19).grid(row=0, column=3, padx=5, pady=2)
-        ttk.Label(window_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5), pady=2)
-        ttk.Entry(window_frame, textvariable=self.window_custom, width=10).grid(row=0, column=5, padx=5, pady=2)
-        ttk.Label(window_frame, text="(comma-separated, e.g., 13,15,21)", style='Caption.TLabel').grid(row=0, column=6, padx=5, pady=2)
+        ttk.Checkbutton(window_frame, text="Window=23", variable=self.window_23).grid(row=0, column=3, padx=5, pady=2)
+        ttk.Checkbutton(window_frame, text="Window=31", variable=self.window_31).grid(row=0, column=4, padx=5, pady=2)
+        ttk.Label(window_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5), pady=2)
+        ttk.Entry(window_frame, textvariable=self.window_custom, width=8).grid(row=0, column=6, padx=5, pady=2)
+        ttk.Label(window_frame, text="(comma-separated, e.g., 13,15,21)", style='Caption.TLabel').grid(row=0, column=7, padx=5, pady=2)
 
         # === Pre-Processing Steps (Optional) ===
         prestep_card_outer, prestep_card = self._create_card(content_frame, title="Pre-Processing Steps (Optional)",
@@ -9363,7 +9365,7 @@ class SpectralPredictApp:
         self.refine_window_custom = tk.StringVar(value="")
         window_frame = ttk.Frame(preprocess_frame)
         window_frame.grid(row=4, column=0, sticky=tk.W, pady=5)
-        for w in [7, 11, 17, 19]:
+        for w in [7, 11, 17, 23, 31]:
             ttk.Radiobutton(window_frame, text=f"{w}", variable=self.refine_window, value=w).pack(side='left', padx=5)
         ttk.Label(window_frame, text="Custom:", style='TLabel').pack(side='left', padx=(15, 5))
         ttk.Entry(window_frame, textvariable=self.refine_window_custom, width=8).pack(side='left', padx=5)
@@ -9414,7 +9416,7 @@ class SpectralPredictApp:
         self.refine_window_custom = tk.StringVar(value="")
         window_frame = ttk.Frame(preprocess_frame)
         window_frame.grid(row=4, column=0, sticky=tk.W, pady=5)
-        for w in [7, 11, 17, 19]:
+        for w in [7, 11, 17, 23, 31]:
             ttk.Radiobutton(window_frame, text=f"{w}", variable=self.refine_window, value=w).pack(side='left', padx=5)
         ttk.Label(window_frame, text="Custom:", style='TLabel').pack(side='left', padx=(15, 5))
         ttk.Entry(window_frame, textvariable=self.refine_window_custom, width=8).pack(side='left', padx=5)
@@ -10860,7 +10862,7 @@ class SpectralPredictApp:
         if hasattr(self, 'refine_window') and hasattr(self, 'refine_window_custom'):
             preset_value = self.refine_window.get()
             # Only clear if a valid preset is selected (not 0)
-            if preset_value in [7, 11, 17, 19]:
+            if preset_value in [7, 11, 17, 23, 31]:
                 self.refine_window_custom.set('')
 
     def _on_hyperparam_modified(self, *args):
@@ -15601,8 +15603,10 @@ class SpectralPredictApp:
                     window_sizes.append(11)
                 if self.window_17.get():
                     window_sizes.append(17)
-                if self.window_19.get():
-                    window_sizes.append(19)
+                if self.window_23.get():
+                    window_sizes.append(23)
+                if self.window_31.get():
+                    window_sizes.append(31)
 
                 # Add custom window sizes
                 if self.window_custom.get().strip():
@@ -16980,8 +16984,10 @@ class SpectralPredictApp:
                 window_sizes.append(11)
             if self.window_17.get():
                 window_sizes.append(17)
-            if self.window_19.get():
-                window_sizes.append(19)
+            if self.window_23.get():
+                window_sizes.append(23)
+            if self.window_31.get():
+                window_sizes.append(31)
 
             # Add custom window sizes
             if self.window_custom.get().strip():
@@ -22880,7 +22886,7 @@ Performance (Classification):
         print(f"DEBUG [WINDOW LOAD]: config.get('Window') = {config.get('Window')}, type = {type(config.get('Window'))}")
         if not pd.isna(window):
             window = int(window)
-            if window in [7, 11, 17, 19]:
+            if window in [7, 11, 17, 23, 31]:
                 self.refine_window.set(window)
                 self.refine_window_custom.set("")
             else:
@@ -25286,7 +25292,7 @@ F1 Score:  {f1:.4f}
             else:
                 preset = self.refine_window.get()
                 # Use preset if valid, otherwise default to 17
-                window = preset if preset in [7, 11, 17, 19] else 17
+                window = preset if preset in [7, 11, 17, 23, 31] else 17
 
             # Map GUI preprocessing names to search.py format
             preprocess_name_map = {
@@ -25656,6 +25662,22 @@ F1 Score:  {f1:.4f}
                             print(f"DEBUG: Applied PLS-DA params (unprefixed): {pls_params}")
                         else:
                             print(f"DEBUG: No applicable PLS params found in: {params_from_search}")
+                    elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                        # Strip model__ prefix for scale-sensitive models
+                        # These are wrapped in Pipeline([('scaler', StandardScaler()), ('model', model)])
+                        # Params SHOULD be unprefixed, but handle prefixed case defensively
+                        stripped_params = {}
+                        for key, val in params_from_search.items():
+                            if key.startswith('model__'):
+                                unprefixed = key[7:]  # Remove 'model__' prefix
+                                stripped_params[unprefixed] = val
+                            elif not any(key.startswith(p) for p in ['scaler__', 'steps', 'memory', 'verbose']):
+                                stripped_params[key] = val
+                        if stripped_params:
+                            model.set_params(**stripped_params)
+                            print(f"DEBUG: Applied {model_name} params: {stripped_params}")
+                        else:
+                            print(f"DEBUG: No applicable params found for {model_name}: {params_from_search}")
                     else:
                         # For other models, params are unprefixed and apply directly
                         model.set_params(**params_from_search)
