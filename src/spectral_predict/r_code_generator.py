@@ -92,10 +92,18 @@ class RCodeGenerator:
         if self.data_X is None or self.data_y is None:
             raise ValueError("data_X and data_y must be provided when include_data=True")
 
+        # Helper to get size from array or list
+        def get_size(obj):
+            if hasattr(obj, 'size'):
+                return obj.size
+            elif hasattr(obj, '__len__'):
+                return len(obj)
+            return 0
+
         # Check data size (100 MB limit)
-        total_elements = self.data_X.size + self.data_y.size
+        total_elements = get_size(self.data_X) + get_size(self.data_y)
         if self.wavelengths is not None:
-            total_elements += self.wavelengths.size
+            total_elements += get_size(self.wavelengths)
         estimated_bytes = total_elements * 8 * 0.3 * 1.33
         size_mb = estimated_bytes / (1024 * 1024)
 
@@ -356,9 +364,14 @@ if (!require("base64enc", quietly = TRUE)) {
         return '\n'.join(sections)
 
     @staticmethod
-    def _encode_array(arr: np.ndarray) -> str:
-        """Encode numpy array to base64+gzip string."""
-        data_bytes = json.dumps(arr.tolist()).encode('utf-8')
+    def _encode_array(arr) -> str:
+        """Encode array (numpy or list) to base64+gzip string."""
+        # Handle both numpy arrays and lists
+        if hasattr(arr, 'tolist'):
+            data = arr.tolist()
+        else:
+            data = list(arr)
+        data_bytes = json.dumps(data).encode('utf-8')
         compressed = gzip.compress(data_bytes, compresslevel=9)
         encoded = base64.b64encode(compressed).decode('ascii')
         return encoded

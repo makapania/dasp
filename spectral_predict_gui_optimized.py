@@ -27043,7 +27043,7 @@ Configuration:
                     if filepath:
                         options = ExportOptions(format='notebook', include_data=has_data,
                                                data_X=data_X, data_y=data_y, wavelengths=wavelengths,
-                                               colab_ready=True)
+                                               colab_ready=True, include_visualization=True)
                         gen = CodeGenerator(model_config, options)
                         gen.save_notebook(filepath)
                         status_var.set(f"Saved: {Path(filepath).name}")
@@ -27067,7 +27067,8 @@ Configuration:
                         initialfile=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipynb"
                     )
                     if filepath:
-                        options = ExportOptions(format='notebook', include_data=False)
+                        options = ExportOptions(format='notebook', include_data=False,
+                                               include_visualization=True)
                         gen = CodeGenerator(model_config, options)
                         gen.save_notebook(filepath)
                         status_var.set(f"Saved: {Path(filepath).name}")
