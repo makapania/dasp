@@ -1025,7 +1025,15 @@ print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, 
     def _render_cross_validation(self) -> str:
         """Render cross-validation code."""
         # Determine final variable name
-        if self.variable_indices is not None:
+        # Priority: imbalance resampling > variable selection > preprocessing > raw
+        resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                              'tomek_links', 'smote_tomek', 'smogn', 'smotetomek',
+                              'oversample', 'undersample']
+
+        if self.imbalance_method and self.imbalance_method.lower() in resampling_methods:
+            # Resampling methods create X_final and modify y
+            x_var = 'X_final'
+        elif self.variable_indices is not None:
             x_var = 'X_final'
         elif self.preprocessing != 'raw':
             x_var = 'X_processed'
@@ -1046,7 +1054,14 @@ print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, 
     def _render_final_model(self) -> str:
         """Render final model training code."""
         # Determine which variable to use
-        if self.variable_indices is not None:
+        # Priority: imbalance resampling > variable selection > preprocessing > raw
+        resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                              'tomek_links', 'smote_tomek', 'smogn', 'smotetomek',
+                              'oversample', 'undersample']
+
+        if self.imbalance_method and self.imbalance_method.lower() in resampling_methods:
+            x_var = 'X_final'
+        elif self.variable_indices is not None:
             x_var = 'X_final'
         elif self.preprocessing != 'raw':
             x_var = 'X_processed'

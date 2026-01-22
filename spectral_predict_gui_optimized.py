@@ -6300,8 +6300,22 @@ class SpectralPredictApp:
         self.outlier_selection_status = ttk.Label(selection_frame, text="No samples selected", style='Caption.TLabel')
         self.outlier_selection_status.grid(row=3, column=0, pady=10)
 
-        self._create_accent_button(selection_frame, "Mark Selected for Exclusion",
-                                    self._mark_selected_for_exclusion).grid(row=4, column=0, pady=10)
+        # Row 4: Buttons in horizontal layout
+        button_frame = ttk.Frame(selection_frame)
+        button_frame.grid(row=4, column=0, pady=10, sticky='w')
+
+        self._create_accent_button(button_frame, "Mark Selected for Exclusion",
+                                   self._mark_selected_for_exclusion).pack(side='left', padx=(0, 10))
+        self._create_accent_button(button_frame, "Unmark Selected",
+                                   self._unmark_selected_from_exclusion).pack(side='left')
+
+        # Row 5: Reset button
+        ttk.Button(selection_frame, text="Reset All Exclusions",
+                   command=self._reset_exclusions).grid(row=5, column=0, pady=10, sticky='w')
+
+        # Row 6: Exclusion status
+        self.tab3_exclusion_status = ttk.Label(selection_frame, text="No spectra excluded", style='Caption.TLabel')
+        self.tab3_exclusion_status.grid(row=6, column=0, pady=5, sticky='w')
 
         # Overall status
         self.tab2_status = ttk.Label(content_frame, text="Load data and run outlier detection to begin", style='Caption.TLabel')
@@ -12945,6 +12959,7 @@ class SpectralPredictApp:
         """Reset all spectrum exclusions."""
         self.excluded_spectra.clear()
         self._update_exclusion_status()
+        self._update_tab3_exclusion_status()  # Also update Tab 3 status
         # Regenerate plots to restore all spectra
         self._generate_plots()
         self._generate_explore_plots()  # Also update Explore tab plots
@@ -14565,6 +14580,16 @@ class SpectralPredictApp:
         n_selected = len(self.outlier_tree.selection())
         self.outlier_selection_status.config(text=f"{n_selected} samples selected")
 
+    def _get_sample_index_from_tree_item(self, item):
+        """Extract sample index from outlier tree item, handling type conversion."""
+        values = self.outlier_tree.item(item, 'values')
+        sample_idx_str = values[0]
+        try:
+            sample_idx = int(sample_idx_str) if str(sample_idx_str).lstrip('-').isdigit() else sample_idx_str
+        except (ValueError, AttributeError):
+            sample_idx = sample_idx_str
+        return sample_idx
+
     def _mark_selected_for_exclusion(self):
         """Add selected samples to unified exclusion set."""
         selected = self.outlier_tree.selection()
@@ -14573,19 +14598,10 @@ class SpectralPredictApp:
             messagebox.showwarning("No Selection", "Please select samples to exclude")
             return
 
-        # Get selected indices
+        # Get selected indices using helper method
         added_count = 0
         for item in selected:
-            values = self.outlier_tree.item(item, 'values')
-            # Sample_Index is now DataFrame index label (could be int or string)
-            # Convert from string to appropriate type
-            sample_idx_str = values[0]
-            try:
-                # Try to convert to int if it looks like one
-                sample_idx = int(sample_idx_str) if str(sample_idx_str).lstrip('-').isdigit() else sample_idx_str
-            except (ValueError, AttributeError):
-                sample_idx = sample_idx_str
-
+            sample_idx = self._get_sample_index_from_tree_item(item)
             if sample_idx not in self.excluded_spectra:
                 self.excluded_spectra.add(sample_idx)
                 added_count += 1
@@ -14594,7 +14610,45 @@ class SpectralPredictApp:
         if self.X is not None:
             self._generate_plots()
             self._generate_explore_plots()  # Also update Explore tab plots
-        # Samples excluded - plots updated
+
+        # Update both status labels (FIX: was missing before)
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+
+    def _unmark_selected_from_exclusion(self):
+        """Remove selected samples from the exclusion set."""
+        selected = self.outlier_tree.selection()
+
+        if not selected:
+            messagebox.showwarning("No Selection", "Please select samples to unmark")
+            return
+
+        removed_count = 0
+        for item in selected:
+            sample_idx = self._get_sample_index_from_tree_item(item)
+            if sample_idx in self.excluded_spectra:
+                self.excluded_spectra.discard(sample_idx)
+                removed_count += 1
+
+        # Update plots (with guard)
+        if self.X is not None:
+            self._generate_plots()
+            self._generate_explore_plots()
+
+        # Update both status labels
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+
+    def _update_tab3_exclusion_status(self):
+        """Update the exclusion status label in Tab 3."""
+        if hasattr(self, 'tab3_exclusion_status'):
+            n_excluded = len(self.excluded_spectra)
+            if n_excluded == 0:
+                self.tab3_exclusion_status.config(text="No spectra excluded")
+            elif n_excluded == 1:
+                self.tab3_exclusion_status.config(text="1 spectrum excluded")
+            else:
+                self.tab3_exclusion_status.config(text=f"{n_excluded} spectra excluded")
 
     def _export_outlier_report(self):
         """Export outlier detection report to CSV."""
@@ -26889,7 +26943,7 @@ Configuration:
             ('bundle', 'Complete Bundle (.zip) - Python + R + Data'),
             ('python_embedded', 'Python Script (.py) - With embedded data'),
             ('r_embedded', 'R Script (.R) - With embedded data'),
-            ('colab', 'Colab Notebook (.ipynb) - With embedded data'),
+            ('colab', 'Notebook (.ipynb) - With embedded data (Colab/Jupyter)'),
             ('script', 'Python Script (.py) - Basic (no data)'),
             ('notebook', 'Jupyter Notebook (.ipynb) - Basic (no data)'),
         ]
@@ -26932,6 +26986,11 @@ Configuration:
                     },
                     'wavelengths': self.refined_wavelengths,
                     'cv_folds': self.refined_config.get('cv_folds', 5),
+                    # Imbalance handling (for reproducibility)
+                    'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
+                    # Variable selection indices (GA or other methods)
+                    'variable_indices': self.refined_config.get('ga_genes'),
+                    'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
                 }
 
                 # Get data
