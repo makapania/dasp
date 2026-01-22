@@ -8861,39 +8861,34 @@ class SpectralPredictApp:
         )
         quartile_legend.pack(side='left', padx=(0, 30))
 
-        # Rank indicator legend
-        rank_legend = self._create_legend_card(
-            legend_outer_frame,
-            items=[
-                ('#27ae60', 'Expert Choice'),
-                ('#f39c12', 'Good Fit'),
-                ('#e74c3c', 'Overfit Risk'),
-            ],
-            title="Rank Colors (generalization quality)"
-        )
-        rank_legend.pack(side='left', padx=(0, 30))
-
-        # Style indicators
+        # Rank symbols and style indicators
         style_frame = tk.Frame(legend_outer_frame, bg=self.colors['card_bg'], padx=10, pady=8)
         style_frame.pack(side='left')
 
         style_title = tk.Label(
             style_frame,
-            text="Style Indicators",
+            text="Rank Symbols & Styles",
             font=('Segoe UI', 10, 'bold'),
             fg=self.colors['text'],
             bg=self.colors['card_bg']
         )
         style_title.pack(anchor='w', pady=(0, 5))
 
-        style_text = tk.Label(
-            style_frame,
-            text="Strikethrough = Overfit warning (R² >> R²cv)",
-            font=('Segoe UI', 9),
-            fg=self.colors['text_light'],
-            bg=self.colors['card_bg']
-        )
-        style_text.pack(anchor='w')
+        # Symbol explanations
+        symbol_items = [
+            ("★ = Expert Choice", self.colors['text_light']),
+            ("● = Good Fit", self.colors['text_light']),
+            ("Strikethrough = Overfit warning", self.colors['text_light']),
+        ]
+        for text, color in symbol_items:
+            lbl = tk.Label(
+                style_frame,
+                text=text,
+                font=('Segoe UI', 9),
+                fg=color,
+                bg=self.colors['card_bg']
+            )
+            lbl.pack(anchor='w')
 
         # Create frame for treeview and scrollbars
         tree_frame = ttk.Frame(results_card)
