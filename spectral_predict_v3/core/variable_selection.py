@@ -975,20 +975,21 @@ def ipls_forward(X, y, wavelengths, n_intervals=20, max_combine=5, cv_folds=5, r
     return subsets
 
 
-def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42):
+def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42, min_intervals=1):
     """
     Backward Interval PLS (biPLS) - iteratively removes worst intervals.
 
     This implements backward interval PLS from Leardi & Nørgaard (2004).
-    Starts with all intervals and iteratively removes the worst until
-    no further improvement is observed.
+    Starts with all intervals and iteratively removes intervals one at a time,
+    always removing the interval whose removal causes the least degradation
+    (or most improvement) in RMSECV.
 
     Algorithm:
     1. Divide spectrum into n_intervals equal segments
-    2. Start with all intervals included
-    3. Iteratively remove the interval whose removal most improves RMSECV
-    4. Stop when removal no longer improves the model
-    5. Return progression of removals
+    2. Start with all intervals included (baseline)
+    3. At each step, remove the interval whose removal results in lowest RMSECV
+    4. Continue until min_intervals remain
+    5. Return all steps and mark the one with best RMSECV as optimal
 
     Parameters
     ----------
@@ -1004,17 +1005,20 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
         Number of CV folds
     random_state : int, default=42
         Random seed
+    min_intervals : int, default=1
+        Minimum number of intervals to keep (stop when reached)
 
     Returns
     -------
     subsets : list of dict
         Each dict contains:
         - 'indices': np.ndarray of variable indices
-        - 'tag': str like 'bwd_iPLS_18int' or 'bwd_iPLS_final'
+        - 'tag': str like 'bwd_iPLS_18int' or 'bwd_iPLS_optimal'
         - 'rmsecv': float
         - 'r2': float
         - 'n_intervals': int
         - 'interval_ids': list of remaining interval indices
+        - 'is_optimal': bool (True for the subset with best RMSECV)
 
     References
     ----------
@@ -1033,24 +1037,45 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
 
     # Create intervals
     intervals = _create_intervals(wavelengths, n_intervals)
+    actual_n_intervals = len(intervals)
 
-    print(f"Backward iPLS: Starting with {len(intervals)} intervals...")
+    print(f"Backward iPLS: Starting with {actual_n_intervals} intervals...")
 
     # Start with all intervals
-    remaining_intervals = list(range(len(intervals)))
+    remaining_intervals = list(range(actual_n_intervals))
 
-    # Evaluate full model
+    # Evaluate full model (baseline)
     full_indices = _get_combined_indices(intervals, remaining_intervals)
-    best_rmsecv, best_r2 = _evaluate_interval_pls(X[:, full_indices], y, cv_folds)
+    full_rmsecv, full_r2 = _evaluate_interval_pls(X[:, full_indices], y, cv_folds)
 
-    print(f"  Full spectrum ({len(intervals)} intervals): RMSECV={best_rmsecv:.4f}, R²={best_r2:.4f}")
+    print(f"  Full spectrum ({actual_n_intervals} intervals): RMSECV={full_rmsecv:.4f}, R²={full_r2:.4f}")
 
     subsets = []
 
-    # Iteratively remove worst interval
-    while len(remaining_intervals) > 1:
+    # Add full model as baseline
+    wl_ranges_full = _get_wavelength_ranges(intervals, remaining_intervals)
+    min_wl = min(s for s, e in wl_ranges_full)
+    max_wl = max(e for s, e in wl_ranges_full)
+
+    subsets.append({
+        'indices': full_indices.copy(),
+        'tag': f"bwd_iPLS_full_{min_wl:.0f}-{max_wl:.0f}nm",
+        'rmsecv': full_rmsecv,
+        'r2': full_r2,
+        'n_intervals': actual_n_intervals,
+        'interval_ids': remaining_intervals.copy(),
+        'is_optimal': False  # Will be updated later
+    })
+
+    # Track best RMSECV for marking optimal
+    best_rmsecv_overall = full_rmsecv
+    best_subset_idx = 0
+
+    # Iteratively remove intervals until min_intervals remain
+    while len(remaining_intervals) > min_intervals:
+        # Find the interval whose removal results in lowest RMSECV
         best_removal = None
-        best_new_rmsecv = best_rmsecv
+        best_new_rmsecv = float('inf')
 
         for interval_id in remaining_intervals:
             # Try removing this interval
@@ -1059,6 +1084,7 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
 
             rmsecv, r2 = _evaluate_interval_pls(X[:, test_indices], y, cv_folds)
 
+            # Select the removal that gives lowest RMSECV (best model)
             if rmsecv < best_new_rmsecv:
                 best_new_rmsecv = rmsecv
                 best_removal = {
@@ -1069,17 +1095,17 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
                 }
 
         if best_removal is None:
-            # No improvement from any removal
-            print(f"  {len(remaining_intervals)} intervals: No improvement from removal, stopping")
+            # Should not happen unless all intervals fail, but handle gracefully
+            print(f"  {len(remaining_intervals)} intervals: All removals failed, stopping")
             break
 
-        # Apply removal
+        # Apply the removal (always remove something, even if it hurts)
         removed_interval = intervals[best_removal['removed_id']]
         remaining_intervals = best_removal['remaining']
-        best_rmsecv = best_removal['rmsecv']
 
         print(f"  Removed interval {removed_interval[2]:.0f}-{removed_interval[3]:.0f}nm -> "
-              f"{len(remaining_intervals)} intervals: RMSECV={best_removal['rmsecv']:.4f}")
+              f"{len(remaining_intervals)} intervals: RMSECV={best_removal['rmsecv']:.4f}, "
+              f"R²={best_removal['r2']:.4f}")
 
         # Create subset entry
         combined_indices = _get_combined_indices(intervals, remaining_intervals)
@@ -1092,34 +1118,44 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
             'rmsecv': best_removal['rmsecv'],
             'r2': best_removal['r2'],
             'n_intervals': len(remaining_intervals),
-            'interval_ids': remaining_intervals.copy()
+            'interval_ids': remaining_intervals.copy(),
+            'is_optimal': False
         })
 
-    # Add final optimized selection with wavelength info
-    if len(subsets) > 0:
-        final = subsets[-1]
-        wl_ranges = _get_wavelength_ranges(intervals, final['interval_ids'])
+        # Track best
+        if best_removal['rmsecv'] < best_rmsecv_overall:
+            best_rmsecv_overall = best_removal['rmsecv']
+            best_subset_idx = len(subsets) - 1
 
-        # Create descriptive final tag
+    # Mark the optimal subset (lowest RMSECV along the path)
+    if subsets:
+        subsets[best_subset_idx]['is_optimal'] = True
+
+        # Add a final entry with descriptive tag for the optimal subset
+        optimal = subsets[best_subset_idx]
+        wl_ranges = _get_wavelength_ranges(intervals, optimal['interval_ids'])
+
         if len(wl_ranges) <= 3:
             wl_str = '+'.join([f"{s:.0f}-{e:.0f}" for s, e in wl_ranges])
-            final_tag = f"bwd_iPLS_final_{wl_str}nm"
+            optimal_tag = f"bwd_iPLS_optimal_{wl_str}nm"
         else:
             min_wl = min(s for s, e in wl_ranges)
             max_wl = max(e for s, e in wl_ranges)
-            final_tag = f"bwd_iPLS_final_{min_wl:.0f}-{max_wl:.0f}nm"
+            optimal_tag = f"bwd_iPLS_optimal_{min_wl:.0f}-{max_wl:.0f}nm"
 
         subsets.append({
-            'indices': final['indices'].copy(),
-            'tag': final_tag,
-            'rmsecv': final['rmsecv'],
-            'r2': final['r2'],
-            'n_intervals': final['n_intervals'],
-            'interval_ids': final['interval_ids'].copy(),
+            'indices': optimal['indices'].copy(),
+            'tag': optimal_tag,
+            'rmsecv': optimal['rmsecv'],
+            'r2': optimal['r2'],
+            'n_intervals': optimal['n_intervals'],
+            'interval_ids': optimal['interval_ids'].copy(),
             'is_optimal': True
         })
 
     print(f"\nBackward iPLS complete: {len(subsets)} subsets generated")
+    print(f"  Optimal: {subsets[best_subset_idx]['n_intervals']} intervals, "
+          f"RMSECV={subsets[best_subset_idx]['rmsecv']:.4f}")
     return subsets
 
 

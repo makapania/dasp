@@ -519,7 +519,7 @@ def generate_outlier_report(X, y, n_pca_components=5,
             Boolean array for high-confidence outliers (2+ methods)
         - outlier_summary : pd.DataFrame
             DataFrame with all flags per sample, columns:
-            - Sample_Index: Sample index
+            - Sample_Index: Sample index (DataFrame index label)
             - Y_Value: Reference value
             - Hotelling_T2: T² statistic
             - T2_Outlier: Flagged by T²
@@ -551,6 +551,8 @@ def generate_outlier_report(X, y, n_pca_components=5,
     - All detection methods handle their own edge cases
     - If no outliers detected by any method, DataFrames will be empty
     - If y is None, Y consistency checks are skipped
+    - If X is a DataFrame, Sample_Index will be DataFrame index labels
+    - If X is a numpy array, Sample_Index will be positional indices (0, 1, 2, ...)
     """
     # Run all detection methods
     pca_results = run_pca_outlier_detection(X, y, n_pca_components)
@@ -564,11 +566,15 @@ def generate_outlier_report(X, y, n_pca_components=5,
     else:
         y_array = np.array(y)
 
-    # Create summary DataFrame
-    n_samples = X.shape[0] if hasattr(X, 'shape') else len(X)
+    # Get sample indices - use DataFrame index if available, otherwise positional
+    if isinstance(X, pd.DataFrame):
+        sample_indices = X.index.tolist()
+    else:
+        sample_indices = list(range(X.shape[0] if hasattr(X, 'shape') else len(X)))
 
+    # Create summary DataFrame
     summary = pd.DataFrame({
-        'Sample_Index': range(n_samples),
+        'Sample_Index': sample_indices,
         'Y_Value': y_array,
         'Hotelling_T2': pca_results['hotelling_t2'],
         'T2_Outlier': pca_results['outlier_flags'],

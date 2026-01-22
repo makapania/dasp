@@ -387,12 +387,12 @@ class TestTab7ValidationSetWorkflow:
         y_val = y.iloc[validation_indices]
 
         val_predictions = model.predict(X_val.values)
-        q2 = np.corrcoef(y_val.values, val_predictions)[0, 1] ** 2
+        r2pred = np.corrcoef(y_val.values, val_predictions)[0, 1] ** 2
 
-        print(f"Q²: {q2:.4f}")
+        print(f"R²pred: {r2pred:.4f}")
 
-        # Q² should be reasonable (may be lower than calibration R²)
-        assert not np.isnan(q2), "Q² should not be NaN"
+        # R²pred should be reasonable (may be lower than calibration R²)
+        assert not np.isnan(r2pred), "R²pred should not be NaN"
 
 
 class TestTab7EndToEndReproducibility:

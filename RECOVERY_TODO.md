@@ -531,7 +531,7 @@ Models with high accuracy were ranked poorly because ranking used ROC_AUC instea
 **Feature:** Checkbox in Validation subtab to compute and display validation metrics for top N models in Results table.
 
 ### Regression - WORKING
-- `Q2` and `RMSEP` columns added to results
+- `R2pred` and `RMSEP` columns added to results
 - Verified to match Predict tab exactly (tested to 4+ decimal places)
 - Uses correct preprocessing order: preprocess FULL spectrum THEN subset
 - Uses `ast.literal_eval()` + `set_params()` for model reconstruction
@@ -591,7 +591,7 @@ Models with high accuracy were ranked poorly because ranking used ROC_AUC instea
 2. Window suffix stripping - regex `_w\d+$` strips window from name
 
 **Testing Needed:**
-1. Run NSGA-II with validation enabled - verify Q2/RMSEP appear and are reasonable
+1. Run NSGA-II with validation enabled - verify R2pred/RMSEP appear and are reasonable
 2. Run Unified Bayesian with validation - same verification
 3. Test with classification data - verify val_Accuracy, val_F1, etc.
 4. Verify Grid Search still works correctly (regression test)
