@@ -14,10 +14,10 @@ PRED_VS_ACTUAL_TEMPLATE = '''
 fig, ax = plt.subplots(figsize=(8, 8))
 
 # Scatter plot
-ax.scatter(y, y_pred_cv, alpha=0.6, edgecolors='k', linewidths=0.5)
+ax.scatter(all_y_true_arr, y_pred_cv, alpha=0.6, edgecolors='k', linewidths=0.5)
 
 # 1:1 line
-lims = [min(y.min(), y_pred_cv.min()), max(y.max(), y_pred_cv.max())]
+lims = [min(all_y_true_arr.min(), y_pred_cv.min()), max(all_y_true_arr.max(), y_pred_cv.max())]
 ax.plot(lims, lims, 'r--', lw=2, label='1:1 line')
 
 # Labels and title
@@ -40,7 +40,7 @@ RESIDUALS_TEMPLATE = '''
 # VISUALIZATION: Residual Plots
 # =============================================================================
 
-residuals = y - y_pred_cv
+residuals = all_y_true_arr - y_pred_cv
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
