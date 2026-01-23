@@ -54,8 +54,14 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-# Add src to path
-src_path = Path(__file__).parent / "src"
+# Frozen application detection (PyInstaller support)
+_FROZEN = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+if _FROZEN:
+    _BASE_PATH = Path(sys._MEIPASS)
+    src_path = _BASE_PATH / "src"
+else:
+    _BASE_PATH = Path(__file__).parent
+    src_path = _BASE_PATH / "src"
 sys.path.insert(0, str(src_path))
 
 # Import spectral_predict modules
@@ -3905,10 +3911,10 @@ class SpectralPredictApp:
 
         try:
             # Load the ASP logo with spectral bar (no text overlay)
-            logo_path = Path(__file__).parent / "asp_logo_final.png"
+            logo_path = _BASE_PATH / "asp_logo_final.png"
             if not logo_path.exists():
                 # Try gradient version as fallback
-                logo_path = Path(__file__).parent / "asp_logo_gradient.png"
+                logo_path = _BASE_PATH / "asp_logo_gradient.png"
                 if not logo_path.exists():
                     # Fallback to text
                     logo_label = tk.Label(parent, text="ASP",
@@ -8858,53 +8864,6 @@ class SpectralPredictApp:
         results_card_outer, results_card = self._create_card(content_frame, title="Model Performance Results",
                                                               subtitle="All tested models ranked by performance. Click on any result row to load it into the 'Model Development' tab for further tuning.")
         results_card_outer.pack(fill='both', expand=True, pady=10, padx=5)
-
-        # ===== RESULTS LEGEND (Always Visible) =====
-        # Create an always-visible legend explaining result colors and styles
-        legend_outer_frame = tk.Frame(results_card, bg=self.colors['card_bg'])
-        legend_outer_frame.pack(fill='x', pady=(0, 15))
-
-        # Quartile colors legend
-        quartile_legend = self._create_legend_card(
-            legend_outer_frame,
-            items=[
-                ('#e3f2fd', 'Q1 Low Y'),
-                ('#e8f5e9', 'Q2'),
-                ('#fff3e0', 'Q3'),
-                ('#fce4ec', 'Q4 High Y'),
-            ],
-            title="Region Colors (highlights best models per Y-range)"
-        )
-        quartile_legend.pack(side='left', padx=(0, 30))
-
-        # Rank symbols and style indicators
-        style_frame = tk.Frame(legend_outer_frame, bg=self.colors['card_bg'], padx=10, pady=8)
-        style_frame.pack(side='left')
-
-        style_title = tk.Label(
-            style_frame,
-            text="Rank Symbols & Styles",
-            font=('Segoe UI', 10, 'bold'),
-            fg=self.colors['text'],
-            bg=self.colors['card_bg']
-        )
-        style_title.pack(anchor='w', pady=(0, 5))
-
-        # Symbol explanations
-        symbol_items = [
-            ("★ = Expert Choice", self.colors['text_light']),
-            ("● = Good Fit", self.colors['text_light']),
-            ("Strikethrough = Overfit warning", self.colors['text_light']),
-        ]
-        for text, color in symbol_items:
-            lbl = tk.Label(
-                style_frame,
-                text=text,
-                font=('Segoe UI', 9),
-                fg=color,
-                bg=self.colors['card_bg']
-            )
-            lbl.pack(anchor='w')
 
         # Create frame for treeview and scrollbars
         tree_frame = ttk.Frame(results_card)
@@ -26986,6 +26945,8 @@ Configuration:
                     },
                     'wavelengths': self.refined_wavelengths,
                     'cv_folds': self.refined_config.get('cv_folds', 5),
+                    # Preprocessing window size (critical for SG derivatives)
+                    'window_size': self.refined_config.get('window', 17),
                     # Imbalance handling (for reproducibility)
                     'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
                     # Variable selection indices (GA or other methods)
