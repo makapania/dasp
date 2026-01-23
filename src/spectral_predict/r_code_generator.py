@@ -751,16 +751,19 @@ print(confusion_matrix)
         else:
             return f'''
 # ============================================================================
-# CROSS-VALIDATION
+# CROSS-VALIDATION (Per-fold averaging - matches Unscrambler)
 # ============================================================================
 
 # Set up {self.cv_folds}-fold cross-validation
 set.seed(42)
 folds <- createFolds(y, k = {self.cv_folds}, list = TRUE, returnTrain = FALSE)
 
-# Initialize vectors for predictions and actuals
+# Initialize vectors for predictions and per-fold metrics
 cv_predictions <- numeric(length(y))
 cv_actuals <- numeric(length(y))
+fold_rmse <- numeric({self.cv_folds})
+fold_r2 <- numeric({self.cv_folds})
+fold_mae <- numeric({self.cv_folds})
 
 # Perform cross-validation
 for (fold_idx in seq_along(folds)) {{
@@ -787,17 +790,28 @@ for (fold_idx in seq_along(folds)) {{
   # Store predictions and actuals
   cv_predictions[test_indices] <- fold_predictions
   cv_actuals[test_indices] <- y_test_cv
+
+  # Calculate per-fold metrics
+  fold_rmse[fold_idx] <- sqrt(mean((fold_predictions - y_test_cv)^2))
+  ss_res <- sum((y_test_cv - fold_predictions)^2)
+  ss_tot <- sum((y_test_cv - mean(y_test_cv))^2)
+  fold_r2[fold_idx] <- ifelse(ss_tot > 0, 1 - ss_res / ss_tot, 0)
+  fold_mae[fold_idx] <- mean(abs(fold_predictions - y_test_cv))
 }}
 
-# Calculate metrics
-cv_rmse <- sqrt(mean((cv_predictions - cv_actuals)^2))
-cv_r2 <- 1 - sum((cv_actuals - cv_predictions)^2) / sum((cv_actuals - mean(cv_actuals))^2)
-cv_mae <- mean(abs(cv_predictions - cv_actuals))
+# Average metrics across folds (chemometrics standard - matches Unscrambler)
+cv_rmse <- mean(fold_rmse)
+cv_r2 <- mean(fold_r2)
+cv_mae <- mean(fold_mae)
+cv_rpd <- sd(y) / cv_rmse
 
-cat("\\n=== Cross-Validation Results ===\\n")
+cat("\\n=== Cross-Validation Results ({self.cv_folds}-fold, per-fold averaging) ===\\n")
 cat("RMSE:", round(cv_rmse, 4), "\\n")
 cat("R²:", round(cv_r2, 4), "\\n")
 cat("MAE:", round(cv_mae, 4), "\\n")
+cat("RPD:", round(cv_rpd, 2), "\\n")
+cat("\\nPer-fold RMSE:", round(fold_rmse, 4), "\\n")
+cat("Per-fold R²:", round(fold_r2, 4), "\\n")
 '''
 
     def _render_final_model(self) -> str:
