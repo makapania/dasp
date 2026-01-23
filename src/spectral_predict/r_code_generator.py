@@ -243,6 +243,9 @@ class RCodeGenerator:
         """Render preprocessing function definitions."""
         functions = []
 
+        # Get window size from config (default 17, matching GUI default)
+        window = self.config.get('window_size', 17)
+
         if 'snv' in self.preprocessing.lower():
             functions.append('''
 # Standard Normal Variate (SNV) preprocessing
@@ -261,11 +264,14 @@ apply_snv <- function(X) {
                 deriv_order = 1
             elif 'sg2' in self.preprocessing.lower() or 'deriv2' in self.preprocessing.lower():
                 deriv_order = 2
+            elif 'sg3' in self.preprocessing.lower() or 'deriv3' in self.preprocessing.lower():
+                deriv_order = 3
 
             if deriv_order > 0:
                 functions.append(f'''
 # Savitzky-Golay derivative preprocessing
-apply_savgol_derivative <- function(X, derivative = {deriv_order}, window_length = 7) {{
+# Default window_length = {window} (matches GUI setting)
+apply_savgol_derivative <- function(X, derivative = {deriv_order}, window_length = {window}) {{
   # Apply Savitzky-Golay filter to each row
   # Using prospectr::savitzkyGolay
   t(apply(X, 1, function(row) {{
@@ -383,21 +389,44 @@ if (!require("base64enc", quietly = TRUE)) {
         if preproc == 'raw':
             return '\n# No preprocessing - using raw spectra\nX_processed <- X\n'
 
+        # Get window size from config (default 17, matching GUI default)
+        window = self.config.get('window_size', 17)
+
         sections = [
             "\n# ============================================================================",
             "# APPLY PREPROCESSING",
             "# ============================================================================\n",
         ]
 
+        # Track if we're using derivatives (need edge trimming)
+        uses_derivative = any(x in preproc for x in ['sg1', 'sg2', 'sg3', 'deriv1', 'deriv2', 'deriv_snv'])
+
         if preproc == 'snv':
             sections.append("X_processed <- apply_snv(X)")
-        elif 'sg1' in preproc or 'deriv1' in preproc:
-            sections.append("X_processed <- apply_savgol_derivative(X, derivative = 1, window_length = 7)")
-        elif 'sg2' in preproc or 'deriv2' in preproc:
-            sections.append("X_processed <- apply_savgol_derivative(X, derivative = 2, window_length = 7)")
+        elif 'snv_sg1' in preproc:
+            sections.append("X_processed <- apply_snv(X)")
+            sections.append(f"X_processed <- apply_savgol_derivative(X_processed, derivative = 1, window_length = {window})")
+        elif 'snv_sg2' in preproc:
+            sections.append("X_processed <- apply_snv(X)")
+            sections.append(f"X_processed <- apply_savgol_derivative(X_processed, derivative = 2, window_length = {window})")
         elif 'deriv_snv' in preproc:
-            sections.append("X_processed <- apply_savgol_derivative(X, derivative = 1, window_length = 7)")
+            sections.append(f"X_processed <- apply_savgol_derivative(X, derivative = 1, window_length = {window})")
             sections.append("X_processed <- apply_snv(X_processed)")
+        elif 'sg1' in preproc or 'deriv1' in preproc:
+            sections.append(f"X_processed <- apply_savgol_derivative(X, derivative = 1, window_length = {window})")
+        elif 'sg2' in preproc or 'deriv2' in preproc:
+            sections.append(f"X_processed <- apply_savgol_derivative(X, derivative = 2, window_length = {window})")
+        elif 'sg3' in preproc or 'deriv3' in preproc:
+            sections.append(f"X_processed <- apply_savgol_derivative(X, derivative = 3, window_length = {window})")
+
+        # Add edge trimming for derivatives (SG boundary artifacts)
+        if uses_derivative:
+            half_window = window // 2
+            sections.append(f"\n# Trim {half_window} edge wavelengths on each side (SG boundary artifacts)")
+            sections.append(f"X_processed <- X_processed[, ({half_window}+1):(ncol(X_processed)-{half_window})]")
+            sections.append(f"if (exists('wavelengths')) {{")
+            sections.append(f"  wavelengths <- wavelengths[({half_window}+1):(length(wavelengths)-{half_window})]")
+            sections.append(f"}}")
 
         sections.append('\ncat("Preprocessed data shape:", dim(X_processed), "\\n")')
 

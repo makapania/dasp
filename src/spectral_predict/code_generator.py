@@ -587,12 +587,18 @@ def _decode_embedded_data(encoded_str):
 
     def _render_preprocessing_functions(self) -> str:
         """Render preprocessing function definitions."""
-        # Map v1 preprocessing names to template names
+        # Get window size from config (default 17, matching GUI default)
+        window = self.config.get('window_size', 17)
+
+        # Map v1 preprocessing names to template names, using actual window size
         preproc_map = {
             'snv': 'snv',
-            'sg1': 'deriv1_w7',
-            'sg2': 'deriv2_w7',
-            'deriv_snv': 'deriv1_w7',  # Will also add SNV
+            'sg1': f'deriv1_w{window}',
+            'sg2': f'deriv2_w{window}',
+            'sg3': f'deriv3_w{window}',
+            'snv_sg1': f'snv_deriv1_w{window}',
+            'snv_sg2': f'snv_deriv2_w{window}',
+            'deriv_snv': f'deriv1_w{window}',  # Will also add SNV
         }
 
         preproc_key = preproc_map.get(self.preprocessing.lower(), self.preprocessing)
@@ -648,6 +654,9 @@ def _decode_embedded_data(encoded_str):
         if preproc == 'raw':
             return '\n# No preprocessing - using raw spectra\nX_processed = X.copy()\n'
 
+        # Get window size from config (default 17, matching GUI default)
+        window = self.config.get('window_size', 17)
+
         # Map v1 preprocessing to application code
         code_lines = [
             "\n# =============================================================================",
@@ -655,19 +664,38 @@ def _decode_embedded_data(encoded_str):
             "# =============================================================================\n"
         ]
 
+        # Track if we're using derivatives (need edge trimming)
+        uses_derivative = preproc in ['sg1', 'sg2', 'sg3', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+
         if preproc == 'snv':
             code_lines.append("X_processed = apply_snv(X)")
         elif preproc == 'sg1':
-            code_lines.append("X_processed = apply_savgol_derivative(X, derivative=1, window_length=7)")
+            code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative=1, window_length={window})")
         elif preproc == 'sg2':
-            code_lines.append("X_processed = apply_savgol_derivative(X, derivative=2, window_length=7)")
+            code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative=2, window_length={window})")
+        elif preproc == 'sg3':
+            code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative=3, window_length={window})")
+        elif preproc == 'snv_sg1':
+            code_lines.append("X_processed = apply_snv(X)")
+            code_lines.append(f"X_processed = apply_savgol_derivative(X_processed, derivative=1, window_length={window})")
+        elif preproc == 'snv_sg2':
+            code_lines.append("X_processed = apply_snv(X)")
+            code_lines.append(f"X_processed = apply_savgol_derivative(X_processed, derivative=2, window_length={window})")
         elif preproc == 'deriv_snv':
-            code_lines.append("X_processed = apply_savgol_derivative(X, derivative=1, window_length=7)")
+            code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative=1, window_length={window})")
             code_lines.append("X_processed = apply_snv(X_processed)")
         else:
             # Try to use the template system
             _, application_code = get_preprocessing_template(preproc)
             code_lines.append(application_code)
+
+        # Add edge trimming for derivatives (SG boundary artifacts)
+        if uses_derivative:
+            half_window = window // 2
+            code_lines.append(f"\n# Trim {half_window} edge wavelengths on each side (SG boundary artifacts)")
+            code_lines.append(f"X_processed = X_processed[:, {half_window}:-{half_window}]")
+            code_lines.append(f"if 'wavelengths' in dir():")
+            code_lines.append(f"    wavelengths = wavelengths[{half_window}:-{half_window}]")
 
         code_lines.append('\nprint(f"Preprocessed data shape: {X_processed.shape}")')
 
