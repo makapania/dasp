@@ -19500,33 +19500,48 @@ class SpectralPredictApp:
             self.ct_primary_instrument_combo['values'] = inst_ids
             self.ct_satellite_instrument_combo['values'] = inst_ids
 
+    def _show_about(self):
+        """Show about dialog."""
+        from spectral_predict import __version__
+        about_text = f"""Spectral Predict
+Version {__version__}
+
+Developed by Matt Sponheimer
+msponheimer@gmail.com"""
+        messagebox.showinfo("About Spectral Predict", about_text)
+
     def _show_help(self):
         """Show help dialog."""
         help_text = """Spectral Predict - Quick Start
 
-1. IMPORT & PREVIEW Tab:
-   - Select ASD directory or CSV file
-   - Select reference CSV
-   - Auto-detect columns
-   - Load data to see plots
+GETTING STARTED:
+1. Import & Preview Tab
+   - Load spectral data (CSV, ASD, OPUS, SPC, etc.)
+   - Select reference values
+   - Preview spectra plots
 
-2. ANALYSIS CONFIGURATION Tab:
-   - Configure analysis options
-   - Select models to test
-   - Run analysis
+2. Configuration Tab
+   - Choose analysis tier (Quick/Standard/Comprehensive)
+   - Configure preprocessing and models
+   - Start automated search
 
-3. ANALYSIS PROGRESS Tab:
-   - Auto-switches during analysis
-   - Shows live progress
-   - Displays results when complete
+3. Results Tab
+   - View ranked model results
+   - Double-click to refine parameters
 
-4. RESULTS Tab:
-   - View all model results
-   - Double-click a row to refine
+KEY FEATURES:
+- Data Management: Merge multiple data sources
+- Explore: PCA and data exploration
+- Data Viewer: Inspect individual samples
+- Quality Check: Detect outliers
+- Development: Fine-tune model parameters
+- Prediction: Apply models to new data
+- Multi-Model: Compare multiple models
+- Cal Transfer: Calibration transfer methods
+- Contaminant Analysis: Detect contaminants
+- Spectral Library: Manage reference spectra
 
-5. REFINE MODEL Tab:
-   - Tweak model parameters
-   - Run refined models
+For detailed documentation, see the User Guide.
 """
         messagebox.showinfo("Help", help_text)
 
@@ -26929,13 +26944,51 @@ Configuration:
                 from spectral_predict.export_bundle import create_export_bundle
                 from datetime import datetime
 
+                # Parse tuned parameters from results table (critical for reproducibility)
+                params_from_search = {}
+                if self.selected_model_config is not None:
+                    raw_params = self.selected_model_config.get('Params')
+                    if isinstance(raw_params, dict):
+                        params_from_search = raw_params
+                    elif isinstance(raw_params, str) and raw_params.strip():
+                        try:
+                            parsed = ast.literal_eval(raw_params)
+                            if isinstance(parsed, dict):
+                                params_from_search = parsed
+                        except (ValueError, SyntaxError):
+                            params_from_search = {}
+
+                # Build variable indices when full wavelength list is available
+                variable_indices = self.refined_config.get('ga_genes')
+                if variable_indices is None and self.refined_full_wavelengths:
+                    # Map selected wavelengths back to full wavelength indices (preserve order)
+                    full_map = {}
+                    for idx, wl in enumerate(self.refined_full_wavelengths):
+                        try:
+                            key = f"{float(wl):.1f}"
+                        except (TypeError, ValueError):
+                            continue
+                        if key not in full_map:
+                            full_map[key] = idx
+
+                    indices = []
+                    for wl in self.refined_wavelengths or []:
+                        try:
+                            key = f"{float(wl):.1f}"
+                        except (TypeError, ValueError):
+                            continue
+                        if key in full_map:
+                            indices.append(full_map[key])
+                    if indices:
+                        variable_indices = indices
+
                 # Build model config
                 model_config = {
                     'model_name': self.refined_config['model_name'],
                     'preprocessing': self.refined_config['preprocessing'],
                     'target_name': self.refined_config.get('target_name', 'target'),
                     'task_type': self.refined_config['task_type'],
-                    'params': self.refined_config.get('params', {}),
+                    'params': params_from_search,
                     'metrics': {
                         'RMSE': self.refined_performance.get('rmse_mean'),
                         'R2': self.refined_performance.get('r2_mean'),
@@ -26947,11 +27000,17 @@ Configuration:
                     'cv_folds': self.refined_config.get('cv_folds', 5),
                     # Preprocessing window size (critical for SG derivatives)
                     'window_size': self.refined_config.get('window', 17),
+                    # Derivative order / polyorder (for deriv_snv variants)
+                    'deriv_order': self.selected_model_config.get('Deriv') if self.selected_model_config else None,
+                    'polyorder': self.selected_model_config.get('Poly') if self.selected_model_config else None,
                     # Imbalance handling (for reproducibility)
                     'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
-                    # Variable selection indices (GA or other methods)
-                    'variable_indices': self.refined_config.get('ga_genes'),
+                    'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+                    # Variable selection indices (GA or wavelength subset)
+                    'variable_indices': variable_indices,
                     'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
+                    # GUI does NOT trim derivative edges; keep export aligned
+                    'trim_derivative_edges': False,
                 }
 
                 # Get data
@@ -41103,6 +41162,12 @@ def main():
     menubar = tk.Menu(root)
     root.config(menu=menubar)
 
+    # About menu (leftmost)
+    about_menu = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="About", menu=about_menu)
+    about_menu.add_command(label="About Spectral Predict", command=app._show_about)
+
+    # Help menu
     help_menu = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="Help", menu=help_menu)
     help_menu.add_command(label="Quick Start", command=app._show_help)
