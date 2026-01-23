@@ -24850,6 +24850,8 @@ F1 Score:  {f1:.4f}
                 style='Caption.TLabel', justify='center'
             )
             no_data_label.pack(expand=True, pady=20)
+            # Force visual refresh through widget hierarchy
+            self.complexity_plot_frame.update_idletasks()
             return
 
         data = self.complexity_curve_data
@@ -24930,6 +24932,9 @@ F1 Score:  {f1:.4f}
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         self._add_plot_export_button(self.complexity_plot_frame, fig, "validation_curve")
+
+        # Force visual refresh through widget hierarchy
+        self.complexity_plot_frame.update_idletasks()
 
     def _run_learning_curve_analysis(self):
         """Run learning curve analysis in a background thread."""
@@ -26916,13 +26921,13 @@ Configuration:
                                      padx=15, pady=15, font=('Arial', 10, 'bold'))
         format_frame.pack(fill='x', padx=30, pady=10)
 
-        format_var = tk.StringVar(value='bundle')
+        format_var = tk.StringVar(value='colab')
 
         formats = [
+            ('colab', 'Notebook (.ipynb) - With embedded data (Colab/Jupyter)'),
             ('bundle', 'Complete Bundle (.zip) - Python + R + Data'),
             ('python_embedded', 'Python Script (.py) - With embedded data'),
             ('r_embedded', 'R Script (.R) - With embedded data'),
-            ('colab', 'Notebook (.ipynb) - With embedded data (Colab/Jupyter)'),
             ('script', 'Python Script (.py) - Basic (no data)'),
             ('notebook', 'Jupyter Notebook (.ipynb) - Basic (no data)'),
         ]
