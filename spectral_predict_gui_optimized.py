@@ -16,8 +16,8 @@ OPTIMIZED VERSION:
 - Phase 3+: Model prediction tab for applying saved .dasp models
 """
 
-# CRITICAL: Must be FIRST for PyInstaller multiprocessing on Windows
-# This prevents infinite process spawning when joblib uses multiprocessing
+# Enable multiprocessing in frozen apps (Nuitka/PyInstaller)
+# MUST be called before any other imports that might spawn processes
 import multiprocessing
 if __name__ == "__main__":
     multiprocessing.freeze_support()
@@ -16552,6 +16552,8 @@ class SpectralPredictApp:
             else:
                 # Auto-training: use top N models by CompositeScore
                 top_n = self.ensemble_top_n.get()
+                # Ensure CompositeScore is numeric (may be object dtype from CSV)
+                results_df['CompositeScore'] = pd.to_numeric(results_df['CompositeScore'], errors='coerce')
                 top_models_df = results_df.nsmallest(top_n, 'CompositeScore')
                 self._log_progress(f"Using top {len(top_models_df)} models (by score) for ensemble:")
 
@@ -19238,6 +19240,8 @@ class SpectralPredictApp:
                     score_col = numeric_cols[0] if len(numeric_cols) > 0 else None
 
                 if score_col is not None:
+                    # Ensure score column is numeric (may be object dtype from CSV)
+                    results_df[score_col] = pd.to_numeric(results_df[score_col], errors='coerce')
                     top_indices = results_df.nsmallest(min(top_n, len(results_df)), score_col).index
                     results_df.loc[top_indices, 'Select'] = True
                 else:
@@ -19564,6 +19568,35 @@ KEY FEATURES:
 For detailed documentation, see the User Guide.
 """
         messagebox.showinfo("Help", help_text)
+
+    def _open_user_guide_online(self):
+        """Open the online User Guide in the default browser."""
+        import webbrowser
+
+        url = "https://docs.google.com/document/d/1cQ4B6SxYWxaTPasJ4S1tWJocuSCN03MFyec1jnpq9S4/edit?usp=sharing"
+        webbrowser.open(url)
+
+    def _open_user_guide_offline(self):
+        """Open the local User Guide in the default application."""
+        import os
+        import sys
+
+        # Determine the docs path relative to the script location
+        if getattr(sys, "frozen", False):
+            # Running as bundled executable
+            base_path = os.path.dirname(sys.executable)
+        else:
+            # Running as script
+            base_path = os.path.dirname(os.path.abspath(__file__))
+
+        guide_path = os.path.join(base_path, "docs", "UserGuide.md")
+
+        if os.path.exists(guide_path):
+            os.startfile(guide_path)  # Windows-specific
+        else:
+            messagebox.showwarning(
+                "User Guide Not Found", f"Could not find User Guide at:\n{guide_path}"
+            )
 
     def _sort_results_by_column(self, col):
         """Sort results table by the specified column."""
@@ -21037,6 +21070,8 @@ For detailed documentation, see the User Guide.
             full_wavelengths = wavelengths  # Same as wavelengths since we use full spectrum
 
             if hasattr(self, 'results_df') and self.results_df is not None and len(self.results_df) > 0:
+                # Ensure CompositeScore is numeric (may be object dtype from CSV)
+                self.results_df['CompositeScore'] = pd.to_numeric(self.results_df['CompositeScore'], errors='coerce')
                 # Get the most common preprocessing from top models used in ensemble
                 top_preprocess = self.results_df.nsmallest(5, 'CompositeScore')['Preprocess'].mode()
                 if len(top_preprocess) > 0:
@@ -41225,6 +41260,8 @@ def main():
     help_menu = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="Help", menu=help_menu)
     help_menu.add_command(label="Quick Start", command=app._show_help)
+    help_menu.add_command(label="User Guide (Online)", command=app._open_user_guide_online)
+    help_menu.add_command(label="User Guide (Offline)", command=app._open_user_guide_offline)
     help_menu.add_separator()
     help_menu.add_command(label="Exit", command=root.quit)
 
