@@ -10844,6 +10844,11 @@ class SpectralPredictApp:
         Sets flag to indicate UI override should be applied (user made manual changes).
         """
         self.refine_hyperparams_modified = True
+        # Clear stale complexity curve data when parameters change
+        self.complexity_curve_data = None
+        # Refresh the plot to show "no data" state
+        if hasattr(self, '_plot_complexity_curve'):
+            self._plot_complexity_curve()
 
     def _bind_hyperparam_traces(self):
         """
