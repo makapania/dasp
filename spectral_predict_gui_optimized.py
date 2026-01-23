@@ -2109,7 +2109,7 @@ class SpectralPredictApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("ASP - Advanced Spectral Prediction (OPTIMIZED)")
+        self.root.title("ASP - Advanced Spectral Prediction")
 
         # Set minimum window size for usability
         self.root.minsize(1200, 700)
@@ -25814,6 +25814,8 @@ F1 Score:  {f1:.4f}
             # Decision logic:
             #   - If model loaded from Results AND user didn't modify params -> use search params (skip UI override)
             #   - Otherwise (manual config OR user modified params) -> apply UI params
+            ui_params = {}
+            skip_ui_override = False
             try:
                 # Check if we should skip UI override
                 skip_ui_override = (self.model_loaded_from_results and
@@ -26642,14 +26644,41 @@ Configuration:
             # Compute validation curve (complexity analysis)
             print(f"\nDEBUG: Computing validation curve for {model_name}...")
             try:
+                params_for_curve = {}
+                if params_from_search:
+                    params_for_curve.update(params_from_search)
+                if ui_params:
+                    params_for_curve.update(ui_params)
+
+                if not params_for_curve:
+                    try:
+                        model_params = model.get_params()
+                        if any(key.startswith('model__') for key in model_params):
+                            params_for_curve = {
+                                key[7:]: val for key, val in model_params.items()
+                                if key.startswith('model__')
+                            }
+                        else:
+                            params_for_curve = model_params
+                    except Exception:
+                        params_for_curve = {}
+
+                n_components_for_curve = None
+                if model_name in ('PLS', 'PLS-DA'):
+                    n_components_for_curve = n_components
+                    if 'n_components' in params_for_curve:
+                        n_components_for_curve = int(params_for_curve['n_components'])
+                    elif 'pls__n_components' in params_for_curve:
+                        n_components_for_curve = int(params_for_curve['pls__n_components'])
+
                 self.complexity_curve_data = self._compute_validation_curve(
                     model_type=model_name,
                     X=X_raw,
                     y=y_array,
-                    params=params_from_search,
+                    params=params_for_curve,
                     cv=cv,
                     task_type=task_type,
-                    n_components=n_components if model_name in ('PLS', 'PLS-DA') else None
+                    n_components=n_components_for_curve
                 )
                 if self.complexity_curve_data:
                     print(f"DEBUG: Validation curve computed successfully "
