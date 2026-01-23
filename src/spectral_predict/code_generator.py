@@ -16,7 +16,7 @@ import numpy as np
 from .templates.header import HEADER_TEMPLATE, DATA_LOADING_TEMPLATE, DATA_LOADING_CLASSIFICATION_TEMPLATE
 from .templates.preprocessing import get_preprocessing_template, SNV_TEMPLATE, SAVGOL_DERIVATIVE_TEMPLATE
 from .templates.variable_selection import get_variable_selection_template
-from .templates.models import get_model_template, get_model_imports, MODEL_IMPORTS
+from .templates.models import get_model_template, get_model_imports, MODEL_IMPORTS, DEFAULT_PARAMS
 from .templates.validation import (
     get_cross_validation_template,
     get_metrics_template,
@@ -165,8 +165,8 @@ class CodeGenerator:
         # 1. Header with imports
         sections.append(self._render_header())
 
-        # 2. Preprocessing functions
-        if self.options.include_preprocessing and self.preprocessing != 'raw':
+        # 2. Preprocessing functions (skip if data is embedded - already preprocessed)
+        if self.options.include_preprocessing and self.preprocessing != 'raw' and not self.options.include_data:
             sections.append(self._render_preprocessing_functions())
 
         # 3. Variable selection functions (if used)
@@ -240,22 +240,25 @@ class CodeGenerator:
         )
         cells.append(self._make_markdown_cell(title_text))
 
-        # Colab pip install cell (if requested)
-        if self.options.colab_ready:
+        # Dependency install cell (always include if non-standard packages are required)
+        pip_packages = self._get_pip_packages()
+        needs_install_cell = self.options.colab_ready or any(
+            pkg in pip_packages for pkg in ['catboost', 'xgboost', 'lightgbm', 'imbalanced-learn']
+        )
+        if needs_install_cell:
             cells.append(self._make_markdown_cell(
                 "## 0. Install Dependencies\n\n"
-                "Run this cell first if using Google Colab, jupyter.org, or other online environments.\n"
+                "Run this cell first if you're missing any required packages.\n"
                 "Skip if running locally with packages already installed."
             ))
-            pip_packages = self._get_pip_packages()
             cells.append(self._make_code_cell(f"!pip install -q {' '.join(pip_packages)}"))
 
         # Imports cell
         cells.append(self._make_markdown_cell("## 1. Setup and Imports"))
         cells.append(self._make_code_cell(self._get_imports_code()))
 
-        # Preprocessing functions
-        if self.preprocessing != 'raw':
+        # Preprocessing functions (skip if data is embedded - already preprocessed)
+        if self.preprocessing != 'raw' and not self.options.include_data:
             cells.append(self._make_markdown_cell("## 2. Preprocessing Functions"))
             cells.append(self._make_code_cell(self._render_preprocessing_functions()))
 
@@ -281,9 +284,17 @@ class CodeGenerator:
             ))
             cells.append(self._make_code_cell(self._render_data_loading()))
 
-        # Apply preprocessing
+        # Apply preprocessing (or skip note if embedded data)
         section_num += 1
-        cells.append(self._make_markdown_cell(f"## {section_num}. Apply Preprocessing"))
+        if self.options.include_data:
+            cells.append(self._make_markdown_cell(
+                f"## {section_num}. Preprocessing (Skipped)\n\n"
+                "Embedded data is already preprocessed with the same preprocessing "
+                f"used during model training ({self.preprocessing}). No additional "
+                "preprocessing is applied to avoid double-processing."
+            ))
+        else:
+            cells.append(self._make_markdown_cell(f"## {section_num}. Apply Preprocessing"))
         cells.append(self._make_code_cell(self._render_preprocessing_application()))
 
         # Apply variable selection
@@ -492,6 +503,13 @@ def _decode_embedded_data(encoded_str):
         if model_import:
             imports.append(model_import)
 
+        # Pipeline/scaling imports (must match Model Development)
+        if self._needs_standard_scaler() or self._needs_pls_da_pipeline():
+            imports.append('from sklearn.pipeline import Pipeline')
+            imports.append('from sklearn.preprocessing import StandardScaler')
+        if self._needs_pls_da_pipeline():
+            imports.append('from sklearn.linear_model import LogisticRegression')
+
         # Scipy for preprocessing
         if 'deriv' in self.preprocessing.lower() or 'sg' in self.preprocessing.lower():
             imports.append('from scipy.signal import savgol_filter')
@@ -510,8 +528,17 @@ def _decode_embedded_data(encoded_str):
 
         # Imbalance handling imports
         if self.imbalance_method:
-            if self.imbalance_method.lower() == 'smote':
-                imports.append('from imblearn.over_sampling import SMOTE')
+            method = self.imbalance_method.lower()
+            class_methods = {
+                'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                'tomek_links', 'smote_tomek', 'smote_enn'
+            }
+            if method in class_methods:
+                imports.extend([
+                    'from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE',
+                    'from imblearn.under_sampling import RandomUnderSampler, TomekLinks',
+                    'from imblearn.combine import SMOTETomek, SMOTEENN',
+                ])
 
         # Build model details string
         model_details = self._format_model_details()
@@ -558,9 +585,33 @@ def _decode_embedded_data(encoded_str):
             'import pandas as pd',
         ]
 
-        model_import = get_model_imports(self.model_name)
+        model_name_for_import = self.model_name
+        if self.task_type == 'classification':
+            if self.model_name == 'MLP' or self.model_name == 'MLPRegressor':
+                model_name_for_import = 'MLPClassifier'
+            elif self.model_name == 'RandomForest':
+                model_name_for_import = 'RandomForestClassifier'
+            elif self.model_name == 'LightGBM':
+                model_name_for_import = 'LightGBMClassifier'
+            elif self.model_name == 'XGBoost':
+                model_name_for_import = 'XGBoostClassifier'
+            elif self.model_name == 'CatBoost':
+                model_name_for_import = 'CatBoostClassifier'
+            elif self.model_name == 'SVR':
+                model_name_for_import = 'SVC'
+            elif self.model_name == 'PLS':
+                model_name_for_import = 'PLSDA'
+
+        model_import = get_model_imports(model_name_for_import)
         if model_import:
             imports.append(model_import)
+
+        # Pipeline/scaling imports (must match Model Development)
+        if self._needs_standard_scaler() or self._needs_pls_da_pipeline():
+            imports.append('from sklearn.pipeline import Pipeline')
+            imports.append('from sklearn.preprocessing import StandardScaler')
+        if self._needs_pls_da_pipeline():
+            imports.append('from sklearn.linear_model import LogisticRegression')
 
         if 'deriv' in self.preprocessing.lower() or 'sg' in self.preprocessing.lower():
             imports.append('from scipy.signal import savgol_filter')
@@ -580,15 +631,30 @@ def _decode_embedded_data(encoded_str):
             imports.append('import matplotlib.pyplot as plt')
 
         # Imbalance handling imports
-        if self.imbalance_method and self.imbalance_method.lower() == 'smote':
-            imports.append('from imblearn.over_sampling import SMOTE')
+        if self.imbalance_method:
+            method = self.imbalance_method.lower()
+            class_methods = {
+                'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                'tomek_links', 'smote_tomek', 'smote_enn'
+            }
+            if method in class_methods:
+                imports.extend([
+                    'from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE',
+                    'from imblearn.under_sampling import RandomUnderSampler, TomekLinks',
+                    'from imblearn.combine import SMOTETomek, SMOTEENN',
+                ])
 
         return '\n'.join(imports)
 
     def _render_preprocessing_functions(self) -> str:
         """Render preprocessing function definitions."""
+        # If data is embedded, it's already preprocessed - no functions needed
+        if self.options.include_data:
+            return ''
+
         # Get window size from config (default 17, matching GUI default)
         window = self.config.get('window_size', 17)
+        deriv_order = self.config.get('deriv_order', None)
 
         # Map v1 preprocessing names to template names, using actual window size
         preproc_map = {
@@ -598,7 +664,8 @@ def _decode_embedded_data(encoded_str):
             'sg3': f'deriv3_w{window}',
             'snv_sg1': f'snv_deriv1_w{window}',
             'snv_sg2': f'snv_deriv2_w{window}',
-            'deriv_snv': f'deriv1_w{window}',  # Will also add SNV
+            'deriv_snv': f'deriv{deriv_order}_w{window}' if deriv_order else f'deriv1_w{window}',  # Will also add SNV
+            'snv_deriv': f'snv_deriv{deriv_order}_w{window}' if deriv_order else f'snv_deriv1_w{window}',
         }
 
         preproc_key = preproc_map.get(self.preprocessing.lower(), self.preprocessing)
@@ -649,6 +716,20 @@ def _decode_embedded_data(encoded_str):
 
     def _render_preprocessing_application(self) -> str:
         """Render preprocessing application code."""
+        # If data is embedded, it's already preprocessed - skip this step
+        if self.options.include_data:
+            return '''
+# =============================================================================
+# PREPROCESSING (SKIPPED - embedded data is already preprocessed)
+# =============================================================================
+
+# The embedded data has already been preprocessed with the same
+# preprocessing used during model training. No additional preprocessing needed.
+# Preprocessing applied: ''' + self.preprocessing + '''
+X_processed = X.copy()
+print(f"Using pre-processed embedded data: {X_processed.shape}")
+'''
+
         preproc = self.preprocessing.lower()
 
         if preproc == 'raw':
@@ -664,8 +745,8 @@ def _decode_embedded_data(encoded_str):
             "# =============================================================================\n"
         ]
 
-        # Track if we're using derivatives (need edge trimming)
-        uses_derivative = preproc in ['sg1', 'sg2', 'sg3', 'snv_sg1', 'snv_sg2', 'deriv_snv']
+        # Track if we're using derivatives (edge trimming is optional)
+        uses_derivative = preproc in ['sg1', 'sg2', 'sg3', 'snv_sg1', 'snv_sg2', 'snv_deriv', 'deriv_snv']
 
         if preproc == 'snv':
             code_lines.append("X_processed = apply_snv(X)")
@@ -681,16 +762,22 @@ def _decode_embedded_data(encoded_str):
         elif preproc == 'snv_sg2':
             code_lines.append("X_processed = apply_snv(X)")
             code_lines.append(f"X_processed = apply_savgol_derivative(X_processed, derivative=2, window_length={window})")
+        elif preproc == 'snv_deriv':
+            deriv = self.config.get('deriv_order', 1) or 1
+            code_lines.append("X_processed = apply_snv(X)")
+            code_lines.append(f"X_processed = apply_savgol_derivative(X_processed, derivative={deriv}, window_length={window})")
         elif preproc == 'deriv_snv':
-            code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative=1, window_length={window})")
+            deriv = self.config.get('deriv_order', 1) or 1
+            code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative={deriv}, window_length={window})")
             code_lines.append("X_processed = apply_snv(X_processed)")
         else:
             # Try to use the template system
             _, application_code = get_preprocessing_template(preproc)
             code_lines.append(application_code)
 
-        # Add edge trimming for derivatives (SG boundary artifacts)
-        if uses_derivative:
+        # Optional edge trimming for derivatives (disabled by default for GUI parity)
+        trim_edges = bool(self.config.get('trim_derivative_edges', False))
+        if uses_derivative and trim_edges:
             half_window = window // 2
             code_lines.append(f"\n# Trim {half_window} edge wavelengths on each side (SG boundary artifacts)")
             code_lines.append(f"X_processed = X_processed[:, {half_window}:-{half_window}]")
@@ -705,6 +792,22 @@ def _decode_embedded_data(encoded_str):
         """Render variable selection application code."""
         if self.variable_indices is None:
             return '\n# No variable selection - using all variables\nX_final = X_processed\n'
+
+        # If data is embedded, it's already subset to selected variables - skip this step
+        if self.options.include_data:
+            return (
+                "\n# =============================================================================\n"
+                "# VARIABLE SELECTION (SKIPPED - embedded data is already subset)\n"
+                "# =============================================================================\n\n"
+                "# The embedded data has already been subset to the selected variables\n"
+                "# during model training. No additional variable selection needed.\n"
+                "if 'wavelengths' in dir():\n"
+                "    selected_indices = np.arange(len(wavelengths))\n"
+                "else:\n"
+                "    selected_indices = np.arange(X_processed.shape[1])\n"
+                "X_final = X_processed.copy()\n"
+                'print(f"Using pre-subset embedded data: {X_final.shape[1]} variables")\n'
+            )
 
         # Convert indices to list for cleaner output
         indices = self.variable_indices
@@ -728,322 +831,10 @@ def _decode_embedded_data(encoded_str):
             f'print(f"After variable selection: {{X_final.shape[1]}} variables selected")\n'
         )
 
-    def _render_imbalance_handling(self) -> str:
-        """Render imbalance handling code for classification or regression."""
-        if not self.imbalance_method:
-            return ''
-
-        method = self.imbalance_method.lower()
-
-        # =====================================================================
-        # CLASSIFICATION IMBALANCE METHODS
-        # =====================================================================
-
-        if method == 'smote':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: SMOTE
-# =============================================================================
-
-from imblearn.over_sampling import SMOTE
-
-# Apply SMOTE to handle class imbalance
-smote = SMOTE(k_neighbors=5, random_state=42)
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply SMOTE
-X_balanced, y_balanced = smote.fit_resample(X_to_balance, y)
-print(f"SMOTE applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
-
-# Update variable names to use balanced data
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'adasyn':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: ADASYN
-# =============================================================================
-
-from imblearn.over_sampling import ADASYN
-
-# Apply ADASYN (Adaptive Synthetic Sampling) to handle class imbalance
-adasyn = ADASYN(n_neighbors=5, random_state=42)
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply ADASYN
-X_balanced, y_balanced = adasyn.fit_resample(X_to_balance, y)
-print(f"ADASYN applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
-
-# Update variable names to use balanced data
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'borderline_smote':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: BorderlineSMOTE
-# =============================================================================
-
-from imblearn.over_sampling import BorderlineSMOTE
-
-# Apply BorderlineSMOTE (focuses on borderline samples) to handle class imbalance
-borderline_smote = BorderlineSMOTE(k_neighbors=5, random_state=42)
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply BorderlineSMOTE
-X_balanced, y_balanced = borderline_smote.fit_resample(X_to_balance, y)
-print(f"BorderlineSMOTE applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
-
-# Update variable names to use balanced data
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'random_undersampler':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: Random Undersampling
-# =============================================================================
-
-from imblearn.under_sampling import RandomUnderSampler
-
-# Apply random undersampling to balance classes
-undersampler = RandomUnderSampler(random_state=42)
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply undersampling
-X_balanced, y_balanced = undersampler.fit_resample(X_to_balance, y)
-print(f"Random undersampling applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
-
-# Update variable names to use balanced data
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'tomek_links':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: Tomek Links
-# =============================================================================
-
-from imblearn.under_sampling import TomekLinks
-
-# Apply Tomek Links to remove noisy boundary samples
-tomek = TomekLinks()
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply Tomek Links removal
-X_balanced, y_balanced = tomek.fit_resample(X_to_balance, y)
-print(f"Tomek Links applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
-
-# Update variable names to use balanced data
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'smote_tomek':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: SMOTETomek
-# =============================================================================
-
-from imblearn.combine import SMOTETomek
-
-# Apply SMOTETomek (combined oversampling + undersampling)
-smote_tomek = SMOTETomek(random_state=42)
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply SMOTETomek
-X_balanced, y_balanced = smote_tomek.fit_resample(X_to_balance, y)
-print(f"SMOTETomek applied: {X_to_balance.shape[0]} samples -> {X_balanced.shape[0]} samples")
-
-# Update variable names to use balanced data
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'class_weight':
-            # Note: class_weight='balanced' is set directly in model params
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: Class Weighting
-# =============================================================================
-
-# Note: Model will use class_weight='balanced' parameter
-# This automatically adjusts weights inversely proportional to class frequencies
-'''
-
-        # =====================================================================
-        # REGRESSION IMBALANCE METHODS
-        # =====================================================================
-
-        elif method in ['smogn', 'smotetomek', 'oversample', 'undersample']:
-            # Regression imbalance methods - use custom RegressionResampler
-            return f'''
-# =============================================================================
-# IMBALANCE HANDLING: {method.upper()} (Regression)
-# =============================================================================
-
-def regression_resampler(X, y, method='{method}', n_bins=5, k_neighbors=5):
-    """
-    Simple regression resampling for imbalanced continuous targets.
-    Bins continuous target into groups and applies SMOTE-like oversampling.
-    """
-    from sklearn.neighbors import NearestNeighbors
-
-    # Bin the continuous target
-    bin_edges = np.linspace(y.min(), y.max(), n_bins + 1)
-    bin_indices = np.digitize(y, bins=bin_edges[:-1], right=False) - 1
-    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
-
-    # Count samples per bin
-    bin_counts = np.bincount(bin_indices, minlength=n_bins)
-    max_count = bin_counts.max()
-
-    X_res, y_res = [X.copy()], [y.copy()]
-
-    for bin_idx in range(n_bins):
-        bin_mask = bin_indices == bin_idx
-        if bin_counts[bin_idx] < max_count and bin_counts[bin_idx] >= k_neighbors:
-            X_bin = X[bin_mask]
-            y_bin = y[bin_mask]
-            n_synthetic = max_count - bin_counts[bin_idx]
-
-            # Generate synthetic samples using interpolation
-            nn = NearestNeighbors(n_neighbors=min(k_neighbors, len(X_bin)))
-            nn.fit(X_bin)
-
-            for _ in range(n_synthetic):
-                idx = np.random.randint(len(X_bin))
-                _, neighbor_indices = nn.kneighbors([X_bin[idx]])
-                neighbor_idx = np.random.choice(neighbor_indices[0][1:])
-
-                # Interpolate
-                alpha = np.random.random()
-                X_new = X_bin[idx] + alpha * (X_bin[neighbor_idx] - X_bin[idx])
-                y_new = y_bin[idx] + alpha * (y_bin[neighbor_idx] - y_bin[idx])
-
-                X_res.append(X_new.reshape(1, -1))
-                y_res.append(np.array([y_new]))
-
-    return np.vstack(X_res), np.concatenate(y_res)
-
-# Determine which variable to use
-X_to_balance = X_final if 'X_final' in locals() else (X_processed if 'X_processed' in locals() else X)
-
-# Apply regression resampling
-X_balanced, y_balanced = regression_resampler(X_to_balance, y, method='{method}')
-print(f"Regression resampling applied: {{X_to_balance.shape[0]}} -> {{X_balanced.shape[0]}} samples")
-
-# Update variable names
-X_final = X_balanced
-y = y_balanced
-'''
-
-        elif method == 'binning':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: Target Binning with Sample Weights (Regression)
-# =============================================================================
-
-from sklearn.utils import compute_sample_weight
-
-# Bin continuous target into n_bins groups
-n_bins = 5
-bin_edges = np.linspace(y.min(), y.max(), n_bins + 1)
-bin_indices = np.digitize(y, bins=bin_edges, right=False)
-bin_indices = np.clip(bin_indices, 1, n_bins)  # Ensure valid bin indices
-
-# Compute inverse frequency weights for each bin
-sample_weights = np.zeros(len(y))
-for bin_idx in range(1, n_bins + 1):
-    mask = bin_indices == bin_idx
-    n_in_bin = mask.sum()
-    if n_in_bin > 0:
-        # Weight inversely proportional to bin frequency
-        sample_weights[mask] = len(y) / (n_bins * n_in_bin)
-
-# Normalize weights to mean=1
-sample_weights = sample_weights / sample_weights.mean()
-
-print(f"Target binning applied: {n_bins} bins, weight range: {sample_weights.min():.2f}-{sample_weights.max():.2f}")
-print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, y, sample_weight=sample_weights))")
-'''
-
-        elif method == 'rare_boost':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: Rare-Value Boosting (Regression)
-# =============================================================================
-
-# Exponentially boost rare target values (far from median)
-median_y = np.median(y)
-std_y = np.std(y)
-
-if std_y > 0:
-    # Distance from median (normalized by std)
-    distances = np.abs(y - median_y) / std_y
-    # Exponential boost: samples farther from median get higher weight
-    boost_factor = 2.0
-    sample_weights = 1.0 + (boost_factor - 1.0) * (distances / distances.max())
-else:
-    # No variation in target - equal weights
-    sample_weights = np.ones(len(y))
-
-# Normalize weights to mean=1
-sample_weights = sample_weights / sample_weights.mean()
-
-print(f"Rare-value boosting applied: boost_factor={boost_factor}, weight range: {sample_weights.min():.2f}-{sample_weights.max():.2f}")
-print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, y, sample_weight=sample_weights))")
-'''
-
-        elif method == 'balanced':
-            return '''
-# =============================================================================
-# IMBALANCE HANDLING: Balanced Sample Weighting (Regression)
-# =============================================================================
-
-from sklearn.utils import compute_sample_weight
-
-# Treat continuous targets as discrete for weighting
-# (rounds to nearest integer or quantizes into bins)
-n_bins = 10
-bin_edges = np.linspace(y.min(), y.max(), n_bins + 1)
-y_binned = np.digitize(y, bins=bin_edges, right=False)
-y_binned = np.clip(y_binned, 1, n_bins)
-
-# Compute balanced weights (inverse frequency)
-sample_weights = compute_sample_weight('balanced', y_binned)
-
-# Normalize weights to mean=1
-sample_weights = sample_weights / sample_weights.mean()
-
-print(f"Balanced weighting applied: {n_bins} bins, weight range: {sample_weights.min():.2f}-{sample_weights.max():.2f}")
-print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, y, sample_weight=sample_weights))")
-'''
-
-        else:
-            return f'\n# Imbalance method: {self.imbalance_method} (not implemented in export)\n'
-
     def _render_model(self) -> str:
         """Render model instantiation code."""
         # If using class_weight for imbalance handling, add it to params
-        params = self.params.copy()
+        params = self._normalize_model_params(self.params)
         if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
             if self.task_type == 'classification':
                 # Only add for models that support class_weight
@@ -1051,11 +842,64 @@ print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, 
                 if any(m in self.model_name for m in supports_class_weight):
                     params['class_weight'] = 'balanced'
 
-        model_code = get_model_template(
-            self.model_name,
-            params,
-            self.task_type
-        )
+        if self.model_name.lower() == 'neuralboosted':
+            warning = (
+                "\n# WARNING: NeuralBoosted export cannot fully reproduce GUI behavior.\n"
+                "# Consider exporting a .dasp model for exact predictions.\n"
+            )
+        else:
+            warning = ""
+
+        model_class = self._resolve_model_class_name()
+
+        if self._needs_pls_da_pipeline():
+            pls_params, lr_params = self._split_pls_da_params(self.params)
+            if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
+                lr_params.setdefault('class_weight', 'balanced')
+            model_code = warning + self._render_pls_da_pipeline(pls_params, lr_params)
+        elif self._needs_standard_scaler():
+            default_key = self._resolve_default_param_key()
+            params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
+            params_full.update(params)
+
+            if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
+                params_full.setdefault('class_weight', 'balanced')
+
+            if 'random_state' not in params_full:
+                params_full['random_state'] = 42
+
+            ctor_class = self._resolve_model_ctor_class()
+            model_code = warning + self._render_scaled_pipeline(params_full, ctor_class)
+        else:
+            default_key = self._resolve_default_param_key()
+            params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
+            params_full.update(params)
+
+            if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
+                params_full.setdefault('class_weight', 'balanced')
+
+            if 'random_state' not in params_full:
+                params_full['random_state'] = 42
+            if model_class.startswith('LightGBM') and 'verbosity' not in params_full:
+                params_full['verbosity'] = -1
+            if model_class.startswith('XGBoost'):
+                params_full.setdefault('tree_method', 'hist')
+                params_full.setdefault('verbosity', 0)
+            if model_class.startswith('CatBoost') and 'verbose' not in params_full:
+                params_full['verbose'] = 0
+            if model_class.startswith('LGBM') or model_class.startswith('XGB'):
+                params_full.setdefault('n_jobs', -1)
+
+            params_full = self._serialize_param_value(params_full)
+            params_literal = repr(params_full)
+            ctor_class = self._resolve_model_ctor_class()
+
+            model_code = (
+                warning
+                + f"\n# {ctor_class} with full parameter pass-through\n"
+                + f"model_params = {params_literal}\n"
+                + f"model = {ctor_class}(**model_params)\n"
+            )
         return (
             "\n# =============================================================================\n"
             "# MODEL DEFINITION\n"
@@ -1063,8 +907,278 @@ print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, 
             + model_code
         )
 
+    def _normalize_model_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Strip pipeline prefixes from params for base estimators."""
+        normalized = {}
+        for key, value in (params or {}).items():
+            if key.startswith('model__'):
+                normalized[key[7:]] = value
+            elif key.startswith('estimator__'):
+                normalized[key[11:]] = value
+            elif key.startswith('base_estimator__'):
+                normalized[key[15:]] = value
+            elif key.startswith('scaler__'):
+                # Scaler params not used in exports yet
+                continue
+            elif key.startswith('pls__') or key.startswith('lr__'):
+                # Handled separately for PLS-DA
+                continue
+            else:
+                normalized[key] = value
+        return normalized
+
+    def _resolve_model_class_name(self) -> str:
+        """Resolve model class name used in templates."""
+        normalized = self.model_name.replace(' ', '').replace('-', '')
+
+        aliases = {
+            'RF': 'RandomForest',
+            'LGBM': 'LightGBM',
+            'XGB': 'XGBoost',
+            'CB': 'CatBoost',
+            'SVM': 'SVR',
+            'NN': 'MLP',
+        }
+
+        if normalized.upper() in aliases:
+            normalized = aliases[normalized.upper()]
+
+        if self.task_type == 'classification':
+            if normalized == 'RandomForest':
+                normalized = 'RandomForestClassifier'
+            elif normalized == 'LightGBM':
+                normalized = 'LightGBMClassifier'
+            elif normalized == 'XGBoost':
+                normalized = 'XGBoostClassifier'
+            elif normalized == 'CatBoost':
+                normalized = 'CatBoostClassifier'
+            elif normalized == 'SVR':
+                normalized = 'SVC'
+            elif normalized == 'PLS':
+                normalized = 'PLSDA'
+            elif normalized == 'MLP':
+                normalized = 'MLPClassifier'
+
+        return normalized
+
+    def _resolve_model_ctor_class(self) -> str:
+        """Resolve actual constructor class name for instantiation."""
+        normalized = self.model_name.replace(' ', '').replace('-', '')
+
+        aliases = {
+            'RF': 'RandomForest',
+            'LGBM': 'LightGBM',
+            'XGB': 'XGBoost',
+            'CB': 'CatBoost',
+            'SVM': 'SVR',
+            'NN': 'MLP',
+        }
+
+        if normalized.upper() in aliases:
+            normalized = aliases[normalized.upper()]
+
+        if self.task_type == 'classification':
+            if normalized == 'RandomForest':
+                return 'RandomForestClassifier'
+            if normalized == 'LightGBM':
+                return 'LGBMClassifier'
+            if normalized == 'XGBoost':
+                return 'XGBClassifier'
+            if normalized == 'CatBoost':
+                return 'CatBoostClassifier'
+            if normalized in ('SVR', 'SVM'):
+                return 'SVC'
+            if normalized == 'MLP':
+                return 'MLPClassifier'
+            if normalized == 'PLS':
+                return 'PLSRegression'
+        else:
+            if normalized == 'RandomForest':
+                return 'RandomForestRegressor'
+            if normalized == 'LightGBM':
+                return 'LGBMRegressor'
+            if normalized == 'XGBoost':
+                return 'XGBRegressor'
+            if normalized == 'CatBoost':
+                return 'CatBoostRegressor'
+            if normalized == 'MLP':
+                return 'MLPRegressor'
+            if normalized == 'PLS':
+                return 'PLSRegression'
+
+        return normalized
+
+    def _resolve_default_param_key(self) -> str:
+        """Resolve DEFAULT_PARAMS key for the current model."""
+        normalized = self.model_name.replace(' ', '').replace('-', '')
+
+        aliases = {
+            'RF': 'RandomForest',
+            'LGBM': 'LightGBM',
+            'XGB': 'XGBoost',
+            'CB': 'CatBoost',
+            'SVM': 'SVR',
+            'NN': 'MLP',
+        }
+
+        if normalized.upper() in aliases:
+            normalized = aliases[normalized.upper()]
+
+        if self.task_type == 'classification':
+            if normalized == 'RandomForest':
+                return 'RandomForestClassifier'
+            if normalized == 'LightGBM':
+                return 'LightGBMClassifier'
+            if normalized == 'XGBoost':
+                return 'XGBoostClassifier'
+            if normalized == 'CatBoost':
+                return 'CatBoostClassifier'
+            if normalized in ('SVR', 'SVM'):
+                return 'SVC'
+            if normalized == 'MLP':
+                return 'MLPClassifier'
+            if normalized == 'PLS':
+                return 'PLSDA'
+        return normalized
+
+    def _serialize_param_value(self, value: Any) -> Any:
+        """Convert numpy types to plain Python types for code literals."""
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, tuple):
+            return tuple(self._serialize_param_value(v) for v in value)
+        if isinstance(value, list):
+            return [self._serialize_param_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._serialize_param_value(v) for k, v in value.items()}
+        return value
+
+    def _needs_pls_da_pipeline(self) -> bool:
+        """Check if we need the PLS-DA pipeline (PLS scores + LR)."""
+        normalized = self.model_name.replace(' ', '').replace('-', '').upper()
+        return self.task_type == 'classification' and normalized in ('PLS', 'PLSDA')
+
+    def _needs_standard_scaler(self) -> bool:
+        """Check if model needs StandardScaler (matches GUI pipeline)."""
+        normalized = self.model_name.replace(' ', '').replace('-', '')
+        scale_models = {
+            'SVR', 'SVC', 'SVM',
+            'MLP', 'MLPRegressor', 'MLPClassifier',
+            'NeuralBoosted'
+        }
+        return normalized in scale_models and not self._needs_pls_da_pipeline()
+
+    def _split_pls_da_params(self, params: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Split params into PLS and LogisticRegression sets for PLS-DA."""
+        pls_params: Dict[str, Any] = {}
+        lr_params: Dict[str, Any] = {}
+        for key, value in (params or {}).items():
+            if key.startswith('pls__'):
+                pls_params[key[5:]] = value
+            elif key.startswith('lr__'):
+                lr_params[key[4:]] = value
+            elif key.startswith('scaler__'):
+                continue
+            else:
+                # Allow unprefixed PLS params for older configs
+                if key in ('n_components', 'max_iter', 'tol', 'scale'):
+                    pls_params[key] = value
+                else:
+                    lr_params[key] = value
+        return pls_params, lr_params
+
+    def _render_pls_da_pipeline(self, pls_params: Dict[str, Any], lr_params: Dict[str, Any]) -> str:
+        """Render a PLS-DA pipeline (PLS scores + scaler + LR)."""
+        n_components = pls_params.pop('n_components', 8)
+        pls_max_iter = pls_params.pop('max_iter', 500)
+        pls_tol = pls_params.pop('tol', 1e-6)
+        pls_scale = pls_params.pop('scale', False)
+
+        lr_defaults = {
+            'max_iter': 1000,
+            'random_state': 42,
+        }
+        lr_defaults.update(lr_params or {})
+        lr_params_literal = repr(lr_defaults)
+
+        return f'''
+# PLS-DA pipeline (PLS scores -> StandardScaler -> LogisticRegression)
+class PLSTransformer:
+    """Minimal PLS transformer for classification pipelines."""
+    def __init__(self, n_components=2, max_iter=500, tol=1e-6, scale=False):
+        self.n_components = n_components
+        self.max_iter = max_iter
+        self.tol = tol
+        self.scale = scale
+        self.pls_ = None
+
+    def fit(self, X, y):
+        from sklearn.cross_decomposition import PLSRegression
+        self.pls_ = PLSRegression(
+            n_components=self.n_components,
+            max_iter=self.max_iter,
+            tol=self.tol,
+            scale=self.scale
+        )
+        y_1d = np.ravel(y) if hasattr(y, 'ndim') and y.ndim > 1 else y
+        self.pls_.fit(X, y_1d)
+        return self
+
+    def transform(self, X):
+        X_scores = self.pls_.transform(X)
+        if X_scores.ndim == 1:
+            X_scores = X_scores.reshape(-1, 1)
+        return X_scores
+
+    def fit_transform(self, X, y):
+        return self.fit(X, y).transform(X)
+
+    def get_params(self, deep=True):
+        return {{
+            'n_components': self.n_components,
+            'max_iter': self.max_iter,
+            'tol': self.tol,
+            'scale': self.scale
+        }}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+pls = PLSTransformer(
+    n_components={n_components},
+    max_iter={pls_max_iter},
+    tol={pls_tol},
+    scale={pls_scale}
+)
+import inspect as _inspect
+_lr_params = {lr_params_literal}
+_lr_sig = _inspect.signature(LogisticRegression)
+_lr_filtered = {{k: v for k, v in _lr_params.items() if k in _lr_sig.parameters}}
+lr = LogisticRegression(**_lr_filtered)
+model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
+'''
+
+    def _render_scaled_pipeline(self, params_full: Dict[str, Any], ctor_class: str) -> str:
+        """Render a StandardScaler + model pipeline with full params."""
+        params_full = self._serialize_param_value(params_full)
+        params_literal = repr(params_full)
+        return (
+            f"\n# {ctor_class} with full parameter pass-through\n"
+            f"model_params = {params_literal}\n"
+            f"model = {ctor_class}(**model_params)\n"
+            "\n# Add StandardScaler for scale-sensitive models\n"
+            "model = Pipeline([('scaler', StandardScaler()), ('model', model)])\n"
+        )
+
     def _render_cross_validation(self) -> str:
         """Render cross-validation code."""
+        if self.imbalance_method:
+            return self._render_cross_validation_with_imbalance()
+
         # Determine final variable name
         # Priority: imbalance resampling > variable selection > preprocessing > raw
         resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
@@ -1094,6 +1208,9 @@ print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, 
 
     def _render_final_model(self) -> str:
         """Render final model training code."""
+        if self.imbalance_method:
+            return self._render_final_model_with_imbalance()
+
         # Determine which variable to use
         # Priority: imbalance resampling > variable selection > preprocessing > raw
         resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
@@ -1117,6 +1234,332 @@ print("Note: Use sample_weight parameter when fitting model (e.g., model.fit(X, 
 # Train the model on all data
 model.fit({x_var}, y)
 print(f"\\nFinal model trained on {{{x_var}.shape[0]}} samples with {{{x_var}.shape[1]}} features")
+'''
+
+    def _render_imbalance_handling(self) -> str:
+        """Render imbalance handling support code."""
+        if not self.imbalance_method:
+            return ''
+
+        method = self.imbalance_method.lower()
+        params = self.config.get('imbalance_params', {}) or {}
+
+        return f'''
+# =============================================================================
+# IMBALANCE HANDLING CONFIG (used inside CV/final fit)
+# =============================================================================
+
+IMBALANCE_METHOD = "{method}"
+IMBALANCE_PARAMS = {params}
+
+def _supports_sample_weight(model_obj):
+    import inspect
+    try:
+        return 'sample_weight' in inspect.signature(model_obj.fit).parameters
+    except Exception:
+        return False
+
+def _get_classification_resampler(method_name, params):
+    method_map = {{
+        'smote': SMOTE,
+        'adasyn': ADASYN,
+        'borderline_smote': BorderlineSMOTE,
+        'random_undersampler': RandomUnderSampler,
+        'tomek_links': TomekLinks,
+        'smote_tomek': SMOTETomek,
+        'smote_enn': SMOTEENN,
+    }}
+    if method_name not in method_map:
+        return None
+    cls = method_map[method_name]
+    resampler_params = dict(params or {{}})
+    resampler_params.setdefault('random_state', 42)
+    return cls(**resampler_params)
+
+def _compute_regression_weights(y_vals, method_name, params):
+    y_vals = np.asarray(y_vals).ravel()
+    if method_name == 'binning':
+        n_bins = int((params or {{}}).get('n_bins', 5))
+        bin_edges = np.linspace(y_vals.min(), y_vals.max(), n_bins + 1)
+        bin_indices = np.digitize(y_vals, bins=bin_edges, right=False)
+        bin_indices = np.clip(bin_indices, 1, n_bins)
+        counts = np.bincount(bin_indices, minlength=n_bins + 1)
+        weights = np.array([len(y_vals) / (n_bins * counts[idx]) for idx in bin_indices])
+    elif method_name == 'rare_boost':
+        boost_factor = float((params or {{}}).get('boost_factor', 2.0))
+        median = np.median(y_vals)
+        std = np.std(y_vals)
+        if std == 0:
+            weights = np.ones(len(y_vals))
+        else:
+            distances = np.abs(y_vals - median) / std
+            weights = 1.0 + (boost_factor - 1.0) * (distances / distances.max())
+    elif method_name == 'balanced':
+        from sklearn.utils import compute_sample_weight
+        n_bins = int((params or {{}}).get('n_bins', 10))
+        bin_edges = np.linspace(y_vals.min(), y_vals.max(), n_bins + 1)
+        y_binned = np.digitize(y_vals, bins=bin_edges, right=False)
+        y_binned = np.clip(y_binned, 1, n_bins)
+        weights = compute_sample_weight('balanced', y_binned)
+    else:
+        return None
+
+    weights = weights / weights.mean()
+    return weights
+
+def _regression_resample(X_vals, y_vals, method_name, params):
+    # Minimal resampling to mirror GUI imbalance methods
+    X_vals = np.asarray(X_vals)
+    y_vals = np.asarray(y_vals).ravel()
+    method_name = (method_name or '').lower()
+    if method_name == 'undersample':
+        n_bins = int((params or {{}}).get('n_bins', 10))
+        sampling_strategy = (params or {{}}).get('sampling_strategy', 'auto')
+        bin_edges = np.linspace(y_vals.min(), y_vals.max(), n_bins + 1)
+        bin_indices = np.digitize(y_vals, bins=bin_edges[:-1], right=False) - 1
+        bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+        unique_bins, bin_counts = np.unique(bin_indices, return_counts=True)
+        if sampling_strategy == 'auto':
+            target_count = int(np.median(bin_counts))
+        elif sampling_strategy == 'mean':
+            target_count = int(np.mean(bin_counts))
+        elif isinstance(sampling_strategy, float):
+            target_count = int(max(bin_counts) * sampling_strategy)
+        else:
+            target_count = int(np.median(bin_counts))
+
+        rng = np.random.RandomState(int((params or {{}}).get('random_state', 42)))
+        keep_idx = []
+        for bin_idx in range(n_bins):
+            bin_mask = bin_indices == bin_idx
+            bin_sample_indices = np.where(bin_mask)[0]
+            if len(bin_sample_indices) > target_count:
+                selected = rng.choice(bin_sample_indices, size=target_count, replace=False)
+                keep_idx.extend(selected)
+            else:
+                keep_idx.extend(bin_sample_indices)
+        keep_idx = np.array(sorted(keep_idx))
+        return X_vals[keep_idx], y_vals[keep_idx]
+
+    if method_name in ('oversample', 'smogn', 'smotetomek'):
+        # Simple SMOGN-style oversampling
+        from sklearn.neighbors import NearestNeighbors
+        n_bins = int((params or {{}}).get('n_bins', 5))
+        k_neighbors = int((params or {{}}).get('k_neighbors', 5))
+        rng = np.random.RandomState(int((params or {{}}).get('random_state', 42)))
+        bin_edges = np.linspace(y_vals.min(), y_vals.max(), n_bins + 1)
+        bin_indices = np.digitize(y_vals, bins=bin_edges[:-1], right=False) - 1
+        bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+        bin_counts = np.bincount(bin_indices, minlength=n_bins)
+        target = int(np.median(bin_counts))
+        X_res, y_res = [X_vals.copy()], [y_vals.copy()]
+        for bin_idx in range(n_bins):
+            if bin_counts[bin_idx] >= target or bin_counts[bin_idx] < max(2, k_neighbors):
+                continue
+            mask = bin_indices == bin_idx
+            X_bin = X_vals[mask]
+            y_bin = y_vals[mask]
+            nn = NearestNeighbors(n_neighbors=min(k_neighbors, len(X_bin)))
+            nn.fit(X_bin)
+            n_synth = target - bin_counts[bin_idx]
+            for _ in range(n_synth):
+                idx = rng.randint(len(X_bin))
+                _, neighbors = nn.kneighbors([X_bin[idx]])
+                neighbor_idx = rng.choice(neighbors[0][1:]) if len(neighbors[0]) > 1 else neighbors[0][0]
+                alpha = rng.random()
+                X_new = X_bin[idx] + alpha * (X_bin[neighbor_idx] - X_bin[idx])
+                y_new = y_bin[idx] + alpha * (y_bin[neighbor_idx] - y_bin[idx])
+                X_res.append(X_new.reshape(1, -1))
+                y_res.append(np.array([y_new]))
+        return np.vstack(X_res), np.concatenate(y_res)
+
+    return X_vals, y_vals
+'''
+
+    def _render_cross_validation_with_imbalance(self) -> str:
+        """Render cross-validation code with imbalance handling inside folds."""
+        # Determine X variable name
+        if self.variable_indices is not None:
+            x_var = 'X_final'
+        elif self.preprocessing != 'raw':
+            x_var = 'X_processed'
+        else:
+            x_var = 'X'
+
+        if self.task_type == 'classification':
+            return f'''
+# =============================================================================
+# CROSS-VALIDATION (with imbalance handling)
+# =============================================================================
+
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+from sklearn.base import clone
+
+cv = StratifiedKFold(n_splits={self.cv_folds}, shuffle=True, random_state=42)
+
+unique_classes = np.unique(y)
+average_method = 'binary' if len(unique_classes) == 2 else 'macro'
+
+fold_acc = []
+fold_f1 = []
+all_y_true = []
+all_y_pred = []
+
+for train_idx, test_idx in cv.split({x_var}, y):
+    X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Apply imbalance handling inside the fold
+    X_train_fold, y_train_fold = X_train, y_train
+    if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                            'tomek_links', 'smote_tomek', 'smote_enn']:
+        resampler = _get_classification_resampler(IMBALANCE_METHOD, IMBALANCE_PARAMS)
+        if resampler is not None:
+            X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
+
+    # Fit and predict
+    fold_model = clone(model)
+    fold_model.fit(X_train_fold, y_train_fold)
+    y_pred_fold = fold_model.predict(X_test)
+
+    all_y_true.extend(y_test)
+    all_y_pred.extend(y_pred_fold)
+    fold_acc.append(accuracy_score(y_test, y_pred_fold))
+    fold_f1.append(f1_score(y_test, y_pred_fold, average=average_method, zero_division=0))
+
+all_y_true_arr = np.array(all_y_true)
+all_y_pred_arr = np.array(all_y_pred)
+
+accuracy = np.mean(fold_acc)
+f1 = np.mean(fold_f1)
+
+print(f"\\nCross-validation Results ({self.cv_folds}-fold):")
+print(f"  Accuracy: {{accuracy:.4f}} (per-fold mean)")
+print(f"  F1 Score (weighted): {{f1:.4f}} (per-fold mean)")
+print("\\nConfusion Matrix:")
+print(confusion_matrix(all_y_true_arr, all_y_pred_arr))
+print("\\nClassification Report:")
+print(classification_report(all_y_true_arr, all_y_pred_arr))
+'''
+
+        return f'''
+# =============================================================================
+# CROSS-VALIDATION (with imbalance handling; matches Model Development)
+# =============================================================================
+
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.base import clone
+
+cv = KFold(n_splits={self.cv_folds}, shuffle=True, random_state=42)
+
+fold_rmse = []
+fold_r2 = []
+fold_mae = []
+all_y_true = []
+all_y_pred = []
+
+for train_idx, test_idx in cv.split({x_var}):
+    X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Apply imbalance handling inside the fold
+    X_train_fold, y_train_fold = X_train, y_train
+    sample_weight = None
+
+    if IMBALANCE_METHOD in ['undersample', 'oversample', 'smogn', 'smotetomek']:
+        X_train_fold, y_train_fold = _regression_resample(X_train, y_train, IMBALANCE_METHOD, IMBALANCE_PARAMS)
+    elif IMBALANCE_METHOD in ['binning', 'rare_boost', 'balanced']:
+        sample_weight = _compute_regression_weights(y_train, IMBALANCE_METHOD, IMBALANCE_PARAMS)
+
+    fold_model = clone(model)
+    fit_kwargs = {{}}
+    if sample_weight is not None:
+        if hasattr(fold_model, 'named_steps'):
+            if 'model' in fold_model.named_steps:
+                fit_kwargs['model__sample_weight'] = sample_weight
+            elif 'lr' in fold_model.named_steps:
+                fit_kwargs['lr__sample_weight'] = sample_weight
+            else:
+                fit_kwargs['sample_weight'] = sample_weight
+        else:
+            fit_kwargs['sample_weight'] = sample_weight
+    fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
+    y_pred_fold = fold_model.predict(X_test).ravel()
+
+    all_y_true.extend(y_test)
+    all_y_pred.extend(y_pred_fold)
+
+    fold_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred_fold)))
+    fold_r2.append(r2_score(y_test, y_pred_fold))
+    fold_mae.append(mean_absolute_error(y_test, y_pred_fold))
+
+rmse = np.mean(fold_rmse)
+all_y_true_arr = np.array(all_y_true)
+all_y_pred_arr = np.array(all_y_pred)
+r2 = r2_score(all_y_true_arr, all_y_pred_arr)
+mae = np.mean(fold_mae)
+rpd = np.std(y) / rmse
+
+# Keep y_pred_cv for compatibility with visualization
+y_pred_cv = all_y_pred_arr
+'''
+
+    def _render_final_model_with_imbalance(self) -> str:
+        """Render final model training code with imbalance handling."""
+        # Determine X variable name
+        if self.variable_indices is not None:
+            x_var = 'X_final'
+        elif self.preprocessing != 'raw':
+            x_var = 'X_processed'
+        else:
+            x_var = 'X'
+
+        if self.task_type == 'classification':
+            return f'''
+# =============================================================================
+# TRAIN FINAL MODEL (with imbalance handling)
+# =============================================================================
+
+X_train_full, y_train_full = {x_var}, y
+if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                        'tomek_links', 'smote_tomek', 'smote_enn']:
+    resampler = _get_classification_resampler(IMBALANCE_METHOD, IMBALANCE_PARAMS)
+    if resampler is not None:
+        X_train_full, y_train_full = resampler.fit_resample(X_train_full, y_train_full)
+
+model.fit(X_train_full, y_train_full)
+print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")
+'''
+
+        return f'''
+# =============================================================================
+# TRAIN FINAL MODEL (with imbalance handling)
+# =============================================================================
+
+X_train_full, y_train_full = {x_var}, y
+sample_weight = None
+
+if IMBALANCE_METHOD in ['undersample', 'oversample', 'smogn', 'smotetomek']:
+    X_train_full, y_train_full = _regression_resample(X_train_full, y_train_full, IMBALANCE_METHOD, IMBALANCE_PARAMS)
+elif IMBALANCE_METHOD in ['binning', 'rare_boost', 'balanced']:
+    sample_weight = _compute_regression_weights(y_train_full, IMBALANCE_METHOD, IMBALANCE_PARAMS)
+
+fit_kwargs = {{}}
+    if sample_weight is not None:
+        if hasattr(model, 'named_steps'):
+            if 'model' in model.named_steps:
+                fit_kwargs['model__sample_weight'] = sample_weight
+            elif 'lr' in model.named_steps:
+                fit_kwargs['lr__sample_weight'] = sample_weight
+            else:
+                fit_kwargs['sample_weight'] = sample_weight
+        else:
+            fit_kwargs['sample_weight'] = sample_weight
+
+model.fit(X_train_full, y_train_full, **fit_kwargs)
+print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")
 '''
 
     def _render_visualization(self) -> str:

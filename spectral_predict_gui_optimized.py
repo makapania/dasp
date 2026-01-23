@@ -16,6 +16,12 @@ OPTIMIZED VERSION:
 - Phase 3+: Model prediction tab for applying saved .dasp models
 """
 
+# CRITICAL: Must be FIRST for PyInstaller multiprocessing on Windows
+# This prevents infinite process spawning when joblib uses multiprocessing
+import multiprocessing
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 import sys
 import os
 import ast
@@ -54,12 +60,21 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-# Frozen application detection (PyInstaller support)
-_FROZEN = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
-if _FROZEN:
+# Frozen application detection (Nuitka and PyInstaller support)
+_NUITKA_FROZEN = "__compiled__" in dir()
+_PYINSTALLER_FROZEN = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+_FROZEN = _NUITKA_FROZEN or _PYINSTALLER_FROZEN
+
+if _NUITKA_FROZEN:
+    # Nuitka standalone: resources are in the same directory as the executable
+    _BASE_PATH = Path(sys.executable).parent
+    src_path = _BASE_PATH / "src"
+elif _PYINSTALLER_FROZEN:
+    # PyInstaller: resources are in _MEIPASS
     _BASE_PATH = Path(sys._MEIPASS)
     src_path = _BASE_PATH / "src"
 else:
+    # Development mode
     _BASE_PATH = Path(__file__).parent
     src_path = _BASE_PATH / "src"
 sys.path.insert(0, str(src_path))

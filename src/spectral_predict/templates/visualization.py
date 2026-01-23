@@ -75,15 +75,29 @@ SPECTRA_PLOT_TEMPLATE = '''
 fig, ax = plt.subplots(figsize=(12, 6))
 
 # Plot a subset of spectra (to avoid clutter)
-n_plot = min(50, X.shape[0])
-indices_to_plot = np.linspace(0, X.shape[0]-1, n_plot, dtype=int)
+X_plot = X_processed if 'X_processed' in locals() else X
+n_plot = min(50, X_plot.shape[0])
+indices_to_plot = np.linspace(0, X_plot.shape[0]-1, n_plot, dtype=int)
+
+# Use wavelengths only if they match the plotted data
+if 'wavelengths' in locals() and len(wavelengths) == X_plot.shape[1]:
+    x_axis = wavelengths
+else:
+    x_axis = np.arange(X_plot.shape[1])
+
+# Ensure spectra are plotted in ascending wavelength order
+if hasattr(x_axis, '__len__') and len(x_axis) == X_plot.shape[1]:
+    sort_idx = np.argsort(x_axis)
+    x_axis = np.array(x_axis)[sort_idx]
+    X_plot = X_plot[:, sort_idx]
 
 for i in indices_to_plot:
-    ax.plot(wavelengths, X[i, :], alpha=0.5, lw=0.5)
+    ax.plot(x_axis, X_plot[i, :], alpha=0.5, lw=0.5)
 
 ax.set_xlabel('Wavelength (nm)', fontsize=12)
 ax.set_ylabel('Intensity', fontsize=12)
-ax.set_title(f'Raw Spectra (n={n_plot} of {X.shape[0]})', fontsize=14)
+title_tag = 'Processed Spectra' if 'X_processed' in locals() else 'Raw Spectra'
+ax.set_title(f'{title_tag} (n={n_plot} of {X_plot.shape[0]})', fontsize=14)
 ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
@@ -91,30 +105,6 @@ plt.savefig('spectra_plot.png', dpi=150, bbox_inches='tight')
 plt.show()
 '''
 
-VARIABLE_IMPORTANCE_TEMPLATE = '''
-# =============================================================================
-# VISUALIZATION: Variable Importance
-# =============================================================================
-
-fig, ax = plt.subplots(figsize=(12, 5))
-
-# Create importance array (highlighting selected variables)
-importance = np.zeros(len(wavelengths))
-importance[selected_indices] = 1
-
-ax.fill_between(wavelengths, 0, importance, alpha=0.3, color='blue', label='Selected')
-ax.plot(wavelengths, importance, 'b-', lw=0.5)
-
-ax.set_xlabel('Wavelength (nm)', fontsize=12)
-ax.set_ylabel('Selected (1) / Not Selected (0)', fontsize=12)
-ax.set_title(f'Selected Variables ({len(selected_indices)} of {len(wavelengths)})', fontsize=14)
-ax.set_ylim(-0.1, 1.1)
-ax.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('selected_variables.png', dpi=150, bbox_inches='tight')
-plt.show()
-'''
 
 CONFUSION_MATRIX_TEMPLATE = '''
 # =============================================================================
@@ -163,7 +153,6 @@ def get_visualization_code(task_type: str, include_spectra: bool = False,
     if include_spectra:
         code_parts.append(SPECTRA_PLOT_TEMPLATE)
 
-    if include_variable_importance:
-        code_parts.append(VARIABLE_IMPORTANCE_TEMPLATE)
+    # Variable importance plot removed for readability in exported notebooks
 
     return '\n'.join(code_parts)

@@ -18,7 +18,7 @@ y_pred_cv = cross_val_predict(model, X_final, y, cv=cv)
 
 CROSS_VALIDATION_REGRESSION_TEMPLATE = '''
 # =============================================================================
-# CROSS-VALIDATION (Per-fold averaging - matches Unscrambler)
+# CROSS-VALIDATION (matches Model Development exactly)
 # =============================================================================
 
 from sklearn.model_selection import KFold
@@ -28,11 +28,12 @@ from sklearn.base import clone
 # Set up cross-validation
 cv = KFold(n_splits={cv_folds}, shuffle=True, random_state=42)
 
-# Store per-fold metrics and predictions
+# Store per-fold metrics and all predictions
 fold_rmse = []
 fold_r2 = []
 fold_mae = []
-y_pred_cv = np.zeros_like(y, dtype=float)
+all_y_true = []
+all_y_pred = []
 
 for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
     X_train, X_test = X_final[train_idx], X_final[test_idx]
@@ -43,52 +44,87 @@ for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
     fold_model.fit(X_train, y_train)
     y_pred_fold = fold_model.predict(X_test).ravel()
 
-    # Store predictions
-    y_pred_cv[test_idx] = y_pred_fold
+    # Collect all predictions for aggregated metrics
+    all_y_true.extend(y_test)
+    all_y_pred.extend(y_pred_fold)
 
     # Calculate per-fold metrics
     fold_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred_fold)))
     fold_r2.append(r2_score(y_test, y_pred_fold))
     fold_mae.append(mean_absolute_error(y_test, y_pred_fold))
 
-# Average metrics across folds (chemometrics standard)
+# Calculate final metrics (SAME AS MODEL DEVELOPMENT)
+# RMSE: per-fold average
+# R²: aggregated across all predictions (not per-fold average)
 rmse = np.mean(fold_rmse)
-r2 = np.mean(fold_r2)
+all_y_true_arr = np.array(all_y_true)
+all_y_pred_arr = np.array(all_y_pred)
+r2 = r2_score(all_y_true_arr, all_y_pred_arr)
 mae = np.mean(fold_mae)
 rpd = np.std(y) / rmse
+
+# Also keep y_pred_cv for compatibility with visualization
+y_pred_cv = all_y_pred_arr
 '''
 
 CROSS_VALIDATION_CLASSIFICATION_TEMPLATE = '''
 # =============================================================================
-# CROSS-VALIDATION
+# CROSS-VALIDATION (matches Model Development)
 # =============================================================================
 
-from sklearn.model_selection import cross_val_predict, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.base import clone
 
 # Set up stratified cross-validation (maintains class proportions)
 cv = StratifiedKFold(n_splits={cv_folds}, shuffle=True, random_state=42)
 
-# Get cross-validated predictions
-y_pred_cv = cross_val_predict(model, X_final, y, cv=cv)
+# Use binary for 2 classes, macro otherwise (matches results tab)
+unique_classes = np.unique(y)
+average_method = 'binary' if len(unique_classes) == 2 else 'macro'
 
-# For probability predictions (if needed):
-# y_prob_cv = cross_val_predict(model, X_final, y, cv=cv, method='predict_proba')
+# Store per-fold metrics and all predictions
+fold_acc = []
+fold_f1 = []
+all_y_true = []
+all_y_pred = []
+
+for train_idx, test_idx in cv.split(X_final, y):
+    X_train, X_test = X_final[train_idx], X_final[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    fold_model = clone(model)
+    fold_model.fit(X_train, y_train)
+    y_pred_fold = fold_model.predict(X_test)
+
+    all_y_true.extend(y_test)
+    all_y_pred.extend(y_pred_fold)
+
+    fold_acc.append(accuracy_score(y_test, y_pred_fold))
+    fold_f1.append(f1_score(y_test, y_pred_fold, average=average_method, zero_division=0))
+
+# Final metrics (per-fold mean, matches Model Development)
+accuracy = np.mean(fold_acc)
+f1 = np.mean(fold_f1)
+
+# Keep y_pred_cv for compatibility with visualization
+y_pred_cv = np.array(all_y_pred)
 '''
 
 METRICS_TEMPLATE = '''
 # =============================================================================
-# EVALUATION METRICS (averaged across folds)
+# EVALUATION METRICS (matches Model Development)
 # =============================================================================
 
-print(f"\\nCross-validation Results ({cv_folds}-fold, per-fold averaging):")
-print(f"  RMSE: {{rmse:.4f}}")
-print(f"  R²:   {{r2:.4f}}")
-print(f"  MAE:  {{mae:.4f}}")
+print(f"\\nCross-validation Results ({cv_folds}-fold):")
+print(f"  RMSE: {{rmse:.4f}} (per-fold average)")
+print(f"  R²:   {{r2:.4f}} (aggregated)")
+print(f"  MAE:  {{mae:.4f}} (per-fold average)")
 print(f"  RPD:  {{rpd:.2f}}")
 
 # Per-fold details
 print(f"\\nPer-fold RMSE: {{[f'{{x:.4f}}' for x in fold_rmse]}}")
-print(f"Per-fold R²:   {{[f'{{x:.4f}}' for x in fold_r2]}}")
+print(f"Per-fold R²:   {{[f'{{x:.4f}}' for x in fold_r2]}} (for reference only)")
 '''
 
 METRICS_CLASSIFICATION_TEMPLATE = '''
@@ -96,21 +132,17 @@ METRICS_CLASSIFICATION_TEMPLATE = '''
 # EVALUATION METRICS
 # =============================================================================
 
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
-
-# Calculate classification metrics
-accuracy = accuracy_score(y, y_pred_cv)
-f1 = f1_score(y, y_pred_cv, average='weighted')
+from sklearn.metrics import confusion_matrix, classification_report
 
 print(f"\\nCross-validation Results ({cv_folds}-fold):")
-print(f"  Accuracy: {{accuracy:.4f}}")
-print(f"  F1 Score (weighted): {{f1:.4f}}")
+print(f"  Accuracy: {{accuracy:.4f}} (per-fold mean)")
+print(f"  F1 Score (weighted): {{f1:.4f}} (per-fold mean)")
 
 print("\\nConfusion Matrix:")
-print(confusion_matrix(y, y_pred_cv))
+print(confusion_matrix(np.array(all_y_true), y_pred_cv))
 
 print("\\nClassification Report:")
-print(classification_report(y, y_pred_cv))
+print(classification_report(np.array(all_y_true), y_pred_cv))
 '''
 
 FINAL_MODEL_TEMPLATE = '''

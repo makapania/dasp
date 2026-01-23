@@ -34,18 +34,19 @@ dependencies = [
     "xlsxwriter>=3.2.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.1",
-    "jcamp>=1.3.0",
+    # Note: jcamp has dependency bug on Python 3.11+ (incorrectly requires "re")
+    # "jcamp>=1.3.0",
     "spc-io>=0.2.0",
     "joblib>=1.3.0",
     # Resampling and utilities
     "imbalanced-learn>=0.11.0",
     "platformdirs>=3.0.0",
     "threadpoolctl>=3.0.0",
-    # Vendor format support (all required)
+    # Vendor format support
     "specdal",
     "brukeropus",
     "specio-py310",
-    "agilent-ir-formats",
+    # Note: agilent-ir-formats moved to optional (not available on Python 3.11+)
     # Optimization
     "optuna>=3.0.0",
     "pymoo>=0.6.0",
@@ -58,6 +59,9 @@ dev = [
     "flake8>=4.0.0",
     "build>=0.7.0",
     "twine>=4.0.0",
+]
+agilent = [
+    "agilent-ir-formats",  # Only available on Python 3.10
 ]
 
 [project.scripts]
