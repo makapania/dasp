@@ -930,11 +930,11 @@ def estimate_nspfce(
     X_primary: np.ndarray,
     X_satellite: np.ndarray,
     wavelengths: np.ndarray,
-    use_wavelength_selection: bool = True,
-    wavelength_selector: str = 'vcpa-iriv',
+    use_wavelength_selection: bool = False,  # Changed default to False - works better
+    wavelength_selector: str = 'cars',  # Changed default to 'cars' (more stable than vcpa-iriv)
     max_iterations: int = 100,
     convergence_threshold: float = 1e-6,
-    normalize: bool = True
+    normalize: bool = False  # Changed default to False - normalization can cause issues
 ) -> Dict:
     """
     Non-supervised Parameter-Free Calibration Enhancement (NS-PFCE).
@@ -1153,20 +1153,21 @@ def estimate_nspfce(
         # Update transformation
         # Use pseudo-inverse approach for stability
         # Solve: X_primary ≈ X_satellite @ T + offset
+        # Rearrange: X_primary - offset ≈ X_satellite @ T
         # T_new = (X_satellite^T X_satellite)^-1 X_satellite^T (X_primary - offset)
 
-        X_satellite_centered = X_satellite_sel - offset
-        X_primary_centered = X_primary_sel
+        # BUG #3 FIX: Account for offset in the target
+        X_target = X_primary_sel - offset  # Subtract offset from target
 
         # Use regularized least squares
         reg_param = 1e-6
         XtX = X_satellite_sel.T @ X_satellite_sel + reg_param * np.eye(n_selected)
-        XtY = X_satellite_sel.T @ X_primary_sel
+        XtY = X_satellite_sel.T @ X_target  # BUG #3 FIX: Use offset-subtracted target
 
         try:
             T_new = np.linalg.solve(XtX, XtY)
         except np.linalg.LinAlgError:
-            T_new = np.linalg.pinv(X_satellite_sel) @ X_primary_sel
+            T_new = np.linalg.pinv(X_satellite_sel) @ X_target
 
         # Adaptive update (damping for stability)
         damping = 0.5
@@ -1177,13 +1178,15 @@ def estimate_nspfce(
         offset = np.mean(X_primary_sel - X_satellite_transformed, axis=0)
 
         # Optional normalization step
+        # BUG #5 FIX: Use Frobenius norm instead of diagonal (T may not be diagonal)
         if normalize and iteration % 10 == 0:
-            # Renormalize to prevent drift
-            scale = np.diag(T)
-            scale_mean = np.mean(scale)
-            if scale_mean > 0:
-                T = T / scale_mean
-                offset = offset * scale_mean
+            # Renormalize using Frobenius norm to prevent drift
+            frob_norm = np.linalg.norm(T, 'fro')
+            expected_norm = np.sqrt(n_selected)  # Expected norm for identity-like matrix
+            if frob_norm > 0:
+                scale_factor = expected_norm / frob_norm
+                T = T * scale_factor
+                offset = offset / scale_factor
 
     if convergence_iterations == 0:
         convergence_iterations = max_iterations
@@ -1196,6 +1199,9 @@ def estimate_nspfce(
     print(f"  NS-PFCE: Converged in {convergence_iterations} iterations")
     print(f"  NS-PFCE: Final RMSE: {final_objective:.6f}")
 
+    # Get actual wavelength values for selected wavelengths
+    selected_wavelength_values = wavelengths[selected_wavelengths] if use_wavelength_selection else wavelengths
+
     # Compile results
     params = {
         # Transformation parameters
@@ -1204,10 +1210,15 @@ def estimate_nspfce(
         'offset': offset,
 
         # Wavelength selection
-        'selected_wavelengths': selected_wavelengths,
+        'selected_wavelengths': selected_wavelengths,  # Indices into original wavelength array
+        'selected_wavelength_indices': selected_wavelengths,  # Alias for backward compatibility
+        'selected_wavelength_values': selected_wavelength_values,  # Actual wavelength values (nm)
+        'original_wavelengths': wavelengths,  # Original full wavelength array
         'wavelength_selector': wavelength_selector if use_wavelength_selection else None,
+        'wavelength_selection_method': wavelength_selector if use_wavelength_selection else None,  # Alias for backward compat
         'use_wavelength_selection': use_wavelength_selection,
         'n_selected_wavelengths': n_selected,
+        'n_original_wavelengths': n_wavelengths,
 
         # Convergence information (dual naming for backward compatibility)
         'convergence_iterations': convergence_iterations,
@@ -1223,7 +1234,11 @@ def estimate_nspfce(
     return params
 
 
-def apply_nspfce(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
+def apply_nspfce(
+    X_satellite_new: np.ndarray,
+    params: Dict,
+    return_full_spectrum: bool = False
+) -> np.ndarray:
     """
     Apply NS-PFCE calibration transfer to new satellite instrument spectra.
 
@@ -1236,11 +1251,25 @@ def apply_nspfce(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
         New satellite instrument spectra to transform.
     params : dict
         NS-PFCE parameters from estimate_nspfce.
+    return_full_spectrum : bool, default=False
+        If wavelength selection was used:
+        - False (default): Return only the selected wavelengths (reduced spectrum).
+          This is the correct behavior - all wavelengths in output are consistently
+          transformed to primary instrument scale.
+        - True: Return full spectrum with non-selected wavelengths unchanged.
+          WARNING: This creates a mixed-scale spectrum (selected wavelengths in
+          primary scale, others in satellite scale) which is usually incorrect.
 
     Returns
     -------
-    X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
+    X_transferred : np.ndarray
         Transformed spectra in primary instrument domain.
+        Shape depends on wavelength selection:
+        - No wavelength selection: (n_samples, n_wavelengths)
+        - With wavelength selection and return_full_spectrum=False:
+          (n_samples, n_selected_wavelengths)
+        - With wavelength selection and return_full_spectrum=True:
+          (n_samples, n_wavelengths) but mixed scales (not recommended)
 
     Examples
     --------
@@ -1248,14 +1277,17 @@ def apply_nspfce(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     >>> X_satellite_new = np.random.randn(50, 200)
     >>> X_transferred = apply_nspfce(X_satellite_new, params)
     >>>
+    >>> # If wavelength selection was used, X_transferred has fewer wavelengths
+    >>> # Use params['selected_wavelength_values'] to get the wavelength grid
+    >>> print(f"Output wavelengths: {params['selected_wavelength_values']}")
+    >>>
     >>> # Can now use primary instrument's calibration model
     >>> y_predicted = primary_model.predict(X_transferred)
 
     Notes
     -----
-    - If wavelength selection was used, transformation is applied only
-      to selected wavelengths
-    - Other wavelengths are preserved or interpolated
+    - If wavelength selection was used, output has only selected wavelengths
+    - Use params['selected_wavelength_values'] to get the wavelength grid
     - Transformation: X_transferred = X_satellite @ T + offset
     """
     T = params['transformation_matrix']
@@ -1266,16 +1298,25 @@ def apply_nspfce(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     n_wavelengths_full = X_satellite_new.shape[1]
 
     if use_wl_selection and selected_wavelengths is not None:
-        # Apply transformation only to selected wavelengths
+        # Extract only selected wavelengths from input
         X_satellite_selected = X_satellite_new[:, selected_wavelengths]
+
+        # Apply transformation
         X_transformed_selected = X_satellite_selected @ T + offset
 
-        # Reconstruct full spectrum
-        # Simple approach: keep non-selected wavelengths unchanged
-        X_transferred = X_satellite_new.copy()
-        X_transferred[:, selected_wavelengths] = X_transformed_selected
+        if return_full_spectrum:
+            # WARNING: This creates mixed-scale spectrum (not recommended)
+            # Keep non-selected wavelengths unchanged (satellite scale)
+            # Selected wavelengths are transformed (primary scale)
+            X_transferred = X_satellite_new.copy()
+            X_transferred[:, selected_wavelengths] = X_transformed_selected
+        else:
+            # BUG #4 FIX: Return only selected wavelengths (all in primary scale)
+            # This is the correct behavior - output is consistent
+            X_transferred = X_transformed_selected
 
     else:
+        # No wavelength selection - apply to all wavelengths
         # Validate dimensions
         n_wavelengths_expected = T.shape[0]
         if X_satellite_new.shape[1] != n_wavelengths_expected:

@@ -948,24 +948,21 @@ TOOLTIP_CONTENT = {
             "Monitor convergence messages - if hitting max iterations, consider increasing."
         ),
         'param_nspfce_wavelength_selection': (
-            "Enable wavelength selection for NS-PFCE to identify informative features. "
-            "When checked: Uses feature selection algorithm (VCPA-IRIV, CARS, or SPA) to find wavelengths "
-            "that transfer reliably between instruments while excluding problematic regions (noise, artifacts). "
-            "Recommended: CHECKED for most applications. Dramatically improves transfer quality by focusing "
-            "on stable, informative spectral regions. Unchecked = use all wavelengths (faster but may include "
-            "noisy regions that degrade transfer). Disable only if you've pre-selected optimal wavelengths "
-            "or working with very clean, well-matched instruments."
+            "Enable wavelength selection for NS-PFCE optimization. "
+            "UNCHECKED (default): Uses all wavelengths. Recommended for most cases - NS-PFCE performs excellently "
+            "without wavelength selection, is faster, and outputs full-width spectra compatible with existing models. "
+            "CHECKED: Uses feature selection (CARS, SPA, or VCPA-IRIV) to focus on a subset of wavelengths. "
+            "Output spectra contain ONLY selected wavelengths (reduced width). "
+            "Use with caution - downstream models must be trained on the same reduced wavelength set."
         ),
         'param_nspfce_selector': (
-            "Wavelength selection algorithm for NS-PFCE method. Chooses which features transfer reliably. "
+            "Wavelength selection algorithm for NS-PFCE (only when wavelength selection is enabled). "
+            "cars (default) = Competitive Adaptive Reweighted Sampling. Fast and robust, uses competitive mechanism. "
+            "Good for most applications. "
+            "spa = Successive Projections Algorithm. Very fast, selects orthogonal variables. Good for "
+            "highly collinear spectral data. "
             "vcpa-iriv = Variable Combination Population Analysis + Iteratively Retaining Informative Variables. "
-            "Most comprehensive, identifies stable informative wavelengths, recommended for spectroscopy (default). "
-            "Slower but most robust. "
-            "cars = Competitive Adaptive Reweighted Sampling. Fast, uses competitive mechanism. Good for "
-            "large datasets where speed matters. "
-            "spa = Successive Projections Algorithm. Very fast, projects orthogonal variables. Good for "
-            "highly collinear spectral data. Less thorough than VCPA-IRIV. "
-            "Default vcpa-iriv works well for most spectroscopy applications."
+            "Most comprehensive but slowest. Identifies stable informative wavelengths through multiple iterations."
         ),
     },
 
@@ -35988,20 +35985,22 @@ Configuration:
         row4.pack(fill='x')
 
         # NS-PFCE Wavelength Selection
-        self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=True)
+        # Default to False - NS-PFCE works great without WL selection (faster, full spectrum output)
+        # When WL selection is enabled, output is reduced to only selected wavelengths
+        self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=False)
         nspfce_wavsel_check = ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
                                               variable=self.ct_nspfce_use_wavelength_selection_var)
         nspfce_wavsel_check.pack(side='left', padx=(0, 20))
         CreateToolTip(nspfce_wavsel_check, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_wavelength_selection'], delay=500)
 
-        # NS-PFCE Selector
+        # NS-PFCE Selector (only used when wavelength selection is enabled)
         nspfce_selector_label = ttk.Label(row4, text="Selector:", style='CardLabel.TLabel')
         nspfce_selector_label.pack(side='left')
         CreateToolTip(nspfce_selector_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
 
-        self.ct_nspfce_selector_var = tk.StringVar(value='vcpa-iriv')
+        self.ct_nspfce_selector_var = tk.StringVar(value='cars')  # Changed default from vcpa-iriv
         nspfce_selector_combo = ttk.Combobox(row4, textvariable=self.ct_nspfce_selector_var,
-                                             values=['vcpa-iriv', 'cars', 'spa'], state='readonly',
+                                             values=['cars', 'spa', 'vcpa-iriv'], state='readonly',
                                              width=12)
         nspfce_selector_combo.pack(side='left')
         CreateToolTip(nspfce_selector_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
@@ -41268,5 +41267,118 @@ def main():
     root.mainloop()
 
 
+def run_import_tests():
+    """Run comprehensive import tests for bundled app verification."""
+    import sys
+
+    REQUIRED_IMPORTS = [
+        # Core scientific
+        ("numpy", "Core scientific computing"),
+        ("pandas", "Data manipulation"),
+        ("scipy", "Scientific computing base"),
+        ("scipy.stats", "Statistical functions"),
+        ("scipy.signal", "Signal processing"),
+        ("scipy.optimize", "Optimization"),
+        # sklearn
+        ("sklearn", "Machine learning base"),
+        ("sklearn.cross_decomposition", "PLS regression"),
+        ("sklearn.preprocessing", "Data preprocessing"),
+        ("sklearn.model_selection", "Cross-validation"),
+        ("sklearn.metrics", "Model metrics"),
+        ("sklearn.linear_model", "Linear models"),
+        ("sklearn.ensemble", "Ensemble methods"),
+        ("sklearn.svm", "Support vector machines"),
+        ("sklearn.neural_network", "Neural networks"),
+        # Boosting models
+        ("xgboost", "XGBoost gradient boosting"),
+        ("lightgbm", "LightGBM gradient boosting"),
+        ("catboost", "CatBoost gradient boosting"),
+        # Optimization
+        ("optuna", "Hyperparameter optimization"),
+        ("pymoo", "Multi-objective optimization"),
+        ("pymoo.algorithms.moo.nsga2", "NSGA-II algorithm"),
+        # Imbalanced learning
+        ("imblearn", "Imbalanced learning"),
+        # Visualization
+        ("matplotlib", "Plotting"),
+        ("matplotlib.pyplot", "Plotting interface"),
+        ("PIL", "Image processing"),
+        # Utilities
+        ("joblib", "Parallel processing"),
+        ("numba", "JIT compilation"),
+        # GUI
+        ("tkinter", "GUI framework"),
+        # File format
+        ("openpyxl", "Excel support"),
+        # pymoo extras
+        ("pymoo.util.nds.non_dominated_sorting", "pymoo NDS"),
+        ("moocore", "Multi-objective core"),
+    ]
+
+    print("=" * 60)
+    print("Spectral Predict - Bundled App Import Test")
+    print("=" * 60)
+    print(f"\nPython: {sys.executable}")
+    print(f"Version: {sys.version}")
+    print()
+
+    failed = []
+    success_count = 0
+
+    for module_name, description in REQUIRED_IMPORTS:
+        try:
+            __import__(module_name)
+            print(f"  [OK] {module_name}")
+            success_count += 1
+        except Exception as e:
+            print(f"  [FAIL] {module_name}: {e}")
+            failed.append((module_name, str(e)))
+
+    # Test XGBoost DLL
+    print("\n--- Testing XGBoost DLL ---")
+    try:
+        import xgboost
+        import numpy as np
+        X = np.array([[1, 2], [3, 4]])
+        y = np.array([0, 1])
+        model = xgboost.XGBClassifier(n_estimators=1, verbosity=0)
+        model.fit(X, y)
+        print("  [OK] XGBoost DLL functional")
+    except Exception as e:
+        print(f"  [FAIL] XGBoost DLL: {e}")
+        failed.append(("xgboost.dll", str(e)))
+
+    # Test LightGBM DLL
+    print("\n--- Testing LightGBM DLL ---")
+    try:
+        import lightgbm
+        import numpy as np
+        X = np.array([[1, 2], [3, 4]])
+        y = np.array([0, 1])
+        model = lightgbm.LGBMClassifier(n_estimators=1, verbosity=-1)
+        model.fit(X, y)
+        print("  [OK] LightGBM DLL functional")
+    except Exception as e:
+        print(f"  [FAIL] LightGBM DLL: {e}")
+        failed.append(("lightgbm.dll", str(e)))
+
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"\nImports: {success_count}/{len(REQUIRED_IMPORTS)}")
+
+    if failed:
+        print(f"\n{len(failed)} FAILED:")
+        for mod, err in failed:
+            print(f"  - {mod}: {err}")
+        return 1
+    else:
+        print("\n[SUCCESS] ALL TESTS PASSED!")
+        return 0
+
+
 if __name__ == "__main__":
+    # Check for --test flag
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        sys.exit(run_import_tests())
     main()
