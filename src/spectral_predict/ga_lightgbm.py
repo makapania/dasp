@@ -437,8 +437,11 @@ def _run_single_ga_lgbm(
                     cache.set(population[i], fitness)
                     fitness_scores[i] = fitness
             else:
-                # Parallel evaluation
-                results = Parallel(n_jobs=n_jobs, prefer="threads")(
+                # Parallel evaluation - use threading in frozen apps
+                import sys
+                is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+                backend = 'threading' if is_frozen else 'loky'
+                results = Parallel(n_jobs=n_jobs, backend=backend)(
                     delayed(_fitness_function_lgbm)(
                         population[i], X, y, cv, task_type,
                         n_estimators, num_leaves, learning_rate, reg_lambda,

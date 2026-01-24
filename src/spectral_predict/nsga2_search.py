@@ -22,7 +22,7 @@ import pandas as pd
 import warnings
 from typing import Dict, List, Optional, Tuple, Callable, Any, Union
 from sklearn.model_selection import cross_val_score, cross_val_predict, KFold, StratifiedKFold
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.linear_model import Ridge, RidgeClassifier, Lasso, ElasticNet
 from .models import PLSTransformer  # Wrapper that ensures 2D output for PLS-DA
@@ -2686,6 +2686,164 @@ def _compute_display_rmse(
         return None
 
 
+def _compute_nir_metrics(
+    X: np.ndarray,
+    y: np.ndarray,
+    solution: np.ndarray,
+    n_wavelengths: int,
+    model_types: List[str],
+    task_type: str,
+    cv_folds: int = 5,
+    random_state: int = 42,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, float]:
+    """
+    Compute NIR-specific metrics (MAEcv, Bias, RPD, RER) for display.
+
+    Uses cross-validated predictions to compute metrics that match Model Development.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data (n_samples, n_wavelengths)
+    y : np.ndarray
+        Target values
+    solution : np.ndarray
+        Chromosome encoding the solution
+    n_wavelengths : int
+        Total number of wavelengths
+    model_types : list of str
+        List of model types used in optimization
+    task_type : str
+        'regression' or 'classification'
+    cv_folds : int
+        Number of CV folds
+    random_state : int
+        Random state for reproducibility
+    imbalance_method : str, optional
+        Imbalance handling method
+    imbalance_params : dict, optional
+        Parameters for imbalance method
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with NIR metrics: {'MAEcv', 'Bias', 'RPD', 'RER'}
+        Values are np.nan if computation failed.
+    """
+    default_metrics = {'MAEcv': np.nan, 'Bias': np.nan, 'RPD': np.nan, 'RER': np.nan}
+
+    if task_type != 'regression':
+        return default_metrics
+
+    try:
+        # Decode solution (same as _compute_display_rmse)
+        preproc_idx = int(solution[0])
+        window_idx = int(solution[1])
+        model_idx = int(solution[2])
+        model_param = int(solution[3])
+        lr_gene = int(solution[4])
+        reg_alpha_gene = int(solution[5])
+        reg_lambda_gene = int(solution[6])
+        l1_gene = int(solution[7])
+        subsample_gene = int(solution[8])
+        colsample_gene = int(solution[9])
+        min_samples_gene = int(solution[10])
+        gamma_gene = int(solution[11])
+        max_features_gene = int(solution[12])
+        wavelength_mask = solution[13:].astype(bool)
+
+        # Apply edge masking (same as _compute_display_rmse)
+        edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+        if edge_zone > 0:
+            wavelength_mask = wavelength_mask.copy()
+            wavelength_mask[:edge_zone] = False
+            wavelength_mask[-edge_zone:] = False
+
+        # Decode hyperparameter genes
+        hyperparams = _decode_hyperparameter_genes(
+            lr_gene, reg_alpha_gene, reg_lambda_gene, l1_gene,
+            subsample_gene, colsample_gene, min_samples_gene, gamma_gene, max_features_gene
+        )
+
+        # Apply preprocessing
+        transform = _get_preprocessing_transform(preproc_idx, window_idx)
+        if transform is not None:
+            X_proc = transform(X)
+        else:
+            X_proc = X.copy()
+
+        # Select wavelengths
+        X_subset = X_proc[:, wavelength_mask]
+
+        if X_subset.shape[1] == 0:
+            return default_metrics
+
+        # Get model type
+        model_type = model_types[min(model_idx, len(model_types) - 1)]
+
+        # Build model (same logic as _compute_display_rmse)
+        if model_type in ('PLS', 'PLS-DA'):
+            min_train_samples = X_subset.shape[0] * (cv_folds - 1) // cv_folds
+            n_components = min(model_param + 1, 15, X_subset.shape[1] - 1, min_train_samples - 1)
+            n_components = max(1, n_components)
+            model = PLSRegression(n_components=n_components, scale=False)
+        else:
+            model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
+
+        # Build pipeline with imbalance handling if specified
+        if imbalance_method is not None and imbalance_method != 'class_weight':
+            from sklearn.pipeline import Pipeline
+            from spectral_predict.imbalance import build_imbalance_transformer
+
+            imb_params = imbalance_params if imbalance_params else {}
+            imbalance_transformer = build_imbalance_transformer(
+                method=imbalance_method,
+                task_type=task_type,
+                random_state=random_state,
+                **imb_params
+            )
+
+            pipe_steps = [("imbalance", imbalance_transformer), ("model", model)]
+
+            if _needs_resampling_pipeline(imbalance_method, task_type):
+                from imblearn.pipeline import Pipeline as ImbPipeline
+                model = ImbPipeline(pipe_steps)
+            else:
+                model = Pipeline(pipe_steps)
+
+        # Cross-validation to get predictions
+        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            y_pred_cv = cross_val_predict(model, X_subset, y, cv=cv)
+
+        # Compute NIR metrics from CV predictions
+        # MAEcv: Mean Absolute Error
+        mae_cv = mean_absolute_error(y, y_pred_cv)
+        # Bias: Mean prediction error (positive = systematic overprediction)
+        bias_cv = float(np.mean(y_pred_cv - y))
+        # RPD and RER need RMSE (compute from predictions for consistency)
+        rmse_cv = np.sqrt(np.mean((y - y_pred_cv) ** 2))
+        # RPD: Ratio of Performance to Deviation
+        y_std = float(np.std(y))
+        rpd = y_std / rmse_cv if rmse_cv > 0 else 0.0
+        # RER: Range Error Ratio
+        y_range = float(np.ptp(y))
+        rer = y_range / rmse_cv if rmse_cv > 0 else 0.0
+
+        return {
+            'MAEcv': float(mae_cv),
+            'Bias': bias_cv,
+            'RPD': rpd,
+            'RER': rer
+        }
+
+    except Exception:
+        return default_metrics
+
+
 def _compute_classification_cv_metrics(
     X: np.ndarray,
     y: np.ndarray,
@@ -3355,9 +3513,24 @@ def convert_nsga2_to_v1_format(
                     row['R2cv'] = r2_cv
                 else:
                     row['R2cv'] = None
+
+                # Compute NIR-specific metrics
+                nir_metrics = _compute_nir_metrics(
+                    X, y, solution, n_wavelengths, model_types, task_type, folds, 42,
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params
+                )
+                row['MAEcv'] = nir_metrics['MAEcv']
+                row['Bias'] = nir_metrics['Bias']
+                row['RPD'] = nir_metrics['RPD']
+                row['RER'] = nir_metrics['RER']
             else:
                 row['RMSEcv'] = objectives[0]  # Fallback to optimization RMSE
                 row['R2cv'] = None
+                row['MAEcv'] = np.nan
+                row['Bias'] = np.nan
+                row['RPD'] = np.nan
+                row['RER'] = np.nan
 
             row['CompositeScore'] = row['RMSEcv']  # Use CV RMSE as composite
         else:
@@ -3584,9 +3757,9 @@ def convert_nsga2_to_v1_format(
     base_cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'Variables', 'full_vars',
                  'SubsetTag', 'Imbalance']
 
-    # Performance metrics after Imbalance (calibration first, then CV)
+    # Performance metrics after Imbalance (calibration first, then CV, then NIR-specific)
     if task_type == 'regression':
-        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'CompositeScore']
+        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore']
     else:
         perf_cols = ['Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall',
                     'Accuracycv', 'ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv', 'CompositeScore']

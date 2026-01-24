@@ -348,8 +348,8 @@ def create_results_dataframe(task_type):
     ]
 
     if task_type == "regression":
-        # Calibration metrics first, then CV metrics
-        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv"]
+        # Calibration metrics first, then CV metrics, then NIR-specific metrics
+        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER"]
     else:
         # Calibration metrics first, then CV metrics
         metric_cols = ["Accuracy", "ROC_AUC", "F1", "Precision", "Recall",

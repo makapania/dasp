@@ -251,7 +251,24 @@ class CodeGenerator:
                 "Run this cell first if you're missing any required packages.\n"
                 "Skip if running locally with packages already installed."
             ))
-            cells.append(self._make_code_cell(f"!pip install -q {' '.join(pip_packages)}"))
+            install_code = (
+                "import sys\n"
+                "import subprocess\n"
+                "\n"
+                f"pkgs = {pip_packages!r}\n"
+                "print('Installing:', ' '.join(pkgs))\n"
+                "try:\n"
+                "    if 'google.colab' in sys.modules:\n"
+                "        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])\n"
+                "    else:\n"
+                "        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', *pkgs])\n"
+                "    print('Install complete.')\n"
+                "except Exception as e:\n"
+                "    print('Install failed in this environment:', e)\n"
+                "    print('If this is a browser/pyodide notebook, install is not available.')\n"
+                "    print('Run this notebook in Colab or a local Jupyter kernel with pip enabled.')\n"
+            )
+            cells.append(self._make_code_cell(install_code))
 
         # Imports cell
         cells.append(self._make_markdown_cell("## 1. Setup and Imports"))
@@ -885,8 +902,28 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             if model_class.startswith('XGBoost'):
                 params_full.setdefault('tree_method', 'hist')
                 params_full.setdefault('verbosity', 0)
-            if model_class.startswith('CatBoost') and 'verbose' not in params_full:
-                params_full['verbose'] = 0
+            if model_class.startswith('CatBoost'):
+                # CatBoost does not allow both depth and max_depth
+                if 'depth' in params_full and 'max_depth' in params_full:
+                    params_full.pop('max_depth', None)
+                # CatBoost does not allow multiple iteration synonyms
+                if 'iterations' in params_full:
+                    params_full.pop('n_estimators', None)
+                    params_full.pop('num_boost_round', None)
+                    params_full.pop('num_trees', None)
+                if 'verbose' not in params_full:
+                    params_full['verbose'] = 0
+            if model_class.startswith('LightGBM'):
+                # LightGBM does not allow both n_estimators and num_iterations
+                if 'n_estimators' in params_full and 'num_iterations' in params_full:
+                    params_full.pop('num_iterations', None)
+                # Drop legacy aliases if present alongside n_estimators
+                if 'n_estimators' in params_full and 'num_boost_round' in params_full:
+                    params_full.pop('num_boost_round', None)
+            if model_class.startswith('XGBoost'):
+                # XGBoost does not allow both n_estimators and num_boost_round
+                if 'n_estimators' in params_full and 'num_boost_round' in params_full:
+                    params_full.pop('num_boost_round', None)
             if model_class.startswith('LGBM') or model_class.startswith('XGB'):
                 params_full.setdefault('n_jobs', -1)
 

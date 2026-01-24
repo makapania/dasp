@@ -40,7 +40,7 @@ from optuna.samplers import TPESampler
 from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
-from sklearn.metrics import roc_auc_score, r2_score, mean_squared_error, accuracy_score
+from sklearn.metrics import roc_auc_score, r2_score, mean_squared_error, accuracy_score, mean_absolute_error
 from typing import Dict, List, Optional, Callable, Tuple, Any
 
 # Import existing infrastructure
@@ -742,8 +742,16 @@ def create_unified_objective(
                 # R² must use aggregated predictions (not per-fold averages)
                 # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
                 # This matches the method used in search.py for consistency with Model Development
-                y_pred = cross_val_predict(model, X_final, y, cv=cv, n_jobs=1)
-                r2 = r2_score(y, y_pred)
+                y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=1)
+                r2 = r2_score(y, y_pred_cv)
+
+                # Compute additional NIR spectroscopy metrics from CV predictions
+                mae_cv = mean_absolute_error(y, y_pred_cv)
+                bias_cv = float(np.mean(y_pred_cv - y))
+                y_std = float(np.std(y))
+                y_range = float(np.ptp(y))
+                rpd = y_std / rmse if rmse > 0 else 0.0
+                rer = y_range / rmse if rmse > 0 else 0.0
 
                 metric = rmse  # Minimize RMSE
             else:
@@ -791,6 +799,11 @@ def create_unified_objective(
                 trial.set_user_attr('R2', cal_r2)          # Calibration
                 trial.set_user_attr('RMSEcv', rmse)        # CV (was RMSE)
                 trial.set_user_attr('R2cv', r2)            # CV (was R2)
+                # NIR-specific metrics (computed from aggregated CV predictions)
+                trial.set_user_attr('MAEcv', mae_cv)
+                trial.set_user_attr('RPD', rpd)
+                trial.set_user_attr('Bias', bias_cv)
+                trial.set_user_attr('RER', rer)
             else:
                 cal_accuracy = accuracy_score(y, y_pred_cal)
                 trial.set_user_attr('Accuracy', cal_accuracy)    # Calibration
@@ -1152,6 +1165,11 @@ def convert_study_to_dataframe(
             row['R2'] = trial.user_attrs.get('R2', np.nan)           # Calibration
             row['RMSEcv'] = trial.user_attrs.get('RMSEcv', trial.value)  # CV
             row['R2cv'] = trial.user_attrs.get('R2cv', np.nan)       # CV
+            # NIR-specific metrics
+            row['MAEcv'] = trial.user_attrs.get('MAEcv', np.nan)
+            row['RPD'] = trial.user_attrs.get('RPD', np.nan)
+            row['Bias'] = trial.user_attrs.get('Bias', np.nan)
+            row['RER'] = trial.user_attrs.get('RER', np.nan)
         else:
             row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)       # Calibration
             accuracycv = trial.user_attrs.get('Accuracycv', -trial.value if trial.value else np.nan)
@@ -1184,7 +1202,7 @@ def convert_study_to_dataframe(
         if task_type == 'classification':
             cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
-            cols.extend(['RMSE', 'R2', 'RMSEcv', 'R2cv', 'CompositeScore', 'Score'])
+            cols.extend(['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score'])
         return pd.DataFrame(columns=cols)
 
     # Sort by performance (use CV metrics for model selection)

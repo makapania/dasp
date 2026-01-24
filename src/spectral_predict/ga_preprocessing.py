@@ -816,7 +816,12 @@ def exhaustive_search(
             if verbose >= 1:
                 print(f"  Parallel evaluation with n_jobs={n_jobs}")
 
-            results = Parallel(n_jobs=n_jobs)(
+            # Use 'threading' in frozen apps (avoids PyInstaller process spawn issues)
+            # Use 'loky' in dev mode (faster multiprocessing)
+            import sys
+            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+            backend = 'threading' if is_frozen else 'loky'
+            results = Parallel(n_jobs=n_jobs, backend=backend)(
                 delayed(evaluate_fitness)(
                     genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
                 )
@@ -1060,7 +1065,12 @@ def smart_exhaustive_search(
             if verbose >= 1:
                 print(f"  Parallel evaluation with n_jobs={n_jobs}")
 
-            stage1_results = Parallel(n_jobs=n_jobs)(
+            # Use 'threading' in frozen apps (avoids PyInstaller process spawn issues)
+            # Use 'loky' in dev mode (faster multiprocessing)
+            import sys
+            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+            backend = 'threading' if is_frozen else 'loky'
+            stage1_results = Parallel(n_jobs=n_jobs, backend=backend)(
                 delayed(evaluate_fitness)(
                     genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config
                 )

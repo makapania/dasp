@@ -9,7 +9,8 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
-    f1_score, precision_score, recall_score, classification_report
+    f1_score, precision_score, recall_score, classification_report,
+    mean_absolute_error
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -382,6 +383,8 @@ def compute_validation_metrics_for_top_models(
     # Get top N indices by CompositeScore (lower is better)
     n_to_process = min(top_n, len(df_results))
     if 'CompositeScore' in df_results.columns:
+        # Ensure CompositeScore is numeric (may be object dtype from CSV)
+        df_results['CompositeScore'] = pd.to_numeric(df_results['CompositeScore'], errors='coerce')
         top_indices = df_results.nsmallest(n_to_process, 'CompositeScore').index
     else:
         # Fallback to first n rows
@@ -3505,7 +3508,12 @@ def _run_single_config(
         ]
     else:
         # Parallel execution for speed
-        cv_metrics = Parallel(n_jobs=n_jobs_cv, backend='loky')(
+        # Use 'threading' in frozen apps (avoids PyInstaller process spawn issues)
+        # Use 'loky' in dev mode (faster multiprocessing)
+        import sys
+        is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+        backend = 'threading' if is_frozen else 'loky'
+        cv_metrics = Parallel(n_jobs=n_jobs_cv, backend=backend)(
             delayed(_run_single_fold)(
                 pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
                 use_sample_weight_for_classification
@@ -3532,6 +3540,21 @@ def _run_single_config(
         # Compute R² from aggregated predictions (not per-fold averages)
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
         mean_r2 = r2_score(all_y_test, all_y_pred)
+
+        # Compute additional NIR spectroscopy metrics from aggregated CV predictions
+        # MAEcv: Mean Absolute Error - less sensitive to outliers than RMSE
+        mae_cv = mean_absolute_error(all_y_test, all_y_pred)
+        # Bias: Mean prediction error (positive = systematic overprediction)
+        bias_cv = float(np.mean(all_y_pred - all_y_test))
+        # RPD: Ratio of Performance to Deviation (std(y) / RMSEcv)
+        # Industry standard for NIR model fitness assessment
+        # RPD < 1.5: Poor, 1.5-2: Screening only, 2-3: Acceptable, > 3: Good
+        y_std = float(np.std(y))
+        rpd = y_std / mean_rmse if mean_rmse > 0 else 0.0
+        # RER: Range Error Ratio (range(y) / RMSEcv)
+        # Alternative to RPD, uses data range instead of standard deviation
+        y_range = float(np.ptp(y))  # max(y) - min(y)
+        rer = y_range / mean_rmse if mean_rmse > 0 else 0.0
 
         # Compute quartiles based on TRUE Y values
         # Regional selection identifies which models excel in different value ranges
@@ -3787,6 +3810,11 @@ def _run_single_config(
         # Cross-validation metrics (test fold averages)
         result["RMSEcv"] = mean_rmse
         result["R2cv"] = mean_r2
+        # NIR-specific metrics (computed from aggregated CV predictions)
+        result["MAEcv"] = mae_cv
+        result["RPD"] = rpd
+        result["Bias"] = bias_cv
+        result["RER"] = rer
         # Add regional performance for consensus predictions (dict format for ensemble)
         result["regional_rmse"] = regional_rmse
         result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds
