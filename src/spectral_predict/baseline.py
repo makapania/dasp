@@ -55,6 +55,10 @@ class BaselineALS(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         """Fit transformer (no-op for ALS baseline correction)."""
+        # Set fitted attributes for sklearn compatibility (required for Pipeline serialization)
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
         return self
 
     def transform(self, X):
@@ -133,6 +137,10 @@ class BaselinePolynomial(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         """Fit transformer (no-op for polynomial baseline correction)."""
+        # Set fitted attributes for sklearn compatibility (required for Pipeline serialization)
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
         return self
 
     def transform(self, X):
@@ -220,6 +228,7 @@ class BaselineAirPLS(BaseEstimator, TransformerMixin):
         """Fit transformer (stores number of features)."""
         X = np.asarray(X, dtype=np.float64)
         self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
         return self
 
     def _baseline_airpls_single(self, y):

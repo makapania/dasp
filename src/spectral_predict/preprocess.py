@@ -14,6 +14,10 @@ class SNV(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         """Fit transformer (no-op for SNV)."""
+        # Set fitted attributes for sklearn compatibility (required for Pipeline serialization)
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
         return self
 
     def transform(self, X):
@@ -61,6 +65,10 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         """Fit transformer (no-op for Savgol)."""
+        # Set fitted attributes for sklearn compatibility (required for Pipeline serialization)
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
         return self
 
     def transform(self, X):
@@ -146,6 +154,10 @@ class SavgolSmooth(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         """Fit transformer (no-op for smoothing)."""
+        # Set fitted attributes for sklearn compatibility (required for Pipeline serialization)
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
         return self
 
     def transform(self, X):
