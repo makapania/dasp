@@ -3472,7 +3472,7 @@ def convert_nsga2_to_v1_format(
             'all_vars': _indices_to_wavelength_str(decoded['selected_indices'], wavelengths) if decoded['selected_indices'] else 'N/A',
             'n_vars': decoded['n_wavelengths'],
             'Deriv': deriv_order,
-            'Window': window_size,
+            'Window': int(window_size) if window_size is not None else None,
             'Poly': deriv_order + 1 if deriv_order else None,  # polyorder = deriv + 1
             'LVs': _get_constrained_pls_components(int(solution[3]), decoded['n_wavelengths'], n_samples) if decoded['model'] in ('PLS', 'PLS-DA') else None,
             'Complexity': objectives[2],
@@ -3632,7 +3632,7 @@ def convert_nsga2_to_v1_format(
                     'all_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', []), wavelengths) if knee_sol.get('selected_indices') else 'N/A',
                     'n_vars': knee_sol.get('n_wavelengths', 0),
                     'Deriv': deriv_order,
-                    'Window': window_size,
+                    'Window': int(window_size) if window_size is not None else None,
                     'Poly': polyorder,
                     'LVs': knee_sol.get('model_params', {}).get('n_components') if knee_sol.get('model') in ('PLS', 'PLS-DA') else None,
                     'Complexity': knee_sol['objectives'].get('complexity', 0),
@@ -3753,9 +3753,9 @@ def convert_nsga2_to_v1_format(
         df = df.drop(columns=['Preprocessing'])
 
     # Reorder columns to match Grid Search format
-    # Rank first, then standard columns, calibration metrics, CV metrics, NSGA-specific columns at end
-    base_cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'Variables', 'full_vars',
-                 'SubsetTag', 'Imbalance']
+    # Preprocessing columns early (Deriv, Window, Poly, LVs, n_vars), metrics in middle, top_vars/all_vars at end
+    base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
+                 'Poly', 'LVs', 'n_vars', 'Variables', 'full_vars', 'SubsetTag', 'Imbalance']
 
     # Performance metrics after Imbalance (calibration first, then CV, then NIR-specific)
     if task_type == 'regression':
@@ -3764,8 +3764,8 @@ def convert_nsga2_to_v1_format(
         perf_cols = ['Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall',
                     'Accuracycv', 'ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv', 'CompositeScore']
 
-    # Other standard columns
-    other_cols = ['top_vars', 'all_vars', 'n_vars', 'Deriv', 'Window', 'Poly', 'LVs']
+    # Variable columns at end
+    other_cols = ['top_vars', 'all_vars']
 
     # NSGA-specific columns at end
     nsga_cols = ['Complexity', 'Is_Knee', 'Folds', 'N_Calibration', 'N_Excluded', 'N_Validation']
