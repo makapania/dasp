@@ -13,7 +13,14 @@ from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 from xgboost import XGBRegressor, XGBClassifier
 from lightgbm import LGBMRegressor, LGBMClassifier
 
-from catboost import CatBoostRegressor, CatBoostClassifier
+# CatBoost is optional (requires Visual Studio on Windows)
+try:
+    from catboost import CatBoostRegressor, CatBoostClassifier
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
+    CatBoostRegressor = None
+    CatBoostClassifier = None
 
 # Import tiered configuration
 from .model_config import get_tier_models, get_hyperparameters
