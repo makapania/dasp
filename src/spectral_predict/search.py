@@ -34,6 +34,9 @@ from .ga_lightgbm import ga_lightgbm_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
 from .constants import RANDOM_STATE
 
+# Import early stopping CV utilities
+from .cv_utils import is_boosting_model, _fit_with_early_stopping
+
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
 from .preprocessing_discovery import discover_preprocessing, IMPORTANCE_METHODS
 
@@ -755,7 +758,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                X_validation=None,
                y_validation=None,
                compute_validation=False,
-               validation_top_n=100):
+               validation_top_n=100,
+               # Early stopping for boosting models
+               early_stopping_rounds=15):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -1879,6 +1884,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                     wavelength_restriction_active=wavelength_restriction_active,
+                    early_stopping_rounds=early_stopping_rounds,
                 )
                 df_results = add_result(df_results, result)
 
@@ -2016,6 +2022,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            early_stopping_rounds=early_stopping_rounds,
                                         )
                                     else:
                                         subset_result = _run_single_config(
@@ -2036,6 +2043,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            early_stopping_rounds=early_stopping_rounds,
                                         )
 
                                     df_results = add_result(df_results, subset_result)
@@ -2327,6 +2335,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            early_stopping_rounds=early_stopping_rounds,
                                         )
                                     else:
                                         # For raw/SNV: use filtered data since indices reference filtered array
@@ -2356,6 +2365,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
+                                            early_stopping_rounds=early_stopping_rounds,
                                         )
 
                                     # Track if uniform fallback was used for this result
@@ -2423,6 +2433,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             full_vars_original=n_original_wavelengths,
                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                             wavelength_restriction_active=wavelength_restriction_active,
+                            early_stopping_rounds=early_stopping_rounds,
                         )
                         df_results = add_result(df_results, region_result)
 
@@ -3095,7 +3106,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
 
 def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
-                     use_sample_weight_for_classification=False):
+                     use_sample_weight_for_classification=False,
+                     early_stopping_rounds=None):
     """
     Run a single CV fold in parallel.
 
@@ -3118,6 +3130,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     use_sample_weight_for_classification : bool
         If True, compute and apply sample_weight for classification models
         that don't support class_weight but do support sample_weight (e.g., Ridge)
+    early_stopping_rounds : int, optional
+        Number of rounds without improvement before stopping for boosting models.
+        If None or 0, early stopping is disabled.
 
     Returns
     -------
@@ -3204,7 +3219,51 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
 
     # Standard path: fit if not already done above
     if sample_weight_train is None:
-        pipe_clone.fit(X_train, y_train)
+        # Check if we should use early stopping for boosting models
+        use_early_stopping = (
+            early_stopping_rounds is not None and
+            early_stopping_rounds > 0
+        )
+
+        if use_early_stopping:
+            # Get final model from pipeline
+            if hasattr(pipe_clone, 'steps'):
+                final_model_es = pipe_clone.steps[-1][1]
+            else:
+                final_model_es = pipe_clone
+
+            # Check if final model is a boosting model
+            if is_boosting_model(final_model_es):
+                manual_fit_used = True
+
+                # Transform training data through preprocessing steps
+                X_train_transformed = X_train.copy()
+                X_test_transformed = X_test.copy()
+
+                if hasattr(pipe_clone, 'steps'):
+                    for step_name, step in pipe_clone.steps[:-1]:
+                        step.fit(X_train_transformed, y_train)
+                        X_train_transformed = step.transform(X_train_transformed)
+                        X_test_transformed = step.transform(X_test_transformed)
+                        fitted_steps.append((step_name, step, 'transform'))
+
+                    final_model = final_model_es
+                else:
+                    final_model = final_model_es
+
+                # Fit with early stopping
+                _fit_with_early_stopping(
+                    final_model,
+                    X_train_transformed, y_train,
+                    X_test_transformed, y_test,
+                    early_stopping_rounds
+                )
+            else:
+                # Not a boosting model - standard fit
+                pipe_clone.fit(X_train, y_train)
+        else:
+            # No early stopping
+            pipe_clone.fit(X_train, y_train)
 
     # Helper function to transform and predict when manual fitting was used
     def _manual_transform_predict(X_data):
@@ -3366,6 +3425,7 @@ def _run_single_config(
     full_vars_original=None,
     n_jobs_cv=1,
     wavelength_restriction_active=False,
+    early_stopping_rounds=None,
 ):
     """
     Run a single model configuration with CV.
@@ -3542,7 +3602,8 @@ def _run_single_config(
         cv_metrics = [
             _run_single_fold(
                 pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
-                use_sample_weight_for_classification
+                use_sample_weight_for_classification,
+                early_stopping_rounds=early_stopping_rounds
             )
             for train_idx, test_idx in cv_splitter.split(X, y)
         ]
@@ -3556,7 +3617,8 @@ def _run_single_config(
         cv_metrics = Parallel(n_jobs=n_jobs_cv, backend=backend)(
             delayed(_run_single_fold)(
                 pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
-                use_sample_weight_for_classification
+                use_sample_weight_for_classification,
+                early_stopping_rounds=early_stopping_rounds
             )
             for train_idx, test_idx in cv_splitter.split(X, y)
         )

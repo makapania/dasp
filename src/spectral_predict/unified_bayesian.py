@@ -38,6 +38,14 @@ import optuna
 from optuna import Trial
 from optuna.samplers import TPESampler
 from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
+
+# Import early stopping CV utilities
+from spectral_predict.cv_utils import (
+    cross_validate_with_early_stopping,
+    cross_val_predict_with_early_stopping,
+    cross_val_score_with_early_stopping,
+    is_boosting_model,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
 from sklearn.metrics import (
@@ -507,7 +515,8 @@ def create_unified_objective(
     n_top_regions: int = 10,
     progress_callback: Optional[Callable] = None,
     imbalance_method: Optional[str] = None,
-    imbalance_params: Optional[Dict[str, Any]] = None
+    imbalance_params: Optional[Dict[str, Any]] = None,
+    early_stopping_rounds: Optional[int] = 15,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -541,6 +550,9 @@ def create_unified_objective(
         Imbalance handling method (e.g., 'smote', 'class_weight')
     imbalance_params : dict, optional
         Parameters for the imbalance method
+    early_stopping_rounds : int, optional, default=15
+        Number of rounds without improvement before stopping for boosting models.
+        Set to None or 0 to disable.
 
     Returns
     -------
@@ -548,6 +560,13 @@ def create_unified_objective(
         Objective function for Optuna
     """
     n_samples, n_features = X_raw.shape
+
+    # Check if early stopping should be used for this model
+    use_early_stopping = (
+        early_stopping_rounds is not None and
+        early_stopping_rounds > 0 and
+        model_name in ('XGBoost', 'LightGBM', 'CatBoost')
+    )
 
     # Determine scoring
     if task_type == 'regression':
@@ -746,19 +765,35 @@ def create_unified_objective(
             # 7. Compute metrics
             if task_type == 'regression':
                 # Use cross_validate for RMSE (averaging is valid for RMSE)
-                cv_results = cross_validate(
-                    model, X_final, y,
-                    cv=cv,
-                    scoring={'rmse': 'neg_root_mean_squared_error'},
-                    n_jobs=n_jobs_cv,
-                    error_score='raise'
-                )
+                # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
+                if use_early_stopping:
+                    cv_results = cross_validate_with_early_stopping(
+                        model, X_final, y,
+                        cv=cv,
+                        scoring={'rmse': 'neg_root_mean_squared_error'},
+                        early_stopping_rounds=early_stopping_rounds,
+                        n_jobs=n_jobs_cv,
+                    )
+                else:
+                    cv_results = cross_validate(
+                        model, X_final, y,
+                        cv=cv,
+                        scoring={'rmse': 'neg_root_mean_squared_error'},
+                        n_jobs=n_jobs_cv,
+                        error_score='raise'
+                    )
                 rmse = -cv_results['test_rmse'].mean()
 
                 # R² must use aggregated predictions (not per-fold averages)
                 # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
                 # This matches the method used in search.py for consistency with Model Development
-                y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                if use_early_stopping:
+                    y_pred_cv = cross_val_predict_with_early_stopping(
+                        model, X_final, y, cv=cv,
+                        early_stopping_rounds=early_stopping_rounds
+                    )
+                else:
+                    y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
                 r2 = r2_score(y, y_pred_cv)
 
                 # Compute additional NIR spectroscopy metrics from CV predictions
@@ -772,19 +807,39 @@ def create_unified_objective(
                 metric = rmse  # Minimize RMSE
             else:
                 # Classification: use accuracy and ROC_AUC
-                scores = cross_val_score(
-                    model, X_final, y, cv=cv, scoring='accuracy', n_jobs=n_jobs_cv, error_score='raise'
-                )
+                # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
+                if use_early_stopping:
+                    scores = cross_val_score_with_early_stopping(
+                        model, X_final, y, cv=cv, scoring='accuracy',
+                        early_stopping_rounds=early_stopping_rounds, n_jobs=n_jobs_cv
+                    )
+                else:
+                    scores = cross_val_score(
+                        model, X_final, y, cv=cv, scoring='accuracy', n_jobs=n_jobs_cv, error_score='raise'
+                    )
                 accuracy = scores.mean()
 
                 # Get CV predictions for comprehensive metrics
-                y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                if use_early_stopping:
+                    y_pred_cv = cross_val_predict_with_early_stopping(
+                        model, X_final, y, cv=cv,
+                        early_stopping_rounds=early_stopping_rounds
+                    )
+                else:
+                    y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
                 try:
-                    y_proba = cross_val_predict(
-                        model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv
-                    )
+                    if use_early_stopping:
+                        y_proba = cross_val_predict_with_early_stopping(
+                            model, X_final, y, cv=cv,
+                            early_stopping_rounds=early_stopping_rounds,
+                            method='predict_proba'
+                        )
+                    else:
+                        y_proba = cross_val_predict(
+                            model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv
+                        )
                     n_classes = len(np.unique(y))
                     if n_classes == 2:
                         # Binary classification
@@ -1003,6 +1058,7 @@ def run_unified_bayesian(
     verbose: bool = True,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
+    early_stopping_rounds: Optional[int] = 15,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1037,6 +1093,11 @@ def run_unified_bayesian(
         Imbalance handling method (e.g., 'smote', 'class_weight')
     imbalance_params : dict, optional
         Parameters for the imbalance method
+    early_stopping_rounds : int, optional, default=15
+        Number of rounds without improvement before stopping for boosting models
+        (XGBoost, CatBoost, LightGBM). Set to None or 0 to disable.
+        Early stopping typically saves 30-50% training time and often improves
+        model quality by preventing overfitting.
 
     Returns
     -------
@@ -1109,6 +1170,12 @@ def run_unified_bayesian(
         print(f"Samples: {n_samples}, Features: {n_features}")
         print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
         print(f"Variable methods: importance, CARS, region")
+        # Show early stopping status for boosting models
+        if model_name in ('XGBoost', 'LightGBM', 'CatBoost'):
+            if early_stopping_rounds and early_stopping_rounds > 0:
+                print(f"Early stopping: enabled ({early_stopping_rounds} rounds)")
+            else:
+                print(f"Early stopping: disabled")
         print(f"{'='*70}\n")
 
     # Create objective function
@@ -1126,6 +1193,7 @@ def run_unified_bayesian(
         progress_callback=progress_callback,
         imbalance_method=imbalance_method,
         imbalance_params=imbalance_params,
+        early_stopping_rounds=early_stopping_rounds,
     )
 
     # Create TPE sampler with good defaults

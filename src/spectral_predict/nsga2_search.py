@@ -22,6 +22,13 @@ import pandas as pd
 import warnings
 from typing import Dict, List, Optional, Tuple, Callable, Any, Union
 from sklearn.model_selection import cross_val_score, cross_val_predict, KFold, StratifiedKFold
+
+# Import early stopping CV utilities
+from .cv_utils import (
+    cross_val_score_with_early_stopping,
+    cross_val_predict_with_early_stopping,
+    is_boosting_model,
+)
 from sklearn.metrics import (
     r2_score, mean_absolute_error, balanced_accuracy_score,
     cohen_kappa_score, matthews_corrcoef, log_loss
@@ -1092,6 +1099,8 @@ class SpectralOptimizationProblem(Problem):
         plsda_lr_C: float = 1.0,
         plsda_lr_solver: str = 'lbfgs',
         plsda_lr_max_iter: int = 1000,
+        # Early stopping for boosting models
+        early_stopping_rounds: Optional[int] = 15,
     ):
         """
         Initialize the optimization problem.
@@ -1124,6 +1133,9 @@ class SpectralOptimizationProblem(Problem):
             LogisticRegression solver for PLS-DA
         plsda_lr_max_iter : int, default=1000
             LogisticRegression maximum iterations for PLS-DA
+        early_stopping_rounds : int, optional, default=15
+            Number of rounds without improvement before stopping for boosting models.
+            Set to None or 0 to disable.
         """
         self.X = X
         self.y = y
@@ -1141,6 +1153,9 @@ class SpectralOptimizationProblem(Problem):
         self.plsda_lr_C = plsda_lr_C
         self.plsda_lr_solver = plsda_lr_solver
         self.plsda_lr_max_iter = plsda_lr_max_iter
+
+        # Early stopping for boosting models
+        self.early_stopping_rounds = early_stopping_rounds
 
         # Use user-specified models or defaults
         self.model_types = models if models is not None else MODEL_TYPES
@@ -1422,13 +1437,27 @@ class SpectralOptimizationProblem(Problem):
                 pipeline_model = Pipeline(pipe_steps)
 
             # Cross-validation
+            # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
+            use_early_stopping = (
+                self.early_stopping_rounds is not None and
+                self.early_stopping_rounds > 0 and
+                is_boosting_model(model)  # Check the underlying model, not pipeline
+            )
+
             if self.task_type == 'regression':
                 cv = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    scores = cross_val_score(
-                        pipeline_model, X_subset, self.y, cv=cv, scoring='neg_mean_squared_error'
-                    )
+                    if use_early_stopping:
+                        scores = cross_val_score_with_early_stopping(
+                            pipeline_model, X_subset, self.y, cv=cv,
+                            scoring='neg_mean_squared_error',
+                            early_stopping_rounds=self.early_stopping_rounds
+                        )
+                    else:
+                        scores = cross_val_score(
+                            pipeline_model, X_subset, self.y, cv=cv, scoring='neg_mean_squared_error'
+                        )
                 # Use mean(sqrt(MSE)) for optimization and display consistency
                 # This matches Bayesian optimization and Model Development exactly.
                 rmse_per_fold = np.sqrt(-scores)
@@ -1438,9 +1467,16 @@ class SpectralOptimizationProblem(Problem):
                 cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    scores = cross_val_score(
-                        pipeline_model, X_subset, self.y, cv=cv, scoring='accuracy'
-                    )
+                    if use_early_stopping:
+                        scores = cross_val_score_with_early_stopping(
+                            pipeline_model, X_subset, self.y, cv=cv,
+                            scoring='accuracy',
+                            early_stopping_rounds=self.early_stopping_rounds
+                        )
+                    else:
+                        scores = cross_val_score(
+                            pipeline_model, X_subset, self.y, cv=cv, scoring='accuracy'
+                        )
                 # Return 1 - accuracy (to minimize)
                 return 1.0 - np.mean(scores)
 
@@ -1678,6 +1714,7 @@ def run_nsga2_search(
     use_guidance: bool = True,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
+    early_stopping_rounds: Optional[int] = 15,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1791,6 +1828,7 @@ def run_nsga2_search(
         models=models,
         imbalance_method=imbalance_method,
         imbalance_params=imbalance_params,
+        early_stopping_rounds=early_stopping_rounds,
     )
 
     # Encode labels for classification before CARS importance calculation
