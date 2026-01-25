@@ -1100,7 +1100,7 @@ class SpectralOptimizationProblem(Problem):
         plsda_lr_solver: str = 'lbfgs',
         plsda_lr_max_iter: int = 1000,
         # Early stopping for boosting models
-        early_stopping_rounds: Optional[int] = 15,
+        early_stopping_rounds: Optional[int] = 50,
     ):
         """
         Initialize the optimization problem.
@@ -1133,7 +1133,7 @@ class SpectralOptimizationProblem(Problem):
             LogisticRegression solver for PLS-DA
         plsda_lr_max_iter : int, default=1000
             LogisticRegression maximum iterations for PLS-DA
-        early_stopping_rounds : int, optional, default=15
+        early_stopping_rounds : int, optional, default=50
             Number of rounds without improvement before stopping for boosting models.
             Set to None or 0 to disable.
         """
@@ -1714,7 +1714,7 @@ def run_nsga2_search(
     use_guidance: bool = True,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
-    early_stopping_rounds: Optional[int] = 15,
+    early_stopping_rounds: Optional[int] = 50,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.

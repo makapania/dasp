@@ -89,7 +89,7 @@ def _fit_with_early_stopping(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    early_stopping_rounds: int = 15
+    early_stopping_rounds: int = 50
 ) -> None:
     """Fit a boosting model with early stopping.
 
@@ -105,7 +105,7 @@ def _fit_with_early_stopping(
         Validation features for early stopping
     y_val : ndarray
         Validation targets for early stopping
-    early_stopping_rounds : int, default=15
+    early_stopping_rounds : int, default=50
         Number of rounds without improvement before stopping
     """
     if isinstance(model, XGBOOST_MODELS):
@@ -128,11 +128,16 @@ def _fit_with_early_stopping(
         )
 
     elif CATBOOST_AVAILABLE and isinstance(model, CATBOOST_MODELS):
+        # Classification requires explicit eval_metric for early stopping
+        # Use Accuracy (not Logloss) so early stopping monitors actual classification performance
+        # Set via set_params() since it's a constructor parameter, not fit parameter
+        if isinstance(model, CatBoostClassifier):
+            model.set_params(eval_metric='Accuracy')
         model.fit(
             X_train, y_train,
             eval_set=(X_val, y_val),  # CatBoost uses tuple, not list
             early_stopping_rounds=early_stopping_rounds,
-            verbose=False
+            verbose=0  # CatBoost prefers int over bool
         )
     else:
         # Not a boosting model - standard fit
@@ -186,7 +191,7 @@ def cross_validate_with_early_stopping(
     y: np.ndarray,
     cv,
     scoring: Union[str, Dict[str, str]] = 'neg_root_mean_squared_error',
-    early_stopping_rounds: int = 15,
+    early_stopping_rounds: int = 50,
     n_jobs: int = 1,
     return_train_score: bool = False,
     return_estimator: bool = False
@@ -210,7 +215,7 @@ def cross_validate_with_early_stopping(
     scoring : str or dict, default='neg_root_mean_squared_error'
         Scoring method. Can be a string (e.g., 'accuracy', 'neg_root_mean_squared_error')
         or a dict mapping names to scorers (e.g., {'rmse': 'neg_root_mean_squared_error'}).
-    early_stopping_rounds : int, default=15
+    early_stopping_rounds : int, default=50
         Number of rounds without improvement before stopping. Only used for
         boosting models. Set to 0 or None to disable early stopping.
     n_jobs : int, default=1
@@ -239,7 +244,7 @@ def cross_validate_with_early_stopping(
     >>> cv = KFold(n_splits=5, shuffle=True, random_state=42)
     >>> results = cross_validate_with_early_stopping(
     ...     model, X, y, cv=cv, scoring='neg_root_mean_squared_error',
-    ...     early_stopping_rounds=15
+    ...     early_stopping_rounds=50
     ... )
     >>> print(f"Mean RMSE: {-results['test_score'].mean():.4f}")
     """
@@ -376,7 +381,7 @@ def cross_val_predict_with_early_stopping(
     X: np.ndarray,
     y: np.ndarray,
     cv,
-    early_stopping_rounds: int = 15,
+    early_stopping_rounds: int = 50,
     method: str = 'predict'
 ) -> np.ndarray:
     """Get cross-validated predictions with early stopping support.
@@ -394,7 +399,7 @@ def cross_val_predict_with_early_stopping(
         Target vector
     cv : int or cross-validator
         Number of folds or CV splitter
-    early_stopping_rounds : int, default=15
+    early_stopping_rounds : int, default=50
         Early stopping rounds for boosting models
     method : str, default='predict'
         Method to call ('predict' or 'predict_proba')
@@ -465,6 +470,9 @@ def cross_val_predict_with_early_stopping(
             else:
                 preds = model_clone.predict(X_val)
 
+        # Flatten predictions for non-proba case (some models return 2D arrays)
+        if method != 'predict_proba':
+            preds = np.ravel(preds)
         predictions[val_idx] = preds
 
     return predictions
@@ -476,7 +484,7 @@ def cross_val_score_with_early_stopping(
     y: np.ndarray,
     cv,
     scoring: str = 'neg_root_mean_squared_error',
-    early_stopping_rounds: int = 15,
+    early_stopping_rounds: int = 50,
     n_jobs: int = 1
 ) -> np.ndarray:
     """Cross-validation scores with early stopping support.
@@ -496,7 +504,7 @@ def cross_val_score_with_early_stopping(
         CV splitter
     scoring : str, default='neg_root_mean_squared_error'
         Scoring method
-    early_stopping_rounds : int, default=15
+    early_stopping_rounds : int, default=50
         Early stopping rounds
     n_jobs : int, default=1
         Number of parallel jobs (only used for non-boosting models)

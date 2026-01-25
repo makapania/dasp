@@ -516,7 +516,7 @@ def create_unified_objective(
     progress_callback: Optional[Callable] = None,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
-    early_stopping_rounds: Optional[int] = 15,
+    early_stopping_rounds: Optional[int] = 50,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -550,7 +550,7 @@ def create_unified_objective(
         Imbalance handling method (e.g., 'smote', 'class_weight')
     imbalance_params : dict, optional
         Parameters for the imbalance method
-    early_stopping_rounds : int, optional, default=15
+    early_stopping_rounds : int, optional, default=50
         Number of rounds without improvement before stopping for boosting models.
         Set to None or 0 to disable.
 
@@ -1060,7 +1060,7 @@ def run_unified_bayesian(
     verbose: bool = True,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
-    early_stopping_rounds: Optional[int] = 15,
+    early_stopping_rounds: Optional[int] = 50,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1095,7 +1095,7 @@ def run_unified_bayesian(
         Imbalance handling method (e.g., 'smote', 'class_weight')
     imbalance_params : dict, optional
         Parameters for the imbalance method
-    early_stopping_rounds : int, optional, default=15
+    early_stopping_rounds : int, optional, default=50
         Number of rounds without improvement before stopping for boosting models
         (XGBoost, CatBoost, LightGBM). Set to None or 0 to disable.
         Early stopping typically saves 30-50% training time and often improves
@@ -1472,7 +1472,16 @@ def convert_study_to_dataframe(
     if task_type == 'regression':
         perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score']
     else:
-        perf_cols = ['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score']
+        perf_cols = [
+            # Calibration metrics
+            'Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall',
+            'Specificity', 'Kappa', 'MCC', 'BalancedAcc', 'BER', 'LogLoss',
+            # Cross-validation metrics
+            'Accuracycv', 'ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv',
+            'Specificitycv', 'Kappacv', 'MCCcv', 'BalancedAcccv', 'BERcv', 'LogLosscv',
+            # Additional columns
+            'CV Error', 'CompositeScore', 'Score'
+        ]
 
     # Bayesian-specific and other columns
     other_cols = ['trial_number', 'Folds', 'Optimization', 'imbalance_method', 'imbalance_params']
