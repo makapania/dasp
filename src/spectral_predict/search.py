@@ -10,7 +10,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
     f1_score, precision_score, recall_score, classification_report,
-    mean_absolute_error
+    mean_absolute_error, balanced_accuracy_score, cohen_kappa_score,
+    matthews_corrcoef, log_loss
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -21,7 +22,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
-from .scoring import create_results_dataframe, add_result
+from .scoring import create_results_dataframe, add_result, compute_specificity
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import (
     spa_selection, uve_selection, uve_spa_selection,
@@ -59,6 +60,10 @@ NEURALBOOSTED_MODELS = {'NeuralBoosted'}
 # Scale-sensitive models: These use gradient descent or kernel methods
 # that are sensitive to feature scale and benefit from StandardScaler
 SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
+
+# Models that are slower with parallel CV (internal threading conflicts)
+# CatBoost and SVM have internal multi-threading that conflicts with sklearn's CV parallelization
+MODELS_PREFER_SERIAL_CV = {'CatBoost', 'SVM'}
 
 # Backward compatibility: LINEAR_MODELS is union of PLS + Neural/SVM
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
@@ -819,8 +824,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     # Fixed random state used throughout codebase
     random_state = RANDOM_STATE
 
-    # Use all cores for parallel execution
-    n_jobs = -1
+    # Use all cores for parallel execution (will be overridden per-model for CatBoost/SVM)
+    n_jobs_default = -1
 
     X_np = X.values
     y_np = y.values
@@ -979,7 +984,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                    mlp_batch_size_list=mlp_batch_size_list,
                                    mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
                                    mlp_momentum_list=mlp_momentum_list,
-                                   tier=tier, enabled_models=enabled_models, n_jobs=n_jobs)
+                                   tier=tier, enabled_models=enabled_models, n_jobs=n_jobs_default)
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
@@ -1872,7 +1877,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     total_samples_original=total_samples_original,
                     folds=folds,
                     full_vars_original=n_original_wavelengths,
-                    n_jobs_cv=n_jobs,
+                    n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                     wavelength_restriction_active=wavelength_restriction_active,
                 )
                 df_results = add_result(df_results, result)
@@ -2009,7 +2014,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=n_jobs,
+                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
                                         )
                                     else:
@@ -2029,7 +2034,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=n_jobs,
+                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
                                         )
 
@@ -2320,7 +2325,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=n_jobs,
+                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
                                         )
                                     else:
@@ -2349,7 +2354,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=n_jobs,
+                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
                                         )
 
@@ -2416,7 +2421,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
-                            n_jobs_cv=n_jobs,
+                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                             wavelength_restriction_active=wavelength_restriction_active,
                         )
                         df_results = add_result(df_results, region_result)
@@ -3277,6 +3282,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         if n_classes_test < 2:
             # Single class in this CV fold - ROC AUC undefined
             auc = np.nan
+            logloss = np.nan
         else:
             try:
                 if manual_fit_used:
@@ -3294,11 +3300,45 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                         auc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro', labels=model_classes)
                     else:
                         auc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro')
+
+                # Log Loss (requires predict_proba)
+                try:
+                    logloss = log_loss(y_test, y_proba, labels=model_classes if model_classes is not None else None)
+                except Exception:
+                    logloss = np.nan
             except Exception:
                 auc = np.nan
+                logloss = np.nan
 
-        return {"Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall,
-                "y_test": y_test, "y_pred": y_pred}
+        # Compute additional classification metrics
+        try:
+            specificity = compute_specificity(y_test, y_pred, average='macro')
+        except Exception:
+            specificity = np.nan
+
+        try:
+            kappa = cohen_kappa_score(y_test, y_pred)
+        except Exception:
+            kappa = np.nan
+
+        try:
+            mcc = matthews_corrcoef(y_test, y_pred)
+        except Exception:
+            mcc = np.nan
+
+        try:
+            balanced_acc = balanced_accuracy_score(y_test, y_pred)
+            ber = 1.0 - balanced_acc
+        except Exception:
+            balanced_acc = np.nan
+            ber = np.nan
+
+        return {
+            "Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall,
+            "Specificity": specificity, "Kappa": kappa, "MCC": mcc,
+            "BalancedAcc": balanced_acc, "BER": ber, "LogLoss": logloss,
+            "y_test": y_test, "y_pred": y_pred
+        }
 
 
 def _run_single_config(
@@ -3585,6 +3625,15 @@ def _run_single_config(
         mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
         mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
         mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
+
+        # New classification metrics
+        mean_specificity = np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+        mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
+        mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
+        mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
+        mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
+        mean_logloss = np.mean([m["LogLoss"] for m in cv_metrics if not np.isnan(m["LogLoss"])])
+
         regional_rmse = None  # Not applicable for classification
 
         # Collect all CV predictions and true values (same as regression)
@@ -3623,6 +3672,12 @@ def _run_single_config(
     cal_f1 = None
     cal_precision = None
     cal_recall = None
+    cal_specificity = None
+    cal_kappa = None
+    cal_mcc = None
+    cal_balanced_acc = None
+    cal_ber = None
+    cal_logloss = None
 
     try:
         # Refit the pipeline on full data to get final fitted parameters
@@ -3679,6 +3734,44 @@ def _run_single_config(
                 cal_f1 = np.nan
                 cal_precision = np.nan
                 cal_recall = np.nan
+
+            # Compute new classification metrics
+            try:
+                cal_specificity = compute_specificity(y, y_pred_cal, average='macro')
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration Specificity: {e}")
+                cal_specificity = np.nan
+
+            try:
+                cal_kappa = cohen_kappa_score(y, y_pred_cal)
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration Kappa: {e}")
+                cal_kappa = np.nan
+
+            try:
+                cal_mcc = matthews_corrcoef(y, y_pred_cal)
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration MCC: {e}")
+                cal_mcc = np.nan
+
+            try:
+                cal_balanced_acc = balanced_accuracy_score(y, y_pred_cal)
+                cal_ber = 1.0 - cal_balanced_acc
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration BalancedAcc/BER: {e}")
+                cal_balanced_acc = np.nan
+                cal_ber = np.nan
+
+            # Compute Log Loss
+            try:
+                if hasattr(pipe, "predict_proba"):
+                    y_pred_proba_cal = pipe.predict_proba(X)
+                    cal_logloss = log_loss(y, y_pred_proba_cal)
+                else:
+                    cal_logloss = np.nan
+            except Exception as e:
+                logger.debug(f"Failed to compute calibration LogLoss: {e}")
+                cal_logloss = np.nan
 
         # Capture ALL parameters
         print(f"\n{'='*80}")
@@ -3829,12 +3922,24 @@ def _run_single_config(
         result["F1"] = cal_f1 if cal_f1 is not None else np.nan
         result["Precision"] = cal_precision if cal_precision is not None else np.nan
         result["Recall"] = cal_recall if cal_recall is not None else np.nan
+        result["Specificity"] = cal_specificity if cal_specificity is not None else np.nan
+        result["Kappa"] = cal_kappa if cal_kappa is not None else np.nan
+        result["MCC"] = cal_mcc if cal_mcc is not None else np.nan
+        result["BalancedAcc"] = cal_balanced_acc if cal_balanced_acc is not None else np.nan
+        result["BER"] = cal_ber if cal_ber is not None else np.nan
+        result["LogLoss"] = cal_logloss if cal_logloss is not None else np.nan
         # Cross-validation metrics (test fold averages)
         result["Accuracycv"] = mean_acc
         result["ROC_AUCcv"] = mean_auc
         result["F1cv"] = mean_f1
         result["Precisioncv"] = mean_precision
         result["Recallcv"] = mean_recall
+        result["Specificitycv"] = mean_specificity
+        result["Kappacv"] = mean_kappa
+        result["MCCcv"] = mean_mcc
+        result["BalancedAcccv"] = mean_balanced_acc
+        result["BERcv"] = mean_ber
+        result["LogLosscv"] = mean_logloss
         # Per-class metrics for regional analysis (analogous to regional_rmse for regression)
         result["per_class_metrics"] = per_class_metrics if per_class_metrics else None
         result["class_labels"] = class_labels

@@ -22,7 +22,10 @@ import pandas as pd
 import warnings
 from typing import Dict, List, Optional, Tuple, Callable, Any, Union
 from sklearn.model_selection import cross_val_score, cross_val_predict, KFold, StratifiedKFold
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.metrics import (
+    r2_score, mean_absolute_error, balanced_accuracy_score,
+    cohen_kappa_score, matthews_corrcoef, log_loss
+)
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.linear_model import Ridge, RidgeClassifier, Lasso, ElasticNet
 from .models import PLSTransformer  # Wrapper that ensures 2D output for PLS-DA
@@ -47,6 +50,7 @@ from pymoo.termination import get_termination
 from .preprocess import SNV, SavgolDerivative
 from .models import get_feature_importances
 from .variable_selection import cars_selection
+from .scoring import compute_specificity
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -2885,11 +2889,14 @@ def _compute_classification_cv_metrics(
     Returns
     -------
     metrics : dict
-        Dictionary with CV metrics: {'F1cv', 'ROC_AUCcv', 'Precisioncv', 'Recallcv'}
+        Dictionary with CV metrics: {'F1cv', 'ROC_AUCcv', 'Precisioncv', 'Recallcv',
+        'Specificitycv', 'Kappacv', 'MCCcv', 'BalancedAcccv', 'BERcv', 'LogLosscv'}
         Values are None if computation failed.
     """
     from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score
     from sklearn.model_selection import StratifiedKFold
+    import logging
+    logger = logging.getLogger(__name__)
 
     try:
         # Encode labels for classification (PLS-DA requires numeric y)
@@ -2967,6 +2974,12 @@ def _compute_classification_cv_metrics(
         roc_auc_scores = []
         precision_scores = []
         recall_scores = []
+        specificity_scores = []
+        kappa_scores = []
+        mcc_scores = []
+        balanced_acc_scores = []
+        ber_scores = []
+        logloss_scores = []
 
         for train_idx, test_idx in cv.split(X_subset, y):
             X_train, X_test = X_subset[train_idx], X_subset[test_idx]
@@ -3030,7 +3043,7 @@ def _compute_classification_cv_metrics(
             except Exception as e:
                 logger.warning(f"F1/Precision/Recall failed in fold: {type(e).__name__}: {e}")
 
-            # Compute ROC_AUC if model has predict_proba
+            # Compute ROC_AUC and Log Loss if model has predict_proba
             try:
                 if hasattr(model, 'predict_proba'):
                     y_proba = model.predict_proba(X_test)
@@ -3039,8 +3052,37 @@ def _compute_classification_cv_metrics(
                     else:
                         # Multi-class: use ovr average
                         roc_auc_scores.append(roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro'))
+
+                    # Log Loss
+                    try:
+                        logloss_scores.append(log_loss(y_test, y_proba))
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"ROC_AUC failed in fold: {type(e).__name__}: {e}")
+
+            # Compute additional classification metrics
+            try:
+                specificity_scores.append(compute_specificity(y_test, y_pred, average='macro'))
+            except Exception:
+                pass
+
+            try:
+                kappa_scores.append(cohen_kappa_score(y_test, y_pred))
+            except Exception:
+                pass
+
+            try:
+                mcc_scores.append(matthews_corrcoef(y_test, y_pred))
+            except Exception:
+                pass
+
+            try:
+                balanced_acc = balanced_accuracy_score(y_test, y_pred)
+                balanced_acc_scores.append(balanced_acc)
+                ber_scores.append(1.0 - balanced_acc)
+            except Exception:
+                pass
 
         # Return mean values
         return {
@@ -3048,11 +3090,21 @@ def _compute_classification_cv_metrics(
             'ROC_AUCcv': float(np.mean(roc_auc_scores)) if roc_auc_scores else np.nan,
             'Precisioncv': float(np.mean(precision_scores)) if precision_scores else np.nan,
             'Recallcv': float(np.mean(recall_scores)) if recall_scores else np.nan,
+            'Specificitycv': float(np.mean(specificity_scores)) if specificity_scores else np.nan,
+            'Kappacv': float(np.mean(kappa_scores)) if kappa_scores else np.nan,
+            'MCCcv': float(np.mean(mcc_scores)) if mcc_scores else np.nan,
+            'BalancedAcccv': float(np.mean(balanced_acc_scores)) if balanced_acc_scores else np.nan,
+            'BERcv': float(np.mean(ber_scores)) if ber_scores else np.nan,
+            'LogLosscv': float(np.mean(logloss_scores)) if logloss_scores else np.nan,
         }
 
     except Exception as e:
         logger.debug(f"_compute_classification_cv_metrics failed: {type(e).__name__}: {e}")
-        return {'F1cv': np.nan, 'ROC_AUCcv': np.nan, 'Precisioncv': np.nan, 'Recallcv': np.nan}
+        return {
+            'F1cv': np.nan, 'ROC_AUCcv': np.nan, 'Precisioncv': np.nan, 'Recallcv': np.nan,
+            'Specificitycv': np.nan, 'Kappacv': np.nan, 'MCCcv': np.nan,
+            'BalancedAcccv': np.nan, 'BERcv': np.nan, 'LogLosscv': np.nan
+        }
 
 
 def _indices_to_wavelength_str(indices: List[int], wavelengths: np.ndarray = None) -> str:
@@ -3300,8 +3352,12 @@ def _compute_calibration_metrics(
             if task_type == 'regression':
                 return {'RMSE': np.nan, 'R2': np.nan}
             else:
-                return {'Accuracy': np.nan, 'ROC_AUC': np.nan, 'F1': np.nan,
-                        'Precision': np.nan, 'Recall': np.nan}
+                return {
+                    'Accuracy': np.nan, 'ROC_AUC': np.nan, 'F1': np.nan,
+                    'Precision': np.nan, 'Recall': np.nan,
+                    'Specificity': np.nan, 'Kappa': np.nan, 'MCC': np.nan,
+                    'BalancedAcc': np.nan, 'BER': np.nan, 'LogLoss': np.nan
+                }
 
         # Get model type and build model (same as _compute_display_rmse)
         model_type = model_types[min(model_idx, len(model_types) - 1)]
@@ -3378,6 +3434,39 @@ def _compute_calibration_metrics(
                 metrics['F1'] = np.nan
                 metrics['Precision'] = np.nan
                 metrics['Recall'] = np.nan
+
+            # Additional classification metrics
+            try:
+                metrics['Specificity'] = compute_specificity(y, y_pred, average='macro')
+            except Exception:
+                metrics['Specificity'] = np.nan
+
+            try:
+                metrics['Kappa'] = cohen_kappa_score(y, y_pred)
+            except Exception:
+                metrics['Kappa'] = np.nan
+
+            try:
+                metrics['MCC'] = matthews_corrcoef(y, y_pred)
+            except Exception:
+                metrics['MCC'] = np.nan
+
+            try:
+                metrics['BalancedAcc'] = balanced_accuracy_score(y, y_pred)
+                metrics['BER'] = 1.0 - metrics['BalancedAcc']
+            except Exception:
+                metrics['BalancedAcc'] = np.nan
+                metrics['BER'] = np.nan
+
+            # Log Loss
+            try:
+                if hasattr(model, 'predict_proba'):
+                    y_proba = model.predict_proba(X_subset)
+                    metrics['LogLoss'] = log_loss(y, y_proba)
+                else:
+                    metrics['LogLoss'] = np.nan
+            except Exception:
+                metrics['LogLoss'] = np.nan
 
         return metrics
 
@@ -3544,12 +3633,24 @@ def convert_nsga2_to_v1_format(
                 row['F1'] = cal_metrics.get('F1', np.nan)
                 row['Precision'] = cal_metrics.get('Precision', np.nan)
                 row['Recall'] = cal_metrics.get('Recall', np.nan)
+                row['Specificity'] = cal_metrics.get('Specificity', np.nan)
+                row['Kappa'] = cal_metrics.get('Kappa', np.nan)
+                row['MCC'] = cal_metrics.get('MCC', np.nan)
+                row['BalancedAcc'] = cal_metrics.get('BalancedAcc', np.nan)
+                row['BER'] = cal_metrics.get('BER', np.nan)
+                row['LogLoss'] = cal_metrics.get('LogLoss', np.nan)
             else:
                 row['Accuracy'] = np.nan
                 row['ROC_AUC'] = np.nan
                 row['F1'] = np.nan
                 row['Precision'] = np.nan
                 row['Recall'] = np.nan
+                row['Specificity'] = np.nan
+                row['Kappa'] = np.nan
+                row['MCC'] = np.nan
+                row['BalancedAcc'] = np.nan
+                row['BER'] = np.nan
+                row['LogLoss'] = np.nan
 
             # CV metrics: compute actual CV metrics for F1, ROC_AUC, Precision, Recall with imbalance handling
             row['Accuracycv'] = 1.0 - objectives[0]  # From optimization objective
@@ -3563,11 +3664,23 @@ def convert_nsga2_to_v1_format(
                 row['F1cv'] = cv_metrics.get('F1cv')
                 row['Precisioncv'] = cv_metrics.get('Precisioncv')
                 row['Recallcv'] = cv_metrics.get('Recallcv')
+                row['Specificitycv'] = cv_metrics.get('Specificitycv')
+                row['Kappacv'] = cv_metrics.get('Kappacv')
+                row['MCCcv'] = cv_metrics.get('MCCcv')
+                row['BalancedAcccv'] = cv_metrics.get('BalancedAcccv')
+                row['BERcv'] = cv_metrics.get('BERcv')
+                row['LogLosscv'] = cv_metrics.get('LogLosscv')
             else:
                 row['ROC_AUCcv'] = None
                 row['F1cv'] = None
                 row['Precisioncv'] = None
                 row['Recallcv'] = None
+                row['Specificitycv'] = None
+                row['Kappacv'] = None
+                row['MCCcv'] = None
+                row['BalancedAcccv'] = None
+                row['BERcv'] = None
+                row['LogLosscv'] = None
 
             row['CompositeScore'] = row['Accuracycv']  # Use CV accuracy as composite
 

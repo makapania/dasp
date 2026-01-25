@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import confusion_matrix
 
 
 def compute_composite_score(df_results, task_type, variable_penalty=0, complexity_penalty=0, verbose=False):
@@ -318,6 +319,59 @@ def _compute_unified_complexity(row):
     return round(complexity_score, 1)
 
 
+def compute_specificity(y_true, y_pred, average='macro'):
+    """
+    Compute specificity (True Negative Rate) for classification.
+
+    For binary classification: TN / (TN + FP)
+    For multi-class: macro-averaged specificity across all classes
+
+    Parameters
+    ----------
+    y_true : array-like
+        True labels
+    y_pred : array-like
+        Predicted labels
+    average : str
+        Averaging method ('macro' for equal weight per class)
+
+    Returns
+    -------
+    specificity : float
+        Specificity score
+    """
+    cm = confusion_matrix(y_true, y_pred)
+
+    # For each class, compute TN / (TN + FP)
+    # TN for class i = sum of all cells except row i and column i
+    # FP for class i = sum of column i except diagonal
+    n_classes = cm.shape[0]
+
+    if n_classes == 2:
+        # Binary classification: simple formula
+        tn = cm[0, 0]
+        fp = cm[0, 1]
+        return tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+    # Multi-class: compute per-class specificity then average
+    specificities = []
+    for i in range(n_classes):
+        # True negatives: all correct predictions for other classes
+        tn = np.sum(cm) - np.sum(cm[i, :]) - np.sum(cm[:, i]) + cm[i, i]
+        # False positives: predicted as class i but actually other classes
+        fp = np.sum(cm[:, i]) - cm[i, i]
+
+        if (tn + fp) > 0:
+            specificities.append(tn / (tn + fp))
+        else:
+            specificities.append(0.0)
+
+    if average == 'macro':
+        return np.mean(specificities)
+    else:
+        return specificities
+
+
 def create_results_dataframe(task_type):
     """
     Create an empty results dataframe with correct columns.
@@ -351,9 +405,15 @@ def create_results_dataframe(task_type):
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
         metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER"]
     else:
-        # Calibration metrics first, then CV metrics
-        metric_cols = ["Accuracy", "ROC_AUC", "F1", "Precision", "Recall",
-                      "Accuracycv", "ROC_AUCcv", "F1cv", "Precisioncv", "Recallcv"]
+        # Calibration metrics first, then CV metrics, then advanced metrics
+        metric_cols = [
+            # Calibration metrics
+            "Accuracy", "ROC_AUC", "F1", "Precision", "Recall",
+            "Specificity", "Kappa", "MCC", "BalancedAcc", "BER", "LogLoss",
+            # Cross-validation metrics
+            "Accuracycv", "ROC_AUCcv", "F1cv", "Precisioncv", "Recallcv",
+            "Specificitycv", "Kappacv", "MCCcv", "BalancedAcccv", "BERcv", "LogLosscv"
+        ]
 
     all_cols = common_cols + metric_cols + ["top_vars", "all_vars", "CompositeScore", "Rank"]
 

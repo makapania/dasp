@@ -40,7 +40,11 @@ from optuna.samplers import TPESampler
 from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
-from sklearn.metrics import roc_auc_score, r2_score, mean_squared_error, accuracy_score, mean_absolute_error
+from sklearn.metrics import (
+    roc_auc_score, r2_score, mean_squared_error, accuracy_score, mean_absolute_error,
+    balanced_accuracy_score, cohen_kappa_score, matthews_corrcoef, log_loss,
+    f1_score, precision_score, recall_score
+)
 from typing import Dict, List, Optional, Callable, Tuple, Any
 
 # Import existing infrastructure
@@ -50,6 +54,7 @@ from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection
 )
+from spectral_predict.scoring import compute_specificity
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -731,7 +736,12 @@ def create_unified_objective(
             # Enable CV parallelism (safe - Bayesian trials are sequential)
             import sys
             is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-            n_jobs_cv = 1 if is_frozen else -1
+
+            # Models that are slower with parallel CV (internal threading conflicts)
+            models_prefer_serial_cv = {'CatBoost', 'SVM'}
+            use_serial = is_frozen or model_name in models_prefer_serial_cv
+
+            n_jobs_cv = 1 if use_serial else -1
 
             # 7. Compute metrics
             if task_type == 'regression':
@@ -767,6 +777,9 @@ def create_unified_objective(
                 )
                 accuracy = scores.mean()
 
+                # Get CV predictions for comprehensive metrics
+                y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+
                 # Compute ROC_AUC using cross_val_predict for probability estimates
                 try:
                     y_proba = cross_val_predict(
@@ -779,8 +792,57 @@ def create_unified_objective(
                     else:
                         # Multiclass - use weighted average
                         roc_auc = roc_auc_score(y, y_proba, multi_class='ovr', average='weighted')
+
+                    # Compute Log Loss from probabilities
+                    try:
+                        logloss_cv = log_loss(y, y_proba)
+                    except Exception:
+                        logloss_cv = np.nan
                 except Exception:
                     roc_auc = np.nan
+                    logloss_cv = np.nan
+
+                # Compute additional classification metrics from CV predictions
+                # Determine averaging method (binary or macro)
+                n_classes = len(np.unique(y))
+                average_method = 'binary' if n_classes == 2 else 'macro'
+
+                try:
+                    f1_cv = f1_score(y, y_pred_cv, average=average_method, zero_division=0)
+                except Exception:
+                    f1_cv = np.nan
+
+                try:
+                    precision_cv = precision_score(y, y_pred_cv, average=average_method, zero_division=0)
+                except Exception:
+                    precision_cv = np.nan
+
+                try:
+                    recall_cv = recall_score(y, y_pred_cv, average=average_method, zero_division=0)
+                except Exception:
+                    recall_cv = np.nan
+
+                try:
+                    specificity_cv = compute_specificity(y, y_pred_cv, average='macro')
+                except Exception:
+                    specificity_cv = np.nan
+
+                try:
+                    kappa_cv = cohen_kappa_score(y, y_pred_cv)
+                except Exception:
+                    kappa_cv = np.nan
+
+                try:
+                    mcc_cv = matthews_corrcoef(y, y_pred_cv)
+                except Exception:
+                    mcc_cv = np.nan
+
+                try:
+                    balanced_acc_cv = balanced_accuracy_score(y, y_pred_cv)
+                    ber_cv = 1.0 - balanced_acc_cv
+                except Exception:
+                    balanced_acc_cv = np.nan
+                    ber_cv = np.nan
 
                 metric = -accuracy  # Minimize negative accuracy
 
@@ -811,9 +873,12 @@ def create_unified_objective(
                 trial.set_user_attr('Bias', bias_cv)
                 trial.set_user_attr('RER', rer)
             else:
+                # Calibration metrics
                 cal_accuracy = accuracy_score(y, y_pred_cal)
                 trial.set_user_attr('Accuracy', cal_accuracy)    # Calibration
-                trial.set_user_attr('Accuracycv', accuracy)      # CV (was Accuracy)
+                trial.set_user_attr('Accuracycv', accuracy)      # CV
+
+                # Calibration ROC AUC and Log Loss
                 try:
                     if hasattr(model, 'predict_proba'):
                         y_proba_cal = model.predict_proba(X_final)
@@ -823,9 +888,78 @@ def create_unified_objective(
                         else:
                             cal_roc_auc = roc_auc_score(y, y_proba_cal, multi_class='ovr', average='weighted')
                         trial.set_user_attr('ROC_AUC', cal_roc_auc)     # Calibration
+
+                        # Calibration Log Loss
+                        try:
+                            cal_logloss = log_loss(y, y_proba_cal)
+                            trial.set_user_attr('LogLoss', cal_logloss)
+                        except Exception:
+                            trial.set_user_attr('LogLoss', np.nan)
+                    else:
+                        trial.set_user_attr('LogLoss', np.nan)
                 except Exception:
                     trial.set_user_attr('ROC_AUC', np.nan)
-                trial.set_user_attr('ROC_AUCcv', roc_auc)          # CV (was ROC_AUC)
+                    trial.set_user_attr('LogLoss', np.nan)
+
+                trial.set_user_attr('ROC_AUCcv', roc_auc)          # CV
+
+                # Calibration F1, Precision, Recall
+                try:
+                    cal_f1 = f1_score(y, y_pred_cal, average='weighted', zero_division=0)
+                    trial.set_user_attr('F1', cal_f1)
+                except Exception:
+                    trial.set_user_attr('F1', np.nan)
+
+                try:
+                    cal_precision = precision_score(y, y_pred_cal, average='weighted', zero_division=0)
+                    trial.set_user_attr('Precision', cal_precision)
+                except Exception:
+                    trial.set_user_attr('Precision', np.nan)
+
+                try:
+                    cal_recall = recall_score(y, y_pred_cal, average='weighted', zero_division=0)
+                    trial.set_user_attr('Recall', cal_recall)
+                except Exception:
+                    trial.set_user_attr('Recall', np.nan)
+
+                # Calibration additional metrics
+                try:
+                    cal_specificity = compute_specificity(y, y_pred_cal, average='macro')
+                    trial.set_user_attr('Specificity', cal_specificity)
+                except Exception:
+                    trial.set_user_attr('Specificity', np.nan)
+
+                try:
+                    cal_kappa = cohen_kappa_score(y, y_pred_cal)
+                    trial.set_user_attr('Kappa', cal_kappa)
+                except Exception:
+                    trial.set_user_attr('Kappa', np.nan)
+
+                try:
+                    cal_mcc = matthews_corrcoef(y, y_pred_cal)
+                    trial.set_user_attr('MCC', cal_mcc)
+                except Exception:
+                    trial.set_user_attr('MCC', np.nan)
+
+                try:
+                    cal_balanced_acc = balanced_accuracy_score(y, y_pred_cal)
+                    cal_ber = 1.0 - cal_balanced_acc
+                    trial.set_user_attr('BalancedAcc', cal_balanced_acc)
+                    trial.set_user_attr('BER', cal_ber)
+                except Exception:
+                    trial.set_user_attr('BalancedAcc', np.nan)
+                    trial.set_user_attr('BER', np.nan)
+
+                # CV metrics
+                trial.set_user_attr('F1cv', f1_cv)
+                trial.set_user_attr('Precisioncv', precision_cv)
+                trial.set_user_attr('Recallcv', recall_cv)
+                trial.set_user_attr('Specificitycv', specificity_cv)
+                trial.set_user_attr('Kappacv', kappa_cv)
+                trial.set_user_attr('MCCcv', mcc_cv)
+                trial.set_user_attr('BalancedAcccv', balanced_acc_cv)
+                trial.set_user_attr('BERcv', ber_cv)
+                trial.set_user_attr('LogLosscv', logloss_cv)
 
             # Store selected wavelengths in TRAINING ORDER (importance order)
             # CRITICAL: Do NOT sort - Model Development expects wavelengths in the same
@@ -1178,12 +1312,33 @@ def convert_study_to_dataframe(
             row['Bias'] = trial.user_attrs.get('Bias', np.nan)
             row['RER'] = trial.user_attrs.get('RER', np.nan)
         else:
-            row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)       # Calibration
+            # Calibration metrics
+            row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)
+            row['ROC_AUC'] = trial.user_attrs.get('ROC_AUC', np.nan)
+            row['F1'] = trial.user_attrs.get('F1', np.nan)
+            row['Precision'] = trial.user_attrs.get('Precision', np.nan)
+            row['Recall'] = trial.user_attrs.get('Recall', np.nan)
+            row['Specificity'] = trial.user_attrs.get('Specificity', np.nan)
+            row['Kappa'] = trial.user_attrs.get('Kappa', np.nan)
+            row['MCC'] = trial.user_attrs.get('MCC', np.nan)
+            row['BalancedAcc'] = trial.user_attrs.get('BalancedAcc', np.nan)
+            row['BER'] = trial.user_attrs.get('BER', np.nan)
+            row['LogLoss'] = trial.user_attrs.get('LogLoss', np.nan)
+
+            # Cross-validation metrics
             accuracycv = trial.user_attrs.get('Accuracycv', -trial.value if trial.value else np.nan)
-            row['Accuracycv'] = accuracycv   # CV
+            row['Accuracycv'] = accuracycv
             row['CV Error'] = 1 - accuracycv if accuracycv is not None and not np.isnan(accuracycv) else np.nan
-            row['ROC_AUC'] = trial.user_attrs.get('ROC_AUC', np.nan)         # Calibration
-            row['ROC_AUCcv'] = trial.user_attrs.get('ROC_AUCcv', np.nan)     # CV
+            row['ROC_AUCcv'] = trial.user_attrs.get('ROC_AUCcv', np.nan)
+            row['F1cv'] = trial.user_attrs.get('F1cv', np.nan)
+            row['Precisioncv'] = trial.user_attrs.get('Precisioncv', np.nan)
+            row['Recallcv'] = trial.user_attrs.get('Recallcv', np.nan)
+            row['Specificitycv'] = trial.user_attrs.get('Specificitycv', np.nan)
+            row['Kappacv'] = trial.user_attrs.get('Kappacv', np.nan)
+            row['MCCcv'] = trial.user_attrs.get('MCCcv', np.nan)
+            row['BalancedAcccv'] = trial.user_attrs.get('BalancedAcccv', np.nan)
+            row['BERcv'] = trial.user_attrs.get('BERcv', np.nan)
+            row['LogLosscv'] = trial.user_attrs.get('LogLosscv', np.nan)
 
         # Add wavelength info
         row['top_vars'] = trial.user_attrs.get('selected_wavelengths', 'N/A')
