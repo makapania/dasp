@@ -756,8 +756,10 @@ def create_unified_objective(
             import sys
             is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
 
-            # Models that are slower with parallel CV (internal threading conflicts)
-            models_prefer_serial_cv = {'CatBoost', 'SVM'}
+            # Models that are slower with parallel CV (threading conflicts or low overhead)
+            # SVM: threading conflicts; PLS/PLS-DA: so fast that joblib overhead dominates
+            # Ridge/Lasso/ElasticNet: linear solve is ~5ms, joblib spawn overhead is ~1s on Windows
+            models_prefer_serial_cv = {'SVM', 'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
             use_serial = is_frozen or model_name in models_prefer_serial_cv
 
             n_jobs_cv = 1 if use_serial else -1

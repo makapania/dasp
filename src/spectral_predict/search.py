@@ -64,9 +64,11 @@ NEURALBOOSTED_MODELS = {'NeuralBoosted'}
 # that are sensitive to feature scale and benefit from StandardScaler
 SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
 
-# Models that are slower with parallel CV (internal threading conflicts)
-# CatBoost and SVM have internal multi-threading that conflicts with sklearn's CV parallelization
-MODELS_PREFER_SERIAL_CV = {'CatBoost', 'SVM'}
+# Models that are slower with parallel CV due to threading conflicts or low overhead
+# SVM: internal multi-threading conflicts with sklearn's CV parallelization
+# PLS/PLS-DA: so fast that joblib overhead dominates (0.08s serial vs 0.29s parallel)
+# Ridge/Lasso/ElasticNet: linear solve is ~5ms, joblib spawn overhead is ~1s on Windows
+MODELS_PREFER_SERIAL_CV = {'SVM', 'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
 
 # Backward compatibility: LINEAR_MODELS is union of PLS + Neural/SVM
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
