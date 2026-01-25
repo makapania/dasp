@@ -3912,8 +3912,16 @@ def convert_nsga2_to_v1_format(
     if task_type == 'regression':
         perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore']
     else:
-        perf_cols = ['Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall',
-                    'Accuracycv', 'ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv', 'CompositeScore']
+        perf_cols = [
+            # Calibration metrics
+            'Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall',
+            'Specificity', 'Kappa', 'MCC', 'BalancedAcc', 'BER', 'LogLoss',
+            # Cross-validation metrics
+            'Accuracycv', 'ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv',
+            'Specificitycv', 'Kappacv', 'MCCcv', 'BalancedAcccv', 'BERcv', 'LogLosscv',
+            # Additional columns
+            'CompositeScore'
+        ]
 
     # Variable columns at end
     other_cols = ['top_vars', 'all_vars']
@@ -3933,5 +3941,12 @@ def convert_nsga2_to_v1_format(
     final_cols.extend(remaining)
 
     df = df[final_cols]
+
+    # Convert integer columns to nullable Int64 to avoid float display (e.g., 1.0 -> 1)
+    int_cols = ['Deriv', 'Window', 'Poly', 'LVs', 'n_vars', 'Rank', 'Folds',
+                'N_Calibration', 'N_Excluded', 'N_Validation', 'full_vars']
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = df[col].astype('Int64')
 
     return df
