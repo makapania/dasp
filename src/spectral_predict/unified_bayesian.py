@@ -727,6 +727,11 @@ def create_unified_objective(
             # Use the constructed pipeline as the model
             model = pipeline
 
+            # Enable CV parallelism (safe - Bayesian trials are sequential)
+            import sys
+            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+            n_jobs_cv = 1 if is_frozen else -1
+
             # 7. Compute metrics
             if task_type == 'regression':
                 # Use cross_validate for RMSE (averaging is valid for RMSE)
@@ -734,7 +739,7 @@ def create_unified_objective(
                     model, X_final, y,
                     cv=cv,
                     scoring={'rmse': 'neg_root_mean_squared_error'},
-                    n_jobs=1,
+                    n_jobs=n_jobs_cv,
                     error_score='raise'
                 )
                 rmse = -cv_results['test_rmse'].mean()
@@ -742,7 +747,7 @@ def create_unified_objective(
                 # R² must use aggregated predictions (not per-fold averages)
                 # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
                 # This matches the method used in search.py for consistency with Model Development
-                y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=1)
+                y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
                 r2 = r2_score(y, y_pred_cv)
 
                 # Compute additional NIR spectroscopy metrics from CV predictions
@@ -757,14 +762,14 @@ def create_unified_objective(
             else:
                 # Classification: use accuracy and ROC_AUC
                 scores = cross_val_score(
-                    model, X_final, y, cv=cv, scoring='accuracy', n_jobs=1, error_score='raise'
+                    model, X_final, y, cv=cv, scoring='accuracy', n_jobs=n_jobs_cv, error_score='raise'
                 )
                 accuracy = scores.mean()
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
                 try:
                     y_proba = cross_val_predict(
-                        model, X_final, y, cv=cv, method='predict_proba', n_jobs=1
+                        model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv
                     )
                     n_classes = len(np.unique(y))
                     if n_classes == 2:
@@ -1196,13 +1201,15 @@ def convert_study_to_dataframe(
 
     # Handle empty results (all trials failed)
     if len(df) == 0:
-        cols = ['Rank', 'Task', 'Model', 'Preprocess', 'Params', 'n_vars', 'top_vars',
-                'all_vars', 'Window', 'Poly', 'Deriv', 'LVs', 'full_vars', 'SubsetTag',
-                'trial_number', 'Folds', 'Optimization', 'Imbalance', 'imbalance_method', 'imbalance_params']
+        # Column order aligned with Grid Search: preprocessing cols early, top_vars/all_vars at end
+        cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
+                'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
+                'trial_number', 'Folds', 'Optimization', 'imbalance_method', 'imbalance_params']
         if task_type == 'classification':
             cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
             cols.extend(['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score'])
+        cols.extend(['top_vars', 'all_vars'])
         return pd.DataFrame(columns=cols)
 
     # Sort by performance (use CV metrics for model selection)
@@ -1228,6 +1235,34 @@ def convert_study_to_dataframe(
         df['Score'] = df['CV Error']
     else:
         df['Score'] = df['RMSEcv']
+
+    # Reorder columns to match Grid Search format
+    # Preprocessing columns early, metrics in middle, top_vars/all_vars at end
+    base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
+                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance']
+
+    # Performance metrics
+    if task_type == 'regression':
+        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score']
+    else:
+        perf_cols = ['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score']
+
+    # Bayesian-specific and other columns
+    other_cols = ['trial_number', 'Folds', 'Optimization', 'imbalance_method', 'imbalance_params']
+
+    # Variable columns at end
+    end_cols = ['top_vars', 'all_vars']
+
+    # Build final column order (only include columns that exist in df)
+    final_cols = []
+    for col_list in [base_cols, perf_cols, other_cols, end_cols]:
+        final_cols.extend([col for col in col_list if col in df.columns])
+
+    # Add any remaining columns not in our explicit lists
+    remaining = [col for col in df.columns if col not in final_cols]
+    final_cols.extend(remaining)
+
+    df = df[final_cols]
 
     return df
 

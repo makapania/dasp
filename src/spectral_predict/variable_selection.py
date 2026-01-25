@@ -11,6 +11,13 @@ from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 
 
+def _get_cv_n_jobs():
+    """Get n_jobs for CV, respecting frozen app constraints."""
+    import sys
+    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+    return 1 if is_frozen else -1
+
+
 def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):
     """
     Uninformative Variable Elimination (UVE) - eliminates variables that contribute no more than noise.
@@ -640,7 +647,7 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
                 pls, X_interval, y,
                 cv=cv_folds,
                 scoring='r2',
-                n_jobs=1
+                n_jobs=_get_cv_n_jobs()
             )
 
             # Use mean R² as interval score
