@@ -282,6 +282,96 @@ class CreateToolTip(object):
             tw.destroy()
 
 
+class TreeviewHeaderTooltip:
+    """Tooltip handler for ttk.Treeview column headers."""
+
+    def __init__(self, treeview, tooltips_dict, delay=500):
+        self.treeview = treeview
+        self.tooltips = tooltips_dict  # {column_name: tooltip_text}
+        self.delay = delay
+        self.tip_window = None
+        self.scheduled_id = None
+        self.current_column = None
+
+        treeview.bind('<Motion>', self._on_motion)
+        treeview.bind('<Leave>', self._hide_tip)
+
+    def _on_motion(self, event):
+        region = self.treeview.identify_region(event.x, event.y)
+        if region == 'heading':
+            col_id = self.treeview.identify_column(event.x)
+            # Convert #1, #2, etc. to column name
+            # Skip #0 (tree column, hidden but can still be detected at edge)
+            if col_id and col_id != '#0':
+                col_index = int(col_id.replace('#', '')) - 1
+                columns = self.treeview['columns']
+                if 0 <= col_index < len(columns):
+                    col_name = columns[col_index]
+                    if col_name != self.current_column:
+                        self._hide_tip()
+                        self.current_column = col_name
+                        self._schedule_tip(event.x, event.y)
+                    return
+        # Not over a heading
+        self._hide_tip()
+        self.current_column = None
+
+    def _schedule_tip(self, x, y):
+        """Schedule tooltip to appear after delay. Captures x,y to avoid stale event."""
+        self._cancel_schedule()
+        self.scheduled_id = self.treeview.after(self.delay, lambda: self._show_tip(x, y))
+
+    def _cancel_schedule(self):
+        if self.scheduled_id:
+            self.treeview.after_cancel(self.scheduled_id)
+            self.scheduled_id = None
+
+    def _show_tip(self, event_x, event_y):
+        """Show tooltip at captured coordinates."""
+        self._hide_tip()  # Ensure clean state (prevent orphaned windows)
+        if self.current_column:
+            tooltip_text = self._get_tooltip_for_column(self.current_column)
+            if tooltip_text:
+                try:
+                    x = self.treeview.winfo_rootx() + event_x + 10
+                    y = self.treeview.winfo_rooty() + event_y + 20
+
+                    self.tip_window = tw = tk.Toplevel(self.treeview)
+                    tw.wm_overrideredirect(True)
+                    tw.wm_geometry(f'+{x}+{y}')
+
+                    label = tk.Label(
+                        tw, text=tooltip_text,
+                        justify='left', background='#ffffe0',
+                        relief='solid', borderwidth=1,
+                        font=('Tahoma', 9), wraplength=350
+                    )
+                    label.pack()
+                except tk.TclError:
+                    pass  # Widget was destroyed
+
+    def _get_tooltip_for_column(self, col_name):
+        """Get tooltip text, with pattern matching for dynamic columns."""
+        # Direct match
+        if col_name in self.tooltips:
+            return self.tooltips[col_name]
+        # Pattern matching for quartile-specific RMSE columns
+        if col_name.startswith('RMSE_Q'):
+            q = col_name[-1]
+            return f'RMSE for Quartile {q}\n\nPrediction error for samples in Y-value quartile {q}.\nQ1=lowest values, Q4=highest values.'
+        # Pattern matching for class-specific F1 columns
+        if col_name.startswith('F1_Class'):
+            cls = col_name.replace('F1_Class', '')
+            return f'F1 Score for Class {cls}\n\nPer-class F1 showing model performance on this specific class.'
+        return None
+
+    def _hide_tip(self, event=None):
+        self._cancel_schedule()
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+
+
 # ===== EXPERT MODEL SELECTION THRESHOLDS =====
 # Based on spectroscopy literature (Gowen 2011, Williams 2014, Nature Scientific Reports)
 # Used to identify well-generalized models across ALL models (ignores Rank)
@@ -1156,6 +1246,39 @@ TOOLTIP_CONTENT = {
             "(e.g., measured sequentially). Set random_state for reproducibility. Not needed if data "
             "is already randomized."
         ),
+    },
+
+    # ===== METRICS (for results table column headers) =====
+    'metrics': {
+        'R2': 'R² (Coefficient of Determination)\n\nMeasures how well the model explains variance in the data.\nRange: 0-1 (higher is better, 1 = perfect fit)',
+        'R2cv': 'R²cv (R² Cross-Validation)\n\nR² calculated on held-out folds during cross-validation.\nMore reliable estimate of true model performance.',
+        'RMSE': 'RMSE (Root Mean Square Error)\n\nAverage prediction error in original units.\nLower is better.',
+        'RMSEcv': 'RMSEcv (RMSE Cross-Validation)\n\nRMSE calculated on held-out folds.\nMore reliable than calibration RMSE.',
+        'MAE': 'MAE (Mean Absolute Error)\n\nAverage absolute prediction error.\nLess sensitive to outliers than RMSE.',
+        'MAEcv': 'MAEcv (MAE Cross-Validation)\n\nMAE calculated on held-out folds.',
+        'RPD': 'RPD (Ratio of Performance to Deviation)\n\nSD(reference) / RMSE. Higher is better.\n<1.5: poor, 1.5-2: rough screening, 2-2.5: good, >2.5: excellent',
+        'RER': 'RER (Range Error Ratio)\n\nRange(reference) / RMSE. Higher is better.\nIndicates prediction precision relative to data range.',
+        'Bias': 'Bias (Systematic Error)\n\nMean(predicted - actual). Should be close to 0.\nPositive = over-predicting, Negative = under-predicting',
+        'LVs': 'LVs (Latent Variables)\n\nNumber of PLS components used.\nMore LVs = more complex model (risk of overfitting).',
+        'Accuracy': 'Accuracy (Classification Accuracy)\n\nProportion of correct predictions.\nRange: 0-1 (higher is better)',
+        'Accuracycv': 'Accuracycv (Accuracy Cross-Validation)\n\nAccuracy on held-out folds.',
+        'F1': 'F1 (F1 Score)\n\nHarmonic mean of Precision and Recall.\nBalances false positives and false negatives.',
+        'F1cv': 'F1cv (F1 Cross-Validation)\n\nF1 on held-out folds.',
+        'Precision': 'Precision\n\nOf predicted positives, how many are correct?\nHigh precision = few false positives.',
+        'Precisioncv': 'Precisioncv (Precision Cross-Validation)',
+        'Recall': 'Recall (Sensitivity)\n\nOf actual positives, how many were found?\nHigh recall = few false negatives.',
+        'Recallcv': 'Recallcv (Recall Cross-Validation)',
+        'ROC_AUC': 'ROC-AUC (Receiver Operating Characteristic - Area Under Curve)\n\nClassifier performance across thresholds.\nRange: 0.5 (random) to 1.0 (perfect)',
+        'ROC_AUCcv': 'ROC-AUCcv (ROC-AUC Cross-Validation)',
+        'CompositeScore': 'CompositeScore (Composite Score)\n\nWeighted combination of metrics for ranking.\nHigher is better.',
+        'Rank': 'Rank (Model Rank)\n\nPosition in results sorted by CompositeScore.\n★ = Expert choice, ● = Good fit',
+        'n_vars': 'n_vars (Number of Variables)\n\nSpectral variables used after variable selection.\nFewer = simpler model.',
+        'Window': 'Window (Savitzky-Golay Window Size)\n\nSmoothing window width (must be odd).\nLarger = more smoothing.',
+        'Poly': 'Poly (Polynomial Order)\n\nSavitzky-Golay polynomial degree.\nHigher = preserves more peak shape.',
+        'Deriv': 'Deriv (Derivative Order)\n\n0=smoothing, 1=1st derivative, 2=2nd derivative.\nDerivatives remove baseline, enhance features.',
+        'Select': 'Select (Selection Checkbox)\n\nClick to include/exclude model from ensemble.',
+        'BestRegion': 'BestRegion (Best Performing Region)\n\nQuartile(s) where this model performs best.\nQ1=low values, Q4=high values.',
+        'BestClass': 'BestClass (Best Performing Class)\n\nClass(es) where this model has highest F1.',
     },
 }
 
@@ -8899,6 +9022,13 @@ class SpectralPredictApp:
         self.results_tree.bind('<Double-Button-1>', self._on_result_double_click)
         # Bind single-click event for checkbox toggling
         self.results_tree.bind('<Button-1>', self._on_result_click)
+
+        # Add tooltips to column headers for metric explanations
+        self.results_header_tooltips = TreeviewHeaderTooltip(
+            self.results_tree,
+            TOOLTIP_CONTENT['metrics'],
+            delay=400
+        )
 
         # Configure tags for quartile-based highlighting (top models per Y-value region)
         self.results_tree.tag_configure('top_q1', background='#e3f2fd')  # Light blue - low Y values
