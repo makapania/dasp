@@ -324,7 +324,8 @@ def suggest_model_params(
 
     elif model_name_lower == 'lightgbm':
         # Focus on 4 key params
-        max_depth = trial.suggest_int('max_depth', -1, 15)
+        # Use categorical to skip invalid values 0 and 1 (can't satisfy num_leaves > 1)
+        max_depth = trial.suggest_categorical('max_depth', [-1] + list(range(2, 16)))
 
         # Constrain num_leaves based on max_depth
         if max_depth == -1:
@@ -999,7 +1000,8 @@ def run_unified_bayesian(
         n_startup_trials=20,  # Random exploration first
         n_ei_candidates=32,   # More candidates for better exploration
         multivariate=True,    # Model parameter interactions
-        consider_endpoints=True
+        consider_endpoints=True,
+        warn_independent_sampling=False  # Suppress dynamic space warning
     )
 
     # Create study

@@ -293,7 +293,8 @@ def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classe
             num_leaves_range = (15, 63)  # Binary/regression: simpler
 
     # Suggest max_depth first to constrain num_leaves
-    max_depth = trial.suggest_int('max_depth', -1, 20)  # -1 = no limit
+    # Use categorical to skip invalid values 0 and 1 (can't satisfy num_leaves > 1)
+    max_depth = trial.suggest_categorical('max_depth', [-1] + list(range(2, 21)))
 
     # Constrain num_leaves based on max_depth to satisfy: num_leaves < 2^max_depth
     if max_depth == -1:

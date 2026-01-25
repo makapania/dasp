@@ -82,7 +82,8 @@ def create_optuna_study(
             seed=random_state,
             n_startup_trials=10,  # Random exploration first
             n_ei_candidates=24,   # Number of candidates for expected improvement
-            multivariate=True     # Consider parameter interactions
+            multivariate=True,    # Consider parameter interactions
+            warn_independent_sampling=False  # Suppress dynamic space warning
         )
     elif sampler == 'Random':
         sampler_obj = RandomSampler(seed=random_state)
