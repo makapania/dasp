@@ -1,6 +1,7 @@
 """Model search with cross-validation and subset selection."""
 
 import os
+import sys
 import inspect
 import logging
 import numpy as np
@@ -832,7 +833,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     random_state = RANDOM_STATE
 
     # Use all cores for parallel execution (will be overridden per-model for CatBoost/SVM)
-    n_jobs_default = -1
+    # In frozen (PyInstaller) apps, force n_jobs=1 to prevent spawning new instances
+    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+    n_jobs_default = 1 if is_frozen else -1
 
     X_np = X.values
     y_np = y.values
