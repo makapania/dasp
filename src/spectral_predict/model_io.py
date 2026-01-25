@@ -549,7 +549,8 @@ def predict_with_model(
 def predict_with_uncertainty(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
-    validate_wavelengths: bool = True
+    validate_wavelengths: bool = True,
+    prediction_data_type: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Make predictions with a loaded model and compute uncertainty estimates.
@@ -567,6 +568,9 @@ def predict_with_uncertainty(
         New spectral data to predict on
     validate_wavelengths : bool, default=True
         Whether to validate wavelengths match model requirements
+    prediction_data_type : str, optional
+        Type of prediction data ('absorbance' or 'reflectance'). If provided and differs
+        from model's training data type, a warning will be included in the result.
 
     Returns
     -------
@@ -588,6 +592,7 @@ def predict_with_uncertainty(
             - 'distance_status': np.ndarray, shape (n_samples,) - 'good', 'caution', 'extrapolation'
         - 'has_uncertainty': bool - whether uncertainty data is available
         - 'has_applicability_domain': bool - whether applicability domain data is available
+        - 'data_type_warning': str or None - warning message if prediction data type differs from training data type
 
     Examples
     --------
@@ -612,6 +617,17 @@ def predict_with_uncertainty(
     model = model_dict['model']
     metadata = model_dict['metadata']
     task_type = metadata.get('task_type', 'regression')
+
+    # Check for data type mismatch
+    data_type_warning = None
+    model_data_type = metadata.get('data_type')
+
+    if prediction_data_type and model_data_type:
+        if prediction_data_type.lower() != model_data_type.lower():
+            data_type_warning = (
+                f"Model trained on {model_data_type.upper()} data, "
+                f"but prediction data is {prediction_data_type.upper()}."
+            )
 
     uncertainty = {}
     has_uncertainty = False
@@ -782,7 +798,8 @@ def predict_with_uncertainty(
         'uncertainty': uncertainty,
         'has_uncertainty': has_uncertainty,
         'applicability_domain': applicability_domain,
-        'has_applicability_domain': has_applicability_domain
+        'has_applicability_domain': has_applicability_domain,
+        'data_type_warning': data_type_warning
     }
 
 

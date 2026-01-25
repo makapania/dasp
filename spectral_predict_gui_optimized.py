@@ -2319,6 +2319,7 @@ class SpectralPredictApp:
         # Model Prediction Tab (Tab 8) variables - shifted from Tab 7
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
+        self.prediction_data_type = None  # Data type of prediction data (absorbance/reflectance)
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
         self.consensus_info = {}  # Store consensus model details for display
@@ -26982,6 +26983,7 @@ Configuration:
                 'performance': {},
                 'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
                 'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
+                'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance)
                 # Validation set metadata
                 'validation_set_enabled': self.validation_enabled.get(),
                 'validation_indices': list(self.validation_indices) if self.validation_indices else [],
@@ -28444,9 +28446,12 @@ Configuration:
                     else:
                         rmse_str = str(rmse)
 
+                    # Get data type if available
+                    data_type = metadata.get('data_type', 'Unknown')
+
                     # Build display text
                     text = f"[{i}] {filename}\n"
-                    text += f"    Model: {model_name}  |  Preprocessing: {preprocessing}\n"
+                    text += f"    Model: {model_name}  |  Preprocessing: {preprocessing}  |  Data Type: {data_type.upper() if data_type != 'Unknown' else data_type}\n"
                     text += f"    R²: {r2_str}  |  RMSE: {rmse_str}  |  Variables: {n_vars}\n"
                     text += f"    Path: {model_dict.get('filepath', 'Unknown')}\n"
                     text += "\n"
@@ -28543,8 +28548,11 @@ Configuration:
                 n_samples = len(self.prediction_data)
                 n_wavelengths = len(self.prediction_data.columns)
 
+                # For validation set, use the same data type as the training data
+                self.prediction_data_type = self.current_data_type.get()
+
                 self.pred_data_status.config(
-                    text=f"> Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths"
+                    text=f"> Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths ({self.prediction_data_type.upper()})"
                 )
                 # Validation set loaded - status updated
                 return
@@ -28615,9 +28623,22 @@ Configuration:
             n_samples = len(self.prediction_data)
             n_wavelengths = len(self.prediction_data.columns)
 
-            self.pred_data_status.config(
-                text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
-            )
+            # Detect data type for prediction data
+            try:
+                from spectral_predict.io import detect_spectral_data_type
+                data_type, confidence, _ = detect_spectral_data_type(self.prediction_data)
+                self.prediction_data_type = data_type
+
+                # Update status to include detected type
+                self.pred_data_status.config(
+                    text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths ({data_type.upper()} detected)"
+                )
+            except Exception as e:
+                print(f"Could not detect prediction data type: {e}")
+                self.prediction_data_type = None
+                self.pred_data_status.config(
+                    text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
+                )
             # Data loaded - status updated
 
         except Exception as e:
@@ -28705,7 +28726,8 @@ Configuration:
                     pred_result = predict_with_uncertainty(
                         model_dict,
                         self.prediction_data,
-                        validate_wavelengths=True
+                        validate_wavelengths=True,
+                        prediction_data_type=self.prediction_data_type
                     )
 
                     predictions = pred_result['predictions']
@@ -28713,6 +28735,12 @@ Configuration:
                     has_uncertainty = pred_result['has_uncertainty']
                     applicability_domain = pred_result.get('applicability_domain', {})
                     has_applicability_domain = pred_result.get('has_applicability_domain', False)
+
+                    # Check for data type mismatch warning
+                    if pred_result.get('data_type_warning'):
+                        messagebox.showwarning("Data Type Mismatch",
+                            pred_result['data_type_warning'] +
+                            "\n\nConsider converting your data before prediction.")
 
                     # Debug output
                     print(f"DEBUG: Model {filename} - has_applicability_domain: {has_applicability_domain}")
