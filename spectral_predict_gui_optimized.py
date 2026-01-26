@@ -16352,8 +16352,10 @@ class SpectralPredictApp:
 
                     # Apply ALL remaining hyperparameters via set_params()
                     # This ensures tuned values like alpha, n_estimators, max_depth, etc. are used
+                    # Filter out Pipeline-specific params that shouldn't go to the model
                     remaining_params = {k: v for k, v in params_dict.items()
-                                       if k not in {'n_components', 'max_n_components', 'max_iter'}}
+                                       if k not in {'n_components', 'max_n_components', 'max_iter'}
+                                       and not any(k.startswith(p) for p in ['steps', 'memory', 'verbose', 'scaler__', 'model__'])}
                     if remaining_params:
                         try:
                             model.set_params(**remaining_params)
@@ -25891,7 +25893,7 @@ F1 Score:  {f1:.4f}
                             print(f"DEBUG: Applied PLS-DA params (unprefixed): {pls_params}")
                         else:
                             print(f"DEBUG: No applicable PLS params found in: {params_from_search}")
-                    elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                    elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                         # Strip model__ prefix for scale-sensitive models
                         # These are wrapped in Pipeline([('scaler', StandardScaler()), ('model', model)])
                         # Params SHOULD be unprefixed, but handle prefixed case defensively
@@ -25909,8 +25911,16 @@ F1 Score:  {f1:.4f}
                             print(f"DEBUG: No applicable params found for {model_name}: {params_from_search}")
                     else:
                         # For other models, params are unprefixed and apply directly
-                        model.set_params(**params_from_search)
-                        print(f"DEBUG: Applied saved search parameters: {params_from_search}")
+                        # But filter out Pipeline-specific params that shouldn't go to the model
+                        filtered_params = {
+                            k: v for k, v in params_from_search.items()
+                            if not any(k.startswith(p) for p in ['steps', 'memory', 'verbose', 'scaler__', 'model__'])
+                        }
+                        if filtered_params:
+                            model.set_params(**filtered_params)
+                            print(f"DEBUG: Applied saved search parameters: {filtered_params}")
+                        else:
+                            print(f"DEBUG: No applicable params after filtering: {params_from_search}")
 
                     # DIAGNOSTIC: Capture parameters AFTER set_params for ALL models
                     if True:  # Apply to ALL models including PLS
