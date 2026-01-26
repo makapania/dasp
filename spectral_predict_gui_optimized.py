@@ -36033,7 +36033,7 @@ Configuration:
         method_buttons_frame = ttk.Frame(method_section)
         method_buttons_frame.pack(fill='x', pady=(0, 10))
 
-        self.ct_method_var = tk.StringVar(value='ctai')
+        self.ct_method_var = tk.StringVar(value='nspfce')
 
         # DS method
         ds_radio = ttk.Radiobutton(method_buttons_frame, text="DS",
@@ -41411,6 +41411,16 @@ Configuration:
 def main():
     """Main entry point."""
     root = tk.Tk()
+
+    # Set window icon (taskbar and title bar)
+    try:
+        from src.spectral_predict.resource_paths import get_resource_path
+        icon_path = get_resource_path('asp_logo.ico')
+        if icon_path.exists():
+            root.iconbitmap(str(icon_path))
+    except Exception:
+        pass  # Fail silently if icon can't be loaded
+
     app = SpectralPredictApp(root)
 
     # Initialize tier-based model selection (must be done after all UI is created)
