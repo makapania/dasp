@@ -25281,6 +25281,7 @@ F1 Score:  {f1:.4f}
             from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
             from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
             from sklearn.base import clone
+            from spectral_predict.cv_utils import is_boosting_model, _fit_with_early_stopping
 
             # Parse wavelength specification
             available_wl = self.X_original.columns.astype(float).values
@@ -26531,6 +26532,16 @@ F1 Score:  {f1:.4f}
             print(f"y range: [{y_array.min():.2f}, {y_array.max():.2f}]")
             print(f"{'='*80}\n")
 
+            # Use early stopping for boosted models when loaded from Results
+            early_stopping_rounds = None
+            if self.selected_model_config is not None:
+                es_value = self.selected_model_config.get('early_stopping_rounds')
+                if es_value is not None and not pd.isna(es_value):
+                    try:
+                        early_stopping_rounds = int(es_value)
+                    except (TypeError, ValueError):
+                        early_stopping_rounds = None
+
             # Collect metrics for each fold
             fold_metrics = []
             all_y_true = []
@@ -26538,6 +26549,15 @@ F1 Score:  {f1:.4f}
             all_y_proba = []  # Store prediction probabilities for classification
             all_cv_indices = []  # Store CV sample indices for specimen ID mapping
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
+
+            final_model = pipe.steps[-1][1]
+            use_early_stopping = (
+                early_stopping_rounds is not None and
+                early_stopping_rounds > 0 and
+                is_boosting_model(final_model)
+            )
+            if use_early_stopping:
+                print(f"DEBUG: Early stopping enabled ({early_stopping_rounds} rounds) for {model_name}")
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
                 # Clone ENTIRE PIPELINE for this fold (not just model)
@@ -26548,8 +26568,49 @@ F1 Score:  {f1:.4f}
                 y_train, y_test = y_array[train_idx], y_array[test_idx]
 
                 # Fit pipeline (preprocessing + model) and predict
-                pipe_fold.fit(X_train, y_train)
-                y_pred = pipe_fold.predict(X_test)
+                if use_early_stopping:
+                    X_train_transformed = X_train.copy()
+                    X_test_transformed = X_test.copy()
+                    y_train_fold = y_train
+
+                    if hasattr(pipe_fold, 'steps'):
+                        for step_name, step in pipe_fold.steps[:-1]:
+                            if hasattr(step, 'fit_resample'):
+                                X_train_transformed, y_train_fold = step.fit_resample(
+                                    X_train_transformed, y_train_fold
+                                )
+                            else:
+                                step.fit(X_train_transformed, y_train_fold)
+                                if hasattr(step, 'transform'):
+                                    X_train_transformed = step.transform(X_train_transformed)
+                                    X_test_transformed = step.transform(X_test_transformed)
+
+                        final_model_fold = pipe_fold.steps[-1][1]
+                        _fit_with_early_stopping(
+                            final_model_fold,
+                            X_train_transformed, y_train_fold,
+                            X_test_transformed, y_test,
+                            early_stopping_rounds
+                        )
+                        y_pred = final_model_fold.predict(X_test_transformed)
+
+                        if hasattr(final_model_fold, 'predict_proba'):
+                            y_proba = final_model_fold.predict_proba(X_test_transformed)
+                            all_y_proba.append(y_proba)
+                    else:
+                        _fit_with_early_stopping(
+                            pipe_fold,
+                            X_train, y_train,
+                            X_test, y_test,
+                            early_stopping_rounds
+                        )
+                        y_pred = pipe_fold.predict(X_test)
+                        if hasattr(pipe_fold, 'predict_proba'):
+                            y_proba = pipe_fold.predict_proba(X_test)
+                            all_y_proba.append(y_proba)
+                else:
+                    pipe_fold.fit(X_train, y_train)
+                    y_pred = pipe_fold.predict(X_test)
 
                 # Store predictions for plotting
                 all_y_true.extend(y_test)
@@ -26557,16 +26618,17 @@ F1 Score:  {f1:.4f}
                 all_cv_indices.extend(test_idx)  # Track indices for specimen ID mapping
 
                 # Store prediction probabilities if available (for classification)
-                if hasattr(pipe_fold, 'predict_proba'):
-                    y_proba = pipe_fold.predict_proba(X_test)
-                    all_y_proba.append(y_proba)
-                elif 'model' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
-                    y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
-                    all_y_proba.append(y_proba)
-                elif 'lr' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
-                    # For PLS-DA, LogisticRegression is named 'lr'
-                    y_proba = pipe_fold.named_steps['lr'].predict_proba(X_test)
-                    all_y_proba.append(y_proba)
+                if not use_early_stopping:
+                    if hasattr(pipe_fold, 'predict_proba'):
+                        y_proba = pipe_fold.predict_proba(X_test)
+                        all_y_proba.append(y_proba)
+                    elif 'model' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
+                        y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
+                        all_y_proba.append(y_proba)
+                    elif 'lr' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
+                        # For PLS-DA, LogisticRegression is named 'lr'
+                        y_proba = pipe_fold.named_steps['lr'].predict_proba(X_test)
+                        all_y_proba.append(y_proba)
 
                 if task_type == "regression":
                     rmse = np.sqrt(mean_squared_error(y_test, y_pred))

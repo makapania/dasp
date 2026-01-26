@@ -3931,6 +3931,8 @@ def _run_single_config(
         "full_vars": full_vars,
         "SubsetTag": subset_tag,
         "Imbalance": imbalance_display,
+        # Track early stopping to allow Model Development to reproduce boosted results
+        "early_stopping_rounds": early_stopping_rounds if model_name in ("XGBoost", "LightGBM", "CatBoost") else None,
         # Store actual imbalance settings for Model Development tab to use
         # (imbalance_display is for UI, these are for exact pipeline reconstruction)
         "imbalance_method": imbalance_method,

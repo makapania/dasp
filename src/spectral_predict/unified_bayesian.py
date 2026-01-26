@@ -32,6 +32,7 @@ Example:
 from __future__ import annotations
 
 import logging
+import ast
 import numpy as np
 import pandas as pd
 import optuna
@@ -78,6 +79,34 @@ PREPROCESSING_OPTIONS = [
     'snv_deriv1', 'snv_deriv2', 'snv_deriv3', 'snv_deriv4',
     'deriv1_snv', 'deriv2_snv', 'deriv3_snv', 'deriv4_snv'
 ]
+
+
+def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
+    """Return model params that can round-trip through str() and ast.literal_eval()."""
+    try:
+        all_params = model.get_params()
+    except Exception:
+        return None
+
+    filtered_params: Dict[str, Any] = {}
+    for key, value in all_params.items():
+        if callable(value) or hasattr(value, '__dict__'):
+            continue
+
+        try:
+            if hasattr(value, 'item'):
+                value = value.item()
+
+            if isinstance(value, float) and np.isnan(value):
+                continue
+
+            test_str = str({key: value})
+            ast.literal_eval(test_str)
+            filtered_params[key] = value
+        except Exception:
+            continue
+
+    return filtered_params
 
 # Subset sizes to explore
 SUBSET_SIZES = ['full', 10, 20, 50, 100, 250, 500, 1000]
@@ -911,10 +940,14 @@ def create_unified_objective(
             trial.set_user_attr('subset_type', subset_type)
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
+            trial.set_user_attr('early_stopping_rounds', early_stopping_rounds if use_early_stopping else None)
             trial.set_user_attr('model_params', str(model_params))
 
             # Fit on full training data for calibration metrics
             model.fit(X_final, y)
+            captured_params = _capture_serializable_params(model)
+            if captured_params:
+                trial.set_user_attr('model_params', str(captured_params))
             y_pred_cal = model.predict(X_final)
 
             if task_type == 'regression':
@@ -1366,6 +1399,7 @@ def convert_study_to_dataframe(
             'Folds': cv_folds,
             'Optimization': 'Unified Bayesian',
             'Imbalance': imbalance_method if imbalance_method else '—',
+            'early_stopping_rounds': trial.user_attrs.get('early_stopping_rounds', None),
             'imbalance_method': imbalance_method,
             'imbalance_params': imbalance_params,
         }
@@ -1431,7 +1465,8 @@ def convert_study_to_dataframe(
         # Column order aligned with Grid Search: preprocessing cols early, top_vars/all_vars at end
         cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
-                'trial_number', 'Folds', 'Optimization', 'imbalance_method', 'imbalance_params']
+                'early_stopping_rounds', 'trial_number', 'Folds', 'Optimization',
+                'imbalance_method', 'imbalance_params']
         if task_type == 'classification':
             cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
@@ -1466,7 +1501,8 @@ def convert_study_to_dataframe(
     # Reorder columns to match Grid Search format
     # Preprocessing columns early, metrics in middle, top_vars/all_vars at end
     base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
-                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance']
+                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
+                 'early_stopping_rounds']
 
     # Performance metrics
     if task_type == 'regression':
