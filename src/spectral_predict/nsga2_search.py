@@ -2146,6 +2146,7 @@ def run_nsga2_search(
         'cancelled': False,
         'imbalance_method': imbalance_method,
         'imbalance_params': imbalance_params,
+        'early_stopping_rounds': early_stopping_rounds,
     }
 
 
@@ -3593,6 +3594,7 @@ def convert_nsga2_to_v1_format(
             'full_vars': n_wavelengths,  # Total wavelengths available
             'SubsetTag': 'nsga2',
             'Imbalance': _format_imbalance_display(result.get('imbalance_method')),
+            'early_stopping_rounds': result.get('early_stopping_rounds'),
             'imbalance_method': result.get('imbalance_method'),
             'imbalance_params': result.get('imbalance_params'),
             'top_vars': _compute_top_variables(X, y, decoded, model_types, task_type, wavelengths, 30, 42) if (X is not None and y is not None and decoded['selected_indices']) else (_indices_to_wavelength_str(decoded['selected_indices'][:30], wavelengths) if decoded['selected_indices'] else 'N/A'),
@@ -3779,6 +3781,7 @@ def convert_nsga2_to_v1_format(
                     'full_vars': n_wavelengths,
                     'SubsetTag': 'nsga2_best',  # Mark as best from all evaluations
                     'Imbalance': 'none',
+                    'early_stopping_rounds': result.get('early_stopping_rounds'),
                     'top_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', [])[:30], wavelengths) if knee_sol.get('selected_indices') else 'N/A',
                     'all_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', []), wavelengths) if knee_sol.get('selected_indices') else 'N/A',
                     'n_vars': knee_sol.get('n_wavelengths', 0),
@@ -3906,7 +3909,8 @@ def convert_nsga2_to_v1_format(
     # Reorder columns to match Grid Search format
     # Preprocessing columns early (Deriv, Window, Poly, LVs, n_vars), metrics in middle, top_vars/all_vars at end
     base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
-                 'Poly', 'LVs', 'n_vars', 'Variables', 'full_vars', 'SubsetTag', 'Imbalance']
+                 'Poly', 'LVs', 'n_vars', 'Variables', 'full_vars', 'SubsetTag', 'Imbalance',
+                 'early_stopping_rounds']
 
     # Performance metrics after Imbalance (calibration first, then CV, then NIR-specific)
     if task_type == 'regression':
@@ -3944,7 +3948,8 @@ def convert_nsga2_to_v1_format(
 
     # Convert integer columns to nullable Int64 to avoid float display (e.g., 1.0 -> 1)
     int_cols = ['Deriv', 'Window', 'Poly', 'LVs', 'n_vars', 'Rank', 'Folds',
-                'N_Calibration', 'N_Excluded', 'N_Validation', 'full_vars']
+                'N_Calibration', 'N_Excluded', 'N_Validation', 'full_vars',
+                'early_stopping_rounds']
     for col in int_cols:
         if col in df.columns:
             df[col] = df[col].astype('Int64')
