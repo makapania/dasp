@@ -2284,6 +2284,7 @@ class SpectralPredictApp:
 
         # Results storage
         self.results_df = None  # Analysis results dataframe
+        self.results_display_df = None  # Currently displayed results (sorted/filtered view)
         self.selected_model_config = None  # Selected model configuration for refinement
         self.results_sort_column = None  # Current column being sorted
         self.results_sort_reverse = False  # Sort direction (False = ascending, True = descending)
@@ -2385,6 +2386,9 @@ class SpectralPredictApp:
         # Section D: Export Workflow (Mode B)
         self.new_satellite_data_export = None  # New satellite data to transform and export
         self.transformed_spectra = None  # Transformed spectra ready for export
+        self.export_metadata_context = None  # Metadata context for smart CSV/Excel (Mode B)
+        self.ct_export_data_type = tk.StringVar(value="reflectance")  # Detected data type for Mode B
+        self.ct_export_data_converted = False  # Whether conversion has been applied
 
         # Legacy variables (kept for backward compatibility with existing methods)
         self.ct_primary_model_dict = None  # Loaded primary model for predictions
@@ -19363,11 +19367,13 @@ class SpectralPredictApp:
             print(f"  Validation samples: {self.last_training_config['validation_count']}")
             print(f"  CV folds: {self.last_training_config['folds']}")
 
-            # Add "Select" column for ensemble model selection
+            # Add "Select" column for ensemble model selection (all optimization methods)
             # Auto-select top N models by CompositeScore (lower is better)
+            if results_df is not None and 'Select' not in results_df.columns:
+                results_df.insert(0, 'Select', False)  # Insert as first column
+
             top_n = self.ensemble_top_n.get()
-            results_df.insert(0, 'Select', False)  # Insert as first column
-            if len(results_df) > 0:
+            if results_df is not None and len(results_df) > 0 and 'Select' in results_df.columns:
                 # Get indices of top N models (lowest score - lower is better for all methods)
                 # Grid search uses 'CompositeScore', Bayesian uses 'Score', Coupled uses 'CV Error'
                 if 'CompositeScore' in results_df.columns:
@@ -19945,6 +19951,9 @@ For detailed documentation, see the User Guide.
 
             self.results_tree.insert('', 'end', iid=str(idx), values=values, tags=tag)
 
+        # Track the currently displayed results for safe row lookup
+        self.results_display_df = results_df
+
         # Update status based on task type
         highlighted_count = 0
         status_suffix = ""
@@ -20004,6 +20013,9 @@ For detailed documentation, see the User Guide.
 
     def _on_result_click(self, event):
         """Handle single-click on results table to toggle checkbox selection."""
+        if self.results_df is None or 'Select' not in self.results_df.columns:
+            return
+
         # Identify which column was clicked
         region = self.results_tree.identify('region', event.x, event.y)
         if region != 'cell':
@@ -20020,14 +20032,31 @@ For detailed documentation, see the User Guide.
             return
 
         # Toggle the selection
-        row_idx = int(row_id)
-        if self.results_df is not None:
+        try:
+            row_idx = int(row_id)
+        except ValueError:
+            row_idx = row_id
+
+        # Resolve row index against the displayed dataframe if needed
+        resolved_idx = row_idx
+        if resolved_idx not in self.results_df.index and self.results_display_df is not None:
+            if resolved_idx in self.results_display_df.index:
+                resolved_idx = resolved_idx
+            else:
+                try:
+                    row_pos = self.results_tree.index(row_id)
+                except Exception:
+                    row_pos = None
+                if row_pos is not None and 0 <= row_pos < len(self.results_display_df):
+                    resolved_idx = self.results_display_df.index[row_pos]
+
+        if resolved_idx in self.results_df.index:
             # Toggle boolean value in DataFrame
-            self.results_df.loc[row_idx, 'Select'] = not self.results_df.loc[row_idx, 'Select']
+            self.results_df.loc[resolved_idx, 'Select'] = not self.results_df.loc[resolved_idx, 'Select']
 
             # Update display (toggle checkbox symbol)
             current_values = list(self.results_tree.item(row_id, 'values'))
-            current_values[0] = '☑' if self.results_df.loc[row_idx, 'Select'] else '☐'
+            current_values[0] = '☑' if self.results_df.loc[resolved_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
 
     def _update_filter_controls(self, is_classification: bool = False):
@@ -20736,15 +20765,29 @@ For detailed documentation, see the User Guide.
 
         # Get the selected row index
         item_id = selection[0]
-        row_idx = int(item_id)
+        try:
+            row_idx = int(item_id)
+        except ValueError:
+            row_idx = item_id
 
-        if self.results_df is None:
+        if self.results_display_df is None or len(self.results_display_df) == 0:
             return
 
-        # Get the selected model configuration
-        # CRITICAL: Use .loc (label-based) not .iloc (position-based)
-        # because treeview IID uses the dataframe's original index labels
-        model_config = self.results_df.loc[row_idx].to_dict()
+        # Get the selected model configuration from the displayed dataframe.
+        # Fallback to row position if the treeview IID doesn't exist in the index.
+        if row_idx in self.results_display_df.index:
+            model_config = self.results_display_df.loc[row_idx].to_dict()
+        else:
+            try:
+                row_pos = self.results_tree.index(item_id)
+            except Exception:
+                row_pos = None
+            if row_pos is None or row_pos < 0 or row_pos >= len(self.results_display_df):
+                messagebox.showwarning("Selection Error",
+                                       "Selected row could not be matched to results data. "
+                                       "Try re-running analysis or sorting again.")
+                return
+            model_config = self.results_display_df.iloc[row_pos].to_dict()
 
         # Attach training configuration if available (for validation checking)
         # This ensures Model Dev can verify it's using the same data configuration as Results tab
@@ -32704,6 +32747,8 @@ Configuration:
                 return 'folder'
         elif filepath.endswith('.csv'):
             return 'csv'
+        elif filepath.endswith('.xlsx') or filepath.endswith('.xls'):
+            return 'excel'
         elif filepath.endswith('.npy'):
             return 'npy'
         else:
@@ -34113,7 +34158,12 @@ Configuration:
             # Try file selection
             path = filedialog.askopenfilename(
                 title="Select Satellite Spectra File for Export",
-                filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
+                filetypes=[
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx *.xls"),
+                    ("NumPy files", "*.npy"),
+                    ("All files", "*.*")
+                ]
             )
         if path:
             self.ct_export_satellite_path_var.set(path)
@@ -34137,6 +34187,9 @@ Configuration:
                                "Please load or build a transfer model in Step 1 first.")
             return
 
+        # Reset metadata context
+        self.export_metadata_context = None
+
         try:
             # Detect format
             detected_format = self._detect_data_format(path)
@@ -34150,9 +34203,87 @@ Configuration:
                 wavelengths = np.arange(X.shape[1])  # Placeholder wavelengths
                 messagebox.showinfo("Note", "NPY file loaded. Using placeholder wavelengths.")
             elif path.endswith('.csv'):
-                df = pd.read_csv(path, header=None)
-                wavelengths = df.iloc[0, :].values.astype(float)
-                X = df.iloc[1:, :].values.astype(float)
+                from spectral_predict.io import identify_wavelength_columns, auto_detect_specimen_id_column
+
+                # Try smart detection first (read with headers)
+                df = pd.read_csv(path)
+                df.columns = df.columns.astype(str).str.strip().str.strip('"').str.strip("'")
+                wavelength_cols = identify_wavelength_columns(df)
+
+                if len(wavelength_cols) >= 100:
+                    # SMART CSV with column headers
+                    detected_id_col = auto_detect_specimen_id_column(df, wavelength_cols)
+                    non_wl_cols = [c for c in df.columns if c not in set(wavelength_cols)]
+                    metadata_cols = [c for c in non_wl_cols if c != detected_id_col] if detected_id_col else non_wl_cols
+
+                    generated_ids = False
+                    if detected_id_col:
+                        specimen_ids = df[detected_id_col].astype(str)
+                    else:
+                        specimen_ids = pd.Series([f"Sample_{i+1}" for i in range(len(df))])
+                        generated_ids = True
+
+                    X_df = df[wavelength_cols].apply(pd.to_numeric, errors='coerce')
+                    wavelengths = np.array([float(c) for c in wavelength_cols])
+                    sort_idx = np.argsort(wavelengths)
+                    wavelengths = wavelengths[sort_idx]
+                    X = X_df.values[:, sort_idx]
+
+                    metadata_df = df[metadata_cols].copy() if metadata_cols else None
+
+                    self.export_metadata_context = {
+                        'specimen_ids': specimen_ids,
+                        'metadata_df': metadata_df,
+                        'specimen_id_col_name': detected_id_col,
+                        'original_column_order': list(df.columns),
+                        'source_format': 'smart_csv',
+                        'generated_ids': generated_ids,
+                    }
+                else:
+                    # Legacy CSV: first row = wavelengths, rest = data
+                    df_legacy = pd.read_csv(path, header=None)
+                    wavelengths = df_legacy.iloc[0, :].values.astype(float)
+                    X = df_legacy.iloc[1:, :].values.astype(float)
+            elif path.endswith('.xlsx') or path.endswith('.xls'):
+                from spectral_predict.io import identify_wavelength_columns, auto_detect_specimen_id_column
+
+                df = pd.read_excel(path)
+                df.columns = df.columns.astype(str).str.strip()
+                wavelength_cols = identify_wavelength_columns(df)
+
+                if len(wavelength_cols) < 100:
+                    raise ValueError(
+                        f"Too few wavelength columns detected ({len(wavelength_cols)}). "
+                        f"Expected at least 100 for spectral data."
+                    )
+
+                detected_id_col = auto_detect_specimen_id_column(df, wavelength_cols)
+                non_wl_cols = [c for c in df.columns if c not in set(wavelength_cols)]
+                metadata_cols = [c for c in non_wl_cols if c != detected_id_col] if detected_id_col else non_wl_cols
+
+                generated_ids = False
+                if detected_id_col:
+                    specimen_ids = df[detected_id_col].astype(str)
+                else:
+                    specimen_ids = pd.Series([f"Sample_{i+1}" for i in range(len(df))])
+                    generated_ids = True
+
+                X_df = df[wavelength_cols].apply(pd.to_numeric, errors='coerce')
+                wavelengths = np.array([float(c) for c in wavelength_cols])
+                sort_idx = np.argsort(wavelengths)
+                wavelengths = wavelengths[sort_idx]
+                X = X_df.values[:, sort_idx]
+
+                metadata_df = df[metadata_cols].copy() if metadata_cols else None
+
+                self.export_metadata_context = {
+                    'specimen_ids': specimen_ids,
+                    'metadata_df': metadata_df,
+                    'specimen_id_col_name': detected_id_col,
+                    'original_column_order': list(df.columns),
+                    'source_format': 'smart_excel',
+                    'generated_ids': generated_ids,
+                }
             else:
                 raise ValueError(f"Unsupported file format: {path}")
 
@@ -34171,15 +34302,49 @@ Configuration:
                             f"but transfer model expects {len(model_wavelengths)}. "
                             f"Resampling may be required.")
 
+            # Auto-detect data type
+            from spectral_predict.io import detect_spectral_data_type
+            data_type, confidence, _ = detect_spectral_data_type(X)
+            self.ct_export_data_type.set(data_type)
+            self.ct_export_data_converted = False
+
             # Display data info
             info_text = f"Samples: {X.shape[0]}\n"
             info_text += f"Wavelengths: {len(wavelengths)} points ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
             info_text += f"Detected Format: {detected_format}"
 
+            if self.export_metadata_context is not None:
+                ctx = self.export_metadata_context
+                if ctx.get('specimen_id_col_name'):
+                    info_text += f"\nSpecimen ID Column: {ctx['specimen_id_col_name']}"
+                if ctx.get('metadata_df') is not None:
+                    meta_cols = list(ctx['metadata_df'].columns)
+                    info_text += f"\nMetadata Columns ({len(meta_cols)}): {', '.join(meta_cols[:5])}"
+                    if len(meta_cols) > 5:
+                        info_text += f" ... +{len(meta_cols) - 5} more"
+
+            info_text += f"\nData Type: {data_type.capitalize()} ({confidence:.0f}% confidence)"
+
             self.ct_export_data_info_text.config(state='normal')
             self.ct_export_data_info_text.delete('1.0', tk.END)
             self.ct_export_data_info_text.insert('1.0', info_text)
             self.ct_export_data_info_text.config(state='disabled')
+
+            # Update data type detection UI
+            self.ct_export_detected_type_label.config(
+                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)")
+
+            if data_type == 'reflectance':
+                self.ct_convert_to_abs_btn.config(state='normal')
+                self.ct_convert_to_refl_btn.config(state='disabled')
+            else:
+                self.ct_convert_to_abs_btn.config(state='disabled')
+                self.ct_convert_to_refl_btn.config(state='normal')
+
+            self.ct_conversion_status_label.config(text="")
+
+            # Show spectra preview plot
+            self._plot_export_spectra_preview(wavelengths, X)
 
             # Play success sound (removed popup - info shown in text widget)
             self.play_sound('success')
@@ -34280,6 +34445,78 @@ Configuration:
             messagebox.showerror("Error", f"Failed to transform spectra:\n{str(e)}\n\nDetails: {repr(e)}")
             import traceback
             traceback.print_exc()
+
+    def _plot_export_spectra_preview(self, wavelengths, X):
+        """Plot preview of loaded spectra for Mode B export workflow."""
+        if not HAS_MATPLOTLIB:
+            return
+        try:
+            for widget in self.ct_export_spectra_plot_frame.winfo_children():
+                widget.destroy()
+
+            fig = Figure(figsize=(10, 3))
+            ax = fig.add_subplot(111)
+
+            n_samples = X.shape[0]
+            if n_samples <= 50:
+                indices = range(n_samples)
+                alpha = 0.3
+            else:
+                indices = np.random.choice(n_samples, size=50, replace=False)
+                alpha = 0.5
+
+            for i in indices:
+                ax.plot(wavelengths, X[i, :], alpha=alpha, linewidth=1.0)
+
+            ax.set_xlabel('Wavelength (nm)')
+            ax.set_ylabel(self.ct_export_data_type.get().capitalize())
+            ax.set_title(f'Loaded Spectra ({n_samples} samples)')
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+
+            canvas = FigureCanvasTkAgg(fig, self.ct_export_spectra_plot_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        except Exception as e:
+            print(f"Error creating spectra preview: {e}")
+
+    def _ct_convert_to_absorbance(self):
+        """Convert loaded Mode B spectra from reflectance to absorbance."""
+        if self.new_satellite_data_export is None:
+            return
+        wavelengths, X = self.new_satellite_data_export
+        X_converted = self._convert_reflectance_to_absorbance(X)
+        self.new_satellite_data_export = (wavelengths, X_converted)
+        self.ct_export_data_type.set("absorbance")
+        self.ct_export_data_converted = True
+
+        # Update UI
+        self.ct_export_detected_type_label.config(text="Absorbance (converted)")
+        self.ct_convert_to_abs_btn.config(state='disabled')
+        self.ct_convert_to_refl_btn.config(state='normal')
+        self.ct_conversion_status_label.config(text="Converted to absorbance")
+
+        # Refresh plot
+        self._plot_export_spectra_preview(wavelengths, X_converted)
+
+    def _ct_convert_to_reflectance(self):
+        """Convert loaded Mode B spectra from absorbance to reflectance."""
+        if self.new_satellite_data_export is None:
+            return
+        wavelengths, X = self.new_satellite_data_export
+        X_converted = self._convert_absorbance_to_reflectance(X)
+        self.new_satellite_data_export = (wavelengths, X_converted)
+        self.ct_export_data_type.set("reflectance")
+        self.ct_export_data_converted = True
+
+        # Update UI
+        self.ct_export_detected_type_label.config(text="Reflectance (converted)")
+        self.ct_convert_to_abs_btn.config(state='normal')
+        self.ct_convert_to_refl_btn.config(state='disabled')
+        self.ct_conversion_status_label.config(text="Converted to reflectance")
+
+        # Refresh plot
+        self._plot_export_spectra_preview(wavelengths, X_converted)
 
     def _plot_transform_preview(self, X_before, X_after, wavelengths):
         """Plot before/after transformation preview with tabbed derivatives.
@@ -34448,7 +34685,81 @@ Configuration:
             self.root.update()
 
             # Export based on detected format
-            if data_format == 'csv':
+            if data_format in ('csv', 'excel') and self.export_metadata_context is not None:
+                ctx = self.export_metadata_context
+                source_fmt = ctx['source_format']
+
+                # Build spectral columns with (possibly resampled) wavelengths
+                spectral_df = pd.DataFrame(X_transformed, columns=[str(w) for w in wavelengths])
+
+                # Determine original column positions
+                original_order = ctx['original_column_order']
+                wl_col_set = set()
+                for c in original_order:
+                    try:
+                        val = float(str(c).strip().strip('"').strip("'"))
+                        if 100 <= val <= 10000:
+                            wl_col_set.add(c)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Find pre-wavelength and post-wavelength columns
+                pre_wl_cols = []
+                post_wl_cols = []
+                found_first_wl = False
+                last_wl_idx = max((i for i, c in enumerate(original_order) if c in wl_col_set), default=-1)
+
+                for i, col in enumerate(original_order):
+                    if col in wl_col_set:
+                        found_first_wl = True
+                        continue
+                    if not found_first_wl:
+                        pre_wl_cols.append(col)
+                    elif i > last_wl_idx:
+                        post_wl_cols.append(col)
+                    else:
+                        pre_wl_cols.append(col)  # Interleaved non-wl cols go before
+
+                # Build output DataFrame
+                output_df = pd.DataFrame()
+                id_col_name = ctx.get('specimen_id_col_name')
+                specimen_ids = ctx.get('specimen_ids')
+                metadata_df_ctx = ctx.get('metadata_df')
+
+                for col in pre_wl_cols:
+                    if col == id_col_name and specimen_ids is not None:
+                        output_df[col] = specimen_ids.values
+                    elif metadata_df_ctx is not None and col in metadata_df_ctx.columns:
+                        output_df[col] = metadata_df_ctx[col].values
+
+                # Add transformed spectral columns
+                for col in spectral_df.columns:
+                    output_df[col] = spectral_df[col].values
+
+                # Add post-wavelength columns
+                for col in post_wl_cols:
+                    if col == id_col_name and specimen_ids is not None:
+                        output_df[col] = specimen_ids.values
+                    elif metadata_df_ctx is not None and col in metadata_df_ctx.columns:
+                        output_df[col] = metadata_df_ctx[col].values
+
+                # Save in matching format
+                if source_fmt == 'smart_csv':
+                    output_path = os.path.join(output_dir, "transformed_spectra.csv")
+                    output_df.to_csv(output_path, index=False)
+                    status_msg = f"Exported to CSV with metadata: {output_path}"
+                else:  # smart_excel
+                    output_path = os.path.join(output_dir, "transformed_spectra.xlsx")
+                    output_df.to_excel(output_path, index=False, sheet_name='Transformed')
+                    status_msg = f"Exported to Excel with metadata: {output_path}"
+
+                # Add metadata info to status
+                n_meta = len(metadata_df_ctx.columns) if metadata_df_ctx is not None else 0
+                status_msg += f"\nMetadata columns preserved: {n_meta}"
+                if id_col_name:
+                    status_msg += f"\nSpecimen IDs preserved ({id_col_name})"
+
+            elif data_format == 'csv':
                 # Export as single CSV file with wavelengths as header
                 output_path = os.path.join(output_dir, "transformed_spectra.csv")
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
@@ -34503,6 +34814,13 @@ Configuration:
                         df.to_csv(output_file, index=False, header=False)
 
                 status_msg = f"Exported {X_transformed.shape[0]} files to: {output_dir}"
+
+            elif data_format == 'excel':
+                # Export as Excel file (without metadata context)
+                output_path = os.path.join(output_dir, "transformed_spectra.xlsx")
+                df = pd.DataFrame(X_transformed, columns=wavelengths)
+                df.to_excel(output_path, index=False)
+                status_msg = f"Exported to Excel: {output_path}"
 
             else:
                 # Fallback: export as CSV
@@ -36546,6 +36864,45 @@ Configuration:
                                                selectbackground=self.colors['accent'],
                                                selectforeground=self.colors['text_inverse'])
         self.ct_export_data_info_text.pack(fill='x', pady=(0, 10))
+
+        # Preview plot of loaded spectra
+        self.ct_export_spectra_plot_frame = ttk.Frame(export_load_section, style='TFrame')
+        self.ct_export_spectra_plot_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        # D1.5: Data Type & Conversion
+        conversion_section = ttk.LabelFrame(self.ct_step3b_frame,
+                                            text="D1.5) Data Type & Conversion (Optional)",
+                                            style='Card.TFrame', padding=10)
+        conversion_section.pack(fill='x', pady=(0, 10))
+
+        detect_frame = ttk.Frame(conversion_section)
+        detect_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(detect_frame, text="Detected Data Type:",
+                 style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+
+        self.ct_export_detected_type_label = ttk.Label(detect_frame, text="--",
+                                                        style='CardLabel.TLabel')
+        self.ct_export_detected_type_label.pack(side='left')
+
+        convert_btn_frame = ttk.Frame(conversion_section)
+        convert_btn_frame.pack(fill='x', pady=(5, 0))
+
+        self.ct_convert_to_abs_btn = ttk.Button(convert_btn_frame,
+            text="Convert to Absorbance",
+            command=self._ct_convert_to_absorbance,
+            style='Modern.TButton', state='disabled')
+        self.ct_convert_to_abs_btn.pack(side='left', padx=(0, 10))
+
+        self.ct_convert_to_refl_btn = ttk.Button(convert_btn_frame,
+            text="Convert to Reflectance",
+            command=self._ct_convert_to_reflectance,
+            style='Modern.TButton', state='disabled')
+        self.ct_convert_to_refl_btn.pack(side='left')
+
+        self.ct_conversion_status_label = ttk.Label(convert_btn_frame, text="",
+                                                    style='CardLabel.TLabel')
+        self.ct_conversion_status_label.pack(side='left', padx=(15, 0))
 
         # D2: Transform Spectra
         transform_section = ttk.LabelFrame(self.ct_step3b_frame,
