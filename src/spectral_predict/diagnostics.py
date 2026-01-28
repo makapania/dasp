@@ -14,10 +14,22 @@ References
 - Efron, B., & Tibshirani, R. J. (1993). An Introduction to the Bootstrap.
 """
 
+import sys
+
 import numpy as np
 from scipy import stats
 from sklearn.base import clone
 from sklearn.pipeline import Pipeline
+
+
+def _get_safe_n_jobs():
+    """Return n_jobs value that's safe for frozen (PyInstaller) apps.
+
+    Returns -1 (all cores) for source code, 1 (serial) for bundled apps.
+    This prevents PyInstaller's multiprocessing issues on Windows.
+    """
+    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+    return 1 if is_frozen else -1
 
 
 def compute_residuals(y_true, y_pred):
@@ -421,7 +433,7 @@ def compute_sklearn_validation_curve(estimator, X, y, param_name, param_range, c
             param_range=param_range,
             cv=cv,
             scoring=scoring,
-            n_jobs=-1
+            n_jobs=_get_safe_n_jobs()
         )
 
         # Convert scores (sklearn returns negated RMSE for regression)
@@ -750,7 +762,7 @@ def compute_learning_curve(estimator, X, y, cv, task='regression', train_sizes=N
             train_sizes=train_sizes,
             cv=cv,
             scoring=scoring,
-            n_jobs=-1,
+            n_jobs=_get_safe_n_jobs(),
             shuffle=True,
             random_state=42
         )

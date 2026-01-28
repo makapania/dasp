@@ -15022,13 +15022,17 @@ class SpectralPredictApp:
             self.screening_status.config(text="Training Random Forest (may take a moment)...")
             self.root.update()
 
+            # Detect if running as bundled app (PyInstaller) - use serial execution to avoid spawn issues
+            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+            n_jobs = 1 if is_frozen else -1
+
             # Quick RF fit (limited trees for speed)
             if is_classification:
                 rf = RandomForestClassifier(n_estimators=100, max_depth=10,
-                                            n_jobs=-1, random_state=42)
+                                            n_jobs=n_jobs, random_state=42)
             else:
                 rf = RandomForestRegressor(n_estimators=100, max_depth=10,
-                                           n_jobs=-1, random_state=42)
+                                           n_jobs=n_jobs, random_state=42)
 
             rf.fit(X_filtered.values, self.y.values)
             importances = pd.Series(rf.feature_importances_, index=X_filtered.columns)
