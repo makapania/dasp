@@ -25878,6 +25878,8 @@ F1 Score:  {f1:.4f}
                     # CRITICAL FIX: Handle PLS-DA prefixed params specially
                     # PLS-DA params are prefixed (pls__n_components, lr__max_iter) but model is just PLSTransformer
                     # Strip pls__ prefix and only apply params that PLSTransformer understands
+                    pipeline_param_keys = {'steps', 'memory', 'verbose', 'transform_input'}
+                    pipeline_param_prefixes = ('scaler__', 'lr__', 'imbalance__')
                     if model_name == "PLS-DA" and task_type == "classification":
                         pls_params = {}
                         for key, val in params_from_search.items():
@@ -25885,6 +25887,8 @@ F1 Score:  {f1:.4f}
                                 # Strip prefix and apply to PLSTransformer
                                 unprefixed = key[5:]  # Remove 'pls__' prefix
                                 pls_params[unprefixed] = val
+                            elif key in pipeline_param_keys or key.startswith(pipeline_param_prefixes):
+                                continue
                             elif not any(key.startswith(p) for p in ['lr__', 'scaler__']):
                                 # Also apply unprefixed params (fallback for older data)
                                 pls_params[key] = val
@@ -25902,7 +25906,9 @@ F1 Score:  {f1:.4f}
                             if key.startswith('model__'):
                                 unprefixed = key[7:]  # Remove 'model__' prefix
                                 stripped_params[unprefixed] = val
-                            elif not any(key.startswith(p) for p in ['scaler__', 'steps', 'memory', 'verbose']):
+                            elif key in pipeline_param_keys:
+                                continue
+                            elif not any(key.startswith(p) for p in ['scaler__', 'steps', 'memory', 'verbose', 'transform_input']):
                                 stripped_params[key] = val
                         if stripped_params:
                             model.set_params(**stripped_params)
@@ -25912,10 +25918,19 @@ F1 Score:  {f1:.4f}
                     else:
                         # For other models, params are unprefixed and apply directly
                         # But filter out Pipeline-specific params that shouldn't go to the model
-                        filtered_params = {
-                            k: v for k, v in params_from_search.items()
-                            if not any(k.startswith(p) for p in ['steps', 'memory', 'verbose', 'scaler__', 'model__'])
-                        }
+                        filtered_params = {}
+                        for key, val in params_from_search.items():
+                            if key.startswith('model__'):
+                                unprefixed = key[7:]  # Remove 'model__' prefix
+                                filtered_params[unprefixed] = val
+                            elif key in pipeline_param_keys:
+                                continue
+                            elif key.startswith(('scaler__', 'pls__', 'lr__', 'imbalance__')):
+                                continue
+                            elif any(key.startswith(p) for p in ['steps', 'memory', 'verbose', 'transform_input']):
+                                continue
+                            else:
+                                filtered_params[key] = val
                         if filtered_params:
                             model.set_params(**filtered_params)
                             print(f"DEBUG: Applied saved search parameters: {filtered_params}")
@@ -26306,7 +26321,7 @@ F1 Score:  {f1:.4f}
                     ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
-                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.extend([
                         ('scaler', StandardScaler()),
@@ -26432,7 +26447,7 @@ F1 Score:  {f1:.4f}
                     ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
-                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.extend([
                         ('scaler', StandardScaler()),
@@ -26485,7 +26500,7 @@ F1 Score:  {f1:.4f}
                     pipe_steps.append(('lr', LogisticRegression(max_iter=1000, random_state=42)))
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
-                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted'):
+                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.append(('scaler', StandardScaler()))
                     pipe_steps.append(('model', model))
