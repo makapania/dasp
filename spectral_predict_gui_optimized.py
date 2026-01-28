@@ -25859,6 +25859,26 @@ F1 Score:  {f1:.4f}
                     except (ValueError, SyntaxError) as parse_err:
                         print(f"WARNING: Could not parse saved Params '{raw_params}': {parse_err}")
 
+            def _apply_pipeline_params_to_pipe(pipe_obj, params_source):
+                if pipe_obj is None or not params_source:
+                    return
+                try:
+                    available = pipe_obj.get_params(deep=True)
+                except Exception as e:
+                    print(f"WARNING: Could not read pipeline params: {e}")
+                    return
+
+                pipeline_params = {
+                    k: v for k, v in params_source.items()
+                    if k in available and k != 'steps'
+                }
+                if pipeline_params:
+                    try:
+                        pipe_obj.set_params(**pipeline_params)
+                        print(f"DEBUG: Applied pipeline params: {pipeline_params}")
+                    except Exception as e:
+                        print(f"WARNING: Failed to apply pipeline params: {e}")
+
             if params_from_search:
                 try:
                     # DIAGNOSTIC: Capture parameters BEFORE set_params for ALL models
@@ -26339,6 +26359,7 @@ F1 Score:  {f1:.4f}
                 else:
                     pipe = Pipeline(pipe_steps)
 
+                _apply_pipeline_params_to_pipe(pipe, params_from_search)
                 print(f"DEBUG: GA pipeline steps: {[name for name, _ in pipe_steps]} (GA preprocessing already applied)")
 
             elif use_full_spectrum_preprocessing:
@@ -26465,6 +26486,7 @@ F1 Score:  {f1:.4f}
                 else:
                     pipe = Pipeline(pipe_steps)
 
+                _apply_pipeline_params_to_pipe(pipe, params_from_search)
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing already applied)")
 
             else:
@@ -26517,6 +26539,7 @@ F1 Score:  {f1:.4f}
                 else:
                     pipe = Pipeline(pipe_steps)
 
+                _apply_pipeline_params_to_pipe(pipe, params_from_search)
                 print(f"DEBUG: Pipeline steps: {[name for name, _ in pipe_steps]} (preprocessing inside CV)")
 
             # CRITICAL FIX: Constrain n_components based on CV fold training sample size
