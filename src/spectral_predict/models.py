@@ -384,11 +384,12 @@ def build_model(model_name, params, task_type='regression'):
             )
 
         elif model_name == "MLP":
+            mlp_params = params.copy()
+            mlp_params.setdefault('max_iter', 1000)  # Increase from sklearn default (100) for spectral data
             return MLPRegressor(
                 random_state=42,
                 early_stopping=True,
-                max_iter=1000,  # Increase from sklearn default (100) for spectral data
-                **params
+                **mlp_params
             )
 
         elif model_name == "NeuralBoosted":
@@ -448,11 +449,12 @@ def build_model(model_name, params, task_type='regression'):
             )
 
         elif model_name == "MLP":
+            mlp_params = params.copy()
+            mlp_params.setdefault('max_iter', 1000)  # Increase from sklearn default (100) for spectral data
             return MLPClassifier(
                 random_state=42,
                 early_stopping=True,
-                max_iter=1000,  # Increase from sklearn default (100) for spectral data
-                **params
+                **mlp_params
             )
 
         elif model_name == "NeuralBoosted":
