@@ -25269,6 +25269,7 @@ F1 Score:  {f1:.4f}
         self.refine_run_button.config(state='disabled')
         self.refine_run_button_selection.config(state='disabled')
         self.refine_status.config(text="Running refined model...")
+        self.root.config(cursor="wait")
 
         # Run in thread
         thread = threading.Thread(target=self._run_refined_model_thread)
@@ -26770,7 +26771,18 @@ F1 Score:  {f1:.4f}
 
                 # Add reproducibility notes for sensitive models
                 reproducibility_note = ""
-                if model_name in ["XGBoost", "LightGBM", "CatBoost"]:
+                if model_name == "CatBoost":
+                    if r2_diff != "N/A" and loaded_r2 != "N/A":
+                        abs_diff = abs(results['r2_mean'] - float(loaded_r2))
+                        reproducibility_note = f"""
+[i]  REPRODUCIBILITY NOTE (CatBoost):
+  CatBoost uses stochastic bootstrap + multithreading by default.
+  Tiny CV drift is expected even with identical parameters.
+  Expected variance: ±0.001 to ±0.005
+  Your difference: {abs_diff:.4f}
+  {'> Within expected range' if abs_diff <= 0.01 else '[!]  Larger than expected - investigate'}
+"""
+                elif model_name in ["XGBoost", "LightGBM"]:
                     # Check if there's a significant difference
                     if r2_diff != "N/A" and loaded_r2 != "N/A":
                         abs_diff = abs(results['r2_mean'] - float(loaded_r2))
@@ -27007,6 +27019,9 @@ Configuration:
         self.refine_results_text.delete('1.0', tk.END)
         self.refine_results_text.insert('1.0', results_text)
         self.refine_results_text.config(state='disabled')
+
+        # Restore default cursor
+        self.root.config(cursor="")
 
         # Re-enable buttons (both Configuration and Selection tabs)
         self.refine_run_button.config(state='normal')
