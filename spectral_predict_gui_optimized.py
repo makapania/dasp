@@ -2381,6 +2381,7 @@ class SpectralPredictApp:
 
         # Section C: Prediction Workflow (Mode A)
         self.current_prediction_model = None  # sklearn model for predictions
+        self.current_prediction_model_dict = None  # Model dict with metadata (for .dasp/legacy)
         self.new_satellite_data_predict = None  # New satellite data to transform and predict
 
         # Section D: Export Workflow (Mode B)
@@ -30431,11 +30432,150 @@ Configuration:
     # TAB 9 HELPER METHODS: Calibration Transfer
     # ======================================================================
 
+    def _normalize_legacy_model_dict(self, model_data, filepath=None):
+        """Normalize legacy pickled model dicts to the current model_dict format."""
+        if not isinstance(model_data, dict):
+            return None
+
+        # Already in model_io.load_model() format
+        if 'model' in model_data and 'metadata' in model_data:
+            return model_data
+
+        model = model_data.get('model')
+        preprocessor = model_data.get('preprocessor', None)
+        if preprocessor is None:
+            preprocessor = model_data.get('preprocessing', None)
+        if preprocessor is not None and not hasattr(preprocessor, 'transform'):
+            preprocessor = None
+
+        wavelengths = model_data.get('wavelengths', model_data.get('wavelength_cols', None))
+        if isinstance(wavelengths, np.ndarray):
+            wavelengths = wavelengths.tolist()
+
+        metadata = {
+            'model_name': model_data.get('model_type', type(model).__name__ if model is not None else 'Unknown'),
+            'task_type': model_data.get('task_type', model_data.get('task', 'regression')),
+            'wavelengths': wavelengths or [],
+            'n_vars': len(wavelengths) if wavelengths is not None else 0,
+            'performance': model_data.get('performance', {}),
+            'target_variable': model_data.get('target_variable', model_data.get('target', 'Unknown')),
+            'data_type': model_data.get('data_type', None),
+            'use_full_spectrum_preprocessing': model_data.get('use_full_spectrum_preprocessing', False),
+            'full_wavelengths': model_data.get('full_wavelengths', None),
+        }
+
+        normalized = {
+            'model': model,
+            'preprocessor': preprocessor,
+            'metadata': metadata,
+            'legacy_format': True
+        }
+        if filepath:
+            normalized['filepath'] = filepath
+        return normalized
+
+    def _load_model_file_for_ct(self, filepath, allow_ensemble=True):
+        """Load a model file (.dasp or legacy .pkl) for calibration transfer workflows."""
+        from pathlib import Path
+        import pickle
+        import zipfile
+
+        if not filepath:
+            raise ValueError("No model file specified")
+
+        path = Path(filepath)
+        suffix = path.suffix.lower()
+
+        if suffix == '.dasp':
+            from spectral_predict import model_io
+
+            is_ensemble = False
+            if allow_ensemble:
+                try:
+                    with zipfile.ZipFile(path, 'r') as zf:
+                        if 'ensemble_config.json' in zf.namelist():
+                            is_ensemble = True
+                except Exception:
+                    is_ensemble = False
+
+            if is_ensemble:
+                ensemble_dict = model_io.load_ensemble(str(path))
+                model_dict = {
+                    'model': ensemble_dict['ensemble'],
+                    'metadata': ensemble_dict['metadata'],
+                    'preprocessor': None,  # Ensembles manage preprocessing internally
+                    'filepath': str(path),
+                    'filename': path.name,
+                    'is_ensemble': True,
+                    'ensemble_type': ensemble_dict['config'].get('ensemble_type', 'unknown'),
+                    'ensemble_name': ensemble_dict['config'].get('ensemble_name', 'Ensemble'),
+                    'model_names': ensemble_dict.get('model_names', []),
+                    'base_model_dicts': ensemble_dict.get('base_model_dicts', [])
+                }
+                return model_dict
+
+            model_dict = model_io.load_model(str(path))
+            model_dict['filepath'] = str(path)
+            model_dict['filename'] = path.name
+            return model_dict
+
+        if suffix == '.pkl':
+            with open(path, 'rb') as f:
+                model_data = pickle.load(f)
+
+            normalized = self._normalize_legacy_model_dict(model_data, filepath=str(path))
+            if normalized is not None:
+                normalized['filename'] = path.name
+                return normalized
+
+            # Raw sklearn model
+            return {
+                'model': model_data,
+                'preprocessor': None,
+                'metadata': {
+                    'model_name': type(model_data).__name__,
+                    'task_type': 'regression',
+                    'wavelengths': [],
+                    'n_vars': 0,
+                    'performance': {},
+                    'target_variable': 'Unknown'
+                },
+                'filepath': str(path),
+                'filename': path.name,
+                'legacy_format': True
+            }
+
+        raise ValueError(f"Unsupported model file type: {path.suffix}")
+
+    def _build_model_info_text(self, model_dict, filepath=None):
+        """Build a short display summary for a loaded model."""
+        metadata = model_dict.get('metadata', {})
+        model_name = metadata.get('model_name', metadata.get('model_type', 'Unknown'))
+        target = metadata.get('target_variable', 'Unknown')
+        task_type = metadata.get('task_type', 'Unknown')
+        performance = metadata.get('performance', {})
+
+        if 'R2' in performance:
+            metric_str = f"R² = {performance['R2']:.4f}"
+        elif 'Accuracy' in performance:
+            metric_str = f"Accuracy = {performance['Accuracy']:.4f}"
+        else:
+            metric_str = "No metrics available"
+
+        info_text = f"Model Type: {model_name}\n"
+        info_text += f"Task: {task_type}\n"
+        info_text += f"Target Variable: {target}\n"
+        info_text += f"Performance: {metric_str}\n"
+
+        if filepath:
+            info_text += f"File: {filepath}"
+        return info_text
+
     def _browse_ct_primary_model(self):
         """Browse for primary model .pkl file."""
         filepath = filedialog.askopenfilename(
             title="Select Primary Model",
-            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+            filetypes=[("Model files", "*.dasp;*.pkl"), ("DASP Model files", "*.dasp"), ("Pickle files", "*.pkl"), ("All files", "*.*")]
         )
         if filepath:
             self.ct_primary_model_path_var.set(filepath)
@@ -30452,19 +30592,21 @@ Configuration:
             return
 
         try:
-            import pickle
-            with open(filepath, 'rb') as f:
-                self.ct_primary_model_dict = pickle.load(f)
+            self.ct_primary_model_dict = self._load_model_file_for_ct(filepath, allow_ensemble=True)
 
             # Display model info
-            model_type = self.ct_primary_model_dict.get('model_type', 'Unknown')
-            n_components = self.ct_primary_model_dict.get('n_components', 'N/A')
-            wl_model = self.ct_primary_model_dict.get('wavelengths', np.array([]))
+            metadata = self.ct_primary_model_dict.get('metadata', {})
+            model_type = metadata.get('model_name', metadata.get('model_type', 'Unknown'))
+            n_components = metadata.get('params', {}).get('n_components', getattr(self.ct_primary_model_dict.get('model'), 'n_components', 'N/A'))
+            wl_model = np.array(metadata.get('wavelengths', []), dtype=float)
+            wl_range_text = "--"
+            if wl_model.size > 0:
+                wl_range_text = f"{wl_model.min():.1f} - {wl_model.max():.1f} nm"
 
             info_text = (f"Model Type: {model_type}\n"
-                        f"Components: {n_components}\n"
-                        f"Wavelength Range: {wl_model.min():.1f} - {wl_model.max():.1f} nm\n"
-                        f"Number of Wavelengths: {len(wl_model)}")
+                         f"Components: {n_components}\n"
+                         f"Wavelength Range: {wl_range_text}\n"
+                         f"Number of Wavelengths: {len(wl_model)}")
 
             self.ct_model_info_text.config(state='normal')
             self.ct_model_info_text.delete('1.0', tk.END)
@@ -30665,7 +30807,7 @@ Configuration:
         """Browse for primary calibration model in Section D."""
         file_path = filedialog.askopenfilename(
             title="Select Primary Calibration Model",
-            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+            filetypes=[("Model files", "*.dasp;*.pkl"), ("DASP Model files", "*.dasp"), ("Pickle files", "*.pkl"), ("All files", "*.*")]
         )
         if file_path:
             self.ct_pred_primary_model_var.set(file_path)
@@ -30678,9 +30820,7 @@ Configuration:
             return
 
         try:
-            import pickle
-            with open(model_path, 'rb') as f:
-                self.ct_primary_model_dict = pickle.load(f)
+            self.ct_primary_model_dict = self._load_model_file_for_ct(model_path, allow_ensemble=True)
 
             messagebox.showinfo("Success", f"Primary model loaded successfully")
 
@@ -31318,6 +31458,9 @@ Configuration:
             # Generate transfer quality plots
             self._plot_transfer_quality(method)
 
+            # Update active transfer model status
+            self._update_active_transfer_model_status()
+
             # Save to transfer model registry
             primary_id = self.ct_primary_instrument_id.get()
             satellite_id = self.ct_satellite_instrument_id.get()
@@ -31763,28 +31906,34 @@ Configuration:
                 raise ValueError(f"Unknown transfer method: {self.ct_pred_transfer_model.method}")
 
             # Resample transferred spectra to primary model's wavelength grid
-            wl_model = self.ct_primary_model_dict['wavelengths']
-            X_for_prediction = resample_to_grid(X_transferred, common_wl, wl_model)
+            metadata = self.ct_primary_model_dict.get('metadata', {})
+            use_full = metadata.get('use_full_spectrum_preprocessing', False) and metadata.get('full_wavelengths') is not None
+            required_wl = metadata.get('full_wavelengths') if use_full else metadata.get('wavelengths')
+
+            if required_wl:
+                target_wl = np.array(required_wl, dtype=float)
+                X_for_prediction = resample_to_grid(X_transferred, common_wl, target_wl)
+            else:
+                target_wl = None
+                X_for_prediction = X_transferred
 
             # VALIDATION: Extrapolation Warning
-            if 'wavelength_range' in self.ct_primary_model_dict:
-                model_wl_range = self.ct_primary_model_dict['wavelength_range']
-                if wl_model[0] < model_wl_range[0] or wl_model[-1] > model_wl_range[1]:
+            model_wl_range = metadata.get('wavelength_range')
+            if model_wl_range is None and target_wl is not None and target_wl.size > 0:
+                model_wl_range = (float(target_wl.min()), float(target_wl.max()))
+            if model_wl_range and target_wl is not None and target_wl.size > 0:
+                if target_wl[0] < model_wl_range[0] or target_wl[-1] > model_wl_range[1]:
                     messagebox.showwarning(
                         "Extrapolation Warning",
-                        f"Transferred data wavelengths ({wl_model[0]:.1f}-{wl_model[-1]:.1f} nm)\n"
+                        f"Transferred data wavelengths ({target_wl[0]:.1f}-{target_wl[-1]:.1f} nm)\n"
                         f"exceed primary model training range ({model_wl_range[0]:.1f}-{model_wl_range[1]:.1f} nm).\n\n"
                         "Predictions may be unreliable in extrapolated regions."
                     )
 
-            # Apply preprocessing if present
-            if 'preprocessing' in self.ct_primary_model_dict:
-                prep = self.ct_primary_model_dict['preprocessing']
-                X_for_prediction = prep.transform(X_for_prediction)
-
-            # Predict
-            model = self.ct_primary_model_dict['model']
-            y_pred = model.predict(X_for_prediction).ravel()
+            # Predict using model_io helper (handles preprocessing and label decoding)
+            from spectral_predict.model_io import predict_with_model
+            y_pred = predict_with_model(self.ct_primary_model_dict, X_for_prediction, validate_wavelengths=bool(required_wl))
+            y_pred = np.array(y_pred).ravel()
 
             # Store predictions
             self.ct_pred_y_pred = y_pred
@@ -31793,13 +31942,19 @@ Configuration:
             # Display results
             pred_text = f"Transferred {len(y_pred)} spectra using {self.ct_pred_transfer_model.method.upper()}\n"
             pred_text += f"Predictions (first 10):\n"
+            y_pred_arr = np.array(y_pred)
+            is_numeric = np.issubdtype(y_pred_arr.dtype, np.number)
             for i in range(min(10, len(y_pred))):
-                pred_text += f"  {self.ct_pred_sample_ids[i]}: {y_pred[i]:.3f}\n"
+                if is_numeric:
+                    pred_text += f"  {self.ct_pred_sample_ids[i]}: {y_pred_arr[i]:.3f}\n"
+                else:
+                    pred_text += f"  {self.ct_pred_sample_ids[i]}: {y_pred_arr[i]}\n"
 
             if len(y_pred) > 10:
                 pred_text += f"  ... and {len(y_pred) - 10} more\n"
 
-            pred_text += f"\nMean: {y_pred.mean():.3f}, Std: {y_pred.std():.3f}"
+            if is_numeric:
+                pred_text += f"\nMean: {y_pred_arr.mean():.3f}, Std: {y_pred_arr.std():.3f}"
 
             self.ct_prediction_text.config(state='normal')
             self.ct_prediction_text.delete('1.0', tk.END)
@@ -31859,6 +32014,9 @@ Configuration:
 
         # Update application mode
         self.application_mode = mode
+
+        # Update active transfer model status display
+        self._update_active_transfer_model_status()
 
         # Provide user feedback
         if mode == 'predict':
@@ -32683,18 +32841,24 @@ Configuration:
             self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
 
     def _browse_existing_transfer_model(self):
-        """Browse for existing .pkl transfer model file."""
+        """Browse for existing transfer model file (.pkl or .json)."""
         from tkinter import filedialog
         filepath = filedialog.askopenfilename(
             title="Select Transfer Model File",
-            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+            filetypes=[
+                ("Transfer Model files", "*.pkl *.json"),
+                ("Pickle files", "*.pkl"),
+                ("JSON files", "*.json"),
+                ("All files", "*.*")
+            ]
         )
         if filepath:
             self.ct_load_model_path_var.set(filepath)
 
     def _load_existing_transfer_model(self):
-        """Load existing transfer model from .pkl file."""
+        """Load existing transfer model from .pkl or .json file."""
         import pickle
+        import os
         from tkinter import messagebox
 
         filepath = self.ct_load_model_path_var.get()
@@ -32703,22 +32867,47 @@ Configuration:
             return
 
         try:
-            with open(filepath, 'rb') as f:
-                transfer_model_data = pickle.load(f)
+            _, ext = os.path.splitext(filepath)
+            ext = ext.lower()
 
-            # Extract components
-            self.current_transfer_model = transfer_model_data.get('model')
-            method = transfer_model_data.get('method', 'Unknown')
-            primary_id = transfer_model_data.get('primary_id', 'N/A')
-            satellite_id = transfer_model_data.get('satellite_id', 'N/A')
-            date_created = transfer_model_data.get('date_created', 'N/A')
-            wavelengths = transfer_model_data.get('wavelengths_common', None)
-            n_samples = transfer_model_data.get('n_samples', 'N/A')
+            if ext == '.json':
+                # Load JSON+NPZ format using backend's load_transfer_model
+                from spectral_predict.calibration_transfer import load_transfer_model
+                # Remove .json extension to get path prefix
+                path_prefix = filepath[:-5] if filepath.endswith('.json') else filepath
+
+                transfer_model = load_transfer_model(path_prefix)
+                self.current_transfer_model = transfer_model
+
+                # Extract info from TransferModel dataclass
+                method = transfer_model.method
+                primary_id = transfer_model.primary_id
+                satellite_id = transfer_model.satellite_id
+                wavelengths = transfer_model.wavelengths_common
+                date_created = transfer_model.meta.get('date_created', 'N/A')
+                n_samples = transfer_model.meta.get('n_samples', 'N/A')
+
+            else:
+                # Load legacy .pkl format
+                with open(filepath, 'rb') as f:
+                    transfer_model_data = pickle.load(f)
+
+                # Extract components
+                self.current_transfer_model = transfer_model_data.get('model')
+                method = transfer_model_data.get('method', 'Unknown')
+                primary_id = transfer_model_data.get('primary_id', 'N/A')
+                satellite_id = transfer_model_data.get('satellite_id', 'N/A')
+                date_created = transfer_model_data.get('date_created', 'N/A')
+                wavelengths = transfer_model_data.get('wavelengths_common', None)
+                n_samples = transfer_model_data.get('n_samples', 'N/A')
 
             # Display model info
             self._display_transfer_model_info(
                 method, primary_id, satellite_id, date_created, n_samples, wavelengths
             )
+
+            # Update active transfer model status
+            self._update_active_transfer_model_status()
 
             # Play success sound (removed popup - info shown in text widget)
             self.play_sound('success')
@@ -32742,6 +32931,45 @@ Configuration:
         self.ct_loaded_model_info_text.delete('1.0', tk.END)
         self.ct_loaded_model_info_text.insert('1.0', info_text)
         self.ct_loaded_model_info_text.config(state='disabled')
+
+    def _update_active_transfer_model_status(self):
+        """Update the active transfer model status display in Mode A and Mode B sections."""
+        # Determine which model is active and its source
+        transfer_model = self.current_transfer_model or self.ct_transfer_model
+
+        if transfer_model is None:
+            status_text = "No transfer model active"
+            status_color = 'gray'
+        else:
+            # Determine source: loaded (current_transfer_model) vs built (ct_transfer_model)
+            if self.current_transfer_model is not None:
+                source = "Loaded"
+            else:
+                source = "Built"
+
+            # Extract model info
+            method = getattr(transfer_model, 'method', 'Unknown')
+            if isinstance(method, str):
+                method_str = method.upper()
+            else:
+                method_str = str(method).upper()
+
+            primary_id = getattr(transfer_model, 'primary_id', 'N/A')
+            satellite_id = getattr(transfer_model, 'satellite_id', 'N/A')
+            wavelengths = getattr(transfer_model, 'wavelengths_common', None)
+
+            n_wavelengths = len(wavelengths) if wavelengths is not None else 'N/A'
+
+            status_text = f"Active: {source} | Method: {method_str} | {primary_id} -> {satellite_id} | {n_wavelengths} wavelengths"
+            status_color = self.colors['accent']
+
+        # Update Mode A status label if it exists
+        if hasattr(self, 'ct_mode_a_transfer_status_label'):
+            self.ct_mode_a_transfer_status_label.config(text=status_text, foreground=status_color)
+
+        # Update Mode B status label if it exists
+        if hasattr(self, 'ct_mode_b_transfer_status_label'):
+            self.ct_mode_b_transfer_status_label.config(text=status_text, foreground=status_color)
 
     def _browse_primary_spectra(self):
         """Browse for primary spectra folder or file."""
@@ -33216,6 +33444,9 @@ Configuration:
 
             # Plot transfer quality (reuse existing method from lines 14939+)
             self._plot_transfer_quality(method)
+
+            # Update active transfer model status
+            self._update_active_transfer_model_status()
 
             # Play success sound (removed popup - info shown in text widget and plot)
             self.play_sound('success')
@@ -33924,14 +34155,13 @@ Configuration:
         from tkinter import filedialog
         filepath = filedialog.askopenfilename(
             title="Select Prediction Model File",
-            filetypes=[("Pickle files", "*.pkl"), ("DASP Model files", "*.dasp"), ("All files", "*.*")]
+            filetypes=[("Model files", "*.dasp;*.pkl"), ("DASP Model files", "*.dasp"), ("Pickle files", "*.pkl"), ("All files", "*.*")]
         )
         if filepath:
             self.ct_pred_model_path_var.set(filepath)
 
     def _load_prediction_model(self):
         """Load sklearn prediction model from .pkl or .dasp file."""
-        import pickle
         from tkinter import messagebox
 
         filepath = self.ct_pred_model_path_var.get()
@@ -33940,37 +34170,10 @@ Configuration:
             return
 
         try:
-            with open(filepath, 'rb') as f:
-                model_data = pickle.load(f)
+            self.current_prediction_model_dict = self._load_model_file_for_ct(filepath, allow_ensemble=True)
+            self.current_prediction_model = self.current_prediction_model_dict.get('model')
 
-            # Handle different model formats
-            if isinstance(model_data, dict):
-                # DASP model format
-                self.current_prediction_model = model_data.get('model')
-                model_type = model_data.get('model_type', 'Unknown')
-                target = model_data.get('target_variable', 'Unknown')
-
-                # Extract metrics
-                metrics = model_data.get('performance', {})
-                if 'R2' in metrics:
-                    metric_str = f"R² = {metrics['R2']:.4f}"
-                elif 'Accuracy' in metrics:
-                    metric_str = f"Accuracy = {metrics['Accuracy']:.4f}"
-                else:
-                    metric_str = "No metrics available"
-
-            else:
-                # Raw sklearn model
-                self.current_prediction_model = model_data
-                model_type = type(model_data).__name__
-                target = "Unknown"
-                metric_str = "No metrics available (raw model)"
-
-            # Display model info
-            info_text = f"Model Type: {model_type}\n"
-            info_text += f"Target Variable: {target}\n"
-            info_text += f"Performance: {metric_str}\n"
-            info_text += f"File: {filepath}"
+            info_text = self._build_model_info_text(self.current_prediction_model_dict, filepath)
 
             self.ct_pred_model_info_text.config(state='normal')
             self.ct_pred_model_info_text.delete('1.0', 'end')
@@ -34029,14 +34232,15 @@ Configuration:
                 raise ValueError("Unsupported file format. Use .csv or .npy")
 
             # Validate against transfer model
-            if self.current_transfer_model is None:
+            transfer_model = self.current_transfer_model or self.ct_transfer_model
+            if transfer_model is None:
                 messagebox.showwarning("Warning",
                     "No transfer model loaded. Cannot validate wavelength grid.\n"
                     "Data loaded, but may not be compatible.")
             else:
                 # Check if wavelengths match transfer model
-                if hasattr(self.current_transfer_model, 'wavelengths_common'):
-                    expected_wl = self.current_transfer_model.wavelengths_common
+                if hasattr(transfer_model, 'wavelengths_common'):
+                    expected_wl = transfer_model.wavelengths_common
                 elif self.ct_wavelengths_common is not None:
                     expected_wl = self.ct_wavelengths_common
                 else:
@@ -34073,9 +34277,12 @@ Configuration:
         """Run the complete prediction workflow: transform -> predict -> display."""
         from tkinter import messagebox
         import numpy as np
+        from spectral_predict.calibration_transfer import resample_to_grid
 
         # Validate prerequisites
-        if self.current_transfer_model is None:
+        # Check both loaded (current_transfer_model) and built (ct_transfer_model) models
+        transfer_model = self.current_transfer_model or self.ct_transfer_model
+        if transfer_model is None:
             messagebox.showerror("Error", "Please load or build a transfer model first (Step 1).")
             return
 
@@ -34091,11 +34298,35 @@ Configuration:
             # Step 1: Apply transfer model to new satellite data
             wavelengths, X_satellite = self.new_satellite_data_predict
 
+            # Align satellite data to transfer model wavelengths if needed
+            source_wl = wavelengths
+            if hasattr(transfer_model, 'wavelengths_common') and transfer_model.wavelengths_common is not None:
+                common_wl = transfer_model.wavelengths_common
+                if len(wavelengths) != len(common_wl) or not np.allclose(wavelengths, common_wl):
+                    X_satellite = resample_to_grid(X_satellite, wavelengths, common_wl)
+                source_wl = common_wl
+
             # Transform satellite data to primary domain
-            X_transferred = self._apply_transfer_model(X_satellite, self.current_transfer_model)
+            X_transferred = self._apply_transfer_model(X_satellite, transfer_model)
 
             # Step 2: Use prediction model to predict properties
-            y_pred = self.current_prediction_model.predict(X_transferred)
+            if self.current_prediction_model_dict is not None:
+                from spectral_predict.model_io import predict_with_model
+                metadata = self.current_prediction_model_dict.get('metadata', {})
+                use_full = metadata.get('use_full_spectrum_preprocessing', False) and metadata.get('full_wavelengths') is not None
+                required_wl = metadata.get('full_wavelengths') if use_full else metadata.get('wavelengths')
+
+                if required_wl:
+                    target_wl = np.array(required_wl, dtype=float)
+                    if source_wl is not None and len(target_wl) > 0:
+                        X_for_prediction = resample_to_grid(X_transferred, source_wl, target_wl)
+                    else:
+                        X_for_prediction = X_transferred
+                    y_pred = predict_with_model(self.current_prediction_model_dict, X_for_prediction, validate_wavelengths=True)
+                else:
+                    y_pred = predict_with_model(self.current_prediction_model_dict, X_transferred, validate_wavelengths=False)
+            else:
+                y_pred = self.current_prediction_model.predict(X_transferred)
 
             # Step 3: Display results
             # Clear existing results
@@ -34105,7 +34336,11 @@ Configuration:
             # Add predictions to treeview
             for i, pred in enumerate(y_pred):
                 sample_id = f"Sample_{i+1}"
-                self.ct_predictions_tree.insert('', 'end', values=(sample_id, f"{pred:.4f}"))
+                try:
+                    pred_display = f"{float(pred):.4f}"
+                except Exception:
+                    pred_display = str(pred)
+                self.ct_predictions_tree.insert('', 'end', values=(sample_id, pred_display))
 
             # Store predictions for export
             self.ct_pred_y_pred = y_pred
@@ -34220,18 +34455,19 @@ Configuration:
     def _browse_export_satellite_spectra(self):
         """Browse for new satellite spectra to transform and export."""
         from tkinter import filedialog
-        path = filedialog.askdirectory(title="Select Satellite Spectra Directory for Export")
+        # Prefer file selection (common for Excel/CSV with many spectra)
+        path = filedialog.askopenfilename(
+            title="Select Satellite Spectra File for Export",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("NumPy files", "*.npy"),
+                ("All files", "*.*")
+            ]
+        )
         if not path:
-            # Try file selection
-            path = filedialog.askopenfilename(
-                title="Select Satellite Spectra File for Export",
-                filetypes=[
-                    ("CSV files", "*.csv"),
-                    ("Excel files", "*.xlsx *.xls"),
-                    ("NumPy files", "*.npy"),
-                    ("All files", "*.*")
-                ]
-            )
+            # Fallback to directory selection (ASD/SPC folders)
+            path = filedialog.askdirectory(title="Select Satellite Spectra Directory for Export")
         if path:
             self.ct_export_satellite_path_var.set(path)
 
@@ -34451,7 +34687,7 @@ Configuration:
             if model_wavelengths is not None:
                 if not np.array_equal(wavelengths_satellite, model_wavelengths):
                     from spectral_predict.calibration_transfer import resample_to_grid
-                    X_satellite_resampled = resample_to_grid(wavelengths_satellite, X_satellite, model_wavelengths)
+                    X_satellite_resampled = resample_to_grid(X_satellite, wavelengths_satellite, model_wavelengths)
                 else:
                     X_satellite_resampled = X_satellite
             else:
@@ -34744,8 +34980,35 @@ Configuration:
             input_path = self.ct_export_satellite_path_var.get()
             data_format = self.satellite_data_format
 
+            def _safe_output_path(base_name, ext, input_abs_path):
+                """Return a non-overwriting output path with _transformed suffix."""
+                suffix = "_transformed"
+                candidate = os.path.join(output_dir, f"{base_name}{suffix}{ext}")
+                if os.path.abspath(candidate) == input_abs_path:
+                    candidate = os.path.join(output_dir, f"{base_name}{suffix}_1{ext}")
+                counter = 1
+                while os.path.exists(candidate):
+                    counter += 1
+                    candidate = os.path.join(output_dir, f"{base_name}{suffix}_{counter}{ext}")
+                return candidate
+
             # Extract input filename for naming output files
             input_basename = Path(input_path).stem  # e.g., "bone_data" from "bone_data.csv"
+
+            # Safety check: prevent overwriting input file
+            input_abs = os.path.abspath(input_path)
+            input_dir = os.path.dirname(input_abs)
+            if os.path.abspath(output_dir) == input_dir:
+                # Output dir is same as input dir - check if output filename would match input
+                input_ext = Path(input_path).suffix.lower()
+                potential_output = os.path.join(output_dir, f"{input_basename}_transformed{input_ext}")
+                if os.path.abspath(potential_output) == input_abs:
+                    messagebox.showerror(
+                        "Cannot Overwrite Input",
+                        f"Output file would overwrite input file:\n{input_path}\n\n"
+                        "Please select a different output directory or rename the input file."
+                    )
+                    return
 
             # Update status
             self.ct_export_status_text.config(state='normal')
@@ -34758,9 +35021,10 @@ Configuration:
             if data_format in ('csv', 'excel') and self.export_metadata_context is not None:
                 ctx = self.export_metadata_context
                 source_fmt = ctx['source_format']
+                n_samples = X_transformed.shape[0]
 
                 # Build spectral columns with (possibly resampled) wavelengths
-                spectral_df = pd.DataFrame(X_transformed, columns=[str(w) for w in wavelengths])
+                spectral_df = pd.DataFrame(X_transformed, columns=[str(w) for w in wavelengths]).reset_index(drop=True)
 
                 # Determine original column positions
                 original_order = ctx['original_column_order']
@@ -34791,35 +35055,48 @@ Configuration:
                         pre_wl_cols.append(col)  # Interleaved non-wl cols go before
 
                 # Build output DataFrame
-                output_df = pd.DataFrame()
                 id_col_name = ctx.get('specimen_id_col_name')
                 specimen_ids = ctx.get('specimen_ids')
                 metadata_df_ctx = ctx.get('metadata_df')
 
+                # Normalize lengths to avoid index alignment issues
+                if specimen_ids is not None:
+                    specimen_ids = pd.Series(specimen_ids).reset_index(drop=True)
+                if metadata_df_ctx is not None:
+                    metadata_df_ctx = metadata_df_ctx.reset_index(drop=True)
+
+                if specimen_ids is not None and len(specimen_ids) != n_samples:
+                    specimen_ids = specimen_ids.iloc[:n_samples].reset_index(drop=True)
+                if metadata_df_ctx is not None and len(metadata_df_ctx) != n_samples:
+                    metadata_df_ctx = metadata_df_ctx.iloc[:n_samples].reset_index(drop=True)
+
+                pre_df = pd.DataFrame()
                 for col in pre_wl_cols:
                     if col == id_col_name and specimen_ids is not None:
-                        output_df[col] = specimen_ids.values
+                        pre_df[col] = specimen_ids.values
                     elif metadata_df_ctx is not None and col in metadata_df_ctx.columns:
-                        output_df[col] = metadata_df_ctx[col].values
+                        pre_df[col] = metadata_df_ctx[col].values
 
-                # Add transformed spectral columns
-                for col in spectral_df.columns:
-                    output_df[col] = spectral_df[col].values
-
+                post_df = pd.DataFrame()
                 # Add post-wavelength columns
                 for col in post_wl_cols:
                     if col == id_col_name and specimen_ids is not None:
-                        output_df[col] = specimen_ids.values
+                        post_df[col] = specimen_ids.values
                     elif metadata_df_ctx is not None and col in metadata_df_ctx.columns:
-                        output_df[col] = metadata_df_ctx[col].values
+                        post_df[col] = metadata_df_ctx[col].values
+
+                # Combine in order without index alignment surprises
+                output_df = pd.concat([pre_df.reset_index(drop=True),
+                                       spectral_df.reset_index(drop=True),
+                                       post_df.reset_index(drop=True)], axis=1)
 
                 # Save in matching format
                 if source_fmt == 'smart_csv':
-                    output_path = os.path.join(output_dir, f"{input_basename}_transformed.csv")
+                    output_path = _safe_output_path(input_basename, ".csv", input_abs)
                     output_df.to_csv(output_path, index=False)
                     status_msg = f"Exported to CSV with metadata: {output_path}"
                 else:  # smart_excel
-                    output_path = os.path.join(output_dir, f"{input_basename}_transformed.xlsx")
+                    output_path = _safe_output_path(input_basename, ".xlsx", input_abs)
                     output_df.to_excel(output_path, index=False, sheet_name='Transformed')
                     status_msg = f"Exported to Excel with metadata: {output_path}"
 
@@ -34831,14 +35108,14 @@ Configuration:
 
             elif data_format == 'csv':
                 # Export as single CSV file with wavelengths as header
-                output_path = os.path.join(output_dir, f"{input_basename}_transformed.csv")
+                output_path = _safe_output_path(input_basename, ".csv", input_abs)
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
                 df.to_csv(output_path, index=False)
                 status_msg = f"Exported to CSV: {output_path}"
 
             elif data_format == 'npy':
                 # Export as .npy file
-                output_path = os.path.join(output_dir, f"{input_basename}_transformed.npy")
+                output_path = _safe_output_path(input_basename, ".npy", input_abs)
                 np.save(output_path, X_transformed)
                 status_msg = f"Exported to NPY: {output_path}"
 
@@ -34870,12 +35147,12 @@ Configuration:
 
                     if ext == '.csv':
                         # Export as CSV with wavelengths in first row
-                        output_file = os.path.join(output_dir, f"{orig_name}.csv")
+                        output_file = os.path.join(output_dir, f"{orig_name}_transformed.csv")
                         df = pd.DataFrame([wavelengths, X_transformed[i, :]])
                         df.to_csv(output_file, index=False, header=False)
                     elif ext == '.npy':
                         # Export as NPY
-                        output_file = os.path.join(output_dir, f"{orig_name}.npy")
+                        output_file = os.path.join(output_dir, f"{orig_name}_transformed.npy")
                         np.save(output_file, X_transformed[i, :])
                     else:
                         # For ASD/SPC, export as CSV (since writing binary formats is complex)
@@ -34887,14 +35164,14 @@ Configuration:
 
             elif data_format == 'excel':
                 # Export as Excel file (without metadata context)
-                output_path = os.path.join(output_dir, f"{input_basename}_transformed.xlsx")
+                output_path = _safe_output_path(input_basename, ".xlsx", input_abs)
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
                 df.to_excel(output_path, index=False)
                 status_msg = f"Exported to Excel: {output_path}"
 
             else:
                 # Fallback: export as CSV
-                output_path = os.path.join(output_dir, f"{input_basename}_transformed.csv")
+                output_path = _safe_output_path(input_basename, ".csv", input_abs)
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
                 df.to_csv(output_path, index=False)
                 status_msg = f"Exported to CSV (fallback): {output_path}"
@@ -36769,6 +37046,12 @@ Configuration:
                                              style='Card.TFrame', padding=15)
         # Don't pack yet - controlled by mode selection
 
+        # Active transfer model status for Mode A
+        self.ct_mode_a_transfer_status_label = ttk.Label(self.ct_step3a_frame,
+                                                         text="No transfer model active",
+                                                         style='CardLabel.TLabel', foreground='gray')
+        self.ct_mode_a_transfer_status_label.pack(anchor='w', pady=(0, 10))
+
         # C1: Load Primary Prediction Model
         c1_section = ttk.LabelFrame(self.ct_step3a_frame, text="C1) Load Primary Prediction Model",
                                    style='Card.TFrame', padding=10)
@@ -36895,6 +37178,12 @@ Configuration:
                                               text="D) Transform & Export Spectra (Mode B)",
                                               style='Card.TFrame', padding=15)
         # Don't pack yet - controlled by mode selection in Section B
+
+        # Active transfer model status for Mode B
+        self.ct_mode_b_transfer_status_label = ttk.Label(self.ct_step3b_frame,
+                                                         text="No transfer model active",
+                                                         style='CardLabel.TLabel', foreground='gray')
+        self.ct_mode_b_transfer_status_label.pack(anchor='w', pady=(0, 10))
 
         # D1: Load New Satellite Data for Export
         export_load_section = ttk.LabelFrame(self.ct_step3b_frame,
