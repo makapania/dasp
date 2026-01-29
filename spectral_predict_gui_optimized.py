@@ -13010,6 +13010,14 @@ class SpectralPredictApp:
                                           index=self.X_original.index,
                                           columns=self.X_original.columns)
 
+            # Keep validation set in sync with converted data
+            if self.validation_indices:
+                try:
+                    self.validation_X = self.X.loc[self.validation_indices]
+                    print(f"DEBUG: Updated validation_X after data type conversion (n={len(self.validation_X)})")
+                except Exception as e:
+                    print(f"WARNING: Could not update validation_X after conversion: {e}")
+
             # Update state
             self.current_data_type.set(target_type)
             self.data_has_been_converted = True
@@ -26916,6 +26924,17 @@ Configuration:
             if model_name == "PLS-DA" and task_type == "classification":
                 # Save entire PLS-DA pipeline (both PLS and LogisticRegression)
                 final_model = final_pipe
+            elif use_full_spectrum_preprocessing and model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
+                # For full-spectrum preprocessing, scaler is applied AFTER subsetting.
+                # Save a prediction pipeline that includes the fitted scaler + model (exclude resampling).
+                if 'scaler' in final_pipe.named_steps and 'model' in final_pipe.named_steps:
+                    final_model = Pipeline([
+                        ('scaler', final_pipe.named_steps['scaler']),
+                        ('model', final_pipe.named_steps['model'])
+                    ])
+                    print("DEBUG: Saving scaler+model pipeline for scale-sensitive model (full-spectrum preprocessing)")
+                else:
+                    final_model = final_pipe
             elif 'model' in final_pipe.named_steps:
                 final_model = final_pipe.named_steps['model']
             else:
@@ -32604,15 +32623,36 @@ Configuration:
             X = df.values
             return wavelengths, X
         elif csv_files:
-            # Load CSV files (assume first row is wavelengths, each subsequent row is a spectrum)
+            # Load CSV files - try smart detection first
+            from spectral_predict.io import identify_wavelength_columns
             all_spectra = []
             wavelengths = None
+
+            # Check first file to determine format
+            first_file = sorted(csv_files)[0]
+            df_test = pd.read_csv(first_file, low_memory=False)
+            df_test.columns = df_test.columns.astype(str).str.strip().str.strip('"').str.strip("'")
+            wavelength_cols = identify_wavelength_columns(df_test)
+            is_smart_csv = len(wavelength_cols) >= 100
+
             for csv_file in sorted(csv_files):
-                df = pd.read_csv(csv_file, header=None)
-                if wavelengths is None:
-                    wavelengths = df.iloc[0, :].values.astype(float)
-                spectrum = df.iloc[1, :].values.astype(float)
-                all_spectra.append(spectrum)
+                if is_smart_csv:
+                    df = pd.read_csv(csv_file, low_memory=False)
+                    df.columns = df.columns.astype(str).str.strip().str.strip('"').str.strip("'")
+                    wl_cols = identify_wavelength_columns(df)
+                    if wavelengths is None:
+                        wavelengths = np.array([float(c) for c in wl_cols])
+                    # Each file may have multiple rows - add all spectra
+                    spectra = df[wl_cols].values.astype(float)
+                    for row in spectra:
+                        all_spectra.append(row)
+                else:
+                    # Legacy: first row = wavelengths, second row = spectrum
+                    df = pd.read_csv(csv_file, header=None, low_memory=False)
+                    if wavelengths is None:
+                        wavelengths = df.iloc[0, :].values.astype(float)
+                    spectrum = df.iloc[1, :].values.astype(float)
+                    all_spectra.append(spectrum)
             X = np.array(all_spectra)
             return wavelengths, X
         elif spc_files:
@@ -32781,10 +32821,21 @@ Configuration:
                 messagebox.showinfo("Note", "NPY file loaded. Using placeholder wavelengths (0, 1, 2, ...). "
                                           "Ensure satellite data uses same wavelength grid.")
             elif path.endswith('.csv'):
-                # Load CSV (assume first row is wavelengths, rest are spectra)
-                df = pd.read_csv(path, header=None)
-                wavelengths = df.iloc[0, :].values.astype(float)
-                X = df.iloc[1:, :].values.astype(float)
+                # Try smart CSV detection first (with headers)
+                from spectral_predict.io import identify_wavelength_columns
+                df = pd.read_csv(path, low_memory=False)
+                df.columns = df.columns.astype(str).str.strip().str.strip('"').str.strip("'")
+                wavelength_cols = identify_wavelength_columns(df)
+
+                if len(wavelength_cols) >= 100:
+                    # Smart CSV with column headers - extract wavelength columns only
+                    wavelengths = np.array([float(c) for c in wavelength_cols])
+                    X = df[wavelength_cols].values.astype(float)
+                else:
+                    # Legacy CSV: first row = wavelengths, rest = data
+                    df_legacy = pd.read_csv(path, header=None, low_memory=False)
+                    wavelengths = df_legacy.iloc[0, :].values.astype(float)
+                    X = df_legacy.iloc[1:, :].values.astype(float)
             else:
                 raise ValueError(f"Unsupported file format: {path}")
 
@@ -32822,9 +32873,21 @@ Configuration:
                 messagebox.showinfo("Note", "NPY file loaded. Using placeholder wavelengths (0, 1, 2, ...). "
                                           "Ensure primary data uses same wavelength grid.")
             elif path.endswith('.csv'):
-                df = pd.read_csv(path, header=None)
-                wavelengths = df.iloc[0, :].values.astype(float)
-                X = df.iloc[1:, :].values.astype(float)
+                # Try smart CSV detection first (with headers)
+                from spectral_predict.io import identify_wavelength_columns
+                df = pd.read_csv(path, low_memory=False)
+                df.columns = df.columns.astype(str).str.strip().str.strip('"').str.strip("'")
+                wavelength_cols = identify_wavelength_columns(df)
+
+                if len(wavelength_cols) >= 100:
+                    # Smart CSV with column headers - extract wavelength columns only
+                    wavelengths = np.array([float(c) for c in wavelength_cols])
+                    X = df[wavelength_cols].values.astype(float)
+                else:
+                    # Legacy CSV: first row = wavelengths, rest = data
+                    df_legacy = pd.read_csv(path, header=None, low_memory=False)
+                    wavelengths = df_legacy.iloc[0, :].values.astype(float)
+                    X = df_legacy.iloc[1:, :].values.astype(float)
             else:
                 raise ValueError(f"Unsupported file format: {path}")
 
@@ -34245,7 +34308,7 @@ Configuration:
                     }
                 else:
                     # Legacy CSV: first row = wavelengths, rest = data
-                    df_legacy = pd.read_csv(path, header=None)
+                    df_legacy = pd.read_csv(path, header=None, low_memory=False)
                     wavelengths = df_legacy.iloc[0, :].values.astype(float)
                     X = df_legacy.iloc[1:, :].values.astype(float)
             elif path.endswith('.xlsx') or path.endswith('.xls'):
@@ -34681,6 +34744,9 @@ Configuration:
             input_path = self.ct_export_satellite_path_var.get()
             data_format = self.satellite_data_format
 
+            # Extract input filename for naming output files
+            input_basename = Path(input_path).stem  # e.g., "bone_data" from "bone_data.csv"
+
             # Update status
             self.ct_export_status_text.config(state='normal')
             self.ct_export_status_text.delete('1.0', tk.END)
@@ -34749,11 +34815,11 @@ Configuration:
 
                 # Save in matching format
                 if source_fmt == 'smart_csv':
-                    output_path = os.path.join(output_dir, "transformed_spectra.csv")
+                    output_path = os.path.join(output_dir, f"{input_basename}_transformed.csv")
                     output_df.to_csv(output_path, index=False)
                     status_msg = f"Exported to CSV with metadata: {output_path}"
                 else:  # smart_excel
-                    output_path = os.path.join(output_dir, "transformed_spectra.xlsx")
+                    output_path = os.path.join(output_dir, f"{input_basename}_transformed.xlsx")
                     output_df.to_excel(output_path, index=False, sheet_name='Transformed')
                     status_msg = f"Exported to Excel with metadata: {output_path}"
 
@@ -34765,14 +34831,14 @@ Configuration:
 
             elif data_format == 'csv':
                 # Export as single CSV file with wavelengths as header
-                output_path = os.path.join(output_dir, "transformed_spectra.csv")
+                output_path = os.path.join(output_dir, f"{input_basename}_transformed.csv")
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
                 df.to_csv(output_path, index=False)
                 status_msg = f"Exported to CSV: {output_path}"
 
             elif data_format == 'npy':
                 # Export as .npy file
-                output_path = os.path.join(output_dir, "transformed_spectra.npy")
+                output_path = os.path.join(output_dir, f"{input_basename}_transformed.npy")
                 np.save(output_path, X_transformed)
                 status_msg = f"Exported to NPY: {output_path}"
 
@@ -34821,14 +34887,14 @@ Configuration:
 
             elif data_format == 'excel':
                 # Export as Excel file (without metadata context)
-                output_path = os.path.join(output_dir, "transformed_spectra.xlsx")
+                output_path = os.path.join(output_dir, f"{input_basename}_transformed.xlsx")
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
                 df.to_excel(output_path, index=False)
                 status_msg = f"Exported to Excel: {output_path}"
 
             else:
                 # Fallback: export as CSV
-                output_path = os.path.join(output_dir, "transformed_spectra.csv")
+                output_path = os.path.join(output_dir, f"{input_basename}_transformed.csv")
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
                 df.to_csv(output_path, index=False)
                 status_msg = f"Exported to CSV (fallback): {output_path}"
