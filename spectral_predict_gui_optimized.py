@@ -2466,6 +2466,7 @@ class SpectralPredictApp:
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
         self.detected_type = None  # Auto-detected type: "asd", "csv", "spc", "combined", or "combined_excel"
         self.combined_file_path = None  # Path to combined CSV/TXT/Excel file (if detected_type == "combined" or "combined_excel")
+        self.combined_data_file = tk.StringVar()  # User-selected combined file path
         self.combined_sheet_name = None  # Sheet name for Excel combined format
         self.combined_metadata = None  # Metadata from combined file parsing
         self.reference_file = tk.StringVar()
@@ -5342,6 +5343,17 @@ class SpectralPredictApp:
         # Detection status label
         self.detection_status = ttk.Label(input_frame, text="", style='Caption.TLabel')
         self.detection_status.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 10))
+        input_row += 1
+
+        # Combined data file (optional - for single files with spectra + targets)
+        ttk.Label(input_frame, text="Combined Data File:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
+        ttk.Entry(input_frame, textvariable=self.combined_data_file, width=60).grid(row=input_row, column=1, padx=10)
+        ttk.Button(input_frame, text="Browse...", command=self._browse_combined_file, style='Modern.TButton').grid(row=input_row, column=2)
+        input_row += 1
+
+        # Helper text for combined file
+        combined_help = ttk.Label(input_frame, text="(Optional: Single CSV/Excel with spectra and targets)", style='Caption.TLabel')
+        combined_help.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 5))
         input_row += 1
 
         # Reference file
@@ -10333,6 +10345,10 @@ class SpectralPredictApp:
         self.spectral_data_path.set(directory)
         path = Path(directory)
 
+        # Clear combined file since we're using folder picker
+        self.combined_data_file.set("")
+        self.combined_file_path = None
+
         # Auto-detect file type
         # Priority: ASD > CSV > SPC
 
@@ -10651,6 +10667,83 @@ class SpectralPredictApp:
         if filename:
             self.reference_file.set(filename)
             self._auto_detect_columns()
+
+    def _browse_combined_file(self):
+        """Browse for a combined data file (CSV/Excel with spectra + targets)."""
+        filename = filedialog.askopenfilename(
+            title="Select Combined Data File",
+            filetypes=[
+                ("Supported files", "*.csv;*.txt;*.xlsx;*.xls"),
+                ("CSV/TXT files", "*.csv;*.txt"),
+                ("Excel files", "*.xlsx;*.xls"),
+                ("All files", "*.*")
+            ]
+        )
+        if filename:
+            self.combined_data_file.set(filename)
+            self._process_combined_file(filename)
+
+    def _process_combined_file(self, filepath: str):
+        """Process a user-selected combined data file."""
+        from spectral_predict.io import (
+            read_combined_csv,
+            read_combined_excel
+        )
+
+        try:
+            is_excel = filepath.lower().endswith(('.xlsx', '.xls'))
+
+            # Try to read and validate the file
+            if is_excel:
+                X, y, metadata_df, metadata = read_combined_excel(filepath)
+                self.detected_type = 'combined_excel'
+                self.combined_sheet_name = 0  # Default to first sheet
+            else:
+                X, y, metadata_df, metadata = read_combined_csv(filepath)
+                self.detected_type = 'combined'
+                self.combined_sheet_name = 0  # Not used for CSV, but consistent
+
+            # Store the path
+            self.combined_file_path = filepath
+            self.combined_metadata = metadata
+
+            # Clear folder picker since we're using combined file
+            self.spectral_data_path.set("")
+            self.reference_file.set("")  # Not needed for combined format
+
+            # Populate column dropdowns
+            available_cols = []
+            if metadata.get('metadata_cols'):
+                available_cols.extend(metadata['metadata_cols'])
+            if metadata.get('y_col'):
+                available_cols.append(metadata['y_col'])
+            if not metadata.get('generated_ids') and metadata.get('specimen_id_col'):
+                if metadata['specimen_id_col'] not in available_cols:
+                    available_cols.append(metadata['specimen_id_col'])
+
+            available_cols = sorted(available_cols)
+
+            if available_cols:
+                self.target_combo['values'] = available_cols
+                if metadata.get('y_col'):
+                    self.target_column.set(metadata['y_col'])
+
+            # Update status
+            format_type = "Excel" if is_excel else "CSV/TXT"
+            self.detection_status.config(
+                text=f"> Combined {format_type}: {metadata['n_spectra']} spectra, "
+                     f"{len(metadata['wavelength_cols'])} wavelengths ({metadata['wavelength_range'][0]:.0f}-{metadata['wavelength_range'][1]:.0f} nm)",
+                foreground=self.colors['success']
+            )
+
+        except Exception as e:
+            self.detection_status.config(
+                text=f"[X] Could not parse as combined format: {str(e)[:50]}",
+                foreground=self.colors['warning']
+            )
+            self.detected_type = None
+            self.combined_data_file.set("")  # Clear invalid path from UI
+            self.combined_file_path = None
 
     def _auto_detect_columns(self):
         """Auto-detect column names from reference file (CSV or Excel)."""
@@ -12117,9 +12210,13 @@ class SpectralPredictApp:
                 self._existing_ref = None
                 self._existing_metadata_df = None
 
+            # Use user-selected combined file if set
+            if self.combined_data_file.get():
+                self.combined_file_path = self.combined_data_file.get()
+
             # Check if spectral data has been selected and detected
-            if not self.spectral_data_path.get():
-                messagebox.showwarning("Missing Input", "Please select spectral data directory")
+            if not self.spectral_data_path.get() and not self.combined_data_file.get():
+                messagebox.showwarning("Missing Input", "Please select spectral data directory or combined data file")
                 return
 
             if not self.detected_type:
@@ -12584,7 +12681,6 @@ class SpectralPredictApp:
             self.tab1_status.config(text=f"> Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
             # Enable interactive controls
             self.update_wl_button.config(state='normal')
-            self.absorbance_checkbox.config(state='normal')
             self.reset_exclusions_button.config(state='normal')
             # No popup needed - status label shows success and plots are visible
 
@@ -12971,6 +13067,10 @@ class SpectralPredictApp:
                 foreground=self.colors['success'] if self.type_confidence >= 70 else self.colors['warning']
             )
 
+        # Refresh plots so labels reflect the override (no data conversion)
+        self._generate_plots()
+        self._generate_explore_plots()
+
     def _convert_and_replot(self):
         """
         Convert spectral data between reflectance and absorbance and regenerate plots.
@@ -13086,6 +13186,13 @@ class SpectralPredictApp:
         # Enable radio buttons for manual override
         self.reflectance_radio.config(state='normal')
         self.absorbance_radio.config(state='normal')
+
+        # Legacy checkbox: only allow reflectance -> absorbance conversion
+        if data_type == "reflectance" and not self.data_has_been_converted:
+            self.absorbance_checkbox.config(state='normal')
+        else:
+            self.use_absorbance.set(False)
+            self.absorbance_checkbox.config(state='disabled')
 
     def _reset_exclusions(self):
         """Reset all spectrum exclusions."""
@@ -13723,6 +13830,9 @@ class SpectralPredictApp:
         """
         # Don't double-convert if data was already converted via the new system
         if self.data_has_been_converted:
+            return data
+        # If the data is already absorbance, never apply legacy conversion
+        if self.current_data_type.get() == "absorbance":
             return data
         if self.use_absorbance.get():
             return self._convert_reflectance_to_absorbance(data)
