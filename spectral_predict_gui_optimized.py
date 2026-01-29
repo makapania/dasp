@@ -10373,13 +10373,38 @@ class SpectralPredictApp:
                 )
                 # No popup needed - status label guides user
             else:
-                # Multiple CSVs - need user to clarify
-                self.detected_type = "csv"
-                self.detection_status.config(
-                    text=f"[!] Found {len(csv_files)} CSV files - select files manually",
-                    foreground=self.colors['accent']
+                # Multiple CSVs - show file selection dialog
+                csv_file_names = [f.name for f in csv_files]
+                selected_file = self._show_file_selection_dialog(
+                    "Multiple CSV Files Found",
+                    "Select the CSV file containing spectral data:",
+                    csv_file_names
                 )
-                # No popup needed - status label guides user
+                if selected_file:
+                    selected_path = path / selected_file
+                    self.spectral_data_path.set(str(selected_path))
+                    self.detected_type = "csv"
+                    self.detection_status.config(
+                        text=f"Selected: {selected_file}",
+                        foreground=self.colors['success']
+                    )
+                    # Auto-detect reference from remaining CSVs
+                    remaining_csvs = [f for f in csv_files if f.name != selected_file]
+                    if len(remaining_csvs) == 1:
+                        self.reference_file.set(str(remaining_csvs[0]))
+                        self._auto_detect_columns()
+                    elif len(remaining_csvs) > 1:
+                        self.detection_status.config(
+                            text=f"Selected: {selected_file} - select reference file manually",
+                            foreground=self.colors['accent']
+                        )
+                else:
+                    # User cancelled - keep directory selected but show warning
+                    self.detected_type = "csv"
+                    self.detection_status.config(
+                        text=f"[!] Found {len(csv_files)} CSV files - click Browse again to select",
+                        foreground=self.colors['accent']
+                    )
             return
 
         # Check for SPC files (GRAMS/Thermo Galactic) - case insensitive
@@ -10620,12 +10645,39 @@ class SpectralPredictApp:
                         foreground=self.colors['accent']
                     )
             else:
-                # Multiple Excel files - need user to clarify
-                self.detected_type = "excel"
-                self.detection_status.config(
-                    text=f"[!] Found {len(xlsx_files)} Excel files - select files manually",
-                    foreground=self.colors['accent']
+                # Multiple Excel files - show file selection dialog
+                xlsx_file_names = [f.name for f in xlsx_files]
+                selected_file = self._show_file_selection_dialog(
+                    "Multiple Excel Files Found",
+                    "Select the Excel file containing spectral data:",
+                    xlsx_file_names
                 )
+                if selected_file:
+                    selected_path = path / selected_file
+                    self.spectral_data_path.set(str(selected_path))
+                    self.detected_type = "excel"
+                    self.detection_status.config(
+                        text=f"Selected: {selected_file}",
+                        foreground=self.colors['success']
+                    )
+                    # Auto-detect reference from remaining files
+                    remaining_xlsx = [f for f in xlsx_files if f.name != selected_file]
+                    ref_files = sorted(list(path.glob("*.csv")) + remaining_xlsx)
+                    if len(ref_files) == 1:
+                        self.reference_file.set(str(ref_files[0]))
+                        self._auto_detect_columns()
+                    elif len(ref_files) > 1:
+                        self.detection_status.config(
+                            text=f"Selected: {selected_file} - select reference file manually",
+                            foreground=self.colors['accent']
+                        )
+                else:
+                    # User cancelled - keep directory selected but show warning
+                    self.detected_type = "excel"
+                    self.detection_status.config(
+                        text=f"[!] Found {len(xlsx_files)} Excel files - click Browse again to select",
+                        foreground=self.colors['accent']
+                    )
             return
 
         # No supported files found
@@ -10651,6 +10703,59 @@ class SpectralPredictApp:
         if filename:
             self.reference_file.set(filename)
             self._auto_detect_columns()
+
+    def _show_file_selection_dialog(self, title: str, message: str, options: list) -> str | None:
+        """Show a dialog for user to select from a list of files.
+
+        Returns the selected filename or None if cancelled.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center on parent
+        dialog.geometry(f"+{self.root.winfo_x() + 100}+{self.root.winfo_y() + 100}")
+
+        result = [None]  # Use list to allow modification in nested function
+
+        ttk.Label(dialog, text=message).pack(padx=20, pady=(20, 10))
+
+        # Listbox with scrollbar
+        frame = ttk.Frame(dialog)
+        frame.pack(padx=20, pady=10, fill='both', expand=True)
+
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        listbox = tk.Listbox(frame, yscrollcommand=scrollbar.set, height=min(10, len(options)))
+        for opt in options:
+            listbox.insert(tk.END, opt)
+        listbox.pack(side=tk.LEFT, fill='both', expand=True)
+        listbox.selection_set(0)  # Select first item by default
+
+        scrollbar.config(command=listbox.yview)
+
+        def on_select():
+            selection = listbox.curselection()
+            if selection:
+                result[0] = options[selection[0]]
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        # Buttons
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=(10, 20))
+        ttk.Button(btn_frame, text="Select", command=on_select).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+        # Double-click to select
+        listbox.bind('<Double-1>', lambda e: on_select())
+
+        dialog.wait_window()
+        return result[0]
 
     def _auto_detect_columns(self):
         """Auto-detect column names from reference file (CSV or Excel)."""
