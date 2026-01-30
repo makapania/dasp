@@ -81,6 +81,10 @@ PREPROCESSING_OPTIONS = [
 ]
 
 
+# Pipeline-specific params that should never be passed to model constructors
+PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps', 'n_jobs'}
+
+
 def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
     """Return model params that can round-trip through str() and ast.literal_eval()."""
     try:
@@ -90,6 +94,9 @@ def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
 
     filtered_params: Dict[str, Any] = {}
     for key, value in all_params.items():
+        # Skip Pipeline-specific params that would break model constructors
+        if key in PIPELINE_PARAMS:
+            continue
         if callable(value) or hasattr(value, '__dict__'):
             continue
 
@@ -723,7 +730,7 @@ def create_unified_objective(
             # Scale-sensitive models need StandardScaler (matches search.py behavior)
             # For PLS-DA: PLS + StandardScaler + LogisticRegression (search.py lines 3417-3424)
             # For scale-sensitive models: StandardScaler + Model (search.py lines 3427-3429)
-            SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
+            SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
 
             # Build pipeline steps with imbalance handling support
             pipe_steps = []

@@ -63,7 +63,7 @@ NEURALBOOSTED_MODELS = {'NeuralBoosted'}
 
 # Scale-sensitive models: These use gradient descent or kernel methods
 # that are sensitive to feature scale and benefit from StandardScaler
-SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted'}
+SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
 
 # Models that are slower with parallel CV due to threading conflicts or low overhead
 # SVM: internal multi-threading conflicts with sklearn's CV parallelization
@@ -3854,8 +3854,18 @@ def _run_single_config(
 
             # CRITICAL FIX: Replace params with complete parameter set
             # Filter out non-serializable parameters and convert numpy types
+
+            # Pipeline-specific params that shouldn't be saved/restored
+            # These are Pipeline meta-parameters, not model parameters
+            # verbose must be bool in newer scikit-learn, but get_params() returns int
+            PIPELINE_META_PARAMS = {'verbose', 'memory', 'steps', 'transform_input'}
+
             filtered_params = {}
             for key, value in all_params.items():
+                # Skip Pipeline-specific parameters that cause issues when re-applied
+                if key in PIPELINE_META_PARAMS:
+                    continue
+
                 # Skip callables and complex objects
                 if callable(value) or hasattr(value, '__dict__'):
                     continue

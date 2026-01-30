@@ -497,26 +497,8 @@ def _decode_embedded_data(encoded_str):
             'import pandas as pd',
         ]
 
-        # Model-specific import (adjusted for task type)
-        model_name_for_import = self.model_name
-        if self.task_type == 'classification':
-            # Adjust model name for classification variants
-            if self.model_name == 'MLP' or self.model_name == 'MLPRegressor':
-                model_name_for_import = 'MLPClassifier'
-            elif self.model_name == 'RandomForest':
-                model_name_for_import = 'RandomForestClassifier'
-            elif self.model_name == 'LightGBM':
-                model_name_for_import = 'LightGBMClassifier'
-            elif self.model_name == 'XGBoost':
-                model_name_for_import = 'XGBoostClassifier'
-            elif self.model_name == 'CatBoost':
-                model_name_for_import = 'CatBoostClassifier'
-            elif self.model_name == 'SVR':
-                model_name_for_import = 'SVC'
-            elif self.model_name == 'PLS':
-                model_name_for_import = 'PLSDA'
-
-        model_import = get_model_imports(model_name_for_import)
+        # Model-specific import (normalize aliases + task type)
+        model_import = get_model_imports(self._resolve_model_class_name())
         if model_import:
             imports.append(model_import)
 
@@ -602,24 +584,7 @@ def _decode_embedded_data(encoded_str):
             'import pandas as pd',
         ]
 
-        model_name_for_import = self.model_name
-        if self.task_type == 'classification':
-            if self.model_name == 'MLP' or self.model_name == 'MLPRegressor':
-                model_name_for_import = 'MLPClassifier'
-            elif self.model_name == 'RandomForest':
-                model_name_for_import = 'RandomForestClassifier'
-            elif self.model_name == 'LightGBM':
-                model_name_for_import = 'LightGBMClassifier'
-            elif self.model_name == 'XGBoost':
-                model_name_for_import = 'XGBoostClassifier'
-            elif self.model_name == 'CatBoost':
-                model_name_for_import = 'CatBoostClassifier'
-            elif self.model_name == 'SVR':
-                model_name_for_import = 'SVC'
-            elif self.model_name == 'PLS':
-                model_name_for_import = 'PLSDA'
-
-        model_import = get_model_imports(model_name_for_import)
+        model_import = get_model_imports(self._resolve_model_class_name())
         if model_import:
             imports.append(model_import)
 
@@ -895,8 +860,11 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
                 params_full.setdefault('class_weight', 'balanced')
 
-            if 'random_state' not in params_full:
-                params_full['random_state'] = 42
+            # Avoid injecting random_state into estimators that don't accept it (e.g., PLSRegression)
+            ctor_class = self._resolve_model_ctor_class()
+            if ctor_class != 'PLSRegression':
+                if 'random_state' not in params_full:
+                    params_full['random_state'] = 42
             if model_class.startswith('LightGBM') and 'verbosity' not in params_full:
                 params_full['verbosity'] = -1
             if model_class.startswith('XGBoost'):
@@ -929,7 +897,6 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
 
             params_full = self._serialize_param_value(params_full)
             params_literal = repr(params_full)
-            ctor_class = self._resolve_model_ctor_class()
 
             model_code = (
                 warning
@@ -944,10 +911,16 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             + model_code
         )
 
+    # Pipeline-specific params that should never be passed to model constructors
+    _PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps', 'n_jobs'}
+
     def _normalize_model_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Strip pipeline prefixes from params for base estimators."""
         normalized = {}
         for key, value in (params or {}).items():
+            # Skip Pipeline-specific params (defense-in-depth)
+            if key in self._PIPELINE_PARAMS:
+                continue
             if key.startswith('model__'):
                 normalized[key[7:]] = value
             elif key.startswith('estimator__'):
@@ -1103,7 +1076,8 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
         scale_models = {
             'SVR', 'SVC', 'SVM',
             'MLP', 'MLPRegressor', 'MLPClassifier',
-            'NeuralBoosted'
+            'NeuralBoosted',
+            'Ridge', 'Lasso', 'ElasticNet'
         }
         return normalized in scale_models and not self._needs_pls_da_pipeline()
 

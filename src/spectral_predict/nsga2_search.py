@@ -1373,7 +1373,7 @@ class SpectralOptimizationProblem(Problem):
             # Scale-sensitive models need StandardScaler (matches search.py behavior)
             # For classification: PLS needs StandardScaler + LogisticRegression wrapper
             # For both tasks: SVC/SVR, MLP, NeuralBoosted need StandardScaler wrapper
-            SCALE_SENSITIVE_MODELS = {'SVR', 'MLP', 'NeuralBoosted'}
+            SCALE_SENSITIVE_MODELS = {'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
 
             # Build pipeline steps with imbalance handling support
             from sklearn.pipeline import Pipeline
