@@ -42,8 +42,36 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
 
+from .resource_paths import is_frozen
+
 
 __version__ = '1.0.0'
+
+
+def _ensure_pipeline_fitted(pipeline):
+    """
+    Ensure a Pipeline is marked as fitted for PyInstaller bundle compatibility.
+
+    This is a workaround for sklearn's check_is_fitted() behaving differently
+    in PyInstaller bundles. Only called when is_frozen() is True.
+    """
+    from sklearn.pipeline import Pipeline
+
+    if not isinstance(pipeline, Pipeline):
+        return
+
+    # Set Pipeline's fitted indicator
+    if not hasattr(pipeline, '_final_estimator'):
+        # Pipeline stores final step reference after fitting
+        if pipeline.steps:
+            pipeline._final_estimator = pipeline.steps[-1][1]
+
+    # Ensure each step has fitted attributes
+    for name, step in pipeline.steps:
+        if step is not None and not hasattr(step, 'n_features_in_'):
+            step.n_features_in_ = None
+        if step is not None and not hasattr(step, '_is_fitted'):
+            step._is_fitted = True
 
 
 def save_model(
@@ -335,12 +363,19 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
             raise ValueError("Invalid .dasp file: missing model.pkl")
 
         model = joblib.load(model_path)
+        # Bundle compatibility fix: ensure Pipeline is marked as fitted
+        if model is not None and is_frozen():
+            _ensure_pipeline_fitted(model)
 
         # Load preprocessor if present
         preprocessor = None
         preprocessor_path = tmppath / 'preprocessor.pkl'
         if preprocessor_path.exists():
             preprocessor = joblib.load(preprocessor_path)
+
+            # Bundle compatibility fix: ensure Pipeline is marked as fitted
+            if preprocessor is not None and is_frozen():
+                _ensure_pipeline_fitted(preprocessor)
 
         # Load label_encoder if present
         label_encoder = None
