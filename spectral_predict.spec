@@ -288,8 +288,9 @@ a = Analysis(
     datas=[
         # Bundle the source modules
         ('src/spectral_predict', 'src/spectral_predict'),
-        # Bundle logo file
+        # Bundle logo files
         ('asp_logo_final.png', '.'),
+        ('asp_logo.ico', '.'),  # Window/taskbar icon
         # Bundle example data (for testing)
         ('example/BoneCollagen.csv', 'example'),
     ] + all_datas,
