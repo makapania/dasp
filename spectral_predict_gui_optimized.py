@@ -2508,6 +2508,8 @@ class SpectralPredictApp:
         self.type_confidence = 0.0  # Detection confidence score
         self.type_detection_method = ""  # Method used for detection
         self.data_has_been_converted = False  # Track if conversion occurred
+        self.data_value_scale = 1.0  # 1.0 for unit reflectance, 100.0 for % reflectance
+        self.source_data_type = None  # Original data type from file metadata (e.g., transmittance)
 
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
@@ -5342,7 +5344,18 @@ class SpectralPredictApp:
 
         # Detection status label
         self.detection_status = ttk.Label(input_frame, text="", style='Caption.TLabel')
-        self.detection_status.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 10))
+        self.detection_status.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 5))
+        input_row += 1
+
+        # Reference file
+        ttk.Label(input_frame, text="Reference CSV/Excel:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
+        ttk.Entry(input_frame, textvariable=self.reference_file, width=60).grid(row=input_row, column=1, padx=10)
+        ttk.Button(input_frame, text="Browse...", command=self._browse_reference_file, style='Modern.TButton').grid(row=input_row, column=2)
+        input_row += 1
+
+        # Helper text for reference file
+        reference_help = ttk.Label(input_frame, text="(For directory-based spectral data: contains Y values)", style='Caption.TLabel')
+        reference_help.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 5))
         input_row += 1
 
         # Combined data file (optional - for single files with spectra + targets)
@@ -5354,12 +5367,6 @@ class SpectralPredictApp:
         # Helper text for combined file
         combined_help = ttk.Label(input_frame, text="(Optional: Single CSV/Excel with spectra and targets)", style='Caption.TLabel')
         combined_help.grid(row=input_row, column=1, sticky=tk.W, padx=10, pady=(0, 5))
-        input_row += 1
-
-        # Reference file
-        ttk.Label(input_frame, text="Reference CSV/Excel:").grid(row=input_row, column=0, sticky=tk.W, pady=10)
-        ttk.Entry(input_frame, textvariable=self.reference_file, width=60).grid(row=input_row, column=1, padx=10)
-        ttk.Button(input_frame, text="Browse...", command=self._browse_reference_file, style='Modern.TButton').grid(row=input_row, column=2)
         input_row += 1
 
         # === Load Data Button and Append Mode ===
@@ -12242,11 +12249,7 @@ class SpectralPredictApp:
                     )
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
                 self.combined_metadata = metadata
 
                 # Store original unfiltered data
@@ -12270,11 +12273,7 @@ class SpectralPredictApp:
                 X, metadata = read_asd_dir(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12307,11 +12306,7 @@ class SpectralPredictApp:
                 X, metadata = read_csv_spectra(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12344,11 +12339,7 @@ class SpectralPredictApp:
                 X, metadata = read_spc_dir(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12383,11 +12374,7 @@ class SpectralPredictApp:
                 X, metadata = read_jcamp_dir(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12422,11 +12409,7 @@ class SpectralPredictApp:
                 X, metadata = read_ascii_spectra(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12461,11 +12444,7 @@ class SpectralPredictApp:
                 X, metadata = read_opus_dir(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12500,11 +12479,7 @@ class SpectralPredictApp:
                 X, metadata = read_perkinelmer_dir(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -12539,11 +12514,7 @@ class SpectralPredictApp:
                 X, metadata = read_excel_spectra(self.spectral_data_path.get())
 
                 # Store data type detection results
-                self.original_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.current_data_type.set(metadata.get('data_type', 'reflectance'))
-                self.type_confidence = metadata.get('type_confidence', 0.0)
-                self.type_detection_method = metadata.get('detection_method', 'unknown')
-                self.data_has_been_converted = False
+                self._apply_data_type_metadata(metadata)
 
                 # Load reference data
                 if not self.reference_file.get():
@@ -13146,6 +13117,16 @@ class SpectralPredictApp:
             messagebox.showerror("Conversion Error", f"Failed to convert data:\n{str(e)}")
             print(f"Error during conversion: {e}")
 
+    def _apply_data_type_metadata(self, metadata):
+        """Apply detected data type metadata from file load."""
+        self.original_data_type.set(metadata.get('data_type', 'reflectance'))
+        self.current_data_type.set(metadata.get('data_type', 'reflectance'))
+        self.type_confidence = metadata.get('type_confidence', 0.0)
+        self.type_detection_method = metadata.get('detection_method', 'unknown')
+        self.data_value_scale = metadata.get('value_scale', 1.0)
+        self.source_data_type = metadata.get('source_data_type', None)
+        self.data_has_been_converted = False
+
     def _update_data_type_status_ui(self):
         """
         Update the data type status label and UI controls after data loading.
@@ -13176,6 +13157,13 @@ class SpectralPredictApp:
         status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence: {confidence:.0f}%)"
         if confidence < 70:
             status_text += " [!]"
+        extra_notes = []
+        if self.source_data_type == "transmittance":
+            extra_notes.append("OPUS transmittance")
+        if self.data_value_scale == 100.0:
+            extra_notes.append("% reflectance")
+        if extra_notes:
+            status_text += " | " + ", ".join(extra_notes)
 
         self.data_type_status_label.config(text=status_text, foreground=color)
 
@@ -13855,19 +13843,36 @@ class SpectralPredictApp:
         numpy.ndarray or pandas.DataFrame
             Absorbance data
         """
+        # Determine reflectance scale (0-1 vs 0-100)
+        scale = self.data_value_scale if self.data_value_scale else 1.0
+        if scale not in [1.0, 100.0]:
+            scale = 1.0
+        if scale == 1.0:
+            try:
+                max_val = np.nanmax(data)
+                min_val = np.nanmin(data)
+                if max_val > 5.0 and min_val >= 0.0 and max_val <= 110.0:
+                    scale = 100.0
+                    self.data_value_scale = 100.0
+            except Exception:
+                pass
+
         # Use small epsilon only to avoid log(0) and extreme values
         # 1e-6 (0.0001% reflectance) gives max absorbance of 6.0
         # This preserves strong absorption bands while avoiding infinity
         epsilon = 1e-6
 
+        # Scale to unit reflectance if needed
+        data_scaled = data / scale
+
         # Count problematic values before clamping
-        n_zero_or_negative = np.sum(data <= 0)
-        n_very_low = np.sum((data > 0) & (data < epsilon))
-        n_above_one = np.sum(data > 1.0)
+        n_zero_or_negative = np.sum(data_scaled <= 0)
+        n_very_low = np.sum((data_scaled > 0) & (data_scaled < epsilon))
+        n_above_one = np.sum(data_scaled > 1.0)
 
         # Only clamp the lower bound to epsilon (avoid log of zero/negative)
         # Allow values > 1.0 - they give small negative absorbance which is fine
-        data_safe = np.maximum(data, epsilon)
+        data_safe = np.maximum(data_scaled, epsilon)
 
         # Warn about problematic values
         if n_zero_or_negative > 0:
@@ -13876,8 +13881,14 @@ class SpectralPredictApp:
             print(f"[i]  Info: {n_very_low} very low reflectance values (< {epsilon}) - strong absorption bands.")
         if n_above_one > 0:
             print(f"[i]  Info: {n_above_one} reflectance values > 1.0 (will give small negative absorbance).")
+        if scale == 100.0:
+            print("[i]  Info: Reflectance detected in percent scale (0-100). Scaling to 0-1 before conversion.")
 
-        result = np.log10(1.0 / data_safe)
+        if self.source_data_type == "transmittance":
+            print("[i]  Info: Using transmittance conversion (A = -log10(T)).")
+            result = -np.log10(data_safe)
+        else:
+            result = np.log10(1.0 / data_safe)
 
         # Report absorbance range
         print(f"[i]  Absorbance range after conversion: {np.min(result):.3f} to {np.max(result):.3f}")
@@ -13906,6 +13917,10 @@ class SpectralPredictApp:
         # Only clip negative values (keep lower bound at 0)
         # Allow values > 1.0 as they can occur in real spectral data
         reflectance = np.maximum(reflectance, 0.0)
+
+        # Restore percent scale if that was the original data scale
+        if self.data_value_scale == 100.0:
+            reflectance = reflectance * 100.0
 
         # Warn if negative values were encountered
         n_negative = np.sum(np.power(10, -data) < 0.0)
@@ -13959,6 +13974,8 @@ class SpectralPredictApp:
         str
             "Reflectance" or "Absorbance" based on current data type
         """
+        if self.source_data_type == "transmittance" and self.current_data_type.get() == "reflectance" and not self.data_has_been_converted:
+            return "Transmittance"
         return self.current_data_type.get().capitalize()
 
     def _generate_plots(self):
