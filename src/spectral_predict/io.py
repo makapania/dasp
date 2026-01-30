@@ -100,9 +100,12 @@ def read_csv_spectra(path):
 
     # Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(result)
+    value_scale = infer_reflectance_scale(result) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Compile metadata
     metadata = {
@@ -111,7 +114,8 @@ def read_csv_spectra(path):
         'file_format': 'csv',
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     return result, metadata
@@ -467,9 +471,12 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
 
     # Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Compile metadata
     metadata = {
@@ -478,7 +485,8 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
         'file_format': 'asd',
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     return df, metadata
@@ -736,9 +744,12 @@ def read_spc_dir(spc_dir):
 
     # Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Compile metadata
     metadata = {
@@ -747,7 +758,8 @@ def read_spc_dir(spc_dir):
         'file_format': 'spc',
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     print(f"Successfully read {len(df)} SPC spectra with {df.shape[1]} wavelengths")
@@ -1203,9 +1215,12 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
 
     # Step 9: Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(X)
+    value_scale = infer_reflectance_scale(X) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Step 10: Compile metadata
     metadata = {
@@ -1219,7 +1234,8 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
         'generated_ids': generated_ids,
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     return X, y, metadata_df, metadata
@@ -1381,9 +1397,12 @@ def read_jcamp_dir(jcamp_dir):
 
     # Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Get x-axis units from first file
     first_file_meta = next(iter(file_metadata.values()))
@@ -1397,6 +1416,7 @@ def read_jcamp_dir(jcamp_dir):
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
+        'value_scale': value_scale,
         'xunits': xunits,
         'file_metadata': file_metadata  # Store individual file metadata
     }
@@ -1634,9 +1654,12 @@ def _read_ascii_dir(directory):
 
     # Detect data type
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Compile metadata
     metadata = {
@@ -1645,7 +1668,8 @@ def _read_ascii_dir(directory):
         'file_format': 'ascii',
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     return df, metadata
@@ -1798,10 +1822,15 @@ def detect_spectral_data_type(X, metadata=None):
     min_val = np.min(flat_data)
     max_val = np.max(flat_data)
     mean_val = np.mean(flat_data)
+    negative_ratio = np.mean(flat_data < 0)
 
     # Criterion 1: Absolute bounds check (weight: 40%)
-    if max_val > 1.5:
-        # Definitely absorbance - reflectance can't exceed 1.0
+    if max_val > 5.0 and min_val >= 0.0 and max_val <= 110.0:
+        # Likely percent reflectance (0-100 range)
+        reflectance_score += 40
+        detection_methods.append("bounds_check(percent_reflectance_range)")
+    elif max_val > 1.5:
+        # Definitely absorbance - reflectance can't exceed 1.0 (unless % reflectance)
         absorbance_score += 40
         detection_methods.append("bounds_check(max>1.5)")
     elif max_val <= 1.0 and min_val >= 0.0:
@@ -1826,9 +1855,18 @@ def detect_spectral_data_type(X, metadata=None):
             # Significantly negative suggests absorbance (or errors)
             absorbance_score += 35
             detection_methods.append("bounds_check(negative_values)")
+        elif min_val < 0.0:
+            # Mildly negative values still lean absorbance
+            absorbance_score += 20
+            detection_methods.append("bounds_check(negative_values)")
         else:
             absorbance_score += 10
             detection_methods.append("bounds_check(near_zero)")
+
+    # Bonus: proportion of negative values (reflectance rarely negative)
+    if negative_ratio > 0.01:
+        absorbance_score += 10
+        detection_methods.append("bounds_check(negative_fraction>1%)")
 
     # Criterion 2: Mean value analysis (weight: 30%)
     if 0.3 <= mean_val <= 0.9:
@@ -1928,6 +1966,39 @@ def detect_spectral_data_type(X, metadata=None):
     method_str = "; ".join(detection_methods)
 
     return (data_type, confidence, method_str)
+
+
+def infer_reflectance_scale(X) -> float:
+    """
+    Infer whether reflectance-like data is unit (0-1) or percent (0-100) scale.
+
+    Returns 100.0 for likely percent reflectance, otherwise 1.0.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if isinstance(X, pd.DataFrame):
+        data = X.values
+    else:
+        data = np.array(X)
+
+    try:
+        flat = data.astype(float).flatten()
+    except (ValueError, TypeError):
+        return 1.0
+
+    flat = flat[~np.isnan(flat)]
+    if len(flat) == 0:
+        return 1.0
+
+    min_val = np.min(flat)
+    max_val = np.max(flat)
+
+    # Percent reflectance typically lives in 0-100 range and exceeds 5
+    if max_val > 5.0 and min_val >= 0.0 and max_val <= 110.0:
+        return 100.0
+
+    return 1.0
 
 
 # ============================================================================
@@ -2375,6 +2446,7 @@ def read_excel_spectra(
 
     # Detect data type
     data_type, type_confidence, detection_method = detect_spectral_data_type(result)
+    value_scale = infer_reflectance_scale(result) if data_type == "reflectance" else 1.0
 
     metadata = {
         'n_spectra': len(result),
@@ -2383,7 +2455,8 @@ def read_excel_spectra(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'sheet_name': sheet_name
+        'sheet_name': sheet_name,
+        'value_scale': value_scale
     }
 
     return result, metadata
@@ -2615,9 +2688,12 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
 
     # Step 9: Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(X)
+    value_scale = infer_reflectance_scale(X) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
     # Step 10: Compile metadata
     metadata = {
@@ -2632,7 +2708,8 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         'generated_ids': generated_ids,
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     print(f"Successfully read {len(X)} spectra with {X.shape[1]} wavelengths from Excel file")
@@ -2731,6 +2808,7 @@ def read_spc_file(
 
     # Detect data type
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
 
     metadata = {
         'n_spectra': 1,
@@ -2738,7 +2816,8 @@ def read_spc_file(
         'file_format': 'spc',
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     return df, metadata
@@ -2786,6 +2865,7 @@ def read_jcamp_file(
 
     # Detect data type
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
 
     metadata = {
         'n_spectra': 1,
@@ -2794,6 +2874,7 @@ def read_jcamp_file(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
+        'value_scale': value_scale,
         'jcamp_header': {k: v for k, v in jcamp_data.items() if k not in ['x', 'y']}
     }
 
@@ -2861,6 +2942,7 @@ def read_ascii_spectra(
 
     # Detect data type
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
 
     metadata = {
         'n_spectra': 1,
@@ -2868,7 +2950,8 @@ def read_ascii_spectra(
         'file_format': 'ascii',
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'value_scale': value_scale
     }
 
     return df, metadata
@@ -2906,7 +2989,15 @@ def read_opus_file(
     df = pd.DataFrame([spectrum.values], columns=spectrum.index, index=[path.stem])
 
     # Detect data type if not already provided
-    data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    source_data_type = file_metadata.get('data_type')
+    if source_data_type in ['absorbance', 'transmittance']:
+        # Map OPUS metadata into supported types for UI/pipelines
+        data_type = 'absorbance' if source_data_type == 'absorbance' else 'reflectance'
+        type_confidence = 95.0
+        detection_method = f"opus_metadata({source_data_type})"
+    else:
+        data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
 
     # Merge metadata
     metadata = {
@@ -2916,6 +3007,8 @@ def read_opus_file(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
+        'source_data_type': source_data_type,
+        'value_scale': value_scale,
         **file_metadata
     }
 
@@ -3298,7 +3391,27 @@ def read_opus_dir(directory: Union[str, Path], **kwargs) -> Tuple[pd.DataFrame, 
     """
     from spectral_predict.readers.opus_reader import read_opus_dir as _read_opus_dir
 
-    return _read_opus_dir(directory, **kwargs)
+    df, metadata = _read_opus_dir(directory, **kwargs)
+
+    # Use OPUS metadata when available, but map into supported types
+    source_data_type = metadata.get('dominant_data_type') or metadata.get('data_type')
+    if source_data_type in ['absorbance', 'transmittance']:
+        data_type = 'absorbance' if source_data_type == 'absorbance' else 'reflectance'
+        type_confidence = 95.0
+        detection_method = f"opus_metadata_dir({source_data_type})"
+    else:
+        data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+
+    metadata.update({
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method,
+        'source_data_type': source_data_type,
+        'value_scale': value_scale
+    })
+
+    return df, metadata
 
 
 def read_sp_dir(directory: Union[str, Path], **kwargs) -> Tuple[pd.DataFrame, Dict[str, Any]]:

@@ -382,7 +382,16 @@ class InteractiveLoadingGUI:
         )
 
         if response:
-            # Convert
+            # Convert (handle percent reflectance if needed)
+            try:
+                from spectral_predict.io import infer_reflectance_scale
+                scale = infer_reflectance_scale(self.X)
+            except Exception:
+                scale = 1.0
+
+            if scale == 100.0:
+                self.X = self.X / 100.0
+
             self.X = self.X.clip(lower=1e-6)
             self.X = np.log10(1.0 / self.X)
             self.converted_to_absorbance = True

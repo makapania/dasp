@@ -154,7 +154,7 @@ def show_data_preview(X, y=None, n_samples=5, n_wavelengths=10):
     return preview_X
 
 
-def reflectance_to_absorbance(X):
+def reflectance_to_absorbance(X, value_scale=None):
     """
     Convert reflectance to absorbance using log10(1/R).
 
@@ -162,6 +162,8 @@ def reflectance_to_absorbance(X):
     ----------
     X : pd.DataFrame
         Spectral data in reflectance (0-1 typical range)
+    value_scale : float, optional
+        1.0 for unit reflectance or 100.0 for percent reflectance. If None, auto-infer.
 
     Returns
     -------
@@ -169,6 +171,18 @@ def reflectance_to_absorbance(X):
         Spectral data in absorbance
     """
     X_abs = X.copy()
+
+    if value_scale is None:
+        try:
+            from spectral_predict.io import infer_reflectance_scale
+            value_scale = infer_reflectance_scale(X_abs)
+        except Exception:
+            value_scale = 1.0
+    if value_scale not in [1.0, 100.0]:
+        value_scale = 1.0
+
+    if value_scale == 100.0:
+        X_abs = X_abs / 100.0
 
     # Avoid log(0) by clipping very small values
     X_abs = X_abs.clip(lower=1e-6)
