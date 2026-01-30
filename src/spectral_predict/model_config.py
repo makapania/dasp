@@ -19,20 +19,20 @@ from typing import List
 MODEL_TIERS = {
     'quick': {
         'description': 'Minimal set for rapid testing',
-        'models': ['PLS', 'RandomForest'],
+        'models': ['PLS', 'Ridge', 'ElasticNet'],
         'recommended_for': 'Quick tests, preliminary analysis, daily QC'
     },
 
     'standard': {
         'description': 'Fast & reliable core models',
-        'models': ['PLS', 'Ridge', 'Lasso', 'ElasticNet', 'RandomForest', 'LightGBM'],
+        'models': ['PLS', 'Ridge', 'ElasticNet', 'RandomForest', 'LightGBM'],
         'recommended_for': 'Most users, daily analysis, routine work'
     },
 
     'comprehensive': {
-        'description': 'Advanced analysis with gradient boosting',
+        'description': 'Advanced analysis with gradient boosting and SVR',
         'models': ['PLS', 'Ridge', 'ElasticNet', 'RandomForest', 'LightGBM',
-                   'XGBoost', 'CatBoost', 'NeuralBoosted'],
+                   'XGBoost', 'SVR'],
         'recommended_for': 'Thorough analysis, research, publications'
     },
 
@@ -48,19 +48,19 @@ MODEL_TIERS = {
 CLASSIFICATION_TIERS = {
     'quick': {
         'description': 'Minimal set for rapid classification testing',
-        'models': ['PLS-DA', 'RandomForest'],
+        'models': ['PLS-DA', 'SVM'],
         'recommended_for': 'Quick tests, preliminary analysis, daily QC'
     },
 
     'standard': {
         'description': 'Fast & reliable production classifiers',
-        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost'],
+        'models': ['PLS-DA', 'SVM', 'RandomForest', 'LightGBM'],
         'recommended_for': 'Most users, daily classification, routine work'
     },
 
     'comprehensive': {
         'description': 'Advanced classifiers for thorough analysis',
-        'models': ['PLS-DA', 'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'SVM', 'MLP', 'NeuralBoosted'],
+        'models': ['PLS-DA', 'SVM', 'RandomForest', 'LightGBM', 'XGBoost'],
         'recommended_for': 'Research, publications, thorough method comparison'
     },
 
