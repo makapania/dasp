@@ -61,7 +61,11 @@ class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):
             return None
 
     def fit(self, X, y):
-        """Fit method (no-op for simple average since models are pre-fitted)."""
+        """Fit method - sets sklearn-compatible attributes (models are pre-fitted)."""
+        # Set sklearn-compatible fitted attributes for Pipeline compatibility
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1] if X.ndim > 1 else 1
+        self._is_fitted = True
         return self
 
     def predict(self, X):
@@ -375,6 +379,11 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
 
         self.regional_weights_ = regional_weights  # (n_models, n_regions)
 
+        # Set sklearn-compatible fitted attributes for Pipeline compatibility
+        X_arr = np.asarray(X)
+        self.n_features_in_ = X_arr.shape[1] if X_arr.ndim > 1 else 1
+        self._is_fitted = True
+
         return self
 
     def predict(self, X):
@@ -639,6 +648,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
             else:
                 self.expert_weights_[self.expert_assignment_[region_idx], region_idx] = 1.0
 
+        # Set sklearn-compatible fitted attributes for Pipeline compatibility
+        X_arr = np.asarray(X)
+        self.n_features_in_ = X_arr.shape[1] if X_arr.ndim > 1 else 1
+        self._is_fitted = True
+
         return self
 
     def predict(self, X):
@@ -865,6 +879,11 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         # Fit meta-model on OOF predictions (prevents leakage)
         self.meta_model.fit(meta_features, y)
 
+        # Set sklearn-compatible fitted attributes for Pipeline compatibility
+        X_arr = np.asarray(X)
+        self.n_features_in_ = X_arr.shape[1] if X_arr.ndim > 1 else 1
+        self._is_fitted = True
+
         return self
 
     def predict(self, X):
@@ -974,6 +993,11 @@ class RegionSpecialistEnsemble(BaseEstimator, RegressorMixin):
         Otherwise, computes boundaries from initial predictions to ensure
         consistency with predict()'s region assignment.
         """
+        # Set sklearn-compatible fitted attributes for Pipeline compatibility
+        X_arr = np.asarray(X)
+        self.n_features_in_ = X_arr.shape[1] if X_arr.ndim > 1 else 1
+        self._is_fitted = True
+
         # If y_percentiles already provided, skip computing
         if self.y_percentiles_ is not None:
             return self
@@ -1144,6 +1168,10 @@ class ClassSpecialistEnsemble(BaseEstimator, ClassifierMixin):
         The base models are already fitted. We just need to store the class labels.
         """
         self.classes_ = np.unique(y)
+        # Set sklearn-compatible fitted attributes for Pipeline compatibility
+        X_arr = np.asarray(X)
+        self.n_features_in_ = X_arr.shape[1] if X_arr.ndim > 1 else 1
+        self._is_fitted = True
         return self
 
     def predict_proba(self, X):
