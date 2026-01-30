@@ -703,7 +703,7 @@ def convert_optuna_result_to_dasp_format(
             result = {
                 'Task': task_type,
                 'Model': model_name,
-                'Params': str(trial_params),
+                'Params': config_result.get('Params', str(trial_params)),
                 'Preprocess': preprocess_cfg.get('name', 'unknown'),
                 'Deriv': preprocess_cfg.get('deriv', 0),
                 'Window': preprocess_cfg.get('window', 0),
@@ -754,12 +754,24 @@ def convert_optuna_result_to_dasp_format(
                 result['F1'] = config_result.get('F1', np.nan)
                 result['Precision'] = config_result.get('Precision', np.nan)
                 result['Recall'] = config_result.get('Recall', np.nan)
+                result['Specificity'] = config_result.get('Specificity', np.nan)
+                result['Kappa'] = config_result.get('Kappa', np.nan)
+                result['MCC'] = config_result.get('MCC', np.nan)
+                result['BalancedAcc'] = config_result.get('BalancedAcc', np.nan)
+                result['BER'] = config_result.get('BER', np.nan)
+                result['LogLoss'] = config_result.get('LogLoss', np.nan)
                 # Cross-validation metrics
                 result['Accuracycv'] = config_result.get('Accuracycv', np.nan)
                 result['ROC_AUCcv'] = config_result.get('ROC_AUCcv', np.nan)
                 result['F1cv'] = config_result.get('F1cv', np.nan)
                 result['Precisioncv'] = config_result.get('Precisioncv', np.nan)
                 result['Recallcv'] = config_result.get('Recallcv', np.nan)
+                result['Specificitycv'] = config_result.get('Specificitycv', np.nan)
+                result['Kappacv'] = config_result.get('Kappacv', np.nan)
+                result['MCCcv'] = config_result.get('MCCcv', np.nan)
+                result['BalancedAcccv'] = config_result.get('BalancedAcccv', np.nan)
+                result['BERcv'] = config_result.get('BERcv', np.nan)
+                result['LogLosscv'] = config_result.get('LogLosscv', np.nan)
                 # Per-class metrics (analogous to regional_rmse for regression)
                 result['per_class_metrics'] = config_result.get('per_class_metrics', None)
                 result['class_labels'] = config_result.get('class_labels', None)
