@@ -2532,7 +2532,7 @@ class SpectralPredictApp:
         self.validation_X = None  # Stored validation spectral data
         self.validation_y = None  # Stored validation target data
         self.show_validation_metrics = tk.BooleanVar(value=True)  # Show val metrics in results
-        self.validation_top_n = tk.IntVar(value=100)  # Number of top models for validation
+        self.validation_top_n = tk.IntVar(value=200)  # Number of top models for validation
 
         # Result display options
         self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors
@@ -14743,7 +14743,7 @@ class SpectralPredictApp:
                 y_display = str(y_val)
 
             values = (
-                row['Sample_Index'],
+                row['Sample_Index'] + 1,  # Display 1-indexed for user-friendliness
                 y_display,  # Use formatted value
                 ">" if row['T2_Outlier'] else "",
                 ">" if row['Q_Outlier'] else "",
@@ -14784,7 +14784,7 @@ class SpectralPredictApp:
             for idx, row in flagged.iterrows():
                 # Find the tree item corresponding to this row
                 for item in self.outlier_tree.get_children():
-                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index']:
+                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index'] + 1:
                         self.outlier_tree.selection_add(item)
                         break
 
@@ -14806,7 +14806,7 @@ class SpectralPredictApp:
 
             for idx, row in high_conf.iterrows():
                 for item in self.outlier_tree.get_children():
-                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index']:
+                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index'] + 1:
                         self.outlier_tree.selection_add(item)
                         break
 
@@ -14837,7 +14837,7 @@ class SpectralPredictApp:
                     except (ValueError, AttributeError):
                         tree_sample_idx = tree_value
 
-                    if tree_sample_idx == row['Sample_Index']:
+                    if tree_sample_idx == row['Sample_Index'] + 1:
                         self.outlier_tree.selection_add(item)
                         break
 
