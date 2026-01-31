@@ -25,7 +25,7 @@ def get_bayesian_search_space(
     trial: optuna.Trial,
     tier: str = 'standard',
     n_features: int = None,
-    max_n_components: int = 8,
+    max_n_components: int = 10,
     task_type: str = 'regression',
     n_classes: int = 2
 ) -> Dict[str, Any]:
@@ -42,7 +42,7 @@ def get_bayesian_search_space(
         Tier level - affects range of hyperparameters
     n_features : int, optional
         Number of input features (used to constrain PLS components)
-    max_n_components : int, default=8
+    max_n_components : int, default=10
         Maximum PLS components (constrained by dataset size)
     task_type : str, default='regression'
         'regression' or 'classification'

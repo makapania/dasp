@@ -133,7 +133,7 @@ def create_objective_function(
     run_single_config_fn: Callable,
     tier: str = 'standard',
     n_features: int = None,
-    max_n_components: int = 8,
+    max_n_components: int = 10,
     enable_variable_subsets: bool = True,
     variable_counts: list = None,
     variable_selection_methods: list = None,

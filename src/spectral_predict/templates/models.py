@@ -232,8 +232,8 @@ model = MLPClassifier(
 
 # Default parameters for each model
 DEFAULT_PARAMS = {
-    'PLS': {'n_components': 8, 'scale': False},
-    'PLSDA': {'n_components': 8, 'scale': False},
+    'PLS': {'n_components': 10, 'scale': False},
+    'PLSDA': {'n_components': 10, 'scale': False},
     'Ridge': {'alpha': 1.0, 'fit_intercept': True},
     'Lasso': {'alpha': 0.1, 'max_iter': 1000, 'tol': 0.0001, 'fit_intercept': True},
     'ElasticNet': {'alpha': 0.1, 'l1_ratio': 0.5, 'max_iter': 1000, 'tol': 0.0001, 'fit_intercept': True},

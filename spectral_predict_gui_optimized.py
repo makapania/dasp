@@ -2497,7 +2497,7 @@ class SpectralPredictApp:
         self.variable_penalty = tk.IntVar(value=0)     # Penalty for using many variables
         self.complexity_penalty = tk.IntVar(value=0)   # Penalty for model complexity
 
-        self.max_n_components = tk.IntVar(value=8)
+        self.max_n_components = tk.IntVar(value=10)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
         self.show_progress = tk.BooleanVar(value=True)
 
@@ -7840,7 +7840,7 @@ class SpectralPredictApp:
 
         ttk.Label(max_comp_frame, text="Max components:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
         ttk.Spinbox(max_comp_frame, from_=2, to=100, textvariable=self.max_n_components, width=10).grid(row=0, column=1, padx=5)
-        ttk.Label(max_comp_frame, text="(default: 8, determines search range)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+        ttk.Label(max_comp_frame, text="(default: 10, determines search range)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
 
         ttk.Label(pls_content_frame, text="💡 Sets the maximum number of PLS/PCR components to evaluate during optimization.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(5, 10))
@@ -13085,8 +13085,17 @@ class SpectralPredictApp:
             # Keep validation set in sync with converted data
             if self.validation_indices:
                 try:
-                    self.validation_X = self.X.loc[self.validation_indices]
-                    print(f"DEBUG: Updated validation_X after data type conversion (n={len(self.validation_X)})")
+                    # Preserve original validation order to keep X/y aligned
+                    if self.validation_X is not None and len(self.validation_X) > 0:
+                        validation_idx = list(self.validation_X.index)
+                    elif self.validation_y is not None and len(self.validation_y) > 0:
+                        validation_idx = list(self.validation_y.index)
+                    else:
+                        validation_idx = list(self.validation_indices)
+
+                    self.validation_X = self.X.loc[validation_idx]
+                    self.validation_y = self.y.loc[validation_idx]
+                    print(f"DEBUG: Updated validation set after data type conversion (n={len(self.validation_X)})")
                 except Exception as e:
                     print(f"WARNING: Could not update validation_X after conversion: {e}")
 
@@ -19130,6 +19139,8 @@ class SpectralPredictApp:
                             progress_callback=unified_progress_wrapper,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
+                            region_test_all_individual=self.region_test_all_individual.get(),
+                            region_test_pairwise=self.region_test_pairwise.get(),
                         )
 
                         if len(results_df_model) > 0:

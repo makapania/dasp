@@ -694,7 +694,7 @@ def compute_validation_metrics_for_top_models(
 
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=0, complexity_penalty=0,
-               max_n_components=8, max_iter=500, models_to_test=None, preprocessing_methods=None,
+               max_n_components=10, max_iter=500, models_to_test=None, preprocessing_methods=None,
                interference_settings=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
                neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
@@ -781,7 +781,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         Penalty for using many variables (0=ignore, 10=strong penalty)
     complexity_penalty : int (0-10), default=5
         Penalty for model complexity (0=ignore, 10=strong penalty)
-    max_n_components : int, default=8
+    max_n_components : int, default=10
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for MLP
@@ -2575,7 +2575,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         Number of validation samples (for tracking)
     total_samples_original : int, optional
         Original total sample count (for tracking)
-    max_n_components : int, default=8
+    max_n_components : int, default=10
         Maximum PLS components (constrained by min(n_samples, n_features))
     tier : str, default='standard'
         Model tier: 'quick', 'standard', or 'comprehensive'

@@ -91,7 +91,7 @@ class PLSTransformer(BaseEstimator, TransformerMixin):
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}' (model not fitted)")
 
 
-def get_model(model_name, task_type='regression', n_components=10, max_n_components=8, max_iter=500, n_jobs=-1):
+def get_model(model_name, task_type='regression', n_components=10, max_n_components=10, max_iter=500, n_jobs=-1):
     """
     Get a single model instance with default hyperparameters.
 
@@ -103,7 +103,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         'regression' or 'classification'
     n_components : int, default=10
         Number of components for PLS models
-    max_n_components : int, default=8
+    max_n_components : int, default=10
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for neural network models
@@ -503,7 +503,7 @@ def build_model(model_name, params, task_type='regression'):
             raise ValueError(f"Unknown classification model: {model_name}")
 
 
-def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
+def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                     n_estimators_list=None, learning_rates=None,
                     neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
                     pls_max_iter_list=None, pls_tol_list=None,
@@ -543,7 +543,7 @@ def get_model_grids(task_type, n_features, max_n_components=8, max_iter=500,
         'regression' or 'classification'
     n_features : int
         Number of input features
-    max_n_components : int, default=8
+    max_n_components : int, default=10
         Maximum number of PLS components to test
     max_iter : int, default=500
         Maximum iterations for MLP

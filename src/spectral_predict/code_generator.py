@@ -1102,7 +1102,7 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
 
     def _render_pls_da_pipeline(self, pls_params: Dict[str, Any], lr_params: Dict[str, Any]) -> str:
         """Render a PLS-DA pipeline (PLS scores + scaler + LR)."""
-        n_components = pls_params.pop('n_components', 8)
+        n_components = pls_params.pop('n_components', 10)
         pls_max_iter = pls_params.pop('max_iter', 500)
         pls_tol = pls_params.pop('tol', 1e-6)
         pls_scale = pls_params.pop('scale', False)
