@@ -552,7 +552,7 @@ def create_unified_objective(
     progress_callback: Optional[Callable] = None,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
-    early_stopping_rounds: Optional[int] = 50,
+    early_stopping_rounds: Optional[int] = 40,
     region_test_all_individual: bool = False,
     region_test_pairwise: bool = False,
 ) -> Callable[[Trial], float]:
@@ -1116,7 +1116,7 @@ def run_unified_bayesian(
     verbose: bool = True,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
-    early_stopping_rounds: Optional[int] = 50,
+    early_stopping_rounds: Optional[int] = 40,
     region_test_all_individual: bool = False,
     region_test_pairwise: bool = False,
 ) -> Tuple[pd.DataFrame, optuna.Study]:

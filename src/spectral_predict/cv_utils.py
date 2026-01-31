@@ -89,7 +89,7 @@ def _fit_with_early_stopping(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    early_stopping_rounds: int = 50
+    early_stopping_rounds: int = 40
 ) -> None:
     """Fit a boosting model with early stopping.
 
@@ -191,7 +191,7 @@ def cross_validate_with_early_stopping(
     y: np.ndarray,
     cv,
     scoring: Union[str, Dict[str, str]] = 'neg_root_mean_squared_error',
-    early_stopping_rounds: int = 50,
+    early_stopping_rounds: int = 40,
     n_jobs: int = 1,
     return_train_score: bool = False,
     return_estimator: bool = False
@@ -381,7 +381,7 @@ def cross_val_predict_with_early_stopping(
     X: np.ndarray,
     y: np.ndarray,
     cv,
-    early_stopping_rounds: int = 50,
+    early_stopping_rounds: int = 40,
     method: str = 'predict'
 ) -> np.ndarray:
     """Get cross-validated predictions with early stopping support.
@@ -484,7 +484,7 @@ def cross_val_score_with_early_stopping(
     y: np.ndarray,
     cv,
     scoring: str = 'neg_root_mean_squared_error',
-    early_stopping_rounds: int = 50,
+    early_stopping_rounds: int = 40,
     n_jobs: int = 1
 ) -> np.ndarray:
     """Cross-validation scores with early stopping support.

@@ -763,7 +763,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                compute_validation=False,
                validation_top_n=100,
                # Early stopping for boosting models
-               early_stopping_rounds=50):
+               early_stopping_rounds=40):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 

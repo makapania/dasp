@@ -2549,7 +2549,7 @@ class SpectralPredictApp:
 
         # Optimization method selection (Grid Search vs Bayesian Optimization vs NSGA-II)
         self.optimization_method = tk.StringVar(value="grid")  # "grid", "unified" (Bayesian), or "nsga2"
-        self.n_unified_trials = tk.IntVar(value=500)   # Number of Bayesian optimization trials (default: 500)
+        self.n_unified_trials = tk.IntVar(value=300)   # Number of Bayesian optimization trials (default: 300)
         self.nsga2_population = tk.IntVar(value=60)   # NSGA-II population size
         self.nsga2_generations = tk.IntVar(value=120)  # NSGA-II number of generations
         self.nsga2_selection_method = tk.StringVar(value="Min Error")  # "Min Error", "Balanced", "Knee Point"
