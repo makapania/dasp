@@ -2359,6 +2359,7 @@ class SpectralPredictApp:
         self.ct_primary_y = None  # pd.Series with sample IDs as index
         self.ct_primary_wavelengths = None  # np.ndarray of wavelengths
         self.ct_primary_detected_type = None  # 'asd', 'csv', 'spc', etc.
+        self.ct_primary_spectral_type = None  # 'absorbance' or 'reflectance' - detected from primary data
         self.ct_primary_spectra_path_var = tk.StringVar()  # Path to primary spectra directory
         self.ct_primary_reference_path_var = tk.StringVar()  # Path to primary reference CSV
         self.ct_primary_spectral_file_col_var = tk.StringVar()  # Spectral file column name
@@ -5836,13 +5837,15 @@ class SpectralPredictApp:
         wavelengths = self.X.columns.values
         n_samples = len(data)
 
-        # Determine plotting strategy
+        # Determine plotting strategy - always plot all samples
+        # Use lower alpha for larger datasets
         if n_samples <= 50:
             alpha = 0.3
-            indices = range(n_samples)
+        elif n_samples <= 200:
+            alpha = 0.2
         else:
-            alpha = 0.5
-            indices = np.random.choice(n_samples, size=50, replace=False)
+            alpha = 0.1
+        indices = range(n_samples)
 
         # Plot spectra
         for i in indices:
@@ -10550,6 +10553,33 @@ class SpectralPredictApp:
                 self.combined_metadata = metadata
                 self.combined_metadata_df = metadata_df
 
+                # Check for duplicate specimen IDs that were auto-renamed
+                n_dups = metadata.get('duplicates_renamed', 0)
+                rename_mapping = metadata.get('duplicate_rename_mapping', {})
+                if n_dups > 0:
+                    # Build warning message showing renamed IDs
+                    warn_msg = (
+                        f"Found {n_dups} duplicate specimen IDs which were automatically renamed:\n\n"
+                    )
+
+                    # Show examples of renamed IDs (up to 5)
+                    for i, (orig_id, new_ids) in enumerate(list(rename_mapping.items())[:5]):
+                        # Format: "SampleA" → "SampleA", "SampleA.1", "SampleA.2"
+                        new_ids_str = ', '.join(f'"{nid}"' for nid in new_ids)
+                        warn_msg += f'  • "{orig_id}" → {new_ids_str}\n'
+
+                    if len(rename_mapping) > 5:
+                        warn_msg += f"  ... and {len(rename_mapping) - 5} more duplicated IDs\n"
+
+                    warn_msg += (
+                        f"\nFor best results, ensure your specimen ID column:\n"
+                        f"  • Is placed in the FIRST column of your file\n"
+                        f"  • Contains unique values for each spectrum\n\n"
+                        f"Detected specimen ID column: {metadata.get('specimen_id_col', 'Unknown')}\n\n"
+                        f"The data has been loaded with renamed IDs."
+                    )
+                    messagebox.showwarning("Duplicate Specimen IDs Detected", warn_msg)
+
                 # Populate column mapping dropdowns with all non-wavelength columns
                 # This allows manual override of auto-detected columns
                 available_cols = []
@@ -10717,6 +10747,32 @@ class SpectralPredictApp:
             # Clear folder picker since we're using combined file
             self.spectral_data_path.set("")
             self.reference_file.set("")  # Not needed for combined format
+
+            # Check for duplicate specimen IDs that were auto-renamed
+            n_dups = metadata.get('duplicates_renamed', 0)
+            rename_mapping = metadata.get('duplicate_rename_mapping', {})
+            if n_dups > 0:
+                # Build warning message showing renamed IDs
+                warn_msg = (
+                    f"Found {n_dups} duplicate specimen IDs which were automatically renamed:\n\n"
+                )
+
+                # Show examples of renamed IDs (up to 5)
+                for i, (orig_id, new_ids) in enumerate(list(rename_mapping.items())[:5]):
+                    new_ids_str = ', '.join(f'"{nid}"' for nid in new_ids)
+                    warn_msg += f'  - "{orig_id}" -> {new_ids_str}\n'
+
+                if len(rename_mapping) > 5:
+                    warn_msg += f"  ... and {len(rename_mapping) - 5} more duplicated IDs\n"
+
+                warn_msg += (
+                    f"\nFor best results, ensure your specimen ID column:\n"
+                    f"  - Is placed in the FIRST column of your file\n"
+                    f"  - Contains unique values for each spectrum\n\n"
+                    f"Detected specimen ID column: {metadata.get('specimen_id_col', 'Unknown')}\n\n"
+                    f"The data has been loaded with renamed IDs."
+                )
+                messagebox.showwarning("Duplicate Specimen IDs Detected", warn_msg)
 
             # Populate column dropdowns
             available_cols = []
@@ -11447,6 +11503,21 @@ class SpectralPredictApp:
                             print(f"  - Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
                             if ref is not None:
                                 print(f"  - Metadata columns: {', '.join(ref.columns)}")
+
+                            # Check for duplicate specimen IDs that were auto-renamed
+                            n_dups = metadata.get('duplicates_renamed', 0)
+                            rename_mapping = metadata.get('duplicate_rename_mapping', {})
+                            if n_dups > 0:
+                                warn_msg = f"Found {n_dups} duplicate specimen IDs which were automatically renamed:\n\n"
+                                for orig_id, new_ids in list(rename_mapping.items())[:5]:
+                                    new_ids_str = ', '.join(f'"{nid}"' for nid in new_ids)
+                                    warn_msg += f'  • "{orig_id}" → {new_ids_str}\n'
+                                if len(rename_mapping) > 5:
+                                    warn_msg += f"  ... and {len(rename_mapping) - 5} more duplicated IDs\n"
+                                warn_msg += f"\nDetected specimen ID column: {metadata.get('specimen_id_col', 'Unknown')}\n"
+                                warn_msg += "\nThe data has been loaded with renamed IDs."
+                                messagebox.showwarning("Duplicate Specimen IDs Detected", warn_msg)
+
                             loaded = True
                             break  # Success - stop trying other sheets
                         except Exception as e:
@@ -11493,6 +11564,20 @@ class SpectralPredictApp:
                         print(f"  - Specimen ID: {metadata.get('specimen_id_col', 'N/A')}")
                         if ref is not None:
                             print(f"  - Metadata columns: {', '.join(ref.columns)}")
+
+                        # Check for duplicate specimen IDs that were auto-renamed
+                        n_dups = metadata.get('duplicates_renamed', 0)
+                        rename_mapping = metadata.get('duplicate_rename_mapping', {})
+                        if n_dups > 0:
+                            warn_msg = f"Found {n_dups} duplicate specimen IDs which were automatically renamed:\n\n"
+                            for orig_id, new_ids in list(rename_mapping.items())[:5]:
+                                new_ids_str = ', '.join(f'"{nid}"' for nid in new_ids)
+                                warn_msg += f'  • "{orig_id}" → {new_ids_str}\n'
+                            if len(rename_mapping) > 5:
+                                warn_msg += f"  ... and {len(rename_mapping) - 5} more duplicated IDs\n"
+                            warn_msg += f"\nDetected specimen ID column: {metadata.get('specimen_id_col', 'Unknown')}\n"
+                            warn_msg += "\nThe data has been loaded with renamed IDs."
+                            messagebox.showwarning("Duplicate Specimen IDs Detected", warn_msg)
                     except Exception as e:
                         print(f"Combined CSV failed: {str(e)}")
 
@@ -14040,13 +14125,15 @@ class SpectralPredictApp:
         wavelengths = self.X.columns.values
         n_samples = len(data)
 
-        # Determine plotting strategy
+        # Determine plotting strategy - always plot all samples
+        # Use lower alpha for larger datasets
         if n_samples <= 50:
             alpha = 0.3
-            indices = range(n_samples)
+        elif n_samples <= 200:
+            alpha = 0.2
         else:
-            alpha = 0.5
-            indices = np.random.choice(n_samples, size=50, replace=False)
+            alpha = 0.1
+        indices = range(n_samples)
 
         # Plot with interactive features (only for raw spectra to keep it simple)
         for i in indices:
@@ -21363,7 +21450,8 @@ For detailed documentation, see the User Guide.
                 initial_dir = str(Path.home())
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_name = f"ensemble_{ensemble_type}_{timestamp}.dasp"
+            data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
+            default_name = f"ensemble_{ensemble_type}_{timestamp}{data_type_suffix}.dasp"
 
             filepath = filedialog.asksaveasfilename(
                 title="Save Ensemble Model",
@@ -27292,7 +27380,8 @@ Configuration:
             # Create prefix: C/R for Classification/Regression + number of variables
             task_prefix = 'C' if self.refined_config['task_type'] == 'classification' else 'R'
             n_vars = self.refined_config['n_vars']
-            default_name = f"{task_prefix}{n_vars}_model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dasp"
+            data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
+            default_name = f"{task_prefix}{n_vars}_model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{data_type_suffix}.dasp"
 
             # Get initial directory from spectral data path
             initial_dir = None
@@ -31670,10 +31759,13 @@ Configuration:
             return
 
         try:
+            ct_data_type = getattr(self, 'ct_primary_spectral_type', None) or 'reflectance'
+            data_type_suffix = "_abs" if ct_data_type == "absorbance" else "_ref"
             path_prefix = save_transfer_model(
                 self.ct_transfer_model,
                 directory=directory,
-                name=None  # Auto-generate name
+                name=None,  # Auto-generate name
+                data_type_suffix=data_type_suffix
             )
             messagebox.showinfo("Success",
                 f"Transfer model saved to:\n{path_prefix}.json\n{path_prefix}.npz")
@@ -33604,9 +33696,17 @@ Configuration:
             messagebox.showwarning("No Model", "Please build a transfer model first.")
             return
 
+        # Generate default filename with data type suffix
+        method = self.ct_transfer_model.method
+        ct_data_type = getattr(self, 'ct_primary_spectral_type', None) or 'reflectance'
+        data_type_suffix = "_abs" if ct_data_type == "absorbance" else "_ref"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"transfer_{method}_{timestamp}{data_type_suffix}.pkl"
+
         # Ask for save location
         filepath = filedialog.asksaveasfilename(
             title="Save Transfer Model",
+            initialfile=default_name,
             defaultextension=".pkl",
             filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
         )
@@ -33721,6 +33821,8 @@ Configuration:
             self.ct_primary_X = df  # Store as DataFrame
             self.ct_primary_wavelengths = df.columns.values  # Get wavelengths from column names
             self.primary_data_format = self.ct_primary_detected_type
+            # Track spectral data type (absorbance vs reflectance) for filename suffix
+            self.ct_primary_spectral_type = metadata.get('data_type', 'reflectance')
 
             # Update info display
             info_text = f"Primary: {self.ct_primary_X.shape[0]} samples, {len(self.ct_primary_wavelengths)} wavelengths\n"
@@ -33955,6 +34057,8 @@ Configuration:
             self.ct_primary_X = X_aligned
             self.ct_primary_y = y_aligned
             self.ct_primary_wavelengths = X_aligned.columns.astype(float).values
+            # Track spectral data type (absorbance vs reflectance) for filename suffix
+            self.ct_primary_spectral_type = metadata.get('data_type', 'reflectance')
 
             # Update data info display
             self._update_data_info()
