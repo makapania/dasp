@@ -12386,6 +12386,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "csv":
                 X, metadata = read_csv_spectra(self.spectral_data_path.get())
@@ -12419,6 +12420,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "spc":
                 X, metadata = read_spc_dir(self.spectral_data_path.get())
@@ -12452,6 +12454,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "jcamp":
                 from spectral_predict.io import read_jcamp_dir
@@ -12487,6 +12490,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "ascii":
                 from spectral_predict.io import read_ascii_spectra
@@ -12522,6 +12526,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "opus":
                 from spectral_predict.io import read_opus_dir
@@ -12557,6 +12562,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "perkinelmer":
                 from spectral_predict.io import read_perkinelmer_dir
@@ -12592,6 +12598,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "excel":
                 from spectral_predict.io import read_excel_spectra
@@ -12627,6 +12634,7 @@ class SpectralPredictApp:
                 self.X_original = X_aligned
                 self.y = y_aligned
                 self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             else:
                 messagebox.showerror("Error", f"Unknown data type: {self.detected_type}")
