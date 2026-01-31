@@ -224,6 +224,7 @@ def save_transfer_model(
     transfer_model: TransferModel,
     directory: Path | str,
     name: str | None = None,
+    data_type_suffix: str = "",
 ) -> Path:
     """
     Save a TransferModel to disk using JSON for metadata and NPZ for arrays.
@@ -237,6 +238,9 @@ def save_transfer_model(
     name : str, optional
         Optional base filename (without extension). If None, derive from
         primary_id, satellite_id, and method.
+    data_type_suffix : str, optional
+        Suffix to append to auto-generated filename (e.g., "_abs" or "_ref").
+        Only used when name is None.
 
     Returns
     -------
@@ -250,7 +254,7 @@ def save_transfer_model(
 
     # Generate filename if not provided
     if name is None:
-        name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}"
+        name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}{data_type_suffix}"
 
     path_prefix = directory / name
 

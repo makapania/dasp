@@ -553,6 +553,8 @@ def create_unified_objective(
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
     early_stopping_rounds: Optional[int] = 50,
+    region_test_all_individual: bool = False,
+    region_test_pairwise: bool = False,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -589,6 +591,10 @@ def create_unified_objective(
     early_stopping_rounds : int, optional, default=50
         Number of rounds without improvement before stopping for boosting models.
         Set to None or 0 to disable.
+    region_test_all_individual : bool, default=False
+        Test all N regions individually (not just top 5)
+    region_test_pairwise : bool, default=False
+        Test all C(N,2) pairwise region combinations
 
     Returns
     -------
@@ -623,11 +629,22 @@ def create_unified_objective(
     # Guard against None params for imbalance handling
     _imbalance_params = imbalance_params if imbalance_params is not None else {}
 
+    # Cache regions by preprocessing config to avoid redundant computation
+    region_cache = {}
+
     def objective(trial: Trial) -> float:
         """Objective function for a single trial."""
         try:
             # 1. Suggest preprocessing
             preprocess_config = suggest_preprocessing(trial, n_features)
+
+            # Create cache key from preprocessing config
+            cache_key = (
+                preprocess_config.get('name', 'raw'),
+                preprocess_config.get('deriv', 0),
+                preprocess_config.get('window', 0),
+                preprocess_config.get('polyorder', 0),
+            )
 
             # 2. Apply preprocessing
             X_prep = apply_preprocessing(X_raw, preprocess_config)
@@ -645,41 +662,40 @@ def create_unified_objective(
             region_idx = trial.suggest_int('region_id', 0, max(0, n_top_regions - 1))
 
             if subset_type == 'region':
-                # Compute regions DYNAMICALLY on preprocessed data
-                # This ensures regions are relevant to the current preprocessing
-                try:
-                    # Create wavelengths for preprocessed data (may have different length)
-                    if n_features_prep == len(wavelengths):
-                        wl_prep = wavelengths
-                    else:
-                        # Interpolate wavelengths if preprocessing changed feature count
-                        wl_prep = np.linspace(wavelengths[0], wavelengths[-1], n_features_prep)
+                # Check cache first
+                if cache_key in region_cache:
+                    dynamic_regions = region_cache[cache_key]
+                else:
+                    # Compute regions DYNAMICALLY on preprocessed data with full parameters
+                    # This ensures regions are relevant to the current preprocessing
+                    try:
+                        # Create wavelengths for preprocessed data (may have different length)
+                        if n_features_prep == len(wavelengths):
+                            wl_prep = wavelengths
+                        else:
+                            # Interpolate wavelengths if preprocessing changed feature count
+                            wl_prep = np.linspace(wavelengths[0], wavelengths[-1], n_features_prep)
 
-                    dynamic_regions = create_region_subsets(
-                        X_prep, y, wl_prep.astype(float),
-                        n_top_regions=n_top_regions
-                    )
-
-                    if len(dynamic_regions) > 0:
-                        # Clamp region_idx to actual available regions
-                        actual_region_idx = min(region_idx, len(dynamic_regions) - 1)
-
-                        top_indices = dynamic_regions[actual_region_idx]['indices']
-                        n_vars = len(top_indices)
-                        subset_tag = dynamic_regions[actual_region_idx]['tag']
-                    else:
-                        # Fallback to importance if no regions found
-                        actual_subset_size = subset_size if subset_size != 'full' else 100
-                        n_vars = min(actual_subset_size, n_features_prep - 1)
-                        if n_vars < 5:
-                            n_vars = min(5, n_features_prep - 1)
-                        importances = compute_importances(
-                            X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
+                        dynamic_regions = create_region_subsets(
+                            X_prep, y, wl_prep.astype(float),
+                            n_top_regions=n_top_regions,
+                            test_all_individual=region_test_all_individual,
+                            test_pairwise=region_test_pairwise
                         )
-                        top_indices = np.argsort(importances)[-n_vars:]
-                        subset_tag = f"top{n_vars}_importance_fallback"
-                except Exception as e:
-                    logging.warning(f"Dynamic region creation failed: {e}, falling back to importance")
+                        region_cache[cache_key] = dynamic_regions
+                    except Exception as e:
+                        logging.warning(f"Dynamic region creation failed: {e}, falling back to empty")
+                        dynamic_regions = []
+                        region_cache[cache_key] = dynamic_regions
+
+                # Use cached region count for index clamping
+                if len(dynamic_regions) > 0:
+                    actual_region_idx = min(region_idx, len(dynamic_regions) - 1)
+                    top_indices = dynamic_regions[actual_region_idx]['indices']
+                    n_vars = len(top_indices)
+                    subset_tag = dynamic_regions[actual_region_idx]['tag']
+                else:
+                    # Fallback to importance if no regions found
                     actual_subset_size = subset_size if subset_size != 'full' else 100
                     n_vars = min(actual_subset_size, n_features_prep - 1)
                     if n_vars < 5:
@@ -1101,6 +1117,8 @@ def run_unified_bayesian(
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
     early_stopping_rounds: Optional[int] = 50,
+    region_test_all_individual: bool = False,
+    region_test_pairwise: bool = False,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1140,6 +1158,10 @@ def run_unified_bayesian(
         (XGBoost, CatBoost, LightGBM). Set to None or 0 to disable.
         Early stopping typically saves 30-50% training time and often improves
         model quality by preventing overfitting.
+    region_test_all_individual : bool, default=False
+        Test all N regions individually (not just top 5)
+    region_test_pairwise : bool, default=False
+        Test all C(N,2) pairwise region combinations
 
     Returns
     -------
@@ -1236,6 +1258,8 @@ def run_unified_bayesian(
         imbalance_method=imbalance_method,
         imbalance_params=imbalance_params,
         early_stopping_rounds=early_stopping_rounds,
+        region_test_all_individual=region_test_all_individual,
+        region_test_pairwise=region_test_pairwise,
     )
 
     # Create TPE sampler with good defaults

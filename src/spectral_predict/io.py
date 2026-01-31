@@ -121,6 +121,51 @@ def read_csv_spectra(path):
     return result, metadata
 
 
+def _rename_duplicate_ids(index: pd.Index) -> tuple:
+    """
+    Rename duplicate IDs by adding .1, .2, etc. suffix.
+
+    Parameters
+    ----------
+    index : pd.Index
+        Index that may contain duplicates
+
+    Returns
+    -------
+    tuple
+        (new_index, n_renamed, rename_mapping) where:
+        - new_index: pd.Index with renamed duplicates
+        - n_renamed: number of IDs that were renamed
+        - rename_mapping: dict mapping original IDs to list of new IDs
+          e.g., {"SampleA": ["SampleA", "SampleA.1", "SampleA.2"]}
+    """
+    if not index.duplicated().any():
+        return index, 0, {}
+
+    new_ids = []
+    seen = {}
+    rename_mapping = {}  # Track original -> [new names] for warning display
+
+    for idx in index:
+        if idx in seen:
+            seen[idx] += 1
+            new_id = f"{idx}.{seen[idx]}"
+            new_ids.append(new_id)
+            rename_mapping[idx].append(new_id)
+        else:
+            seen[idx] = 0
+            new_ids.append(idx)
+            rename_mapping[idx] = [idx]  # Start tracking this ID
+
+    # Count how many were renamed (exclude originals)
+    n_renamed = sum(1 for idx in new_ids if '.' in str(idx) and str(idx).rsplit('.', 1)[-1].isdigit())
+
+    # Filter rename_mapping to only include IDs that had duplicates
+    rename_mapping = {k: v for k, v in rename_mapping.items() if len(v) > 1}
+
+    return pd.Index(new_ids), n_renamed, rename_mapping
+
+
 def read_reference_csv(path, id_column):
     """
     Read reference file (CSV or Excel) with target variables.
@@ -853,10 +898,14 @@ def auto_detect_specimen_id_column(df, exclude_wavelength_cols):
     - **ABSENT** - in which case we return None and generate synthetic IDs
 
     Detection Priority:
-    1. Column named 'specimen_id', 'sample_id', 'id', 'sample', 'specimen', etc.
-    2. Column with all/mostly unique values (>80% unique)
-    3. First non-wavelength column with object/string dtype
-    4. Check if all remaining columns are numeric/y-like → No ID column, return None
+    1. First non-wavelength column if it has good uniqueness (>50% unique)
+       - ID columns are typically the first column in spectral data files
+    2. Column named 'specimen_id', 'sample_id', 'id', 'sample', 'specimen', etc.
+       - BUT only if it has reasonable uniqueness (>20% or >10 unique values)
+       - This prevents matching columns like "Sample" containing "Yes/No" categorical data
+    3. Column with all/mostly unique values (>80% unique)
+    4. First non-wavelength column with object/string dtype
+    5. Check if all remaining columns are numeric/y-like → No ID column, return None
 
     Parameters
     ----------
@@ -878,17 +927,33 @@ def auto_detect_specimen_id_column(df, exclude_wavelength_cols):
         # No non-wavelength columns at all → no ID, no y → error
         raise ValueError("No non-wavelength columns found")
 
+    # Helper function to check uniqueness
+    def get_uniqueness(col):
+        n_unique = df[col].nunique()
+        n_total = len(df[col].dropna())
+        if n_total == 0:
+            return 0, 0, 0
+        return n_unique, n_total, n_unique / n_total
+
     # If only one candidate column, check if it looks like y data
     if len(candidate_cols) == 1:
         col = candidate_cols[0]
         # If it looks like a target variable (numeric, not unique), assume no ID column
         if pd.api.types.is_numeric_dtype(df[col]):
-            n_unique = df[col].nunique()
-            n_total = len(df[col].dropna())
-            if n_total > 0 and n_unique / n_total < 0.8:  # Not very unique → probably y, not ID
+            _, _, uniqueness_ratio = get_uniqueness(col)
+            if uniqueness_ratio < 0.8:  # Not very unique → probably y, not ID
                 return None
 
-    # Priority 1: Check for common ID names (case-insensitive)
+    # Priority 1: Check first non-wavelength column - IDs are typically first
+    # Accept if it has good uniqueness (>50% unique)
+    first_col = candidate_cols[0]
+    n_unique, n_total, uniqueness_ratio = get_uniqueness(first_col)
+    if n_total > 0 and uniqueness_ratio > 0.5:
+        return first_col
+
+    # Priority 2: Check for common ID names (case-insensitive)
+    # BUT verify the column has reasonable uniqueness (>20% unique or >10 unique values)
+    # This prevents matching columns like "Sample" that contain "Yes/No" categorical data
     common_names = [
         'specimen_id', 'sample_id', 'specimen', 'sample', 'id',
         'file_number', 'file_name', 'filename', 'name',
@@ -900,28 +965,27 @@ def auto_detect_specimen_id_column(df, exclude_wavelength_cols):
                   if col.lower() == name.lower() or
                      col.lower().replace('_', '') == name.lower().replace('_', '')]
         if matches:
-            return matches[0]
+            col = matches[0]
+            n_unique, n_total, uniqueness_ratio = get_uniqueness(col)
+            # Accept if >20% unique OR has >10 unique values (for small datasets)
+            if n_total > 0 and (uniqueness_ratio > 0.2 or n_unique > 10):
+                return col
+            # Otherwise skip this match and continue searching
 
-    # Priority 2: Find column with unique/mostly unique values
+    # Priority 3: Find column with unique/mostly unique values
     # Specimen IDs should be unique identifiers
     for col in candidate_cols:
-        n_unique = df[col].nunique()
-        n_total = len(df[col].dropna())
+        _, n_total, uniqueness_ratio = get_uniqueness(col)
+        if n_total > 0 and uniqueness_ratio > 0.8:
+            return col
 
-        if n_total > 0:
-            uniqueness_ratio = n_unique / n_total
-
-            # If >80% unique, likely an ID column
-            if uniqueness_ratio > 0.8:
-                return col
-
-    # Priority 3: Find non-numeric dtype column
+    # Priority 4: Find non-numeric dtype column
     # IDs often contain letters/special characters
     for col in candidate_cols:
         if df[col].dtype == 'object' or df[col].dtype.name == 'string':
             return col
 
-    # Priority 4: Check if all remaining columns are numeric (likely all y-like)
+    # Priority 5: Check if all remaining columns are numeric (likely all y-like)
     # If so, assume no ID column present
     all_numeric = all(pd.api.types.is_numeric_dtype(df[col])
                      for col in candidate_cols)
@@ -930,7 +994,7 @@ def auto_detect_specimen_id_column(df, exclude_wavelength_cols):
         # Likely format: wavelengths + 1-3 y columns, no ID
         return None
 
-    # Priority 5: Fallback to first candidate column
+    # Priority 6: Fallback to first candidate column
     return candidate_cols[0]
 
 
@@ -1194,18 +1258,24 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
     # Step 8: Validation
     # Check for duplicate specimen IDs (only if not generated)
     # Use X.index since specimen_ids may be out of sync after NaN removal
+    n_duplicates_renamed = 0
+    duplicate_rename_mapping = {}
     if not generated_ids and X.index.duplicated().any():
-        n_duplicates = X.index.duplicated().sum()
-        duplicates = X.index[X.index.duplicated()].unique()[:5]
-        print(f"Warning: Found {n_duplicates} duplicate specimen IDs. "
-              f"Keeping first occurrence. Examples: {list(duplicates)}")
+        # Rename duplicates by adding .1, .2, etc. suffix instead of removing them
+        new_index, n_duplicates_renamed, duplicate_rename_mapping = _rename_duplicate_ids(X.index)
 
-        # Keep first occurrence of each duplicate
-        keep_mask = ~X.index.duplicated(keep='first')
-        X = X[keep_mask]
-        y = y[keep_mask]
+        print(f"Warning: Found {n_duplicates_renamed} duplicate specimen IDs. "
+              f"Auto-renamed with .1, .2, etc. suffix.")
+
+        # Show examples of renamed IDs
+        for orig_id, new_ids in list(duplicate_rename_mapping.items())[:3]:
+            print(f"  '{orig_id}' -> {new_ids}")
+
+        # Apply renamed index to all DataFrames
+        X.index = new_index
+        y.index = new_index
         if metadata_df is not None:
-            metadata_df = metadata_df[keep_mask]
+            metadata_df.index = new_index
 
     # Check wavelength ordering
     wavelength_values = X.columns.values
@@ -1235,7 +1305,9 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'duplicates_renamed': n_duplicates_renamed,
+        'duplicate_rename_mapping': duplicate_rename_mapping
     }
 
     return X, y, metadata_df, metadata
@@ -1824,30 +1896,30 @@ def detect_spectral_data_type(X, metadata=None):
     mean_val = np.mean(flat_data)
     negative_ratio = np.mean(flat_data < 0)
 
-    # Criterion 1: Absolute bounds check (weight: 40%)
+    # Criterion 1: Absolute bounds check (weight: ~35%)
     if max_val > 5.0 and min_val >= 0.0 and max_val <= 110.0:
         # Likely percent reflectance (0-100 range)
-        reflectance_score += 40
+        reflectance_score += 35
         detection_methods.append("bounds_check(percent_reflectance_range)")
     elif max_val > 1.5:
         # Definitely absorbance - reflectance can't exceed 1.0 (unless % reflectance)
-        absorbance_score += 40
+        absorbance_score += 35
         detection_methods.append("bounds_check(max>1.5)")
     elif max_val <= 1.0 and min_val >= 0.0:
         # All values in [0, 1] - likely reflectance
         if mean_val > 0.3:
             # High mean in [0,1] range strongly suggests reflectance
-            reflectance_score += 40
+            reflectance_score += 35
             detection_methods.append("bounds_check(0-1_range)")
         else:
             # Low mean could be dark sample reflectance or low absorbance
-            reflectance_score += 25
-            absorbance_score += 15
+            reflectance_score += 20
+            absorbance_score += 10
             detection_methods.append("bounds_check(0-1_low_mean)")
     elif max_val > 1.0 and max_val <= 1.5:
         # Ambiguous range - could be reflectance with errors or low absorbance
-        absorbance_score += 20
-        reflectance_score += 15
+        absorbance_score += 15
+        reflectance_score += 10
         detection_methods.append("bounds_check(ambiguous_1.0-1.5)")
     else:
         # Negative values or very low values
@@ -1868,64 +1940,110 @@ def detect_spectral_data_type(X, metadata=None):
         absorbance_score += 10
         detection_methods.append("bounds_check(negative_fraction>1%)")
 
-    # Criterion 2: Mean value analysis (weight: 30%)
+    # Criterion 2: Mean value analysis (weight: ~20%)
     if 0.3 <= mean_val <= 0.9:
         # Typical reflectance range
-        reflectance_score += 30
+        reflectance_score += 20
         detection_methods.append("mean_check(reflectance_range)")
     elif mean_val > 1.0:
         # High mean suggests absorbance
-        absorbance_score += 30
+        absorbance_score += 20
         detection_methods.append("mean_check(absorbance_range)")
     elif mean_val < 0.3 and max_val <= 1.0:
         # Low mean in bounded range - dark reflectance
-        reflectance_score += 20
+        reflectance_score += 15
         detection_methods.append("mean_check(dark_reflectance)")
     else:
         # Ambiguous mean
         detection_methods.append("mean_check(ambiguous)")
 
-    # Criterion 3: Peak direction analysis (weight: 30%)
-    # Analyze first spectrum for peak/valley characteristics
-    if len(data) > 0:
-        first_spectrum = data[0, :]
-        first_spectrum = first_spectrum[~np.isnan(first_spectrum)]
+    # Guardrail: typical reflectance stats should not be overridden by noisy shape votes
+    if (0.3 <= mean_val <= 0.9) and (negative_ratio < 0.001) and (min_val > -0.05) and (max_val <= 1.5):
+        reflectance_score += 20
+        detection_methods.append("reflectance_guard(typical_range_low_negative)")
 
-        if len(first_spectrum) > 10:
-            # Find local maxima and minima
+    # Criterion 3: Peak/valley shape analysis (weight: ~25%)
+    def _smooth_spectrum(spectrum):
+        spectrum = np.asarray(spectrum, dtype=float)
+        if spectrum.size < 11:
+            return spectrum
+        try:
+            from scipy.signal import savgol_filter
+            # Keep window length odd and bounded by spectrum length
+            window = min(15, spectrum.size // 2 * 2 - 1)
+            window = max(window, 7)
+            return savgol_filter(spectrum, window_length=window, polyorder=2, mode='interp')
+        except Exception:
+            # Simple moving average fallback
+            window = 5
+            kernel = np.ones(window) / window
+            return np.convolve(spectrum, kernel, mode='same')
+
+    def _shape_vote(spectrum):
+        spectrum = np.asarray(spectrum, dtype=float)
+        spectrum = spectrum[~np.isnan(spectrum)]
+        if spectrum.size < 20:
+            return 0, "peak_analysis(insufficient_points)"
+
+        spectrum = _smooth_spectrum(spectrum)
+        # Robust normalization to reduce amplitude bias
+        p5 = np.percentile(spectrum, 5)
+        p95 = np.percentile(spectrum, 95)
+        scale = p95 - p5
+        if scale <= 0:
+            return 0, "peak_analysis(flat_spectrum)"
+        norm = (spectrum - np.median(spectrum)) / scale
+
+        try:
             from scipy.signal import find_peaks
+            peaks, p_props = find_peaks(norm, prominence=0.05)
+            valleys, v_props = find_peaks(-norm, prominence=0.05)
+        except Exception:
+            return 0, "peak_analysis(missing_scipy)"
 
-            # Find peaks (high points)
-            peaks, _ = find_peaks(first_spectrum, prominence=0.01 * (max_val - min_val))
-            # Find valleys (low points) by inverting
-            valleys, _ = find_peaks(-first_spectrum, prominence=0.01 * (max_val - min_val))
+        peak_prom = float(np.mean(p_props.get("prominences", []))) if len(peaks) else 0.0
+        valley_prom = float(np.mean(v_props.get("prominences", []))) if len(valleys) else 0.0
 
-            # Calculate prominence of peaks vs valleys
-            if len(peaks) > 0:
-                peak_heights = first_spectrum[peaks]
-                peak_prominence = np.mean(peak_heights - mean_val)
-            else:
-                peak_prominence = 0
+        if valley_prom > peak_prom * 1.2:
+            return 1, "peak_analysis(valleys_prominent)"
+        if peak_prom > valley_prom * 1.2:
+            return -1, "peak_analysis(peaks_prominent)"
+        return 0, "peak_analysis(ambiguous)"
 
-            if len(valleys) > 0:
-                valley_depths = first_spectrum[valleys]
-                valley_prominence = np.mean(mean_val - valley_depths)
-            else:
-                valley_prominence = 0
+    if len(data) > 0:
+        # Vote across multiple spectra to reduce single-sample fragility
+        n_samples = data.shape[0]
+        sample_count = min(n_samples, 25)
+        if n_samples > 1:
+            indices = np.linspace(0, n_samples - 1, sample_count).astype(int)
+        else:
+            indices = np.array([0])
 
-            # In reflectance spectra, absorption features appear as valleys
-            # In absorbance spectra, absorption features appear as peaks
-            if valley_prominence > peak_prominence * 1.2:
-                # Valleys more prominent - suggests reflectance
+        votes = []
+        methods = []
+        for idx in indices:
+            vote, method = _shape_vote(data[idx, :])
+            votes.append(vote)
+            methods.append(method)
+
+        votes = np.array(votes)
+        reflectance_votes = np.sum(votes == 1)
+        absorbance_votes = np.sum(votes == -1)
+        valid_votes = reflectance_votes + absorbance_votes
+
+        if valid_votes > 0:
+            refl_ratio = reflectance_votes / valid_votes
+            abs_ratio = absorbance_votes / valid_votes
+            if refl_ratio >= 0.6:
                 reflectance_score += 25
-                detection_methods.append("peak_analysis(valleys_prominent)")
-            elif peak_prominence > valley_prominence * 1.2:
-                # Peaks more prominent - suggests absorbance
+                detection_methods.append("peak_analysis(vote_reflectance)")
+            elif abs_ratio >= 0.6:
                 absorbance_score += 25
-                detection_methods.append("peak_analysis(peaks_prominent)")
+                detection_methods.append("peak_analysis(vote_absorbance)")
             else:
-                # Ambiguous peak structure
-                detection_methods.append("peak_analysis(ambiguous)")
+                detection_methods.append("peak_analysis(vote_ambiguous)")
+        else:
+            detection_methods.append("peak_analysis(no_valid_votes)")
 
     # Criterion 4: Column name analysis (bonus weight: +15%)
     if metadata and 'column_names' in metadata:
@@ -2667,18 +2785,24 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     # Step 8: Validation
     # Check for duplicate specimen IDs (only if not generated)
     # Use X.index since specimen_ids may be out of sync after NaN removal
+    n_duplicates_renamed = 0
+    duplicate_rename_mapping = {}
     if not generated_ids and X.index.duplicated().any():
-        n_duplicates = X.index.duplicated().sum()
-        duplicates = X.index[X.index.duplicated()].unique()[:5]
-        print(f"Warning: Found {n_duplicates} duplicate specimen IDs. "
-              f"Keeping first occurrence. Examples: {list(duplicates)}")
+        # Rename duplicates by adding .1, .2, etc. suffix instead of removing them
+        new_index, n_duplicates_renamed, duplicate_rename_mapping = _rename_duplicate_ids(X.index)
 
-        # Keep first occurrence of each duplicate
-        keep_mask = ~X.index.duplicated(keep='first')
-        X = X[keep_mask]
-        y = y[keep_mask]
+        print(f"Warning: Found {n_duplicates_renamed} duplicate specimen IDs. "
+              f"Auto-renamed with .1, .2, etc. suffix.")
+
+        # Show examples of renamed IDs
+        for orig_id, new_ids in list(duplicate_rename_mapping.items())[:3]:
+            print(f"  '{orig_id}' -> {new_ids}")
+
+        # Apply renamed index to all DataFrames
+        X.index = new_index
+        y.index = new_index
         if metadata_df is not None:
-            metadata_df = metadata_df[keep_mask]
+            metadata_df.index = new_index
 
     # Check wavelength ordering
     wavelength_values = X.columns.values
@@ -2686,7 +2810,7 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
               for i in range(len(wavelength_values)-1)):
         print("Warning: Wavelengths were not strictly increasing. Sorted automatically.")
 
-    # Step 9: Detect data type (reflectance vs absorbance)
+    # Step 9: Detect data type (reflectance vs absorbance) for Excel
     data_type, type_confidence, detection_method = detect_spectral_data_type(X)
     value_scale = infer_reflectance_scale(X) if data_type == "reflectance" else 1.0
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
@@ -2709,7 +2833,9 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'duplicates_renamed': n_duplicates_renamed,
+        'duplicate_rename_mapping': duplicate_rename_mapping
     }
 
     print(f"Successfully read {len(X)} spectra with {X.shape[1]} wavelengths from Excel file")
