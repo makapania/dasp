@@ -1916,11 +1916,11 @@ def detect_spectral_data_type(X, metadata=None):
             reflectance_score += 20
             absorbance_score += 10
             detection_methods.append("bounds_check(0-1_low_mean)")
-    elif max_val > 1.0 and max_val <= 1.5:
-        # Ambiguous range - could be reflectance with errors or low absorbance
-        absorbance_score += 15
+    elif max_val > 1.2 and max_val <= 1.5:
+        # Ambiguous range - could be reflectance with mild overshoot or low absorbance
+        absorbance_score += 10
         reflectance_score += 10
-        detection_methods.append("bounds_check(ambiguous_1.0-1.5)")
+        detection_methods.append("bounds_check(ambiguous_1.2-1.5)")
     else:
         # Negative values or very low values
         if min_val < -0.5:
@@ -1962,88 +1962,14 @@ def detect_spectral_data_type(X, metadata=None):
         reflectance_score += 20
         detection_methods.append("reflectance_guard(typical_range_low_negative)")
 
-    # Criterion 3: Peak/valley shape analysis (weight: ~25%)
-    def _smooth_spectrum(spectrum):
-        spectrum = np.asarray(spectrum, dtype=float)
-        if spectrum.size < 11:
-            return spectrum
-        try:
-            from scipy.signal import savgol_filter
-            # Keep window length odd and bounded by spectrum length
-            window = min(15, spectrum.size // 2 * 2 - 1)
-            window = max(window, 7)
-            return savgol_filter(spectrum, window_length=window, polyorder=2, mode='interp')
-        except Exception:
-            # Simple moving average fallback
-            window = 5
-            kernel = np.ones(window) / window
-            return np.convolve(spectrum, kernel, mode='same')
+    # Guardrail: absorbance often shows negative baselines or substantial negatives
+    if (negative_ratio > 0.02) or (min_val < -0.05 and mean_val < 0.4):
+        absorbance_score += 20
+        detection_methods.append("absorbance_guard(negative_baseline)")
 
-    def _shape_vote(spectrum):
-        spectrum = np.asarray(spectrum, dtype=float)
-        spectrum = spectrum[~np.isnan(spectrum)]
-        if spectrum.size < 20:
-            return 0, "peak_analysis(insufficient_points)"
-
-        spectrum = _smooth_spectrum(spectrum)
-        # Robust normalization to reduce amplitude bias
-        p5 = np.percentile(spectrum, 5)
-        p95 = np.percentile(spectrum, 95)
-        scale = p95 - p5
-        if scale <= 0:
-            return 0, "peak_analysis(flat_spectrum)"
-        norm = (spectrum - np.median(spectrum)) / scale
-
-        try:
-            from scipy.signal import find_peaks
-            peaks, p_props = find_peaks(norm, prominence=0.05)
-            valleys, v_props = find_peaks(-norm, prominence=0.05)
-        except Exception:
-            return 0, "peak_analysis(missing_scipy)"
-
-        peak_prom = float(np.mean(p_props.get("prominences", []))) if len(peaks) else 0.0
-        valley_prom = float(np.mean(v_props.get("prominences", []))) if len(valleys) else 0.0
-
-        if valley_prom > peak_prom * 1.2:
-            return 1, "peak_analysis(valleys_prominent)"
-        if peak_prom > valley_prom * 1.2:
-            return -1, "peak_analysis(peaks_prominent)"
-        return 0, "peak_analysis(ambiguous)"
-
-    if len(data) > 0:
-        # Vote across multiple spectra to reduce single-sample fragility
-        n_samples = data.shape[0]
-        sample_count = min(n_samples, 25)
-        if n_samples > 1:
-            indices = np.linspace(0, n_samples - 1, sample_count).astype(int)
-        else:
-            indices = np.array([0])
-
-        votes = []
-        methods = []
-        for idx in indices:
-            vote, method = _shape_vote(data[idx, :])
-            votes.append(vote)
-            methods.append(method)
-
-        votes = np.array(votes)
-        reflectance_votes = np.sum(votes == 1)
-        absorbance_votes = np.sum(votes == -1)
-        valid_votes = reflectance_votes + absorbance_votes
-
-        if valid_votes > 0:
-            refl_ratio = reflectance_votes / valid_votes
-            abs_ratio = absorbance_votes / valid_votes
-            if refl_ratio >= 0.6:
-                reflectance_score += 25
-                detection_methods.append("peak_analysis(vote_reflectance)")
-            elif abs_ratio >= 0.6:
-                absorbance_score += 25
-                detection_methods.append("peak_analysis(vote_absorbance)")
-            else:
-                detection_methods.append("peak_analysis(vote_ambiguous)")
-        else:
-            detection_methods.append("peak_analysis(no_valid_votes)")
+    # Criterion 3: Peak/valley shape analysis is currently disabled because it
+    # misclassifies reflectance data with sharp peaks after smoothing.
+    detection_methods.append("peak_analysis(disabled)")
 
     # Criterion 4: Column name analysis (bonus weight: +15%)
     if metadata and 'column_names' in metadata:

@@ -11078,6 +11078,26 @@ class SpectralPredictApp:
         # Align Y with X index
         self.y = new_y.reindex(self.X.index)
 
+        # Keep validation targets in sync with current target column
+        if self.validation_X is not None or self.validation_y is not None:
+            try:
+                if self.validation_X is not None and len(self.validation_X) > 0:
+                    validation_idx = list(self.validation_X.index)
+                elif self.validation_y is not None and len(self.validation_y) > 0:
+                    validation_idx = list(self.validation_y.index)
+                else:
+                    validation_idx = []
+
+                if validation_idx:
+                    self.validation_y = self.y.loc[validation_idx]
+                    if hasattr(self, 'validation_status_label'):
+                        self.validation_status_label.config(
+                            text=f"Validation set updated for target '{new_target}' ({len(validation_idx)} samples)"
+                        )
+                    print(f"DEBUG: Updated validation_y after target change (n={len(validation_idx)})")
+            except Exception as e:
+                print(f"WARNING: Could not update validation_y after target change: {e}")
+
         # Update task type detection and model checkboxes
         self._on_task_type_changed()
 
@@ -19283,21 +19303,92 @@ class SpectralPredictApp:
 
                             # For classification, re-create label encoder from training data
                             # (run_unified_bayesian doesn't return it)
+                            y_train_np = y_np
                             if task_type == 'classification':
+                                # Quick sanity check: validation labels should overlap training labels
+                                train_labels = np.unique(y_np)
+                                val_labels = np.unique(y_val_np)
+
+                                def _norm_label(v):
+                                    return str(v).strip().lower()
+
+                                # Build normalized mapping from training labels -> original label
+                                norm_to_train = {_norm_label(v): v for v in train_labels}
+                                train_label_strs = np.array([_norm_label(v) for v in train_labels], dtype=object)
+                                val_label_strs = np.array([_norm_label(v) for v in val_labels], dtype=object)
+                                overlap = np.intersect1d(train_label_strs, val_label_strs)
+
+                                if overlap.size == 0:
+                                    # Common Yes/No mismatch with 0/1 or True/False
+                                    if set(train_label_strs) == {"yes", "no"}:
+                                        yn_map = {"0": "no", "1": "yes", "true": "yes", "false": "no"}
+                                        y_val_np = np.array([yn_map.get(_norm_label(v), _norm_label(v)) for v in y_val_np], dtype=object)
+                                        val_labels = np.unique(y_val_np)
+                                        val_label_strs = np.array([_norm_label(v) for v in val_labels], dtype=object)
+                                        overlap = np.intersect1d(train_label_strs, val_label_strs)
+                                        if overlap.size > 0:
+                                            self._log_progress("  Mapped validation labels to Yes/No")
+
+                                # Normalize validation labels to training label set (string-normalized match)
+                                if overlap.size > 0:
+                                    y_val_np = np.array(
+                                        [norm_to_train.get(_norm_label(v), v) for v in y_val_np],
+                                        dtype=object
+                                    )
+
                                 from sklearn.preprocessing import LabelEncoder
                                 temp_encoder = LabelEncoder()
                                 temp_encoder.fit(y_np)
+                                y_train_np = temp_encoder.transform(y_np)
+
                                 try:
                                     y_val_np = temp_encoder.transform(y_val_np)
-                                    self._log_progress("  Encoded validation labels")
+                                    self._log_progress("  Encoded training + validation labels")
                                 except ValueError as e:
-                                    self._log_progress(f"  [Warning] Could not encode validation labels: {e}")
+                                    # Handle unseen/mismatched validation labels by filtering to known classes
+                                    classes = temp_encoder.classes_
+                                    class_str_map = {str(c): c for c in classes}
+                                    y_val_raw = y_val_np
+                                    y_val_mapped = []
+                                    known_mask = []
+                                    for v in y_val_raw:
+                                        if v in classes:
+                                            y_val_mapped.append(v)
+                                            known_mask.append(True)
+                                        else:
+                                            v_str = str(v)
+                                            if v_str in class_str_map:
+                                                y_val_mapped.append(class_str_map[v_str])
+                                                known_mask.append(True)
+                                            else:
+                                                y_val_mapped.append(None)
+                                                known_mask.append(False)
+
+                                    known_mask = np.array(known_mask, dtype=bool)
+                                    unknown_count = int((~known_mask).sum())
+                                    if unknown_count > 0:
+                                        self._log_progress(
+                                            f"  [Warning] {unknown_count} validation labels not in training classes; "
+                                            f"dropping those rows for validation metrics"
+                                        )
+                                    if known_mask.any():
+                                        X_val_np = X_val_np[known_mask]
+                                        y_val_np = np.array(y_val_mapped, dtype=object)[known_mask]
+                                        y_val_np = temp_encoder.transform(y_val_np)
+                                    else:
+                                        self._log_progress(
+                                            f"  [Warning] No validation labels match training classes: {e}"
+                                        )
+                                        self._log_progress(
+                                            f"  Training labels: {list(classes)} | Validation labels: {list(val_labels)}"
+                                        )
+                                        raise ValueError("No validation labels match training classes")
 
                             # Compute validation metrics
                             results_df = compute_validation_metrics_for_top_models(
                                 df_results=results_df,
                                 X_train=X_np,
-                                y_train=y_np,
+                                y_train=y_train_np,
                                 X_val=X_val_np,
                                 y_val=y_val_np,
                                 task_type=task_type,
