@@ -567,6 +567,11 @@ def compute_validation_metrics_for_top_models(
             # === STEP 4: Rebuild model and fit ===
             model = _rebuild_model_from_row(row, task_type)
 
+            # Safety check: Skip if n_components > n_features (can happen with variable selection)
+            if hasattr(model, 'n_components') and model.n_components > X_train_final.shape[1]:
+                print(f"  [Warning] Skipping model {i+1}: n_components ({model.n_components}) > n_features ({X_train_final.shape[1]})")
+                continue
+
             # Fit on training data
             model.fit(X_train_final, y_train)
 

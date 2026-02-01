@@ -740,6 +740,18 @@ def create_unified_objective(
                 trial, model_name, n_features_final, task_type
             )
 
+            # 5b. Prune invalid PLS trials where n_components > n_features
+            # This can happen when variable subset selection reduces features below the
+            # suggested n_components. Skip these trials rather than silently clamping.
+            if model_name.lower() in ('pls', 'pls-da'):
+                n_components = model_params.get('n_components', 2)
+                if n_components > n_features_final:
+                    logging.debug(
+                        f"Trial {trial.number}: Pruning - n_components ({n_components}) > "
+                        f"n_features ({n_features_final})"
+                    )
+                    return 1e10  # Return penalty to skip invalid combination
+
             # 6. Build and cross-validate model
             model = build_model(model_name, model_params, task_type=task_type)
 
