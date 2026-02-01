@@ -2648,7 +2648,7 @@ class SpectralPredictApp:
 
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
-        self.ga_preprocess_method = tk.StringVar(value="smart")  # 'smart', 'exhaustive', or 'ga'
+        self.ga_preprocess_method = tk.StringVar(value="exhaustive")  # 'exhaustive' or 'ga'
         self.ga_preprocess_population = tk.IntVar(value=48)
         self.ga_preprocess_generations = tk.IntVar(value=30)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
@@ -6925,16 +6925,16 @@ class SpectralPredictApp:
         # Initially hide options
         self.smart_preproc_options_frame.grid_remove()
 
-        # ===== GA AND SMART PREPROCESSING =====
-        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA and Smart Preprocessing",
-                                                                     subtitle="Genetic algorithm with smart initialization and multi-seed robustness")
+        # ===== GA AND EXHAUSTIVE PREPROCESSING =====
+        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA and Exhaustive Preprocessing",
+                                                                     subtitle="Genetic algorithm or exhaustive search for optimal preprocessing")
         ga_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         ga_preproc_frame = tk.Frame(ga_preproc_card, bg=self.colors['card_bg'])
         ga_preproc_frame.pack(fill='both', expand=True)
 
         # Enable GA Preprocessing checkbox
-        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA and Smart Preprocessing",
+        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA and Exhaustive Preprocessing",
                                                     variable=self.enable_ga_preprocessing,
                                                     command=self._toggle_ga_preprocessing_options)
         self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
@@ -6946,7 +6946,7 @@ class SpectralPredictApp:
         # Search method dropdown
         ttk.Label(self.ga_preproc_options_frame, text="Search Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         method_combo = ttk.Combobox(self.ga_preproc_options_frame, textvariable=self.ga_preprocess_method,
-                                     values=["smart", "exhaustive", "ga"], state="readonly", width=12)
+                                     values=["exhaustive", "ga"], state="readonly", width=12)
         method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
 
         ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))

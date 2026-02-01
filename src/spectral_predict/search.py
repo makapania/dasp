@@ -736,7 +736,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                analysis_wl_regions=None,  # List of (min, max) tuples for multi-region support
                imbalance_method=None, imbalance_params=None, enable_class_weight=False,
                ga_preprocess=False,
-               ga_preprocess_method='ga',
+               ga_preprocess_method='exhaustive',
                ga_preprocess_population=48,
                ga_preprocess_generations=30,
                ga_preprocess_cv_folds=5,
