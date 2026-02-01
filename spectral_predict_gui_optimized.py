@@ -13624,7 +13624,7 @@ class SpectralPredictApp:
                 missing = train_classes - val_classes
 
                 if missing:
-                    self._log(f"Warning: {len(missing)} class(es) not in validation set: {missing}")
+                    print(f"Warning: {len(missing)} class(es) not in validation set: {missing}")
                     messagebox.showinfo(
                         "Class Distribution Warning",
                         f"The following classes have no samples in validation:\n{', '.join(map(str, missing))}\n\n"
