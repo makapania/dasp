@@ -403,6 +403,25 @@ def compute_validation_metrics_for_top_models(
 
     print(f"\n[Validation] Computing validation metrics for top {n_to_process} models...")
 
+    # For classification, check class distribution in validation set and warn if problematic
+    if task_type == 'classification':
+        val_class_counts = pd.Series(y_val).value_counts()
+        train_class_counts = pd.Series(y_train).value_counts()
+        classes_in_train = set(train_class_counts.index)
+        classes_in_val = set(val_class_counts.index)
+        missing_classes = classes_in_train - classes_in_val
+
+        if missing_classes:
+            print(f"\n[Validation Warning] {len(missing_classes)} class(es) not represented in validation set: {missing_classes}")
+            print(f"  Training class distribution: {dict(train_class_counts)}")
+            print(f"  Validation class distribution: {dict(val_class_counts)}")
+            print(f"  Some metrics (ROC AUC) will be NaN. Consider using more validation samples or fewer classes.\n")
+
+        # Check for critically small class samples in validation
+        min_samples_per_class = val_class_counts.min() if len(val_class_counts) > 0 else 0
+        if min_samples_per_class < 2:
+            print(f"[Validation Warning] Some classes have <2 samples in validation. Metrics may be unreliable.\n")
+
     # Cache preprocessed data by preprocessing config to avoid redundant computation
     preprocess_cache = {}
 
@@ -422,7 +441,20 @@ def compute_validation_metrics_for_top_models(
             ga_transform = None
             ga_genes = None
 
-            if ga_genes_str is not None and ga_genes_str != '' and not pd.isna(ga_genes_str):
+            # Handle ga_genes_str being None, empty string, NaN scalar, list, or array
+            ga_genes_is_valid = False
+            if ga_genes_str is not None:
+                if isinstance(ga_genes_str, (list, np.ndarray)):
+                    ga_genes_is_valid = len(ga_genes_str) > 0
+                elif isinstance(ga_genes_str, str):
+                    ga_genes_is_valid = ga_genes_str != ''
+                else:
+                    try:
+                        ga_genes_is_valid = not pd.isna(ga_genes_str)
+                    except (ValueError, TypeError):
+                        ga_genes_is_valid = True
+
+            if ga_genes_is_valid:
                 try:
                     # Parse genes from string (stored as list representation)
                     import ast
@@ -598,8 +630,10 @@ def compute_validation_metrics_for_top_models(
                     n_classes_val = len(val_classes)
 
                     if n_classes_val < 2:
-                        # ROC AUC undefined with only one class - skip
-                        pass
+                        # ROC AUC undefined with only one class
+                        # Only log for first model to avoid spam
+                        if i == 0:
+                            print(f"  [Info] ROC AUC skipped - validation set has only 1 class (need at least 2)")
                     elif hasattr(model, 'predict_proba'):
                         y_proba = model.predict_proba(X_val_final)
                         model_classes = model.classes_ if hasattr(model, 'classes_') else np.unique(y_train)
