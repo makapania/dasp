@@ -52,7 +52,7 @@ from sklearn.base import clone
 from sklearn.metrics import (
     roc_auc_score, r2_score, mean_squared_error, accuracy_score, mean_absolute_error,
     balanced_accuracy_score, cohen_kappa_score, matthews_corrcoef, log_loss,
-    f1_score, precision_score, recall_score
+    f1_score, precision_score, recall_score, classification_report
 )
 from typing import Dict, List, Optional, Callable, Tuple, Any
 
@@ -858,6 +858,26 @@ def create_unified_objective(
                 rpd = y_std / rmse if rmse > 0 else 0.0
                 rer = y_range / rmse if rmse > 0 else 0.0
 
+                # Compute regional RMSE (per-quartile performance) for coloring in Results tab
+                # This enables the same quartile-based highlighting as Grid search
+                quartiles = np.percentile(y, [25, 50, 75])
+                regional_rmse = {}
+                for i, (lower, upper) in enumerate([
+                    (-np.inf, quartiles[0]),  # Q1
+                    (quartiles[0], quartiles[1]),  # Q2
+                    (quartiles[1], quartiles[2]),  # Q3
+                    (quartiles[2], np.inf)  # Q4
+                ]):
+                    # Use true Y values for mask
+                    mask = (y >= lower) & (y < upper if i < 3 else y >= lower)
+                    if mask.sum() > 0:
+                        regional_rmse[f'Q{i+1}'] = float(np.sqrt(mean_squared_error(
+                            y[mask], y_pred_cv[mask]
+                        )))
+                    else:
+                        regional_rmse[f'Q{i+1}'] = np.nan
+                y_quartiles = quartiles.tolist()
+
                 metric = rmse  # Minimize RMSE
             else:
                 # Classification: use accuracy and ROC_AUC
@@ -953,6 +973,26 @@ def create_unified_objective(
                     balanced_acc_cv = np.nan
                     ber_cv = np.nan
 
+                # Compute per-class metrics for coloring in Results tab
+                # This enables the same class-based highlighting as Grid search
+                per_class_metrics = {}
+                class_labels = None
+                try:
+                    report = classification_report(y, y_pred_cv, output_dict=True, zero_division=0)
+                    class_labels = sorted([k for k in report.keys()
+                                           if k not in ['accuracy', 'macro avg', 'weighted avg']])
+                    for class_label in class_labels:
+                        class_key = str(class_label)
+                        if class_key in report:
+                            per_class_metrics[class_key] = {
+                                'F1': report[class_key]['f1-score'],
+                                'Precision': report[class_key]['precision'],
+                                'Recall': report[class_key]['recall'],
+                                'Support': report[class_key]['support']
+                            }
+                except Exception:
+                    pass
+
                 metric = -accuracy  # Minimize negative accuracy
 
             # Store additional info in trial
@@ -985,6 +1025,9 @@ def create_unified_objective(
                 trial.set_user_attr('RPD', rpd)
                 trial.set_user_attr('Bias', bias_cv)
                 trial.set_user_attr('RER', rer)
+                # Regional RMSE for quartile-based coloring in Results tab
+                trial.set_user_attr('regional_rmse', regional_rmse)
+                trial.set_user_attr('y_quartiles', y_quartiles)
             else:
                 # Calibration metrics
                 cal_accuracy = accuracy_score(y, y_pred_cal)
@@ -1073,6 +1116,9 @@ def create_unified_objective(
                 trial.set_user_attr('BalancedAcccv', balanced_acc_cv)
                 trial.set_user_attr('BERcv', ber_cv)
                 trial.set_user_attr('LogLosscv', logloss_cv)
+                # Per-class metrics for class-based coloring in Results tab
+                trial.set_user_attr('per_class_metrics', per_class_metrics)
+                trial.set_user_attr('class_labels', class_labels)
 
             # Store selected wavelengths in TRAINING ORDER (importance order)
             # CRITICAL: Do NOT sort - Model Development expects wavelengths in the same
@@ -1446,6 +1492,14 @@ def convert_study_to_dataframe(
             row['RPD'] = trial.user_attrs.get('RPD', np.nan)
             row['Bias'] = trial.user_attrs.get('Bias', np.nan)
             row['RER'] = trial.user_attrs.get('RER', np.nan)
+            # Regional RMSE for quartile-based coloring in Results tab
+            row['regional_rmse'] = trial.user_attrs.get('regional_rmse', None)
+            row['y_quartiles'] = trial.user_attrs.get('y_quartiles', None)
+            # Individual quartile columns for display/sorting
+            regional_rmse = trial.user_attrs.get('regional_rmse')
+            if regional_rmse:
+                for q in ['Q1', 'Q2', 'Q3', 'Q4']:
+                    row[f'RMSE_{q}'] = regional_rmse.get(q, np.nan)
         else:
             # Calibration metrics
             row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)
@@ -1474,6 +1528,14 @@ def convert_study_to_dataframe(
             row['BalancedAcccv'] = trial.user_attrs.get('BalancedAcccv', np.nan)
             row['BERcv'] = trial.user_attrs.get('BERcv', np.nan)
             row['LogLosscv'] = trial.user_attrs.get('LogLosscv', np.nan)
+            # Per-class metrics for class-based coloring in Results tab
+            row['per_class_metrics'] = trial.user_attrs.get('per_class_metrics', None)
+            row['class_labels'] = trial.user_attrs.get('class_labels', None)
+            # Individual class F1 columns for display/sorting
+            per_class = trial.user_attrs.get('per_class_metrics')
+            if per_class:
+                for class_label, metrics in per_class.items():
+                    row[f'F1_Class{class_label}'] = metrics.get('F1', np.nan)
 
         # Add wavelength info
         row['top_vars'] = trial.user_attrs.get('selected_wavelengths', 'N/A')
