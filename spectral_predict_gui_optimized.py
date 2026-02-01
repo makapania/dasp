@@ -19490,6 +19490,15 @@ class SpectralPredictApp:
                     else:
                         self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
 
+                # Store label_encoder for classification (needed for legend display)
+                if task_type == 'classification':
+                    from sklearn.preprocessing import LabelEncoder
+                    label_encoder = LabelEncoder()
+                    label_encoder.fit(y_np)
+                    self.label_encoder = label_encoder
+                else:
+                    self.label_encoder = None
+
             elif optimization_method == "nsga2":
                 # === NSGA-II MULTI-OBJECTIVE OPTIMIZATION ===
                 self._log_progress("\n🧬 Running NSGA-II Multi-Objective Optimization...")
