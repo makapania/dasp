@@ -1262,21 +1262,33 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
         # NEW: Run GA optimization per-model (not per-model-group)
         # This ensures each model gets preprocessing optimized for its actual hyperparameters
+        # Use model_grids.keys() since it's already filtered by enabled_models or models_to_test
+        models_for_ga = list(model_grids.keys())
         print(f"Running {ga_preprocess_method.upper()} optimization per-model with actual hyperparameters...")
-        print(f"Models selected: {models_to_test}")
+        print(f"Models selected: {models_for_ga}")
         print(f"")
 
         # Storage for GA results (one per model)
         ga_results = {}
 
         # Run GA optimization for each selected model
-        # GA uses PROXY fitness models (PLS, LightGBM, MLP) for speed
-        # After GA finds optimal preprocessing, Grid Search runs with user's full settings
-        for model_name in models_to_test:
+        # Uses ACTUAL model evaluation (via model_config) for accurate preprocessing optimization
+        # Falls back to proxy fitness models if actual model fails
+        for model_name in models_for_ga:
+            # Send progress update to GUI before starting this model
+            if progress_callback:
+                model_idx = models_for_ga.index(model_name) + 1
+                progress_callback({
+                    'algorithm': 'preprocessing_optimization',
+                    'current': 0,
+                    'total': len(models_for_ga),
+                    'message': f"Optimizing preprocessing for {model_name} ({model_idx}/{len(models_for_ga)})..."
+                })
+
             print(f"Optimizing preprocessing for {model_name}...")
 
-            # Determine which proxy fitness model to use based on model type
-            if model_name.lower() in ['pls', 'ridge', 'lasso', 'elasticnet']:
+            # Determine which proxy fitness model to use as fallback
+            if model_name.lower() in ['pls', 'pls-da', 'ridge', 'lasso', 'elasticnet']:
                 fitness_model = 'pls'
             elif model_name.lower() in ['lightgbm', 'xgboost', 'catboost', 'randomforest']:
                 fitness_model = 'lightgbm'
@@ -1287,7 +1299,20 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             else:
                 fitness_model = 'pls'  # Default
 
-            # Run GA/Exhaustive optimization with proxy fitness model
+            # Get first hyperparameter set for this model (for actual model evaluation)
+            # model_grids is dict mapping model_name -> list of (model_instance, params_dict)
+            first_params = {}
+            if model_name in model_grids and model_grids[model_name]:
+                # Extract params from first config tuple: (model_instance, params_dict)
+                first_params = model_grids[model_name][0][1] if len(model_grids[model_name][0]) > 1 else {}
+
+            # Build model_config for actual model evaluation
+            model_config = {
+                'name': model_name,
+                'params': first_params
+            }
+
+            # Run GA/Exhaustive optimization with actual model evaluation
             ga_result = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
@@ -1300,16 +1325,38 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 random_state=random_state,
                 verbose=1,
                 progress_callback=progress_callback,
-                fitness_model=fitness_model,  # Use proxy model for fast evaluation
+                fitness_model=fitness_model,  # Fallback if model_config fails
                 top_n=5,  # Return top 5 preprocessing configs
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1
+                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1,
+                model_config=model_config  # Use actual model for fitness evaluation
             )
 
             ga_results[model_name] = ga_result
             print(f"  {model_name} optimization complete!")
             print(f"  Best config: {ga_result['best_config']}")
-            print(f"  Best RMSECV: {ga_result['best_rmsecv']:.4f}")
+            if task_type == 'classification':
+                # For classification, fitness is accuracy (positive, higher = better)
+                best_fitness = ga_result['configs'][0]['fitness'] if ga_result.get('configs') else 0
+                print(f"  Best Accuracy: {best_fitness:.4f}")
+            else:
+                # For regression, best_rmsecv is already the RMSECV value
+                print(f"  Best RMSECV: {ga_result['best_rmsecv']:.4f}")
             print(f"  Returning top {len(ga_result.get('configs', []))} configs\n")
+
+            # Send completion update to GUI after this model finishes
+            if progress_callback:
+                model_idx = models_for_ga.index(model_name) + 1
+                best_score = ga_result['configs'][0]['fitness'] if ga_result.get('configs') else 0
+                if task_type == 'classification':
+                    score_str = f"Best Accuracy: {best_score:.4f}"
+                else:
+                    score_str = f"Best RMSECV: {ga_result['best_rmsecv']:.4f}"
+                progress_callback({
+                    'algorithm': 'preprocessing_optimization',
+                    'current': model_idx,
+                    'total': len(models_for_ga),
+                    'message': f"  ✓ {model_name} preprocessing complete - {score_str}"
+                })
 
         # Create preprocessing configs from all GA results
         # Each model contributes its top-N preprocessing configs
@@ -1351,7 +1398,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 })
 
         print(f"Total preprocessing configs: {len(preprocess_configs)}")
-        print(f"Breakdown: {len(models_to_test)} models × up to 5 configs each")
+        print(f"Breakdown: {len(models_for_ga)} models × up to 5 configs each")
         print(f"{'='*70}\n")
 
         # Skip normal preprocessing config building
@@ -3286,10 +3333,16 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
 
                 if hasattr(pipe_clone, 'steps'):
                     for step_name, step in pipe_clone.steps[:-1]:
-                        step.fit(X_train_transformed, y_train)
-                        X_train_transformed = step.transform(X_train_transformed)
-                        X_test_transformed = step.transform(X_test_transformed)
-                        fitted_steps.append((step_name, step, 'transform'))
+                        if hasattr(step, 'fit_resample'):
+                            # For imblearn resamplers, apply fit_resample (only to training data)
+                            X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
+                            fitted_steps.append((step_name, step, 'resample'))
+                            # Note: Don't transform test data - resampling only applies to training
+                        elif hasattr(step, 'transform'):
+                            step.fit(X_train_transformed, y_train)
+                            X_train_transformed = step.transform(X_train_transformed)
+                            X_test_transformed = step.transform(X_test_transformed)
+                            fitted_steps.append((step_name, step, 'transform'))
 
                     final_model = final_model_es
                 else:

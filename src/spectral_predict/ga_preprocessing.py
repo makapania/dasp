@@ -310,14 +310,18 @@ def evaluate_fitness(
         else:
             cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-        # If model_config provided, use actual model for fitness
+        # If model_config provided, try actual model for fitness (with fallback)
         if model_config is not None:
-            return _evaluate_with_actual_model(
+            actual_result = _evaluate_with_actual_model(
                 X_preproc, y, cv, task_type,
                 model_config['name'], model_config.get('params', {}), random_state
             )
+            # If actual model succeeded, return its result
+            if actual_result > -np.inf:
+                return actual_result
+            # Fall through to proxy models if actual model failed
 
-        # Otherwise use proxy fitness model
+        # Use proxy fitness model (or as fallback if actual model failed)
         if fitness_model == 'lightgbm':
             return _evaluate_lightgbm(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'mlp':
@@ -359,7 +363,7 @@ def _evaluate_with_actual_model(
     task_type : str
         'regression' or 'classification'
     model_name : str
-        Name of model (e.g., 'pls', 'lightgbm', 'xgboost')
+        Name of model (e.g., 'PLS', 'LightGBM', 'XGBoost', 'PLS-DA')
     model_params : dict
         User hyperparameters for the model
     random_state : int
@@ -371,19 +375,11 @@ def _evaluate_with_actual_model(
         Negative RMSECV (regression) or accuracy (classification)
     """
     from .models import get_model
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
 
     try:
-        # Get the actual model instance
-        model = get_model(model_name, task_type=task_type, random_state=random_state)
-
-        # Apply user hyperparameters
-        if model_params:
-            model.set_params(**model_params)
-
-        # Cross-validated prediction
-        y_pred = cross_val_predict(model, X, y, cv=cv)
-
-        # Calculate fitness
+        # Prepare y for classification
         if task_type == 'classification':
             y_class = np.asarray(y)
             if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
@@ -392,7 +388,49 @@ def _evaluate_with_actual_model(
                 y_class = le.fit_transform(y_class)
             else:
                 y_class = y_class.astype(int)
+            y_for_cv = y_class
+        else:
+            y_for_cv = y
 
+        # Get n_components from params if available (for PLS-based models)
+        n_components = model_params.get('n_components', 10) if model_params else 10
+
+        # Get the model instance (get_model doesn't accept random_state)
+        model = get_model(model_name, task_type=task_type, n_components=n_components)
+
+        # Apply user hyperparameters (excluding lr_ prefixed params for PLS-DA)
+        if model_params:
+            # Filter out lr_ params (LogisticRegression params for PLS-DA)
+            base_params = {k: v for k, v in model_params.items()
+                          if not k.startswith('lr_')}
+            if base_params:
+                try:
+                    model.set_params(**base_params)
+                except Exception:
+                    pass  # Ignore params that don't apply
+
+        # For PLS-DA classification, build Pipeline with PLSTransformer + LogisticRegression
+        # This matches how PLS-DA is built during search (search.py:3598-3621)
+        if task_type == 'classification' and model_name.upper() in ['PLS-DA', 'PLS']:
+            from sklearn.linear_model import LogisticRegression
+
+            # Extract LogisticRegression parameters from config (prefixed with lr_)
+            lr_C = model_params.get('lr_C', 1.0) if model_params else 1.0
+            lr_solver = model_params.get('lr_solver', 'lbfgs') if model_params else 'lbfgs'
+            lr_max_iter = model_params.get('lr_max_iter', 1000) if model_params else 1000
+
+            model = Pipeline([
+                ('pls', model),
+                ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
+                ('lr', LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter,
+                                          random_state=random_state))
+            ])
+
+        # Cross-validated prediction
+        y_pred = cross_val_predict(model, X, y_for_cv, cv=cv)
+
+        # Calculate fitness
+        if task_type == 'classification':
             # Ensure y_pred is integer class labels
             y_pred_class = np.asarray(y_pred)
             if y_pred_class.dtype != int:
@@ -732,6 +770,93 @@ def mutate(
 
 
 # =============================================================================
+# DIVERSITY SELECTION FOR EXHAUSTIVE SEARCH
+# =============================================================================
+
+def select_diverse_exhaustive_configs(
+    all_genes: List[np.ndarray],
+    all_fitness: List[float],
+    n_top: int = 5,
+    exclude_raw_from_diversity: bool = True
+) -> List[int]:
+    """
+    Select top-N diverse configurations ensuring variety across preprocessing types.
+
+    This prevents the top-N from being all similar configs (e.g., all 2nd derivative
+    with similar windows). Instead, we get the best config from each preprocessing
+    type first, then fill remaining slots with best overall.
+
+    Parameters
+    ----------
+    all_genes : list of np.ndarray
+        All chromosomes evaluated
+    all_fitness : list of float
+        Fitness scores for each chromosome
+    n_top : int
+        Number of configurations to return
+    exclude_raw_from_diversity : bool
+        If True, "raw" preprocessing is NOT given a diversity slot.
+        It will only be included if it scores well enough to be in top-N
+        without the diversity boost. Default True because raw rarely
+        produces the best models.
+
+    Returns
+    -------
+    selected_indices : list of int
+        Indices of selected configurations in original order
+    """
+    # Create list of (index, genes, fitness, preproc_type)
+    configs = []
+    for i, (genes, fitness) in enumerate(zip(all_genes, all_fitness)):
+        if fitness > -np.inf:  # Skip invalid configs
+            preproc_type = PREPROC_TYPES[genes[0]]
+            configs.append({
+                'index': i,
+                'genes': genes,
+                'fitness': fitness,
+                'preproc_type': preproc_type
+            })
+
+    if len(configs) <= n_top:
+        return [c['index'] for c in configs]
+
+    # Sort by fitness (descending - higher is better)
+    sorted_configs = sorted(configs, key=lambda c: c['fitness'], reverse=True)
+
+    # Select ensuring diversity across preprocessing types
+    selected = []
+    selected_preprocs = set()
+
+    # First pass: select best from each preprocessing TYPE (not window variation)
+    # This ensures we get deriv1, deriv2, snv_deriv1, etc. rather than just
+    # multiple window sizes of the same preprocessing
+    for config in sorted_configs:
+        preproc_type = config['preproc_type']
+
+        # Skip raw in diversity selection if configured (raw rarely produces best models)
+        if exclude_raw_from_diversity and preproc_type == 'raw':
+            continue
+
+        if preproc_type not in selected_preprocs:
+            selected.append(config)
+            selected_preprocs.add(preproc_type)
+            if len(selected) >= n_top:
+                break
+
+    # Second pass: fill remaining slots with best overall (including raw)
+    if len(selected) < n_top:
+        for config in sorted_configs:
+            if config not in selected:
+                selected.append(config)
+                if len(selected) >= n_top:
+                    break
+
+    # Return indices sorted by fitness (best first)
+    selected = sorted(selected, key=lambda c: c['fitness'], reverse=True)
+    return [c['index'] for c in selected]
+
+
+# =============================================================================
 # EXHAUSTIVE SEARCH (FOR SMALL SEARCH SPACE)
 # =============================================================================
 
@@ -866,15 +991,19 @@ def exhaustive_search(
                     'message': f"Tested {i+1}/{len(all_genes)} combinations"
                 })
 
-    # Sort by fitness (descending) and get top-N
-    results_array = np.array(results)
-    sorted_indices = np.argsort(results_array)[::-1]  # Descending order
-    top_n_actual = min(top_n, len(sorted_indices))
+    # Use diversity selection to ensure variety across preprocessing types
+    # This prevents selecting 5 similar configs (e.g., all deriv2 with different windows)
+    diverse_indices = select_diverse_exhaustive_configs(
+        all_genes, results, n_top=top_n,
+        exclude_raw_from_diversity=True  # Raw rarely produces best models
+    )
 
-    # Build top-N configs list
+    if verbose >= 1:
+        print(f"  Diversity selection: ensuring variety across preprocessing types")
+
+    # Build top-N configs list using diversity-selected indices
     configs = []
-    for i in range(top_n_actual):
-        idx = sorted_indices[i]
+    for idx in diverse_indices:
         genes = all_genes[idx]
         fitness = results[idx]
         name, transform = chromosome_to_transform(genes)
@@ -931,7 +1060,7 @@ def exhaustive_search(
         else:
             print(f"  Best RMSECV: {best_score:.4f}")
         print(f"  Best config: {best_config}")
-        print(f"  Returning top {top_n_actual} configs")
+        print(f"  Returning top {len(configs)} diverse configs")
 
     return {
         'configs': configs,  # NEW: List of top-N configs
