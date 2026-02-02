@@ -1177,6 +1177,7 @@ def run_unified_bayesian(
     early_stopping_rounds: Optional[int] = 40,
     region_test_all_individual: bool = False,
     region_test_pairwise: bool = False,
+    controller=None,  # For pause/resume/stop support
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1339,6 +1340,13 @@ def run_unified_bayesian(
 
     # Progress callback wrapper
     def progress_wrapper(study: optuna.Study, trial: optuna.trial.FrozenTrial):
+        # Check for stop/pause signal from controller
+        if controller is not None:
+            if not controller.check_and_wait():
+                # User requested stop - tell Optuna to stop after this trial
+                study.stop()
+                return
+
         if progress_callback:
             progress_info = {
                 'stage': 'unified_bayesian',

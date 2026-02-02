@@ -19327,6 +19327,7 @@ class SpectralPredictApp:
                             imbalance_params=imbalance_params,
                             region_test_all_individual=self.region_test_all_individual.get(),
                             region_test_pairwise=self.region_test_pairwise.get(),
+                            controller=self.search_controller,
                         )
 
                         if len(results_df_model) > 0:
