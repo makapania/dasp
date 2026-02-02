@@ -2595,7 +2595,6 @@ class SpectralPredictApp:
             var.trace_add('write', self._on_model_checkbox_changed)
 
         # Preprocessing method selection
-        self.use_optimize_preprocessing = tk.BooleanVar(value=True)  # Exhaustive preprocessing search
         self.use_raw = tk.BooleanVar(value=False)
         self.use_snv = tk.BooleanVar(value=True)
         self.use_sg1 = tk.BooleanVar(value=True)  # 1st derivative
@@ -6731,62 +6730,48 @@ class SpectralPredictApp:
         preprocess_frame = tk.Frame(preprocess_card, bg=self.colors['card_bg'])
         preprocess_frame.pack(fill='both', expand=True)
 
-        # Optimize Preprocessing checkbox (row 0) - triggers exhaustive preprocessing search
-        self.optimize_preproc_checkbox = ttk.Checkbutton(
-            preprocess_frame,
-            text="Optimize Preprocessing (exhaustive search)",
-            variable=self.use_optimize_preprocessing,
-            command=self._toggle_optimize_preprocessing
-        )
-        self.optimize_preproc_checkbox.grid(row=0, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Finds optimal preprocessing automatically",
-                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
-
         self.raw_checkbox = ttk.Checkbutton(preprocess_frame, text="Raw (no preprocessing)", variable=self.use_raw)
-        self.raw_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Baseline, unprocessed spectra", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
+        self.raw_checkbox.grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Baseline, unprocessed spectra", style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.raw_checkbox, text=TOOLTIP_CONTENT['preprocessing']['Raw'], delay=500)
 
         self.snv_checkbox = ttk.Checkbutton(preprocess_frame, text="SNV (Standard Normal Variate)", variable=self.use_snv)
-        self.snv_checkbox.grid(row=2, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Scatter correction", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
+        self.snv_checkbox.grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Scatter correction", style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SNV'], delay=500)
 
         self.sg1_checkbox = ttk.Checkbutton(preprocess_frame, text="SG1 (1st derivative)", variable=self.use_sg1)
-        self.sg1_checkbox.grid(row=3, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Removes baseline drift", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
+        self.sg1_checkbox.grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Removes baseline drift", style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.sg1_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG1'], delay=500)
 
         self.sg2_checkbox = ttk.Checkbutton(preprocess_frame, text="SG2 (2nd derivative)", variable=self.use_sg2)
-        self.sg2_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
+        self.sg2_checkbox.grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Peak enhancement", style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.sg2_checkbox, text=TOOLTIP_CONTENT['preprocessing']['SG2'], delay=500)
 
         self.sg3_checkbox = ttk.Checkbutton(preprocess_frame, text="SG3 (3rd derivative)", variable=self.use_sg3)
-        self.sg3_checkbox.grid(row=5, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Higher order - complex spectral features", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
+        self.sg3_checkbox.grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Higher order - complex spectral features", style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
         self.sg4_checkbox = ttk.Checkbutton(preprocess_frame, text="SG4 (4th derivative)", variable=self.use_sg4)
-        self.sg4_checkbox.grid(row=6, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Highest order - rarely needed", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
+        self.sg4_checkbox.grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Highest order - rarely needed", style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
         # Advanced: deriv_snv option
         self.deriv_snv_checkbox = ttk.Checkbutton(preprocess_frame, text="deriv_snv (advanced)", variable=self.use_deriv_snv)
-        self.deriv_snv_checkbox.grid(row=7, column=0, sticky=tk.W, pady=5)
-        ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
+        self.deriv_snv_checkbox.grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.deriv_snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['deriv_snv'], delay=500)
-
-        # Initialize checkbox states based on default Optimize Preprocessing setting
-        self._toggle_optimize_preprocessing()
 
         # Derivative window size settings
         window_size_label = ttk.Label(preprocess_frame, text="Derivative Window Sizes:", style='Subheading.TLabel')
-        window_size_label.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+        window_size_label.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
         CreateToolTip(window_size_label, text=TOOLTIP_CONTENT['preprocessing']['window_size'], delay=500)
-        ttk.Label(preprocess_frame, text="Select one or more (default: 17 only)", style='Caption.TLabel').grid(row=10, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(preprocess_frame, text="Select one or more (default: 17 only)", style='Caption.TLabel').grid(row=9, column=0, columnspan=2, sticky=tk.W)
 
         window_frame = ttk.Frame(preprocess_frame)
-        window_frame.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=5)
+        window_frame.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         ttk.Checkbutton(window_frame, text="Window=7", variable=self.window_7).grid(row=0, column=0, padx=5, pady=2)
         ttk.Checkbutton(window_frame, text="Window=11", variable=self.window_11).grid(row=0, column=1, padx=5, pady=2)
@@ -16023,23 +16008,6 @@ class SpectralPredictApp:
         else:
             self.smart_preproc_options_frame.grid_remove()
 
-    def _toggle_optimize_preprocessing(self):
-        """Enable/disable individual preprocessing checkboxes based on Optimize Preprocessing state."""
-        if self.use_optimize_preprocessing.get():
-            # Disable individual preprocessing checkboxes (they're ignored during exhaustive search)
-            state = 'disabled'
-        else:
-            state = 'normal'
-
-        # Apply to all preprocessing checkboxes
-        self.raw_checkbox.configure(state=state)
-        self.snv_checkbox.configure(state=state)
-        self.sg1_checkbox.configure(state=state)
-        self.sg2_checkbox.configure(state=state)
-        self.sg3_checkbox.configure(state=state)
-        self.sg4_checkbox.configure(state=state)
-        self.deriv_snv_checkbox.configure(state=state)
-
     def _update_importance_description(self, event=None):
         """Update importance method description label based on selection."""
         method = self.smart_preprocess_importance.get()
@@ -19726,9 +19694,9 @@ class SpectralPredictApp:
                 ga_generations=self.ga_generations.get(),
                 ga_n_runs=self.ga_n_runs.get(),
                 ga_quick_mode=self.ga_quick_mode.get(),
-                # GA preprocessing parameters (LEGACY) - also triggered by Optimize Preprocessing checkbox
-                ga_preprocess=self.enable_ga_preprocessing.get() or self.use_optimize_preprocessing.get(),
-                ga_preprocess_method='exhaustive' if self.use_optimize_preprocessing.get() else self.ga_preprocess_method.get(),
+                # GA preprocessing parameters (LEGACY)
+                ga_preprocess=self.enable_ga_preprocessing.get(),
+                ga_preprocess_method=self.ga_preprocess_method.get(),
                 ga_preprocess_population=self.ga_preprocess_population.get(),
                 ga_preprocess_generations=self.ga_preprocess_generations.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
