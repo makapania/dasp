@@ -1442,6 +1442,9 @@ for train_idx, test_idx in cv.split({x_var}, y):
 all_y_true_arr = np.array(all_y_true)
 all_y_pred_arr = np.array(all_y_pred)
 
+# Keep y_pred_cv for compatibility with metrics template
+y_pred_cv = all_y_pred_arr
+
 accuracy = np.mean(fold_acc)
 f1 = np.mean(fold_f1)
 
