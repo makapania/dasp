@@ -2385,11 +2385,19 @@ class SpectralPredictApp:
         self.current_prediction_model_dict = None  # Model dict with metadata (for .dasp/legacy)
         self.new_satellite_data_predict = None  # New satellite data to transform and predict
 
+        # Mode A (Predict) data type tracking
+        self.ct_pred_data_type = tk.StringVar(value="reflectance")  # Current data type for Mode A
+        self.ct_pred_original_data_type = "reflectance"  # Originally detected data type
+        self.ct_pred_type_confidence = 0.0  # Detection confidence (0-100)
+        self.ct_pred_data_converted = False  # Whether conversion has been applied
+
         # Section D: Export Workflow (Mode B)
         self.new_satellite_data_export = None  # New satellite data to transform and export
         self.transformed_spectra = None  # Transformed spectra ready for export
         self.export_metadata_context = None  # Metadata context for smart CSV/Excel (Mode B)
         self.ct_export_data_type = tk.StringVar(value="reflectance")  # Detected data type for Mode B
+        self.ct_export_original_data_type = "reflectance"  # Originally detected data type for Mode B
+        self.ct_export_type_confidence = 0.0  # Detection confidence for Mode B (0-100)
         self.ct_export_data_converted = False  # Whether conversion has been applied
 
         # Legacy variables (kept for backward compatibility with existing methods)
@@ -2403,6 +2411,7 @@ class SpectralPredictApp:
         self.ct_pred_transfer_model = None  # Transfer model loaded for prediction
         self.ct_pred_y_pred = None  # Predictions from transferred spectra
         self.ct_pred_sample_ids = None  # Sample IDs for predictions
+        self.ct_pred_loaded_sample_ids = None  # Sample IDs from loaded data (filenames, ID column, etc.)
         self.ct_multiinstrument_data = None  # Multi-instrument dataset for equalization
         self.ct_equalized_wavelengths = None  # Wavelengths after equalization
         self.ct_equalized_X = None  # Equalized spectra
@@ -34576,92 +34585,525 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load prediction model:\n{str(e)}")
 
+    def _handle_blank_spectra_values(self, X, source_description="satellite spectra"):
+        """Check for blank/NaN values in spectra and offer to replace with 0s.
+
+        For files converted from Unscrambler, blank cells often represent zeros.
+        This prompts the user to replace blanks with 0s instead of removing specimens.
+
+        Parameters
+        ----------
+        X : np.ndarray or pd.DataFrame
+            Spectral data matrix
+        source_description : str
+            Description for the dialog (e.g., "satellite spectra")
+
+        Returns
+        -------
+        X : np.ndarray or pd.DataFrame
+            Data with blanks replaced by 0s if user accepts, unchanged otherwise
+        replaced : bool
+            True if blanks were replaced with 0s
+        """
+        from tkinter import messagebox
+        import numpy as np
+        import pandas as pd
+
+        # Check for NaN values
+        if isinstance(X, pd.DataFrame):
+            nan_mask = X.isna()
+            has_nan = nan_mask.any().any()
+            n_blank = int(nan_mask.sum().sum())
+            n_specimens_affected = int(nan_mask.any(axis=1).sum())
+        else:
+            nan_mask = np.isnan(X)
+            has_nan = np.any(nan_mask)
+            n_blank = int(np.sum(nan_mask))
+            n_specimens_affected = int(np.sum(np.any(nan_mask, axis=1)))
+
+        if not has_nan:
+            return X, False
+
+        # Show popup
+        replace = messagebox.askyesno(
+            "Blank Values Detected in Spectra",
+            f"Found {n_blank} blank cell(s) in {source_description} "
+            f"affecting {n_specimens_affected} specimen(s).\n\n"
+            f"Files converted from Unscrambler often have blank cells "
+            f"where zeros should be.\n\n"
+            f"Replace blank spectral values with 0?"
+        )
+
+        if replace:
+            if isinstance(X, pd.DataFrame):
+                X = X.fillna(0)
+            else:
+                X = np.nan_to_num(X, nan=0.0)
+            return X, True
+
+        return X, False
+
     def _browse_new_satellite_data_predict(self):
         """Browse for new satellite spectra for prediction."""
         from tkinter import filedialog
-        filepath = filedialog.askopenfilename(
-            title="Select New Satellite Spectra",
-            filetypes=[("CSV files", "*.csv"), ("NumPy files", "*.npy"), ("All files", "*.*")]
+
+        # Ask user what type of data to load (same pattern as Import tab)
+        choice = messagebox.askquestion(
+            "Load Type",
+            "Load a directory of spectral files?\n\n"
+            "Yes = Directory (ASD, SPC, OPUS, JCAMP, PerkinElmer, ASCII, CSV)\n"
+            "No = Single combined file (CSV, Excel, or NumPy)",
+            icon='question'
         )
-        if filepath:
-            self.ct_pred_satellite_path_var.set(filepath)
+
+        if choice == 'yes':
+            # Load directory
+            directory = filedialog.askdirectory(title="Select Satellite Spectra Directory")
+            if directory:
+                self.ct_pred_satellite_path_var.set(directory)
+        else:
+            # Load single file
+            filepath = filedialog.askopenfilename(
+                title="Select New Satellite Spectra",
+                filetypes=[
+                    ("All Supported", "*.csv *.xlsx *.xls *.npy"),
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx *.xls"),
+                    ("NumPy files", "*.npy"),
+                    ("All files", "*.*")
+                ]
+            )
+            if filepath:
+                self.ct_pred_satellite_path_var.set(filepath)
 
     def _load_new_satellite_data_predict(self):
         """Load new satellite data for prediction workflow."""
         import numpy as np
         import pandas as pd
+        import os
+        from pathlib import Path
         from tkinter import messagebox
+        from spectral_predict.io import (
+            read_asd_dir, read_spc_dir, read_csv_spectra,
+            read_jcamp_dir, read_opus_dir, read_sp_dir, read_ascii_spectra,
+            read_combined_csv, read_combined_excel
+        )
+        from spectral_predict.calibration_transfer import resample_to_grid
 
         filepath = self.ct_pred_satellite_path_var.get()
         if not filepath:
-            messagebox.showwarning("No File", "Please browse and select satellite spectra file first.")
+            messagebox.showwarning("No Path", "Please browse and select satellite spectra first.")
             return
 
         try:
-            # Load data based on file type
-            if filepath.endswith('.csv'):
-                df = pd.read_csv(filepath)
-                # Assume first column is wavelengths or sample IDs
-                if 'wavelength' in df.columns[0].lower():
-                    wavelengths = df.iloc[:, 0].values
-                    X = df.iloc[:, 1:].values.T  # Transpose to (samples, wavelengths)
-                else:
-                    # First column is sample IDs
-                    wavelengths = np.array([float(col) for col in df.columns[1:]])
-                    X = df.iloc[:, 1:].values
+            is_directory = os.path.isdir(filepath)
+            format_type = None
 
-            elif filepath.endswith('.npy'):
-                data = np.load(filepath)
-                if data.ndim == 2:
-                    # Assume shape is (samples, wavelengths)
-                    X = data
-                    wavelengths = np.arange(X.shape[1])  # Generic wavelengths
+            if is_directory:
+                # Directory - detect format by scanning files
+                dir_path = Path(filepath)
+                files = list(dir_path.iterdir())
+
+                # Check for ASD files (including .sig)
+                asd_files = [f for f in files if f.suffix.lower() in ['.asd', '.sig']]
+                if asd_files:
+                    format_type = 'asd'
+                    X_df, metadata = read_asd_dir(filepath)
+
+                # Check for SPC files
+                elif any(f.suffix.lower() == '.spc' for f in files):
+                    format_type = 'spc'
+                    X_df, metadata = read_spc_dir(filepath)
+
+                # Check for JCAMP-DX files
+                elif any(f.suffix.lower() in ['.jdx', '.dx'] for f in files):
+                    format_type = 'jcamp'
+                    X_df, metadata = read_jcamp_dir(filepath)
+
+                # Check for Bruker OPUS files (.0, .1, etc.)
+                elif any(f.suffix.lstrip('.').isdigit() for f in files if f.suffix):
+                    format_type = 'opus'
+                    X_df, metadata = read_opus_dir(filepath)
+
+                # Check for PerkinElmer files (.sp)
+                elif any(f.suffix.lower() == '.sp' for f in files):
+                    format_type = 'perkinelmer'
+                    X_df, metadata = read_sp_dir(filepath)
+
+                # Check for ASCII files (.dpt, .dat, .asc)
+                elif any(f.suffix.lower() in ['.dpt', '.dat', '.asc'] for f in files):
+                    format_type = 'ascii'
+                    X_df, metadata = read_ascii_spectra(filepath)
+
+                # Check for CSV files in directory
+                elif any(f.suffix.lower() == '.csv' for f in files):
+                    format_type = 'csv'
+                    X_df, metadata = read_csv_spectra(filepath)
+
                 else:
-                    raise ValueError("NumPy array must be 2D (samples, wavelengths)")
+                    raise ValueError(
+                        "No supported spectral files found in directory.\n"
+                        "Supported: ASD, SIG, SPC, JCAMP-DX, OPUS, PerkinElmer, ASCII, CSV"
+                    )
+
+                # Convert DataFrame to arrays
+                wavelengths = np.array([float(col) for col in X_df.columns])
+                X = X_df.values
+
+                # Check for blank values from Unscrambler conversion
+                X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                if blanks_replaced:
+                    print("Replaced blank spectral values with 0s")
+
+                # Extract sample IDs from DataFrame index (filenames)
+                sample_ids = list(X_df.index)
+
+                # Handle duplicates by adding .1, .2 suffix
+                from collections import Counter
+                seen = Counter()
+                unique_ids = []
+                for sid in sample_ids:
+                    sid_str = str(sid)
+                    if seen[sid_str] > 0:
+                        unique_ids.append(f"{sid_str}.{seen[sid_str]}")
+                    else:
+                        unique_ids.append(sid_str)
+                    seen[sid_str] += 1
+                sample_ids = unique_ids
+
             else:
-                raise ValueError("Unsupported file format. Use .csv or .npy")
+                # Single file handling
+                file_ext = os.path.splitext(filepath)[1].lower()
+                sample_ids = None  # Will be set based on format
 
-            # Validate against transfer model
+                if file_ext == '.csv':
+                    # Try combined format first
+                    try:
+                        X_df, y, metadata_df, metadata = read_combined_csv(filepath)
+                        format_type = 'combined_csv'
+                        wavelengths = np.array([float(col) for col in X_df.columns])
+                        X = X_df.values
+                        # Check for blank values from Unscrambler conversion
+                        X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                        if blanks_replaced:
+                            print("Replaced blank spectral values with 0s")
+                        # Extract sample IDs from X_df index
+                        sample_ids = [str(idx) for idx in X_df.index]
+                    except Exception:
+                        # Fallback to simple CSV
+                        df = pd.read_csv(filepath)
+                        format_type = 'csv'
+                        if 'wavelength' in df.columns[0].lower():
+                            wavelengths = df.iloc[:, 0].values
+                            X = df.iloc[:, 1:].values.T
+                            # Column-oriented: use column names as sample IDs
+                            sample_ids = [str(col) for col in df.columns[1:]]
+                        else:
+                            wavelengths = np.array([float(col) for col in df.columns[1:]])
+                            X = df.iloc[:, 1:].values
+                            # Check for blank values from Unscrambler conversion
+                            X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                            if blanks_replaced:
+                                print("Replaced blank spectral values with 0s")
+                            # Row-oriented: try to detect ID column
+                            sample_ids = self._extract_sample_ids_from_dataframe(df, list(df.columns[1:]))
+
+                elif file_ext in ['.xlsx', '.xls']:
+                    X_df, y, metadata_df, metadata = read_combined_excel(filepath)
+                    format_type = 'excel'
+                    wavelengths = np.array([float(col) for col in X_df.columns])
+                    X = X_df.values
+                    # Check for blank values from Unscrambler conversion
+                    X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                    if blanks_replaced:
+                        print("Replaced blank spectral values with 0s")
+                    # Extract sample IDs from X_df index
+                    sample_ids = [str(idx) for idx in X_df.index]
+
+                elif file_ext == '.npy':
+                    data = np.load(filepath)
+                    format_type = 'npy'
+                    if data.ndim == 2:
+                        X = data
+                        wavelengths = np.arange(X.shape[1])
+                        # NPY has no metadata - generate synthetic IDs
+                        sample_ids = [f"Sample_{i+1}" for i in range(X.shape[0])]
+                    else:
+                        raise ValueError("NumPy array must be 2D (samples, wavelengths)")
+
+                else:
+                    raise ValueError(
+                        f"Unsupported file format: {file_ext}\n"
+                        "Use folder selection for spectral files, or .csv/.xlsx/.npy for combined data"
+                    )
+
+                # Ensure sample_ids is set (fallback)
+                if sample_ids is None:
+                    sample_ids = [f"Sample_{i+1}" for i in range(X.shape[0])]
+
+            # Get expected wavelengths from transfer model
             transfer_model = self.current_transfer_model or self.ct_transfer_model
-            if transfer_model is None:
-                messagebox.showwarning("Warning",
-                    "No transfer model loaded. Cannot validate wavelength grid.\n"
-                    "Data loaded, but may not be compatible.")
-            else:
-                # Check if wavelengths match transfer model
+            expected_wl = None
+
+            if transfer_model is not None:
                 if hasattr(transfer_model, 'wavelengths_common'):
                     expected_wl = transfer_model.wavelengths_common
                 elif self.ct_wavelengths_common is not None:
                     expected_wl = self.ct_wavelengths_common
-                else:
-                    expected_wl = None
 
-                if expected_wl is not None:
-                    if len(wavelengths) != len(expected_wl):
-                        messagebox.showerror("Error",
-                            f"Wavelength mismatch!\n"
-                            f"Transfer model expects {len(expected_wl)} wavelengths\n"
-                            f"Loaded data has {len(wavelengths)} wavelengths")
+            # Wavelength validation and resampling
+            resampled = False
+            if expected_wl is not None:
+                if len(wavelengths) != len(expected_wl) or not np.allclose(wavelengths, expected_wl, rtol=1e-3):
+                    # Wavelengths don't match - offer to resample
+                    wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
+                    wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
+
+                    # Check if ranges overlap enough for reasonable resampling
+                    overlap_start = max(wavelengths[0], expected_wl[0])
+                    overlap_end = min(wavelengths[-1], expected_wl[-1])
+
+                    if overlap_start < overlap_end:
+                        # Reasonable overlap - offer resampling
+                        do_resample = messagebox.askyesno(
+                            "Wavelength Mismatch",
+                            f"Wavelength grids don't match.\n\n"
+                            f"Loaded data: {len(wavelengths)} pts ({wl_range_loaded} nm)\n"
+                            f"Transfer model: {len(expected_wl)} pts ({wl_range_expected} nm)\n\n"
+                            f"Resample loaded data to match transfer model?\n"
+                            f"(Uses linear interpolation)"
+                        )
+
+                        if do_resample:
+                            X = resample_to_grid(X, wavelengths, expected_wl)
+                            wavelengths = expected_wl
+                            resampled = True
+                        else:
+                            messagebox.showwarning(
+                                "Warning",
+                                "Data loaded without resampling.\n"
+                                "Prediction may fail if wavelengths are incompatible."
+                            )
+                    else:
+                        # No overlap - cannot resample
+                        messagebox.showerror(
+                            "Error",
+                            f"Wavelength ranges don't overlap!\n\n"
+                            f"Loaded: {wl_range_loaded} nm\n"
+                            f"Expected: {wl_range_expected} nm\n\n"
+                            f"Cannot proceed - data is incompatible."
+                        )
                         return
+            elif transfer_model is None:
+                messagebox.showwarning(
+                    "Warning",
+                    "No transfer model loaded. Cannot validate wavelength grid.\n"
+                    "Data loaded, but may not be compatible."
+                )
 
             # Store data
             self.new_satellite_data_predict = (wavelengths, X)
+            self.ct_pred_loaded_sample_ids = sample_ids  # Store extracted sample IDs
 
-            # Display info
-            info_text = f"Samples: {X.shape[0]}\n"
+            # Auto-detect data type
+            from spectral_predict.io import detect_spectral_data_type
+            data_type, confidence, _ = detect_spectral_data_type(X)
+            self.ct_pred_data_type.set(data_type)
+            self.ct_pred_original_data_type = data_type
+            self.ct_pred_type_confidence = confidence
+            self.ct_pred_data_converted = False
+
+            # Update data type UI
+            self._update_ct_pred_data_type_ui()
+
+            # Display info (enhanced with format type and resampling status)
+            info_text = f"Format: {format_type}\n"
+            info_text += f"Samples: {X.shape[0]}\n"
             info_text += f"Wavelengths: {len(wavelengths)} ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
-            info_text += f"File: {filepath}"
+            if resampled:
+                info_text += "Status: Resampled to match transfer model\n"
+            info_text += f"Data Type: {data_type.capitalize()} ({confidence:.0f}% confidence)\n"
+            info_text += f"Path: {filepath}"
 
             self.ct_pred_satellite_info_text.config(state='normal')
             self.ct_pred_satellite_info_text.delete('1.0', 'end')
             self.ct_pred_satellite_info_text.insert('1.0', info_text)
             self.ct_pred_satellite_info_text.config(state='disabled')
 
-            # Play success sound (removed popup - info shown in text widget)
             self.play_sound('success')
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load satellite data:\n{str(e)}")
+
+    def _update_ct_pred_data_type_ui(self):
+        """Update the Mode A data type UI elements based on current state."""
+        if self.new_satellite_data_predict is None:
+            # No data loaded
+            self.ct_pred_data_type_status.config(text="No data loaded",
+                                                  foreground=self.colors['text_light'])
+            self.ct_pred_refl_radio.config(state='disabled')
+            self.ct_pred_abs_radio.config(state='disabled')
+            self.ct_pred_convert_btn.config(state='disabled')
+            return
+
+        # Enable radio buttons
+        self.ct_pred_refl_radio.config(state='normal')
+        self.ct_pred_abs_radio.config(state='normal')
+        self.ct_pred_convert_btn.config(state='normal')
+
+        # Update status label
+        data_type = self.ct_pred_data_type.get()
+        confidence = self.ct_pred_type_confidence
+        confidence_str = "High" if confidence >= 70 else "Low"
+
+        if self.ct_pred_data_converted:
+            self.ct_pred_data_type_status.config(
+                text=f"{data_type.capitalize()} (converted)",
+                foreground=self.colors['accent']
+            )
+        elif data_type != self.ct_pred_original_data_type:
+            # User override without conversion
+            self.ct_pred_data_type_status.config(
+                text=f"[Override] {data_type.capitalize()} (detected: {self.ct_pred_original_data_type})",
+                foreground=self.colors['warning']
+            )
+        else:
+            # Normal detection display
+            color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            self.ct_pred_data_type_status.config(
+                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                foreground=color
+            )
+
+        # Update conversion button text
+        target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+        self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+
+    def _on_ct_pred_data_type_override(self):
+        """Handle manual override of data type in Mode A (no conversion)."""
+        if self.new_satellite_data_predict is None:
+            return
+
+        current = self.ct_pred_data_type.get()
+        original = self.ct_pred_original_data_type
+
+        # Update conversion button text
+        target = "Absorbance" if current == "reflectance" else "Reflectance"
+        self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+
+        # Update status to show override
+        if current != original and not self.ct_pred_data_converted:
+            self.ct_pred_data_type_status.config(
+                text=f"[Override] {current.capitalize()} (detected: {original})",
+                foreground=self.colors['warning']
+            )
+        else:
+            self._update_ct_pred_data_type_ui()
+
+        # Clear conversion status when overriding
+        self.ct_pred_conversion_status.config(text="")
+
+    def _ct_pred_convert_data_type(self):
+        """Convert satellite data between reflectance and absorbance in Mode A."""
+        from tkinter import messagebox
+
+        if self.new_satellite_data_predict is None:
+            messagebox.showwarning("No Data", "Please load satellite data first.")
+            return
+
+        wavelengths, X = self.new_satellite_data_predict
+        current_type = self.ct_pred_data_type.get()
+        target_type = "absorbance" if current_type == "reflectance" else "reflectance"
+
+        # Convert using existing conversion functions
+        if target_type == "absorbance":
+            X_converted = self._convert_reflectance_to_absorbance(X)
+        else:
+            X_converted = self._convert_absorbance_to_reflectance(X)
+
+        # Update stored data
+        self.new_satellite_data_predict = (wavelengths, X_converted)
+
+        # Update state
+        self.ct_pred_data_type.set(target_type)
+        self.ct_pred_data_converted = True
+
+        # Update UI
+        next_target = "Absorbance" if target_type == "reflectance" else "Reflectance"
+        self.ct_pred_convert_btn.config(text=f"Convert to {next_target}")
+        self.ct_pred_data_type_status.config(
+            text=f"{target_type.capitalize()} (converted)",
+            foreground=self.colors['accent']
+        )
+        self.ct_pred_conversion_status.config(
+            text=f"Converted from {current_type} to {target_type}",
+            foreground=self.colors['success']
+        )
+
+    def _extract_sample_ids_from_dataframe(self, df, wavelength_cols):
+        """
+        Extract sample IDs from a DataFrame for Mode A prediction.
+
+        Priority:
+        1. Auto-detect specimen ID column using standard patterns
+        2. If only one non-wavelength column, use it
+        3. If multiple ambiguous columns, ask user to choose
+        4. Fallback to generated Sample_1, Sample_2, etc.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame with spectral data
+        wavelength_cols : list
+            List of column names that are wavelength columns
+
+        Returns
+        -------
+        list
+            List of sample ID strings
+        """
+        from tkinter import simpledialog
+        from spectral_predict.io import auto_detect_specimen_id_column
+
+        n_samples = len(df)
+        wavelength_col_set = set(str(c) for c in wavelength_cols)
+
+        # Get non-wavelength columns
+        non_wl_cols = [c for c in df.columns if str(c) not in wavelength_col_set]
+
+        if not non_wl_cols:
+            # No non-wavelength columns - generate synthetic IDs
+            return [f"Sample_{i+1}" for i in range(n_samples)]
+
+        # Try auto-detection first
+        try:
+            detected_id_col = auto_detect_specimen_id_column(df, wavelength_cols)
+            if detected_id_col:
+                # Clear detection - use it
+                return df[detected_id_col].astype(str).tolist()
+        except Exception:
+            pass  # Auto-detection failed, continue with fallback
+
+        if len(non_wl_cols) == 1:
+            # Only one candidate - use it
+            return df[non_wl_cols[0]].astype(str).tolist()
+
+        # Multiple ambiguous columns - ask user to choose
+        options_display = "\n".join([f"  - {col}" for col in non_wl_cols[:10]])
+        if len(non_wl_cols) > 10:
+            options_display += f"\n  ... and {len(non_wl_cols) - 10} more"
+
+        choice = simpledialog.askstring(
+            "Select Sample ID Column",
+            f"Multiple non-wavelength columns found:\n{options_display}\n\n"
+            f"Which column contains sample IDs?\n"
+            f"(Leave blank for auto-generated IDs)"
+        )
+
+        if choice and choice in non_wl_cols:
+            return df[choice].astype(str).tolist()
+        else:
+            return [f"Sample_{i+1}" for i in range(n_samples)]
 
     def _run_prediction_workflow(self):
         """Run the complete prediction workflow: transform -> predict -> display."""
@@ -34723,9 +35165,15 @@ Configuration:
             for item in self.ct_predictions_tree.get_children():
                 self.ct_predictions_tree.delete(item)
 
+            # Use loaded sample IDs if available, else generate synthetic ones
+            if self.ct_pred_loaded_sample_ids and len(self.ct_pred_loaded_sample_ids) == len(y_pred):
+                sample_ids = self.ct_pred_loaded_sample_ids
+            else:
+                sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
+
             # Add predictions to treeview
             for i, pred in enumerate(y_pred):
-                sample_id = f"Sample_{i+1}"
+                sample_id = sample_ids[i]
                 try:
                     pred_display = f"{float(pred):.4f}"
                 except Exception:
@@ -34734,7 +35182,7 @@ Configuration:
 
             # Store predictions for export
             self.ct_pred_y_pred = y_pred
-            self.ct_pred_sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
+            self.ct_pred_sample_ids = sample_ids
 
             # Enable export button
             self.ct_export_predictions_button.config(state='normal')
@@ -34844,20 +35292,30 @@ Configuration:
 
     def _browse_export_satellite_spectra(self):
         """Browse for new satellite spectra to transform and export."""
-        from tkinter import filedialog
-        # Prefer file selection (common for Excel/CSV with many spectra)
-        path = filedialog.askopenfilename(
-            title="Select Satellite Spectra File for Export",
-            filetypes=[
-                ("CSV files", "*.csv"),
-                ("Excel files", "*.xlsx *.xls"),
-                ("NumPy files", "*.npy"),
-                ("All files", "*.*")
-            ]
+        from tkinter import filedialog, messagebox
+
+        choice = messagebox.askquestion(
+            "Load Type",
+            "Load a directory of spectral files?\n\n"
+            "Yes = Directory (ASD, SIG, SPC, OPUS, JCAMP, PerkinElmer, ASCII, CSV)\n"
+            "No = Single combined file (CSV, Excel, or NumPy)",
+            icon='question'
         )
-        if not path:
-            # Fallback to directory selection (ASD/SPC folders)
+
+        if choice == 'yes':
             path = filedialog.askdirectory(title="Select Satellite Spectra Directory for Export")
+        else:
+            path = filedialog.askopenfilename(
+                title="Select Satellite Spectra File for Export",
+                filetypes=[
+                    ("All Supported", "*.csv *.xlsx *.xls *.npy"),
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx *.xls"),
+                    ("NumPy files", "*.npy"),
+                    ("All files", "*.*")
+                ]
+            )
+
         if path:
             self.ct_export_satellite_path_var.set(path)
 
@@ -34884,13 +35342,72 @@ Configuration:
         self.export_metadata_context = None
 
         try:
-            # Detect format
+            # Detect format (will be updated for directory formats)
             detected_format = self._detect_data_format(path)
             self.satellite_data_format = detected_format  # Store for export
 
             # Load data
             if os.path.isdir(path):
-                wavelengths, X = self._load_spectra_from_directory(path)
+                # Comprehensive directory loading - detect format by scanning files
+                from pathlib import Path
+                from spectral_predict.io import (
+                    read_asd_dir, read_spc_dir, read_csv_spectra,
+                    read_jcamp_dir, read_opus_dir, read_sp_dir, read_ascii_spectra
+                )
+
+                dir_path = Path(path)
+                files = list(dir_path.iterdir())
+
+                # Check for ASD files (including .sig)
+                asd_files = [f for f in files if f.suffix.lower() in ['.asd', '.sig']]
+                if asd_files:
+                    detected_format = 'asd'
+                    X_df, metadata = read_asd_dir(path)
+
+                # Check for SPC files
+                elif any(f.suffix.lower() == '.spc' for f in files):
+                    detected_format = 'spc'
+                    X_df, metadata = read_spc_dir(path)
+
+                # Check for JCAMP-DX files
+                elif any(f.suffix.lower() in ['.jdx', '.dx'] for f in files):
+                    detected_format = 'jcamp'
+                    X_df, metadata = read_jcamp_dir(path)
+
+                # Check for Bruker OPUS files (.0, .1, etc.)
+                elif any(f.suffix.lstrip('.').isdigit() for f in files if f.suffix):
+                    detected_format = 'opus'
+                    X_df, metadata = read_opus_dir(path)
+
+                # Check for PerkinElmer files (.sp)
+                elif any(f.suffix.lower() == '.sp' for f in files):
+                    detected_format = 'perkinelmer'
+                    X_df, metadata = read_sp_dir(path)
+
+                # Check for ASCII files (.dpt, .dat, .asc)
+                elif any(f.suffix.lower() in ['.dpt', '.dat', '.asc'] for f in files):
+                    detected_format = 'ascii'
+                    X_df, metadata = read_ascii_spectra(path)
+
+                # Check for CSV files in directory
+                elif any(f.suffix.lower() == '.csv' for f in files):
+                    detected_format = 'csv'
+                    X_df, metadata = read_csv_spectra(path)
+
+                else:
+                    raise ValueError(
+                        "No supported spectral files found in directory.\n"
+                        "Supported: ASD, SIG, SPC, JCAMP-DX, OPUS, PerkinElmer, ASCII, CSV"
+                    )
+
+                # Convert DataFrame to arrays
+                wavelengths = np.array([float(col) for col in X_df.columns])
+                X = X_df.values
+                # Check for blank values from Unscrambler conversion
+                X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                if blanks_replaced:
+                    print("Replaced blank spectral values with 0s")
+                self.satellite_data_format = detected_format  # Update format
             elif path.endswith('.npy'):
                 X = np.load(path)
                 wavelengths = np.arange(X.shape[1])  # Placeholder wavelengths
@@ -34921,6 +35438,10 @@ Configuration:
                     sort_idx = np.argsort(wavelengths)
                     wavelengths = wavelengths[sort_idx]
                     X = X_df.values[:, sort_idx]
+                    # Check for blank values from Unscrambler conversion
+                    X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                    if blanks_replaced:
+                        print("Replaced blank spectral values with 0s")
 
                     metadata_df = df[metadata_cols].copy() if metadata_cols else None
 
@@ -34937,6 +35458,10 @@ Configuration:
                     df_legacy = pd.read_csv(path, header=None, low_memory=False)
                     wavelengths = df_legacy.iloc[0, :].values.astype(float)
                     X = df_legacy.iloc[1:, :].values.astype(float)
+                    # Check for blank values from Unscrambler conversion
+                    X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                    if blanks_replaced:
+                        print("Replaced blank spectral values with 0s")
             elif path.endswith('.xlsx') or path.endswith('.xls'):
                 from spectral_predict.io import identify_wavelength_columns, auto_detect_specimen_id_column
 
@@ -34966,6 +35491,10 @@ Configuration:
                 sort_idx = np.argsort(wavelengths)
                 wavelengths = wavelengths[sort_idx]
                 X = X_df.values[:, sort_idx]
+                # Check for blank values from Unscrambler conversion
+                X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
+                if blanks_replaced:
+                    print("Replaced blank spectral values with 0s")
 
                 metadata_df = df[metadata_cols].copy() if metadata_cols else None
 
@@ -34980,31 +35509,85 @@ Configuration:
             else:
                 raise ValueError(f"Unsupported file format: {path}")
 
+            # Get expected wavelengths from transfer model
+            transfer_model = self.current_transfer_model or self.ct_transfer_model
+            expected_wl = None
+
+            if transfer_model is not None:
+                if hasattr(transfer_model, 'wavelengths_common'):
+                    expected_wl = transfer_model.wavelengths_common
+                elif self.ct_wavelengths_common is not None:
+                    expected_wl = self.ct_wavelengths_common
+
+            # Wavelength validation and resampling
+            resampled = False
+            if expected_wl is not None:
+                if len(wavelengths) != len(expected_wl) or not np.allclose(wavelengths, expected_wl, rtol=1e-3):
+                    # Wavelengths don't match - offer to resample
+                    from spectral_predict.calibration_transfer import resample_to_grid
+
+                    wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
+                    wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
+
+                    # Check if ranges overlap enough for reasonable resampling
+                    overlap_start = max(wavelengths[0], expected_wl[0])
+                    overlap_end = min(wavelengths[-1], expected_wl[-1])
+
+                    if overlap_start < overlap_end:
+                        # Reasonable overlap - offer resampling
+                        do_resample = messagebox.askyesno(
+                            "Wavelength Mismatch",
+                            f"Wavelength grids don't match.\n\n"
+                            f"Loaded data: {len(wavelengths)} pts ({wl_range_loaded} nm)\n"
+                            f"Transfer model: {len(expected_wl)} pts ({wl_range_expected} nm)\n\n"
+                            f"Resample loaded data to match transfer model?\n"
+                            f"(Uses linear interpolation)"
+                        )
+
+                        if do_resample:
+                            X = resample_to_grid(X, wavelengths, expected_wl)
+                            wavelengths = expected_wl
+                            resampled = True
+                        else:
+                            messagebox.showwarning(
+                                "Warning",
+                                "Data loaded without resampling.\n"
+                                "Transform may fail if wavelengths are incompatible."
+                            )
+                    else:
+                        # No overlap - cannot resample
+                        messagebox.showerror(
+                            "Error",
+                            f"Wavelength ranges don't overlap!\n\n"
+                            f"Loaded: {wl_range_loaded} nm\n"
+                            f"Expected: {wl_range_expected} nm\n\n"
+                            f"Cannot proceed - data is incompatible."
+                        )
+                        return
+            elif transfer_model is None:
+                messagebox.showwarning(
+                    "Warning",
+                    "No transfer model loaded. Cannot validate wavelength grid.\n"
+                    "Data loaded, but may not be compatible."
+                )
+
             # Store data
             self.new_satellite_data_export = (wavelengths, X)
-
-            # Validate compatibility with transfer model
-            transfer_model = self.current_transfer_model or self.ct_transfer_model
-            if transfer_model is not None:
-                # Check wavelength compatibility
-                model_wavelengths = getattr(transfer_model, 'wavelengths_common', None)
-                if model_wavelengths is not None:
-                    if len(wavelengths) != len(model_wavelengths):
-                        messagebox.showwarning("Wavelength Mismatch",
-                            f"Warning: Loaded data has {len(wavelengths)} wavelengths, "
-                            f"but transfer model expects {len(model_wavelengths)}. "
-                            f"Resampling may be required.")
 
             # Auto-detect data type
             from spectral_predict.io import detect_spectral_data_type
             data_type, confidence, _ = detect_spectral_data_type(X)
             self.ct_export_data_type.set(data_type)
+            self.ct_export_original_data_type = data_type  # Store original for override warning
+            self.ct_export_type_confidence = confidence  # Store confidence
             self.ct_export_data_converted = False
 
             # Display data info
             info_text = f"Samples: {X.shape[0]}\n"
             info_text += f"Wavelengths: {len(wavelengths)} points ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
             info_text += f"Detected Format: {detected_format}"
+            if resampled:
+                info_text += "\nStatus: Resampled to match transfer model"
 
             if self.export_metadata_context is not None:
                 ctx = self.export_metadata_context
@@ -35024,8 +35607,14 @@ Configuration:
             self.ct_export_data_info_text.config(state='disabled')
 
             # Update data type detection UI
+            color = self.colors['success'] if confidence >= 70 else self.colors['warning']
             self.ct_export_detected_type_label.config(
-                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)")
+                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                foreground=color)
+
+            # Enable radio buttons
+            self.ct_export_refl_radio.config(state='normal')
+            self.ct_export_abs_radio.config(state='normal')
 
             if data_type == 'reflectance':
                 self.ct_convert_to_abs_btn.config(state='normal')
@@ -35173,6 +35762,46 @@ Configuration:
         except Exception as e:
             print(f"Error creating spectra preview: {e}")
 
+    def _on_ct_export_data_type_override(self):
+        """Handle manual override of data type in Mode B (no conversion)."""
+        if self.new_satellite_data_export is None:
+            return
+
+        current = self.ct_export_data_type.get()
+
+        # Update conversion button states based on current type
+        if current == "reflectance":
+            self.ct_convert_to_abs_btn.config(state='normal')
+            self.ct_convert_to_refl_btn.config(state='disabled')
+        else:
+            self.ct_convert_to_abs_btn.config(state='disabled')
+            self.ct_convert_to_refl_btn.config(state='normal')
+
+        # Update status label if overriding detection
+        if hasattr(self, 'ct_export_original_data_type') and current != self.ct_export_original_data_type:
+            if not self.ct_export_data_converted:
+                self.ct_export_detected_type_label.config(
+                    text=f"[Override] {current.capitalize()} (detected: {self.ct_export_original_data_type})",
+                    foreground=self.colors['warning']
+                )
+        else:
+            # Reset to normal display
+            if self.ct_export_data_converted:
+                self.ct_export_detected_type_label.config(
+                    text=f"{current.capitalize()} (converted)",
+                    foreground=self.colors['accent']
+                )
+            else:
+                confidence = getattr(self, 'ct_export_type_confidence', 0)
+                color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+                self.ct_export_detected_type_label.config(
+                    text=f"{current.capitalize()} ({confidence:.0f}% confidence)",
+                    foreground=color
+                )
+
+        # Clear conversion status when overriding
+        self.ct_conversion_status_label.config(text="")
+
     def _ct_convert_to_absorbance(self):
         """Convert loaded Mode B spectra from reflectance to absorbance."""
         if self.new_satellite_data_export is None:
@@ -35184,10 +35813,14 @@ Configuration:
         self.ct_export_data_converted = True
 
         # Update UI
-        self.ct_export_detected_type_label.config(text="Absorbance (converted)")
+        self.ct_export_detected_type_label.config(
+            text="Absorbance (converted)",
+            foreground=self.colors['accent'])
         self.ct_convert_to_abs_btn.config(state='disabled')
         self.ct_convert_to_refl_btn.config(state='normal')
-        self.ct_conversion_status_label.config(text="Converted to absorbance")
+        self.ct_conversion_status_label.config(
+            text="Converted to absorbance",
+            foreground=self.colors['success'])
 
         # Refresh plot
         self._plot_export_spectra_preview(wavelengths, X_converted)
@@ -35203,10 +35836,14 @@ Configuration:
         self.ct_export_data_converted = True
 
         # Update UI
-        self.ct_export_detected_type_label.config(text="Reflectance (converted)")
+        self.ct_export_detected_type_label.config(
+            text="Reflectance (converted)",
+            foreground=self.colors['accent'])
         self.ct_convert_to_abs_btn.config(state='normal')
         self.ct_convert_to_refl_btn.config(state='disabled')
-        self.ct_conversion_status_label.config(text="Converted to reflectance")
+        self.ct_conversion_status_label.config(
+            text="Converted to reflectance",
+            foreground=self.colors['success'])
 
         # Refresh plot
         self._plot_export_spectra_preview(wavelengths, X_converted)
@@ -37510,6 +38147,58 @@ Configuration:
                                               selectforeground=self.colors['text_inverse'])
         self.ct_pred_satellite_info_text.pack(fill='x', pady=(0, 10))
 
+        # C2.5: Data Type & Conversion (Mode A)
+        pred_data_type_section = ttk.LabelFrame(c2_section,
+                                                text="Data Type & Conversion (Optional)",
+                                                style='Card.TFrame', padding=10)
+        pred_data_type_section.pack(fill='x', pady=(0, 10))
+
+        # Detection status row
+        pred_detect_frame = ttk.Frame(pred_data_type_section)
+        pred_detect_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(pred_detect_frame, text="Detected:",
+                 style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+
+        self.ct_pred_data_type_status = ttk.Label(pred_detect_frame, text="No data loaded",
+                                                  style='CardLabel.TLabel')
+        self.ct_pred_data_type_status.pack(side='left')
+
+        # Radio buttons row
+        pred_radio_frame = ttk.Frame(pred_data_type_section)
+        pred_radio_frame.pack(fill='x', pady=(5, 5))
+
+        ttk.Label(pred_radio_frame, text="Override:",
+                 style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+
+        self.ct_pred_refl_radio = ttk.Radiobutton(pred_radio_frame, text="Reflectance",
+                                                  variable=self.ct_pred_data_type,
+                                                  value="reflectance",
+                                                  command=self._on_ct_pred_data_type_override,
+                                                  state='disabled')
+        self.ct_pred_refl_radio.pack(side='left', padx=(0, 15))
+
+        self.ct_pred_abs_radio = ttk.Radiobutton(pred_radio_frame, text="Absorbance",
+                                                 variable=self.ct_pred_data_type,
+                                                 value="absorbance",
+                                                 command=self._on_ct_pred_data_type_override,
+                                                 state='disabled')
+        self.ct_pred_abs_radio.pack(side='left')
+
+        # Conversion button row
+        pred_convert_frame = ttk.Frame(pred_data_type_section)
+        pred_convert_frame.pack(fill='x', pady=(5, 0))
+
+        self.ct_pred_convert_btn = ttk.Button(pred_convert_frame,
+                                              text="Convert to Absorbance",
+                                              command=self._ct_pred_convert_data_type,
+                                              style='Modern.TButton', state='disabled')
+        self.ct_pred_convert_btn.pack(side='left', padx=(0, 15))
+
+        self.ct_pred_conversion_status = ttk.Label(pred_convert_frame, text="",
+                                                   style='CardLabel.TLabel')
+        self.ct_pred_conversion_status.pack(side='left')
+
         # C3: Run Prediction
         c3_section = ttk.LabelFrame(self.ct_step3a_frame, text="C3) Run Prediction",
                                    style='Card.TFrame', padding=10)
@@ -37627,12 +38316,33 @@ Configuration:
         detect_frame = ttk.Frame(conversion_section)
         detect_frame.pack(fill='x', pady=(0, 5))
 
-        ttk.Label(detect_frame, text="Detected Data Type:",
+        ttk.Label(detect_frame, text="Detected:",
                  style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
 
         self.ct_export_detected_type_label = ttk.Label(detect_frame, text="--",
                                                         style='CardLabel.TLabel')
         self.ct_export_detected_type_label.pack(side='left')
+
+        # Radio buttons for override (Mode B)
+        export_radio_frame = ttk.Frame(conversion_section)
+        export_radio_frame.pack(fill='x', pady=(5, 5))
+
+        ttk.Label(export_radio_frame, text="Override:",
+                 style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+
+        self.ct_export_refl_radio = ttk.Radiobutton(export_radio_frame, text="Reflectance",
+                                                    variable=self.ct_export_data_type,
+                                                    value="reflectance",
+                                                    command=self._on_ct_export_data_type_override,
+                                                    state='disabled')
+        self.ct_export_refl_radio.pack(side='left', padx=(0, 15))
+
+        self.ct_export_abs_radio = ttk.Radiobutton(export_radio_frame, text="Absorbance",
+                                                   variable=self.ct_export_data_type,
+                                                   value="absorbance",
+                                                   command=self._on_ct_export_data_type_override,
+                                                   state='disabled')
+        self.ct_export_abs_radio.pack(side='left')
 
         convert_btn_frame = ttk.Frame(conversion_section)
         convert_btn_frame.pack(fill='x', pady=(5, 0))
