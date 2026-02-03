@@ -2377,6 +2377,23 @@ class SpectralPredictApp:
         self.ct_satellite_id_col_var = tk.StringVar()  # Specimen ID column name
         self.ct_satellite_target_col_var = tk.StringVar()  # Target variable column name
 
+        # Section A: Build Transfer Model - Primary Data Type tracking
+        self.ct_primary_data_type = tk.StringVar(value="reflectance")  # Current data type
+        self.ct_primary_original_data_type = "reflectance"  # Originally detected type
+        self.ct_primary_type_confidence = 0.0  # Detection confidence (0-100)
+        self.ct_primary_reflectance_scale = 1.0  # 1.0 for fractional, 100.0 for percent
+        self.ct_primary_was_converted = False  # Whether user converted the data
+
+        # Section A: Build Transfer Model - Satellite Data Type tracking
+        self.ct_satellite_data_type = tk.StringVar(value="reflectance")  # Current data type
+        self.ct_satellite_original_data_type = "reflectance"  # Originally detected type
+        self.ct_satellite_type_confidence = 0.0  # Detection confidence (0-100)
+        self.ct_satellite_reflectance_scale = 1.0  # 1.0 for fractional, 100.0 for percent
+        self.ct_satellite_was_converted = False  # Whether user converted the data
+
+        # Transfer model data type (from loaded model)
+        self.ct_loaded_model_data_type = None  # Data type stored in loaded transfer model
+
         # Section B: Application Mode
         self.application_mode = None  # 'predict' or 'export'
 
@@ -33288,9 +33305,16 @@ Configuration:
                 wavelengths = transfer_model_data.get('wavelengths_common', None)
                 n_samples = transfer_model_data.get('n_samples', 'N/A')
 
+            # Extract data type info from model metadata
+            model_data_type = None
+            if hasattr(self.current_transfer_model, 'meta') and self.current_transfer_model.meta:
+                model_data_type = self.current_transfer_model.meta.get('spectral_data_type', None)
+            self.ct_loaded_model_data_type = model_data_type
+
             # Display model info
             self._display_transfer_model_info(
-                method, primary_id, satellite_id, date_created, n_samples, wavelengths
+                method, primary_id, satellite_id, date_created, n_samples, wavelengths,
+                model_data_type=model_data_type
             )
 
             # Update active transfer model status
@@ -33302,7 +33326,7 @@ Configuration:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load transfer model:\n{str(e)}")
 
-    def _display_transfer_model_info(self, method, primary_id, satellite_id, date_created, n_samples, wavelengths):
+    def _display_transfer_model_info(self, method, primary_id, satellite_id, date_created, n_samples, wavelengths, model_data_type=None):
         """Display transfer model information in text widget."""
         info_text = f"Method: {method}\n"
         info_text += f"Primary ID: {primary_id}\n"
@@ -33312,6 +33336,18 @@ Configuration:
 
         if wavelengths is not None:
             info_text += f"Wavelength Range: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm ({len(wavelengths)} points)\n"
+
+        # Show data type if available in metadata
+        if model_data_type:
+            info_text += f"Data Type: {model_data_type.capitalize()}"
+            # Check if model metadata includes conversion info
+            if hasattr(self.current_transfer_model, 'meta') and self.current_transfer_model.meta:
+                meta = self.current_transfer_model.meta
+                was_converted = meta.get('primary_was_converted', False)
+                original_type = meta.get('original_primary_type', None)
+                if was_converted and original_type and original_type != model_data_type:
+                    info_text += f" (converted from {original_type})"
+            info_text += "\n"
 
         # Update the text widget
         self.ct_loaded_model_info_text.config(state='normal')
@@ -33457,6 +33493,39 @@ Configuration:
             # Store data
             self.current_primary_data = (wavelengths, X)
 
+            # Detect spectral data type (reflectance vs absorbance)
+            try:
+                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+                temp_df = pd.DataFrame(X, columns=[str(w) for w in wavelengths])
+                data_type, confidence, method = detect_spectral_data_type(temp_df)
+                scale = infer_reflectance_scale(temp_df) if data_type == "reflectance" else 1.0
+
+                # Store detection results
+                self.ct_primary_original_data_type = data_type
+                self.ct_primary_type_confidence = confidence
+                self.ct_primary_reflectance_scale = scale
+                self.ct_primary_data_type.set(data_type)
+                self.ct_primary_was_converted = False
+
+                # Update UI
+                color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+                self.ct_primary_type_status_label.config(
+                    text=f"Detected: {data_type.capitalize()} ({confidence:.0f}%)",
+                    foreground=color)
+
+                # Enable controls
+                self.ct_primary_refl_radio.config(state='normal')
+                self.ct_primary_abs_radio.config(state='normal')
+                self.ct_primary_convert_btn.config(state='normal')
+
+                # Set button text based on detected type
+                if data_type == "reflectance":
+                    self.ct_primary_convert_btn.config(text="Convert to Absorbance")
+                else:
+                    self.ct_primary_convert_btn.config(text="Convert to Reflectance")
+            except Exception as e:
+                print(f"Warning: Could not detect primary data type: {e}")
+
             # Update info display
             self._update_data_info()
 
@@ -33509,6 +33578,39 @@ Configuration:
             # Store data
             self.current_satellite_data = (wavelengths, X)
 
+            # Detect spectral data type (reflectance vs absorbance)
+            try:
+                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+                temp_df = pd.DataFrame(X, columns=[str(w) for w in wavelengths])
+                data_type, confidence, method = detect_spectral_data_type(temp_df)
+                scale = infer_reflectance_scale(temp_df) if data_type == "reflectance" else 1.0
+
+                # Store detection results
+                self.ct_satellite_original_data_type = data_type
+                self.ct_satellite_type_confidence = confidence
+                self.ct_satellite_reflectance_scale = scale
+                self.ct_satellite_data_type.set(data_type)
+                self.ct_satellite_was_converted = False
+
+                # Update UI
+                color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+                self.ct_satellite_type_status_label.config(
+                    text=f"Detected: {data_type.capitalize()} ({confidence:.0f}%)",
+                    foreground=color)
+
+                # Enable controls
+                self.ct_satellite_refl_radio.config(state='normal')
+                self.ct_satellite_abs_radio.config(state='normal')
+                self.ct_satellite_convert_btn.config(state='normal')
+
+                # Set button text based on detected type
+                if data_type == "reflectance":
+                    self.ct_satellite_convert_btn.config(text="Convert to Absorbance")
+                else:
+                    self.ct_satellite_convert_btn.config(text="Convert to Reflectance")
+            except Exception as e:
+                print(f"Warning: Could not detect satellite data type: {e}")
+
             # Update info display
             self._update_data_info()
 
@@ -33536,8 +33638,13 @@ Configuration:
             wl_m, X_m = self.current_primary_data
             info_text += f"Primary: {X_m.shape[0]} samples, {len(wl_m)} wavelengths "
             info_text += f"({wl_m[0]:.1f} - {wl_m[-1]:.1f} nm)\n"
-            info_text += f"Format: {self.primary_data_format}\n"
-            info_text += "[!] No Y values loaded (simple loading)\n\n"
+            info_text += f"Format: {self.primary_data_format}"
+            primary_type = self.ct_primary_data_type.get()
+            if primary_type:
+                info_text += f"  |  Data Type: {primary_type.capitalize()}"
+                if self.ct_primary_was_converted:
+                    info_text += " (converted)"
+            info_text += "\n\n"
 
         if self.ct_satellite_X is not None:
             info_text += f"Satellite (with Y values):\n"
@@ -33551,8 +33658,13 @@ Configuration:
             wl_s, X_s = self.current_satellite_data
             info_text += f"Satellite: {X_s.shape[0]} samples, {len(wl_s)} wavelengths "
             info_text += f"({wl_s[0]:.1f} - {wl_s[-1]:.1f} nm)\n"
-            info_text += f"Format: {self.satellite_data_format}\n"
-            info_text += "[!] No Y values loaded (simple loading)\n\n"
+            info_text += f"Format: {self.satellite_data_format}"
+            satellite_type = self.ct_satellite_data_type.get()
+            if satellite_type:
+                info_text += f"  |  Data Type: {satellite_type.capitalize()}"
+                if self.ct_satellite_was_converted:
+                    info_text += " (converted)"
+            info_text += "\n\n"
 
         # Check for sample matching (if both enhanced loading used)
         if self.ct_primary_X is not None and self.ct_satellite_X is not None:
@@ -33802,6 +33914,30 @@ Configuration:
             else:
                 raise ValueError(f"Unknown method: {method}")
 
+            # Check data type consistency between primary and satellite
+            primary_type = self.ct_primary_data_type.get()
+            satellite_type = self.ct_satellite_data_type.get()
+            if primary_type != satellite_type:
+                response = messagebox.askyesno("Data Type Mismatch",
+                    f"Primary data is {primary_type.capitalize()} but "
+                    f"satellite data is {satellite_type.capitalize()}.\n\n"
+                    "Both should be the same type (preferably absorbance) "
+                    "for best calibration transfer results.\n\n"
+                    "Continue building anyway?")
+                if not response:
+                    return
+
+            # Build metadata with data type information
+            from datetime import datetime
+            transfer_meta = {
+                'spectral_data_type': primary_type,
+                'original_primary_type': self.ct_primary_original_data_type,
+                'original_satellite_type': self.ct_satellite_original_data_type,
+                'primary_was_converted': self.ct_primary_was_converted,
+                'satellite_was_converted': self.ct_satellite_was_converted,
+                'build_date': datetime.now().isoformat(),
+            }
+
             # Create TransferModel with all required fields
             self.ct_transfer_model = TransferModel(
                 primary_id='primary',
@@ -33809,7 +33945,7 @@ Configuration:
                 method=method,
                 wavelengths_common=wl_common,
                 params=params,
-                meta={}
+                meta=transfer_meta
             )
 
             # Store in current_transfer_model for consistency
@@ -33981,6 +34117,21 @@ Configuration:
             # Track spectral data type (absorbance vs reflectance) for filename suffix
             self.ct_primary_spectral_type = metadata.get('data_type', 'reflectance')
 
+            # Sync data type detection with Section A controls
+            try:
+                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+                data_type, confidence, _ = detect_spectral_data_type(df)
+                scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+                self.ct_primary_original_data_type = data_type
+                self.ct_primary_type_confidence = confidence
+                self.ct_primary_reflectance_scale = scale
+                self.ct_primary_data_type.set(data_type)
+                self.ct_primary_was_converted = False
+            except Exception:
+                # Fall back to metadata-based detection
+                self.ct_primary_data_type.set(self.ct_primary_spectral_type)
+                self.ct_primary_original_data_type = self.ct_primary_spectral_type
+
             # Update info display
             info_text = f"Primary: {self.ct_primary_X.shape[0]} samples, {len(self.ct_primary_wavelengths)} wavelengths\n"
             self.ct_data_info_text.config(state='normal')
@@ -34025,6 +34176,19 @@ Configuration:
             self.ct_satellite_X = df  # Store as DataFrame
             self.ct_satellite_wavelengths = df.columns.values  # Get wavelengths from column names
             self.satellite_data_format = self.ct_satellite_detected_type
+
+            # Sync data type detection with Section A controls
+            try:
+                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+                data_type, confidence, _ = detect_spectral_data_type(df)
+                scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+                self.ct_satellite_original_data_type = data_type
+                self.ct_satellite_type_confidence = confidence
+                self.ct_satellite_reflectance_scale = scale
+                self.ct_satellite_data_type.set(data_type)
+                self.ct_satellite_was_converted = False
+            except Exception:
+                pass
 
             # Update info display
             primary_info = ""
@@ -34216,6 +34380,20 @@ Configuration:
             self.ct_primary_wavelengths = X_aligned.columns.astype(float).values
             # Track spectral data type (absorbance vs reflectance) for filename suffix
             self.ct_primary_spectral_type = metadata.get('data_type', 'reflectance')
+
+            # Sync data type detection with Section A controls
+            try:
+                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+                data_type, confidence, _ = detect_spectral_data_type(X_aligned)
+                scale = infer_reflectance_scale(X_aligned) if data_type == "reflectance" else 1.0
+                self.ct_primary_original_data_type = data_type
+                self.ct_primary_type_confidence = confidence
+                self.ct_primary_reflectance_scale = scale
+                self.ct_primary_data_type.set(data_type)
+                self.ct_primary_was_converted = False
+            except Exception:
+                self.ct_primary_data_type.set(self.ct_primary_spectral_type)
+                self.ct_primary_original_data_type = self.ct_primary_spectral_type
 
             # Update data info display
             self._update_data_info()
@@ -34439,6 +34617,19 @@ Configuration:
             self.ct_satellite_X = X_aligned
             self.ct_satellite_y = y_aligned
             self.ct_satellite_wavelengths = X_aligned.columns.astype(float).values
+
+            # Sync data type detection with Section A controls
+            try:
+                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+                data_type, confidence, _ = detect_spectral_data_type(X_aligned)
+                scale = infer_reflectance_scale(X_aligned) if data_type == "reflectance" else 1.0
+                self.ct_satellite_original_data_type = data_type
+                self.ct_satellite_type_confidence = confidence
+                self.ct_satellite_reflectance_scale = scale
+                self.ct_satellite_data_type.set(data_type)
+                self.ct_satellite_was_converted = False
+            except Exception:
+                pass
 
             # Update data info display
             self._update_data_info()
@@ -35761,6 +35952,154 @@ Configuration:
             canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         except Exception as e:
             print(f"Error creating spectra preview: {e}")
+
+    # =========================================================================
+    # Section A: Build Transfer Model - Data Type Handling
+    # =========================================================================
+
+    def _on_ct_primary_data_type_override(self):
+        """Handle manual override of primary data type radio buttons (Section A)."""
+        if self.current_primary_data is None:
+            return
+
+        current = self.ct_primary_data_type.get()
+        original = self.ct_primary_original_data_type
+
+        # Update status label
+        if current != original and not self.ct_primary_was_converted:
+            self.ct_primary_type_status_label.config(
+                text=f"[Override] {current.capitalize()} (detected: {original})",
+                foreground=self.colors['warning'])
+        elif not self.ct_primary_was_converted:
+            confidence = self.ct_primary_type_confidence
+            color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            self.ct_primary_type_status_label.config(
+                text=f"Detected: {current.capitalize()} ({confidence:.0f}%)",
+                foreground=color)
+
+        # Update convert button text based on current type
+        if current == "reflectance":
+            self.ct_primary_convert_btn.config(text="Convert to Absorbance")
+        else:
+            self.ct_primary_convert_btn.config(text="Convert to Reflectance")
+
+    def _ct_primary_convert(self):
+        """Convert primary spectra data type (R<->A) for Section A."""
+        if self.current_primary_data is None:
+            return
+
+        current = self.ct_primary_data_type.get()
+        wavelengths, X = self.current_primary_data
+
+        # Save/restore shared state to avoid cross-tab interference
+        saved_scale = self.data_value_scale
+        saved_source_type = getattr(self, 'source_data_type', None)
+        self.data_value_scale = self.ct_primary_reflectance_scale
+        self.source_data_type = None  # Prevent transmittance formula
+
+        try:
+            if current == "reflectance":
+                X_converted = self._convert_reflectance_to_absorbance(X)
+                target = "absorbance"
+            else:
+                X_converted = self._convert_absorbance_to_reflectance(X)
+                target = "reflectance"
+        finally:
+            self.data_value_scale = saved_scale
+            self.source_data_type = saved_source_type
+
+        # Update stored data
+        self.current_primary_data = (wavelengths, X_converted)
+        self.ct_primary_data_type.set(target)
+        self.ct_primary_was_converted = True
+
+        # Update UI
+        self.ct_primary_type_status_label.config(
+            text=f"Converted to {target.capitalize()}",
+            foreground=self.colors['accent'])
+
+        # Update button text for next conversion direction
+        if target == "absorbance":
+            self.ct_primary_convert_btn.config(text="Convert to Reflectance")
+        else:
+            self.ct_primary_convert_btn.config(text="Convert to Absorbance")
+
+        # Refresh data info display
+        self._update_data_info()
+
+    def _on_ct_satellite_data_type_override(self):
+        """Handle manual override of satellite data type radio buttons (Section A)."""
+        if self.current_satellite_data is None:
+            return
+
+        current = self.ct_satellite_data_type.get()
+        original = self.ct_satellite_original_data_type
+
+        # Update status label
+        if current != original and not self.ct_satellite_was_converted:
+            self.ct_satellite_type_status_label.config(
+                text=f"[Override] {current.capitalize()} (detected: {original})",
+                foreground=self.colors['warning'])
+        elif not self.ct_satellite_was_converted:
+            confidence = self.ct_satellite_type_confidence
+            color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            self.ct_satellite_type_status_label.config(
+                text=f"Detected: {current.capitalize()} ({confidence:.0f}%)",
+                foreground=color)
+
+        # Update convert button text based on current type
+        if current == "reflectance":
+            self.ct_satellite_convert_btn.config(text="Convert to Absorbance")
+        else:
+            self.ct_satellite_convert_btn.config(text="Convert to Reflectance")
+
+    def _ct_satellite_convert(self):
+        """Convert satellite spectra data type (R<->A) for Section A."""
+        if self.current_satellite_data is None:
+            return
+
+        current = self.ct_satellite_data_type.get()
+        wavelengths, X = self.current_satellite_data
+
+        # Save/restore shared state to avoid cross-tab interference
+        saved_scale = self.data_value_scale
+        saved_source_type = getattr(self, 'source_data_type', None)
+        self.data_value_scale = self.ct_satellite_reflectance_scale
+        self.source_data_type = None  # Prevent transmittance formula
+
+        try:
+            if current == "reflectance":
+                X_converted = self._convert_reflectance_to_absorbance(X)
+                target = "absorbance"
+            else:
+                X_converted = self._convert_absorbance_to_reflectance(X)
+                target = "reflectance"
+        finally:
+            self.data_value_scale = saved_scale
+            self.source_data_type = saved_source_type
+
+        # Update stored data
+        self.current_satellite_data = (wavelengths, X_converted)
+        self.ct_satellite_data_type.set(target)
+        self.ct_satellite_was_converted = True
+
+        # Update UI
+        self.ct_satellite_type_status_label.config(
+            text=f"Converted to {target.capitalize()}",
+            foreground=self.colors['accent'])
+
+        # Update button text for next conversion direction
+        if target == "absorbance":
+            self.ct_satellite_convert_btn.config(text="Convert to Reflectance")
+        else:
+            self.ct_satellite_convert_btn.config(text="Convert to Absorbance")
+
+        # Refresh data info display
+        self._update_data_info()
+
+    # =========================================================================
+    # Section D: Mode B (Export) - Data Type Handling
+    # =========================================================================
 
     def _on_ct_export_data_type_override(self):
         """Handle manual override of data type in Mode B (no conversion)."""
@@ -37801,6 +38140,31 @@ Configuration:
         self._create_accent_button(primary_browse_frame, "Load Primary Spectra",
                                    self._load_primary_spectra).pack(side='left')
 
+        # Primary Data Type section
+        primary_type_frame = ttk.Frame(primary_frame)
+        primary_type_frame.pack(fill='x', pady=(5, 0))
+
+        ttk.Label(primary_type_frame, text="Data Type:",
+                 style='Caption.TLabel').pack(side='left', padx=(0, 10))
+
+        self.ct_primary_type_status_label = ttk.Label(primary_type_frame, text="No data loaded",
+            style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.ct_primary_type_status_label.pack(side='left', padx=(0, 10))
+
+        self.ct_primary_refl_radio = ttk.Radiobutton(primary_type_frame, text="Reflectance",
+            variable=self.ct_primary_data_type, value="reflectance",
+            command=self._on_ct_primary_data_type_override, state='disabled')
+        self.ct_primary_refl_radio.pack(side='left', padx=5)
+
+        self.ct_primary_abs_radio = ttk.Radiobutton(primary_type_frame, text="Absorbance",
+            variable=self.ct_primary_data_type, value="absorbance",
+            command=self._on_ct_primary_data_type_override, state='disabled')
+        self.ct_primary_abs_radio.pack(side='left', padx=5)
+
+        self.ct_primary_convert_btn = ttk.Button(primary_type_frame, text="Convert to Absorbance",
+            command=self._ct_primary_convert, style='Modern.TButton', state='disabled')
+        self.ct_primary_convert_btn.pack(side='left', padx=10)
+
         # Load Satellite Spectra
         satellite_frame = ttk.Frame(data_section)
         satellite_frame.pack(fill='x', pady=(0, 10))
@@ -37821,6 +38185,31 @@ Configuration:
 
         self._create_accent_button(satellite_browse_frame, "Load Satellite Spectra",
                                    self._load_satellite_spectra).pack(side='left')
+
+        # Satellite Data Type section
+        satellite_type_frame = ttk.Frame(satellite_frame)
+        satellite_type_frame.pack(fill='x', pady=(5, 0))
+
+        ttk.Label(satellite_type_frame, text="Data Type:",
+                 style='Caption.TLabel').pack(side='left', padx=(0, 10))
+
+        self.ct_satellite_type_status_label = ttk.Label(satellite_type_frame, text="No data loaded",
+            style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.ct_satellite_type_status_label.pack(side='left', padx=(0, 10))
+
+        self.ct_satellite_refl_radio = ttk.Radiobutton(satellite_type_frame, text="Reflectance",
+            variable=self.ct_satellite_data_type, value="reflectance",
+            command=self._on_ct_satellite_data_type_override, state='disabled')
+        self.ct_satellite_refl_radio.pack(side='left', padx=5)
+
+        self.ct_satellite_abs_radio = ttk.Radiobutton(satellite_type_frame, text="Absorbance",
+            variable=self.ct_satellite_data_type, value="absorbance",
+            command=self._on_ct_satellite_data_type_override, state='disabled')
+        self.ct_satellite_abs_radio.pack(side='left', padx=5)
+
+        self.ct_satellite_convert_btn = ttk.Button(satellite_type_frame, text="Convert to Absorbance",
+            command=self._ct_satellite_convert, style='Modern.TButton', state='disabled')
+        self.ct_satellite_convert_btn.pack(side='left', padx=10)
 
         # Data info display
         ttk.Label(data_section, text="Data Information:",
