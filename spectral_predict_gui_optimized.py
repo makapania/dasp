@@ -2411,6 +2411,7 @@ class SpectralPredictApp:
         # Section D: Export Workflow (Mode B)
         self.new_satellite_data_export = None  # New satellite data to transform and export
         self.transformed_spectra = None  # Transformed spectra ready for export
+        self.satellite_source_filenames = None  # Source filenames from directory loading
         self.export_metadata_context = None  # Metadata context for smart CSV/Excel (Mode B)
         self.ct_export_data_type = tk.StringVar(value="reflectance")  # Detected data type for Mode B
         self.ct_export_original_data_type = "reflectance"  # Originally detected data type for Mode B
@@ -34175,7 +34176,8 @@ Configuration:
             # df is a DataFrame with index=sample names, columns=wavelengths
             self.ct_satellite_X = df  # Store as DataFrame
             self.ct_satellite_wavelengths = df.columns.values  # Get wavelengths from column names
-            self.satellite_data_format = self.ct_satellite_detected_type
+            self.satellite_data_format = self.ct_satellite_detected_type + '_folder'
+            self.satellite_source_filenames = list(df.index)  # Preserve filenames for export
 
             # Sync data type detection with Section A controls
             try:
@@ -35552,37 +35554,37 @@ Configuration:
                 # Check for ASD files (including .sig)
                 asd_files = [f for f in files if f.suffix.lower() in ['.asd', '.sig']]
                 if asd_files:
-                    detected_format = 'asd'
+                    detected_format = 'asd_folder'
                     X_df, metadata = read_asd_dir(path)
 
                 # Check for SPC files
                 elif any(f.suffix.lower() == '.spc' for f in files):
-                    detected_format = 'spc'
+                    detected_format = 'spc_folder'
                     X_df, metadata = read_spc_dir(path)
 
                 # Check for JCAMP-DX files
                 elif any(f.suffix.lower() in ['.jdx', '.dx'] for f in files):
-                    detected_format = 'jcamp'
+                    detected_format = 'jcamp_folder'
                     X_df, metadata = read_jcamp_dir(path)
 
                 # Check for Bruker OPUS files (.0, .1, etc.)
                 elif any(f.suffix.lstrip('.').isdigit() for f in files if f.suffix):
-                    detected_format = 'opus'
+                    detected_format = 'opus_folder'
                     X_df, metadata = read_opus_dir(path)
 
                 # Check for PerkinElmer files (.sp)
                 elif any(f.suffix.lower() == '.sp' for f in files):
-                    detected_format = 'perkinelmer'
+                    detected_format = 'perkinelmer_folder'
                     X_df, metadata = read_sp_dir(path)
 
                 # Check for ASCII files (.dpt, .dat, .asc)
                 elif any(f.suffix.lower() in ['.dpt', '.dat', '.asc'] for f in files):
-                    detected_format = 'ascii'
+                    detected_format = 'ascii_folder'
                     X_df, metadata = read_ascii_spectra(path)
 
                 # Check for CSV files in directory
                 elif any(f.suffix.lower() == '.csv' for f in files):
-                    detected_format = 'csv'
+                    detected_format = 'csv_folder'
                     X_df, metadata = read_csv_spectra(path)
 
                 else:
@@ -35594,6 +35596,8 @@ Configuration:
                 # Convert DataFrame to arrays
                 wavelengths = np.array([float(col) for col in X_df.columns])
                 X = X_df.values
+                # Preserve source filenames from DataFrame index for export
+                self.satellite_source_filenames = list(X_df.index)
                 # Check for blank values from Unscrambler conversion
                 X, blanks_replaced = self._handle_blank_spectra_values(X, "satellite spectra")
                 if blanks_replaced:
@@ -36326,7 +36330,8 @@ Configuration:
         """Export transformed spectra with automatic format matching.
 
         Preserves file naming and structure from input based on detected format.
-        Supports: csv, npy, asd_folder, spc_folder, csv_folder formats.
+        Supports: csv, npy, excel, and folder formats (asd, spc, csv, jcamp, opus,
+        perkinelmer, ascii). Folder formats export individual CSV files per spectrum.
         """
         from tkinter import messagebox
         from pathlib import Path
@@ -36485,21 +36490,36 @@ Configuration:
                 np.save(output_path, X_transformed)
                 status_msg = f"Exported to NPY: {output_path}"
 
-            elif data_format in ['asd_folder', 'spc_folder', 'csv_folder']:
+            elif data_format in ['asd_folder', 'spc_folder', 'csv_folder',
+                                   'jcamp_folder', 'opus_folder', 'perkinelmer_folder',
+                                   'ascii_folder']:
                 # Recreate folder structure with transformed data
                 input_path_obj = Path(input_path)
 
                 # Get list of original files to preserve naming
                 import glob
-                if data_format == 'asd_folder':
-                    original_files = sorted(glob.glob(os.path.join(input_path, "*.asd")))
-                    ext = '.asd'
-                elif data_format == 'spc_folder':
-                    original_files = sorted(glob.glob(os.path.join(input_path, "*.spc")))
-                    ext = '.spc'
-                else:  # csv_folder
-                    original_files = sorted(glob.glob(os.path.join(input_path, "*.csv")))
-                    ext = '.csv'
+                folder_ext_map = {
+                    'asd_folder': ['.asd', '.sig'],
+                    'spc_folder': ['.spc'],
+                    'csv_folder': ['.csv'],
+                    'jcamp_folder': ['.jdx', '.dx'],
+                    'opus_folder': None,  # numeric extensions handled separately
+                    'perkinelmer_folder': ['.sp'],
+                    'ascii_folder': ['.dpt', '.dat', '.asc'],
+                }
+
+                extensions = folder_ext_map.get(data_format)
+                if extensions is not None:
+                    original_files = sorted([
+                        str(f) for f in Path(input_path).iterdir()
+                        if f.suffix.lower() in extensions
+                    ])
+                else:
+                    # OPUS files have numeric extensions (.0, .1, etc.)
+                    original_files = sorted([
+                        str(f) for f in Path(input_path).iterdir()
+                        if f.suffix and f.suffix.lstrip('.').isdigit()
+                    ])
 
                 # Create output directory if it doesn't exist
                 os.makedirs(output_dir, exist_ok=True)
@@ -36511,20 +36531,10 @@ Configuration:
 
                     orig_name = Path(orig_file).stem
 
-                    if ext == '.csv':
-                        # Export as CSV with wavelengths in first row
-                        output_file = os.path.join(output_dir, f"{orig_name}_transformed.csv")
-                        df = pd.DataFrame([wavelengths, X_transformed[i, :]])
-                        df.to_csv(output_file, index=False, header=False)
-                    elif ext == '.npy':
-                        # Export as NPY
-                        output_file = os.path.join(output_dir, f"{orig_name}_transformed.npy")
-                        np.save(output_file, X_transformed[i, :])
-                    else:
-                        # For ASD/SPC, export as CSV (since writing binary formats is complex)
-                        output_file = os.path.join(output_dir, f"{orig_name}_transformed.csv")
-                        df = pd.DataFrame([wavelengths, X_transformed[i, :]])
-                        df.to_csv(output_file, index=False, header=False)
+                    # All folder formats export as individual CSV files
+                    output_file = os.path.join(output_dir, f"{orig_name}_transformed.csv")
+                    df = pd.DataFrame([wavelengths, X_transformed[i, :]])
+                    df.to_csv(output_file, index=False, header=False)
 
                 status_msg = f"Exported {X_transformed.shape[0]} files to: {output_dir}"
 
@@ -36536,9 +36546,13 @@ Configuration:
                 status_msg = f"Exported to Excel: {output_path}"
 
             else:
-                # Fallback: export as CSV
+                # Fallback: export as CSV with source file identification
                 output_path = _safe_output_path(input_basename, ".csv", input_abs)
                 df = pd.DataFrame(X_transformed, columns=wavelengths)
+                # Add Source_File column if filenames are available (from directory loading)
+                if hasattr(self, 'satellite_source_filenames') and self.satellite_source_filenames is not None:
+                    filenames = self.satellite_source_filenames[:len(df)]
+                    df.insert(0, 'Source_File', filenames)
                 df.to_csv(output_path, index=False)
                 status_msg = f"Exported to CSV (fallback): {output_path}"
 
