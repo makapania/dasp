@@ -10416,23 +10416,46 @@ class SpectralPredictApp:
         # Check for CSV files
         csv_files = sorted(list(path.glob("*.csv")))
         if csv_files:
-            if len(csv_files) == 1:
-                # Single CSV - use as spectral data
-                self.spectral_data_path.set(str(csv_files[0]))
+            # Separate spectral CSVs from reference/metadata CSVs
+            from spectral_predict.io import _is_likely_reference_csv
+            spectral_csvs = [f for f in csv_files if not _is_likely_reference_csv(f)]
+            reference_csvs = [f for f in csv_files if _is_likely_reference_csv(f)]
+
+            if len(spectral_csvs) == 1:
+                # Single spectral CSV - use as spectral data file
+                self.spectral_data_path.set(str(spectral_csvs[0]))
                 self.detected_type = "csv"
                 self.detection_status.config(
                     text="Detected CSV spectra file - select reference CSV below",
                     foreground=self.colors['success']
                 )
-                # No popup needed - status label guides user
-            else:
-                # Multiple CSVs - need user to clarify
+                # Auto-detect reference file
+                if len(reference_csvs) == 1:
+                    self.reference_file.set(str(reference_csvs[0]))
+                    self._auto_detect_columns()
+            elif len(spectral_csvs) > 1:
+                # Multiple spectral CSVs - treat as folder of individual spectra
+                self.detected_type = "csv_dir"
+                self.detection_status.config(
+                    text=f"> Detected {len(spectral_csvs)} CSV spectra files",
+                    foreground=self.colors['success']
+                )
+                # Auto-detect reference file
+                if len(reference_csvs) == 1:
+                    self.reference_file.set(str(reference_csvs[0]))
+                    self._auto_detect_columns()
+                elif len(reference_csvs) > 1:
+                    self.detection_status.config(
+                        text=f"> Detected {len(spectral_csvs)} CSV spectra - {len(reference_csvs)} reference files found, select manually",
+                        foreground=self.colors['accent']
+                    )
+            elif len(spectral_csvs) == 0 and len(reference_csvs) > 0:
+                # Only reference CSVs found, no spectral data
                 self.detected_type = "csv"
                 self.detection_status.config(
-                    text=f"[!] Found {len(csv_files)} CSV files - select files manually",
+                    text=f"[!] Found {len(csv_files)} CSV files but none appear to be spectra - select files manually",
                     foreground=self.colors['accent']
                 )
-                # No popup needed - status label guides user
             return
 
         # Check for SPC files (GRAMS/Thermo Galactic) - case insensitive
@@ -11492,7 +11515,7 @@ class SpectralPredictApp:
             import os
             from pathlib import Path
             from spectral_predict.io import (
-                read_asd_dir, read_csv_spectra, read_spc_dir,
+                read_asd_dir, read_csv_spectra, read_csv_dir, read_spc_dir,
                 read_combined_csv, read_combined_excel, read_reference_csv, align_xy
             )
 
@@ -11684,8 +11707,8 @@ class SpectralPredictApp:
                     X, metadata = read_spc_dir(spectra_path)
                 # Check for CSV files
                 elif any(f.suffix.lower() == '.csv' for f in files):
-                    format_type = 'csv'
-                    X, metadata = read_csv_spectra(spectra_path)
+                    format_type = 'csv_dir'
+                    X, metadata = read_csv_dir(spectra_path)
                 else:
                     messagebox.showerror("Error", f"No supported spectral files found in directory")
                     return
@@ -12332,7 +12355,7 @@ class SpectralPredictApp:
     def _load_and_plot_data(self):
         """Load data and generate spectral plots."""
         try:
-            from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy, read_asd_dir, read_spc_dir
+            from spectral_predict.io import read_csv_spectra, read_csv_dir, read_reference_csv, align_xy, read_asd_dir, read_spc_dir
 
             self.tab1_status.config(text="Loading data...")
             self.root.update()
@@ -12462,6 +12485,40 @@ class SpectralPredictApp:
                 # Apply specimen ID column if not using filename
                 # DISABLED: This function can cause data misalignment
                 # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
+
+                # Store original unfiltered data
+                self.X_original = X_aligned
+                self.y = y_aligned
+                self.ref = ref
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
+
+            elif self.detected_type == "csv_dir":
+                # Directory of individual CSV spectrum files
+                exclude = []
+                if self.reference_file.get():
+                    exclude.append(Path(self.reference_file.get()).name)
+                X, metadata = read_csv_dir(self.spectral_data_path.get(), exclude_files=exclude)
+
+                # Store data type detection results
+                self._apply_data_type_metadata(metadata)
+
+                # Load reference data
+                if not self.reference_file.get():
+                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
+                    return
+
+                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                # Align data and get alignment info
+                X_aligned, y_aligned, alignment_info = align_xy(
+                    X, ref,
+                    self.spectral_file_column.get(),
+                    self.target_column.get(),
+                    return_alignment_info=True
+                )
+
+                # Show alignment report to user
+                self._show_alignment_report(alignment_info)
 
                 # Store original unfiltered data
                 self.X_original = X_aligned
@@ -34091,7 +34148,7 @@ Configuration:
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
-        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir
+        from spectral_predict.io import read_asd_dir, read_csv_dir, read_spc_dir
 
         # Validate inputs
         if not self.ct_primary_spectra_path_var.get():
@@ -34106,7 +34163,7 @@ Configuration:
             elif self.ct_primary_detected_type == 'spc':
                 df, metadata = read_spc_dir(self.ct_primary_spectra_path_var.get())
             elif self.ct_primary_detected_type == 'csv':
-                df, metadata = read_csv_spectra(self.ct_primary_spectra_path_var.get())
+                df, metadata = read_csv_dir(self.ct_primary_spectra_path_var.get())
             else:
                 raise ValueError(f"Unsupported file type: {self.ct_primary_detected_type}")
 
@@ -34153,7 +34210,7 @@ Configuration:
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
-        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir
+        from spectral_predict.io import read_asd_dir, read_csv_dir, read_spc_dir
 
         # Validate inputs
         if not self.ct_satellite_spectra_path_var.get():
@@ -34168,7 +34225,7 @@ Configuration:
             elif self.ct_satellite_detected_type == 'spc':
                 df, metadata = read_spc_dir(self.ct_satellite_spectra_path_var.get())
             elif self.ct_satellite_detected_type == 'csv':
-                df, metadata = read_csv_spectra(self.ct_satellite_spectra_path_var.get())
+                df, metadata = read_csv_dir(self.ct_satellite_spectra_path_var.get())
             else:
                 raise ValueError(f"Unsupported file type: {self.ct_satellite_detected_type}")
 
@@ -34318,7 +34375,7 @@ Configuration:
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
-        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir, read_reference_csv, align_xy
+        from spectral_predict.io import read_asd_dir, read_csv_dir, read_spc_dir, read_reference_csv, align_xy
 
         # Validate inputs
         if not self.ct_primary_spectra_path_var.get():
@@ -34344,7 +34401,7 @@ Configuration:
             elif self.ct_primary_detected_type == 'spc':
                 X, metadata = read_spc_dir(self.ct_primary_spectra_path_var.get())
             elif self.ct_primary_detected_type == 'csv':
-                X, metadata = read_csv_spectra(self.ct_primary_spectra_path_var.get())
+                X, metadata = read_csv_dir(self.ct_primary_spectra_path_var.get())
             else:
                 raise ValueError(f"Unsupported file type: {self.ct_primary_detected_type}")
 
@@ -34557,7 +34614,7 @@ Configuration:
         from tkinter import messagebox
         import pandas as pd
         import numpy as np
-        from spectral_predict.io import read_asd_dir, read_csv_spectra, read_spc_dir, read_reference_csv, align_xy
+        from spectral_predict.io import read_asd_dir, read_csv_dir, read_spc_dir, read_reference_csv, align_xy
 
         # Validate inputs
         if not self.ct_satellite_spectra_path_var.get():
@@ -34583,7 +34640,7 @@ Configuration:
             elif self.ct_satellite_detected_type == 'spc':
                 X, metadata = read_spc_dir(self.ct_satellite_spectra_path_var.get())
             elif self.ct_satellite_detected_type == 'csv':
-                X, metadata = read_csv_spectra(self.ct_satellite_spectra_path_var.get())
+                X, metadata = read_csv_dir(self.ct_satellite_spectra_path_var.get())
             else:
                 raise ValueError(f"Unsupported file type: {self.ct_satellite_detected_type}")
 
@@ -34877,7 +34934,7 @@ Configuration:
         from pathlib import Path
         from tkinter import messagebox
         from spectral_predict.io import (
-            read_asd_dir, read_spc_dir, read_csv_spectra,
+            read_asd_dir, read_spc_dir, read_csv_dir,
             read_jcamp_dir, read_opus_dir, read_sp_dir, read_ascii_spectra,
             read_combined_csv, read_combined_excel
         )
@@ -34931,7 +34988,7 @@ Configuration:
                 # Check for CSV files in directory
                 elif any(f.suffix.lower() == '.csv' for f in files):
                     format_type = 'csv'
-                    X_df, metadata = read_csv_spectra(filepath)
+                    X_df, metadata = read_csv_dir(filepath)
 
                 else:
                     raise ValueError(
@@ -35544,7 +35601,7 @@ Configuration:
                 # Comprehensive directory loading - detect format by scanning files
                 from pathlib import Path
                 from spectral_predict.io import (
-                    read_asd_dir, read_spc_dir, read_csv_spectra,
+                    read_asd_dir, read_spc_dir, read_csv_dir,
                     read_jcamp_dir, read_opus_dir, read_sp_dir, read_ascii_spectra
                 )
 
@@ -35585,7 +35642,7 @@ Configuration:
                 # Check for CSV files in directory
                 elif any(f.suffix.lower() == '.csv' for f in files):
                     detected_format = 'csv_folder'
-                    X_df, metadata = read_csv_spectra(path)
+                    X_df, metadata = read_csv_dir(path)
 
                 else:
                     raise ValueError(
