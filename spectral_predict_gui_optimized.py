@@ -2560,7 +2560,7 @@ class SpectralPredictApp:
         self.validation_X = None  # Stored validation spectral data
         self.validation_y = None  # Stored validation target data
         self.show_validation_metrics = tk.BooleanVar(value=True)  # Show val metrics in results
-        self.validation_top_n = tk.IntVar(value=200)  # Number of top models for validation
+        self.validation_top_n = tk.IntVar(value=500)  # Number of top models for validation
 
         # Result display options
         self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors

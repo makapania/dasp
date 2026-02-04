@@ -121,6 +121,173 @@ def read_csv_spectra(path):
     return result, metadata
 
 
+def _is_likely_reference_csv(path: Union[str, Path]) -> bool:
+    """
+    Heuristic to determine if a CSV file is a reference/metadata file vs spectral data.
+
+    Reference CSVs typically have few columns with non-numeric header names (e.g.,
+    'SampleID', 'Nitrogen', 'Moisture'). Spectral CSVs have many numeric column
+    names (wavelengths) or wavelength/value columns (long format).
+
+    Only reads the header row for efficiency.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to CSV file
+
+    Returns
+    -------
+    bool
+        True if the file looks like a reference/metadata CSV, False if it looks spectral.
+    """
+    path = Path(path)
+    try:
+        # Read only the header row
+        df_header = pd.read_csv(path, nrows=0)
+        columns = list(df_header.columns)
+
+        if len(columns) < 2:
+            return False
+
+        # Check for long-format spectral CSV (wavelength/value columns)
+        lower_cols = [str(c).lower() for c in columns]
+        wl_names = {"wavelength", "wavelength_nm"}
+        val_names = {"value", "intensity", "reflectance", "pct_reflect"}
+        if wl_names.intersection(lower_cols) and val_names.intersection(lower_cols):
+            return False  # This is a spectral file (long format)
+
+        # Count numeric column names (wavelengths in wide format)
+        n_numeric = 0
+        for col in columns:
+            try:
+                float(col)
+                n_numeric += 1
+            except (ValueError, TypeError):
+                pass
+
+        # Spectral wide-format CSVs have many numeric columns (wavelengths)
+        # Reference CSVs have mostly text column names
+        if n_numeric >= 50:
+            return False  # Likely spectral data (wide format)
+
+        # Few or no numeric columns -> likely a reference/metadata file
+        return True
+
+    except Exception:
+        # If we can't read it, assume it's not a reference file
+        return False
+
+
+def read_csv_dir(
+    csv_dir: Union[str, Path],
+    exclude_files: Optional[list[str]] = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Read individual CSV spectrum files from a directory.
+
+    Each CSV file should contain a single spectrum in long format
+    (wavelength, value columns) or wide format. Files are combined into
+    a single wide DataFrame.
+
+    Parameters
+    ----------
+    csv_dir : str or Path
+        Directory containing CSV files
+    exclude_files : list of str, optional
+        Filenames to exclude (e.g., reference CSV)
+
+    Returns
+    -------
+    tuple
+        (df, metadata) where:
+        - df: pd.DataFrame - Wide matrix with rows = filename, columns = wavelengths (nm)
+        - metadata: dict - Contains data_type, type_confidence, detection_method, etc.
+    """
+    csv_dir = Path(csv_dir)
+
+    if not csv_dir.exists():
+        raise ValueError(f"Directory not found: {csv_dir}")
+
+    if not csv_dir.is_dir():
+        raise ValueError(f"Not a directory: {csv_dir}")
+
+    exclude_set = {f.lower() for f in (exclude_files or [])}
+
+    # Find CSV files, excluding reference files
+    csv_files = sorted(
+        f for f in csv_dir.glob("*.csv")
+        if f.name.lower() not in exclude_set
+    )
+
+    if len(csv_files) == 0:
+        raise ValueError(f"No CSV files found in {csv_dir}")
+
+    print(f"Found {len(csv_files)} CSV files")
+
+    # Read each file
+    spectra = {}
+    skipped = []
+    for csv_file in csv_files:
+        stem = csv_file.stem
+        try:
+            df_single, _ = read_csv_spectra(csv_file)
+            # read_csv_spectra returns a DataFrame; use first row
+            if len(df_single) == 1:
+                spectra[stem] = df_single.iloc[0]
+            else:
+                # Multi-row CSV in a directory - use all rows with prefixed IDs
+                for idx in df_single.index:
+                    key = f"{stem}_{idx}" if len(df_single) > 1 else stem
+                    spectra[key] = df_single.loc[idx]
+        except Exception as e:
+            print(f"Warning: Could not read {csv_file.name}: {e}")
+            skipped.append(csv_file.name)
+
+    if len(spectra) == 0:
+        raise ValueError(
+            f"No valid spectra could be read from {csv_dir}. "
+            f"Skipped files: {skipped}"
+        )
+
+    # Combine into wide matrix
+    df = pd.DataFrame(spectra).T
+
+    # Sort columns (wavelengths)
+    df = df[sorted(df.columns)]
+
+    # Validate
+    if df.shape[1] < 100:
+        raise ValueError(f"Expected at least 100 wavelengths, got {df.shape[1]}")
+
+    # Check wavelengths are increasing
+    wls = np.array(df.columns)
+    if not np.all(wls[1:] > wls[:-1]):
+        raise ValueError("Wavelengths must be strictly increasing")
+
+    # Detect data type (reflectance vs absorbance)
+    data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+    print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
+    if type_confidence < 70:
+        print(f"  WARNING: Low confidence detection. Method: {detection_method}")
+    if data_type == "reflectance" and value_scale != 1.0:
+        print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
+
+    # Compile metadata
+    metadata = {
+        'n_spectra': len(df),
+        'wavelength_range': (df.columns.min(), df.columns.max()),
+        'file_format': 'csv_dir',
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method,
+        'value_scale': value_scale
+    }
+
+    return df, metadata
+
+
 def _rename_duplicate_ids(index: pd.Index) -> tuple:
     """
     Rename duplicate IDs by adding .1, .2, etc. suffix.
@@ -2241,7 +2408,13 @@ def read_spectra(
 
     # Dispatch to appropriate reader
     if format == 'csv':
+        # Handle directory of CSV files vs single CSV file
+        if path.is_dir():
+            return read_csv_dir(path, **kwargs)
         return read_csv_spectra(path, **kwargs)
+
+    elif format == 'csv_dir':
+        return read_csv_dir(path, **kwargs)
 
     elif format == 'excel':
         return read_excel_spectra(path, **kwargs)
@@ -2405,7 +2578,7 @@ def _detect_directory_format(directory: Path) -> str:
     elif any(f.suffix.lower() in ['.jdx', '.dx'] for f in files):
         return 'jcamp'
     elif any(f.suffix.lower() in ['.csv'] for f in files):
-        return 'csv'
+        return 'csv_dir'
     elif any(f.suffix.lower() in ['.xlsx', '.xls'] for f in files):
         return 'excel'
     else:
