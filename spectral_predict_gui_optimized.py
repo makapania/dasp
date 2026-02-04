@@ -21563,6 +21563,7 @@ For detailed documentation, see the User Guide.
             ensemble_method = selected_result['method']
             fig.canvas.manager.set_window_title(f'Regional Performance - {ensemble_method} Ensemble')
             plt.show()
+            plt.close(fig)
 
         except Exception as e:
             import traceback
@@ -21603,6 +21604,7 @@ For detailed documentation, see the User Guide.
             ensemble_method = selected_result['method']
             fig.canvas.manager.set_window_title(f'Model Weights - {ensemble_method} Ensemble')
             plt.show()
+            plt.close(fig)
 
         except Exception as e:
             import traceback
@@ -21647,6 +21649,7 @@ For detailed documentation, see the User Guide.
             ensemble_method = selected_result['method']
             fig.canvas.manager.set_window_title(f'Model Specialization - {ensemble_method} Ensemble')
             plt.show()
+            plt.close(fig)
 
         except Exception as e:
             import traceback
@@ -32780,6 +32783,7 @@ Configuration:
         fig.suptitle('Paired Spectra Preview - Before Calibration Transfer', fontsize=14, fontweight='bold')
         plt.tight_layout()
         plt.show()
+        plt.close(fig)
 
         # Create a second figure for wavelength range comparison
         fig2, ax = plt.subplots(figsize=(10, 4))
@@ -32801,6 +32805,7 @@ Configuration:
 
         plt.tight_layout()
         plt.show()
+        plt.close(fig2)
 
     def _plot_transfer_quality(self, method):
         """Plot transfer quality diagnostics for Section C.
@@ -33294,13 +33299,13 @@ Configuration:
         mode = self.ct_step1_mode_var.get()
 
         if mode == 'load':
-            # Show load frame, hide build frame
-            self.ct_load_existing_frame.pack(fill='x', pady=(0, 15), before=self.ct_build_new_frame)
+            # Hide build frame first, then show load frame anchored before STEP 2
             self.ct_build_new_frame.pack_forget()
+            self.ct_load_existing_frame.pack(fill='x', pady=(0, 15), before=self.ct_step2_title_label)
         else:
-            # Show build frame, hide load frame
+            # Hide load frame first, then show build frame anchored before STEP 2
             self.ct_load_existing_frame.pack_forget()
-            self.ct_build_new_frame.pack(fill='x', pady=(0, 15))
+            self.ct_build_new_frame.pack(fill='x', pady=(0, 15), before=self.ct_step2_title_label)
 
     def _browse_existing_transfer_model(self):
         """Browse for existing transfer model file (.pkl or .json)."""
@@ -33812,6 +33817,7 @@ Configuration:
             fig.suptitle('Primary vs Satellite Spectra Preview', fontsize=14, fontweight='bold')
             plt.tight_layout()
             plt.show()
+            plt.close(fig)
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to create preview plot:\n{str(e)}")
@@ -38483,9 +38489,9 @@ Configuration:
         # ===================================================================
         # STEP 2: Choose Application Mode
         # ===================================================================
-        step2_title_label = ttk.Label(main_frame, text="STEP 2: Choose How to Use Transfer Model",
-                                     style='Caption.TLabel')
-        step2_title_label.pack(pady=(20, 10))
+        self.ct_step2_title_label = ttk.Label(main_frame, text="STEP 2: Choose How to Use Transfer Model",
+                                              style='Caption.TLabel')
+        self.ct_step2_title_label.pack(pady=(20, 10))
 
         mode_selection_frame = ttk.LabelFrame(main_frame, text="B) Application Mode",
                                              style='Card.TFrame', padding=15)
