@@ -391,7 +391,7 @@ class CodeGenerator:
         # Add imbalanced-learn for classification resampling methods
         classification_resample_methods = [
             'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-            'tomek_links', 'smote_tomek'
+            'tomek_links', 'smote_tomek', 'smote_enn'
         ]
         if self.imbalance_method and self.imbalance_method.lower() in classification_resample_methods:
             packages.append('imbalanced-learn')
@@ -556,7 +556,11 @@ def _decode_embedded_data(encoded_str):
             extra_packages = f', {pkg}'
         if self.options.include_visualization:
             extra_packages += ', matplotlib'
-        if self.imbalance_method and self.imbalance_method.lower() == 'smote':
+        classification_resample_methods = [
+            'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+            'tomek_links', 'smote_tomek', 'smote_enn',
+        ]
+        if self.imbalance_method and self.imbalance_method.lower() in classification_resample_methods:
             extra_packages += ', imbalanced-learn'
 
         return HEADER_TEMPLATE.format(
@@ -1193,7 +1197,7 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         # Determine final variable name
         # Priority: imbalance resampling > variable selection > preprocessing > raw
         resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-                              'tomek_links', 'smote_tomek', 'smogn', 'smotetomek',
+                              'tomek_links', 'smote_tomek', 'smote_enn', 'smogn', 'smotetomek',
                               'oversample', 'undersample']
 
         if self.imbalance_method and self.imbalance_method.lower() in resampling_methods:
@@ -1225,7 +1229,7 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         # Determine which variable to use
         # Priority: imbalance resampling > variable selection > preprocessing > raw
         resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-                              'tomek_links', 'smote_tomek', 'smogn', 'smotetomek',
+                              'tomek_links', 'smote_tomek', 'smote_enn', 'smogn', 'smotetomek',
                               'oversample', 'undersample']
 
         if self.imbalance_method and self.imbalance_method.lower() in resampling_methods:
@@ -1285,6 +1289,10 @@ def _get_classification_resampler(method_name, params):
     cls = method_map[method_name]
     resampler_params = dict(params or {{}})
     resampler_params.setdefault('random_state', 42)
+    # Combined methods don't accept k_neighbors directly
+    if method_name in ('smote_tomek', 'smote_enn') and 'k_neighbors' in resampler_params:
+        k = resampler_params.pop('k_neighbors')
+        resampler_params['smote'] = SMOTE(k_neighbors=k)
     return cls(**resampler_params)
 
 def _compute_regression_weights(y_vals, method_name, params):

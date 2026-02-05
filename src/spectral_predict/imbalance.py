@@ -11,6 +11,7 @@ CLASSIFICATION METHODS:
 - RandomUnderSampler: Random majority class undersampling
 - TomekLinks: Remove Tomek links (noise at class boundaries)
 - SMOTETomek: Combined over/undersampling
+- SMOTEENN: Combined SMOTE + Edited Nearest Neighbors cleaning
 
 REGRESSION METHODS:
 - Undersampling: Remove samples from over-represented target ranges
@@ -257,6 +258,13 @@ class ClassificationResampler(BaseEstimator):
             resampler_params = dict(self.params)
             if self.random_state is not None:
                 resampler_params['random_state'] = self.random_state
+
+            # Combined methods (SMOTETomek, SMOTEENN) don't accept k_neighbors directly;
+            # route it through a SMOTE sub-component
+            if method_lower in ('smote_tomek', 'smote_enn') and 'k_neighbors' in resampler_params:
+                k = resampler_params.pop('k_neighbors')
+                resampler_params['smote'] = SMOTE(k_neighbors=k)
+
             self.resampler_ = resampler_class(**resampler_params)
         else:
             # Allow passing custom imblearn object
@@ -976,6 +984,7 @@ def get_available_methods(task_type='classification'):
             ('random_undersampler', 'Random undersampling of majority class'),
             ('tomek_links', 'Tomek Links - Remove boundary noise'),
             ('smote_tomek', 'SMOTETomek - Combined over/undersampling'),
+            ('smote_enn', 'SMOTEENN - Combined SMOTE + Edited Nearest Neighbors'),
             ('class_weight', 'Class weights - No resampling, weight loss function')
         ]
 

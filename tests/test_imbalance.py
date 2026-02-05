@@ -317,6 +317,40 @@ class TestClassificationResampler:
         minority_class = min(original_counts, key=original_counts.get)
         assert resampled_counts[minority_class] >= original_counts[minority_class]
 
+    def test_smote_enn_combined_method(self, imbalanced_data):
+        """Verify that combined SMOTE+ENN works correctly."""
+        X, y = imbalanced_data
+
+        resampler = ClassificationResampler(
+            method="smote_enn", random_state=42
+        )
+        X_res, y_res = resampler.fit_resample(X, y)
+
+        original_counts = Counter(y)
+        resampled_counts = Counter(y_res)
+        minority_class = min(original_counts, key=original_counts.get)
+        assert resampled_counts[minority_class] >= original_counts[minority_class]
+
+    def test_smote_enn_with_k_neighbors(self, imbalanced_data):
+        """Verify k_neighbors is properly routed through SMOTE sub-component."""
+        X, y = imbalanced_data
+
+        resampler = ClassificationResampler(
+            method="smote_enn", random_state=42, k_neighbors=3
+        )
+        X_res, y_res = resampler.fit_resample(X, y)
+        assert len(X_res) > 0
+
+    def test_smote_tomek_with_k_neighbors(self, imbalanced_data):
+        """Verify k_neighbors is properly routed through SMOTE sub-component for SMOTETomek."""
+        X, y = imbalanced_data
+
+        resampler = ClassificationResampler(
+            method="smote_tomek", random_state=42, k_neighbors=3
+        )
+        X_res, y_res = resampler.fit_resample(X, y)
+        assert len(X_res) > 0
+
 
 # =============================================================================
 # Regression Resampler Tests
