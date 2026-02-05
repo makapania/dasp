@@ -249,7 +249,7 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
     # Regression: resampling methods need imblearn Pipeline (fit_resample)
     # 'binning', 'rare_boost', 'balanced' use RegressionSampleWeighter (fit/transform only)
     if task_type == 'regression':
-        resampling_methods = ['undersample', 'oversample', 'smogn']
+        resampling_methods = ['undersample', 'oversample', 'smogn', 'smotetomek']
         return imbalance_method.lower() in resampling_methods
 
     return False
