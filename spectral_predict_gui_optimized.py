@@ -6387,7 +6387,7 @@ class SpectralPredictApp:
                                                    state='disabled', width=25)
         self.imbalance_method_combo['values'] = [
             'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-            'tomek_links', 'smote_tomek', 'class_weight',
+            'tomek_links', 'smote_tomek', 'smote_enn', 'class_weight',
             'binning', 'rare_boost', 'balanced'
         ]
         self.imbalance_method_combo.grid(row=1, column=1, sticky=tk.W, pady=8)
@@ -15856,7 +15856,7 @@ class SpectralPredictApp:
             if task_type == 'classification':
                 classification_methods = [
                     'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-                    'tomek_links', 'smote_tomek', 'class_weight'
+                    'tomek_links', 'smote_tomek', 'smote_enn', 'class_weight'
                 ]
                 self.imbalance_method_combo['values'] = classification_methods
                 # Set default if current selection is not valid
@@ -15977,6 +15977,7 @@ class SpectralPredictApp:
             'random_undersampler': 'Random undersampling of majority class',
             'tomek_links': 'Tomek Links - Remove boundary noise',
             'smote_tomek': 'SMOTETomek - Combined over/undersampling',
+            'smote_enn': 'SMOTEENN - Combined SMOTE + Edited Nearest Neighbors',
             'class_weight': 'Class weights - No resampling, weight loss function',
             # Regression methods
             'smogn': 'SMOGN - Synthetic minority oversampling for regression (recommended)',
@@ -16000,7 +16001,7 @@ class SpectralPredictApp:
         # Show relevant parameters
         enabled = self.enable_imbalance_handling.get()
         if enabled:
-            if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek']:
+            if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek', 'smote_enn']:
                 # Show k_neighbors parameter
                 self.imbalance_widgets['k_neighbors_label'].grid()
                 self.imbalance_widgets['k_neighbors_spin'].config(state='normal')
@@ -16038,7 +16039,7 @@ class SpectralPredictApp:
 
         # Build parameter dict based on method
         params = {}
-        if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek']:
+        if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek', 'smote_enn']:
             params['k_neighbors'] = self.k_neighbors.get()
         elif method in ['smogn', 'oversample', 'smotetomek']:
             # Regression resampling methods use both k_neighbors and n_bins
@@ -19829,7 +19830,7 @@ class SpectralPredictApp:
                 'n_samples_used': len(X_filtered),  # Actual calibration samples used
                 'excluded_count': n_excluded,
                 'validation_count': n_validation,
-                'total_samples_original': len(self.X) if self.X is not None else 0
+                'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
             }
             print(f"\n> Stored training configuration:")
             print(f"  Calibration samples: {self.last_training_config['n_samples_used']}")
@@ -22607,13 +22608,22 @@ For detailed documentation, see the User Guide.
         if current_folds != saved_folds:
             warnings.append(f"CV folds: trained with {saved_folds}, current setting is {current_folds}")
 
-        # Calculate current data state
-        # IMPORTANT: Use X_original to get total count BEFORE any exclusions
-        # self.X may already have validation samples removed, causing double-counting
-        current_total = len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
-        current_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
-        current_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
-        current_calibration = current_total - current_excluded - current_validation
+        # Calculate current data state using set operations that mirror the training filter
+        # Training applies exclusions first, then validation from remainder (handles overlap)
+        all_indices = set(self.X_original.index) if self.X_original is not None else (
+            set(self.X.index) if self.X is not None else set()
+        )
+        current_total = len(all_indices)
+        excluded = set(self.excluded_spectra) if self.excluded_spectra else set()
+        validation = set(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else set()
+
+        # Mirror training: remove excluded first, then validation from remainder
+        remaining = all_indices - excluded
+        remaining = remaining - validation
+        current_calibration = len(remaining)
+
+        current_excluded = len(excluded)
+        current_validation = len(validation)
 
         # Check sample counts
         saved_samples = training_config.get("n_samples_used")
@@ -23427,6 +23437,14 @@ For detailed documentation, see the User Guide.
             # Don't clear excluded_spectra - user may have manually excluded samples in Data Upload tab
             # Only update if explicitly provided in config
             pass
+
+        # Restore fold count from training config BEFORE validation check
+        # Without this, models trained with folds != 5 always trigger a mismatch
+        if 'training_config' in config:
+            saved_folds = config['training_config'].get('folds')
+            if saved_folds is not None and 3 <= saved_folds <= 10:
+                self.refine_folds.set(saved_folds)
+                print(f"> Restored CV folds from training config: {saved_folds}")
 
         # Check for training configuration mismatch
         if 'training_config' in config:
