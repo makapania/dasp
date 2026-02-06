@@ -31669,6 +31669,30 @@ Configuration:
             return
 
         try:
+            # --- ROI: optionally clip to region for estimation ---
+            roi_config = self._get_roi_config()
+            roi_meta = {}
+            X_primary_est = self.ct_X_primary_common
+            X_satellite_est = self.ct_X_satellite_common
+            wl_est = self.ct_wavelengths_common
+            if roi_config['enabled']:
+                from spectral_predict.calibration_transfer import clip_wavelengths_to_region
+                X_primary_est, wl_roi, roi_indices = clip_wavelengths_to_region(
+                    X_primary_est, wl_est, roi_config['start'], roi_config['end'])
+                X_satellite_est, _, _ = clip_wavelengths_to_region(
+                    X_satellite_est, wl_est, roi_config['start'], roi_config['end'])
+                roi_meta = {
+                    'enabled': True,
+                    'start': roi_config['start'],
+                    'end': roi_config['end'],
+                    'indices': roi_indices.tolist(),
+                    'n_wavelengths_region': len(roi_indices),
+                    'n_wavelengths_full': len(wl_est),
+                }
+                messagebox.showinfo("ROI",
+                    f"Estimating transfer on region {roi_config['start']:.1f}–{roi_config['end']:.1f} nm\n"
+                    f"({len(roi_indices)} of {len(wl_est)} wavelengths)")
+
             if method == 'ds':
                 # Build DS transfer model
                 # VALIDATION: DS Ridge Lambda parameter
@@ -31683,17 +31707,20 @@ Configuration:
                 except ValueError:
                     messagebox.showerror("Invalid Parameter", "DS Ridge Lambda must be a number.")
                     return
-                A = estimate_ds(self.ct_X_primary_common, self.ct_X_satellite_common, lam=lam)
+                A = estimate_ds(X_primary_est, X_satellite_est, lam=lam)
 
                 # Create TransferModel object
                 from spectral_predict.calibration_transfer import TransferModel
+                meta_ds = {'lambda': lam, 'note': 'DS transfer built in GUI'}
+                if roi_meta:
+                    meta_ds['region_of_interest'] = roi_meta
                 self.ct_transfer_model = TransferModel(
                     primary_id=primary_id,
                     satellite_id=satellite_id,
                     method='ds',
                     wavelengths_common=self.ct_wavelengths_common,
                     params={'A': A},
-                    meta={'lambda': lam, 'note': 'DS transfer built in GUI'}
+                    meta=meta_ds
                 )
 
                 info_text = (f"Transfer Method: Direct Standardization (DS)\n"
@@ -31721,16 +31748,19 @@ Configuration:
                 except ValueError:
                     messagebox.showerror("Invalid Parameter", "PDS Window must be an integer.")
                     return
-                B = estimate_pds(self.ct_X_primary_common, self.ct_X_satellite_common, window=window)
+                B = estimate_pds(X_primary_est, X_satellite_est, window=window)
 
                 from spectral_predict.calibration_transfer import TransferModel
+                meta_pds = {'note': 'PDS transfer built in GUI'}
+                if roi_meta:
+                    meta_pds['region_of_interest'] = roi_meta
                 self.ct_transfer_model = TransferModel(
                     primary_id=primary_id,
                     satellite_id=satellite_id,
                     method='pds',
                     wavelengths_common=self.ct_wavelengths_common,
                     params={'B': B, 'window': window},
-                    meta={'note': 'PDS transfer built in GUI'}
+                    meta=meta_pds
                 )
 
                 info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
@@ -31756,23 +31786,26 @@ Configuration:
                 except (ValueError, AttributeError):
                     n_transfer = 12  # Default
 
-                # Select transfer samples using Kennard-Stone
+                # Select transfer samples using Kennard-Stone (on full data for sample selection)
                 transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
 
-                # Estimate TSR model
+                # Estimate TSR model (on ROI-clipped data if applicable)
                 tsr_params = estimate_tsr(
-                    self.ct_X_primary_common,
-                    self.ct_X_satellite_common,
+                    X_primary_est,
+                    X_satellite_est,
                     transfer_indices
                 )
 
+                meta_tsr = {'note': 'TSR transfer built in GUI', 'n_transfer_samples': n_transfer}
+                if roi_meta:
+                    meta_tsr['region_of_interest'] = roi_meta
                 self.ct_transfer_model = TransferModel(
                     primary_id=primary_id,
                     satellite_id=satellite_id,
                     method='tsr',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=tsr_params,
-                    meta={'note': 'TSR transfer built in GUI', 'n_transfer_samples': n_transfer}
+                    meta=meta_tsr
                 )
 
                 info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
@@ -31787,17 +31820,20 @@ Configuration:
 
                 # Estimate CTAI model
                 ctai_params = estimate_ctai(
-                    self.ct_X_primary_common,
-                    self.ct_X_satellite_common
+                    X_primary_est,
+                    X_satellite_est
                 )
 
+                meta_ctai = {'note': 'CTAI transfer built in GUI (no standards needed)'}
+                if roi_meta:
+                    meta_ctai['region_of_interest'] = roi_meta
                 self.ct_transfer_model = TransferModel(
                     primary_id=primary_id,
                     satellite_id=satellite_id,
                     method='ctai',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=ctai_params,
-                    meta={'note': 'CTAI transfer built in GUI (no standards needed)'}
+                    meta=meta_ctai
                 )
 
                 info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
@@ -31837,24 +31873,27 @@ Configuration:
 
                 # Need Y values for JYPLS-inv - use spectral mean as pseudo-Y
                 # In real applications, user would provide reference values
-                y_transfer = self.ct_X_primary_common[transfer_indices].mean(axis=1)
+                y_transfer = X_primary_est[transfer_indices].mean(axis=1)
 
-                # Estimate JYPLS-inv model
+                # Estimate JYPLS-inv model (on ROI-clipped data if applicable)
                 jypls_params = estimate_jypls_inv(
-                    self.ct_X_primary_common,
-                    self.ct_X_satellite_common,
+                    X_primary_est,
+                    X_satellite_est,
                     y_transfer,
                     transfer_indices,
                     n_components=n_components
                 )
 
+                meta_jypls = {'note': 'JYPLS-inv transfer built in GUI', 'n_transfer_samples': n_transfer}
+                if roi_meta:
+                    meta_jypls['region_of_interest'] = roi_meta
                 self.ct_transfer_model = TransferModel(
                     primary_id=primary_id,
                     satellite_id=satellite_id,
                     method='jypls-inv',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=jypls_params,
-                    meta={'note': 'JYPLS-inv transfer built in GUI', 'n_transfer_samples': n_transfer}
+                    meta=meta_jypls
                 )
 
                 info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
@@ -31884,27 +31923,32 @@ Configuration:
                     messagebox.showerror("Invalid Parameter", "NS-PFCE Max Iterations must be an integer.")
                     return
 
-                # Estimate NS-PFCE model
+                # Estimate NS-PFCE model (on ROI-clipped data if applicable)
+                # NS-PFCE needs wavelengths array matching the spectral columns
+                wl_for_nspfce = wl_roi if roi_meta else wl_est
                 nspfce_params = estimate_nspfce(
-                    self.ct_X_primary_common,
-                    self.ct_X_satellite_common,
-                    self.ct_wavelengths_common,
+                    X_primary_est,
+                    X_satellite_est,
+                    wl_for_nspfce,
                     use_wavelength_selection=use_wavelength_selection,
                     wavelength_selector=wavelength_selector,
                     max_iterations=max_iterations
                 )
 
+                meta_nspfce = {
+                    'note': 'NS-PFCE transfer built in GUI',
+                    'use_wavelength_selection': use_wavelength_selection,
+                    'wavelength_selector': wavelength_selector if use_wavelength_selection else 'N/A'
+                }
+                if roi_meta:
+                    meta_nspfce['region_of_interest'] = roi_meta
                 self.ct_transfer_model = TransferModel(
                     primary_id=primary_id,
                     satellite_id=satellite_id,
                     method='nspfce',
                     wavelengths_common=self.ct_wavelengths_common,
                     params=nspfce_params,
-                    meta={
-                        'note': 'NS-PFCE transfer built in GUI',
-                        'use_wavelength_selection': use_wavelength_selection,
-                        'wavelength_selector': wavelength_selector if use_wavelength_selection else 'N/A'
-                    }
+                    meta=meta_nspfce
                 )
 
                 # Build info text
@@ -32365,28 +32409,8 @@ Configuration:
             common_wl = self.ct_pred_transfer_model.wavelengths_common
             X_satellite_common = resample_to_grid(X_satellite_new, wavelengths_satellite, common_wl)
 
-            # Apply transfer model
-            if self.ct_pred_transfer_model.method == 'ds':
-                A = self.ct_pred_transfer_model.params['A']
-                X_transferred = apply_ds(X_satellite_common, A)
-            elif self.ct_pred_transfer_model.method == 'pds':
-                B = self.ct_pred_transfer_model.params['B']
-                window = self.ct_pred_transfer_model.params['window']
-                X_transferred = apply_pds(X_satellite_common, B, window)
-            elif self.ct_pred_transfer_model.method == 'tsr':
-                from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(X_satellite_common, self.ct_pred_transfer_model.params)
-            elif self.ct_pred_transfer_model.method == 'ctai':
-                from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(X_satellite_common, self.ct_pred_transfer_model.params)
-            elif self.ct_pred_transfer_model.method == 'jypls-inv':
-                from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(X_satellite_common, self.ct_pred_transfer_model.params)
-            elif self.ct_pred_transfer_model.method == 'nspfce':
-                from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(X_satellite_common, self.ct_pred_transfer_model.params)
-            else:
-                raise ValueError(f"Unknown transfer method: {self.ct_pred_transfer_model.method}")
+            # Apply transfer model (ROI-aware: splices region back into full spectrum)
+            X_transferred = self._apply_transfer_with_roi(X_satellite_common, self.ct_pred_transfer_model)
 
             # Resample transferred spectra to primary model's wavelength grid
             metadata = self.ct_primary_model_dict.get('metadata', {})
@@ -32671,12 +32695,7 @@ Configuration:
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
-            if transfer_model.method == 'ds':
-                X_transformed = apply_ds(X_satellite_resampled, transfer_model.params['A'])
-            else:  # pds
-                X_transformed = apply_pds(X_satellite_resampled,
-                                         transfer_model.params['B'],
-                                         transfer_model.params['window'])
+            X_transformed = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
 
             # Create model name for filename prefix
             model_name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}"
@@ -33430,6 +33449,17 @@ Configuration:
                     info_text += f" (converted from {original_type})"
             info_text += "\n"
 
+        # Show ROI info if present in metadata
+        if hasattr(self.current_transfer_model, 'meta') and self.current_transfer_model.meta:
+            roi_info = self.current_transfer_model.meta.get('region_of_interest', {})
+            if roi_info.get('enabled', False):
+                info_text += (
+                    f"Region of Interest: {roi_info.get('start', '?'):.1f} - "
+                    f"{roi_info.get('end', '?'):.1f} nm "
+                    f"({roi_info.get('n_wavelengths_region', '?')} of "
+                    f"{roi_info.get('n_wavelengths_full', '?')} wavelengths)\n"
+                )
+
         # Update the text widget
         self.ct_loaded_model_info_text.config(state='normal')
         self.ct_loaded_model_info_text.delete('1.0', tk.END)
@@ -33886,6 +33916,27 @@ Configuration:
             self.ct_X_primary_common = X_primary_common
             self.ct_X_satellite_common = X_satellite_common
 
+            # --- ROI: optionally clip to region for estimation ---
+            roi_config = self._get_roi_config()
+            roi_meta = {}
+            if roi_config['enabled']:
+                from spectral_predict.calibration_transfer import clip_wavelengths_to_region
+                X_primary_common, _, roi_indices = clip_wavelengths_to_region(
+                    X_primary_common, wl_common, roi_config['start'], roi_config['end'])
+                X_satellite_common, wl_roi, _ = clip_wavelengths_to_region(
+                    X_satellite_common, wl_common, roi_config['start'], roi_config['end'])
+                roi_meta = {
+                    'enabled': True,
+                    'start': roi_config['start'],
+                    'end': roi_config['end'],
+                    'indices': roi_indices.tolist(),
+                    'n_wavelengths_region': len(roi_indices),
+                    'n_wavelengths_full': len(wl_common),
+                }
+                messagebox.showinfo("ROI",
+                    f"Estimating transfer on region {roi_config['start']:.1f}–{roi_config['end']:.1f} nm\n"
+                    f"({len(roi_indices)} of {len(wl_common)} wavelengths)")
+
             # Get method and parameters
             method = self.ct_method_var.get()
 
@@ -33917,7 +33968,9 @@ Configuration:
                 use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
                 selector_name = self.ct_nspfce_selector_var.get() if use_wavelength_selection else None
 
-                params = estimate_nspfce(X_primary_common, X_satellite_common, wl_common,
+                # Use clipped wavelength array when ROI is active
+                wl_for_nspfce = wl_roi if roi_config['enabled'] else wl_common
+                params = estimate_nspfce(X_primary_common, X_satellite_common, wl_for_nspfce,
                                         use_wavelength_selection=use_wavelength_selection,
                                         wavelength_selector=selector_name if selector_name else 'vcpa-iriv',
                                         max_iterations=max_iter)
@@ -34019,6 +34072,8 @@ Configuration:
                 'satellite_was_converted': self.ct_satellite_was_converted,
                 'build_date': datetime.now().isoformat(),
             }
+            if roi_meta:
+                transfer_meta['region_of_interest'] = roi_meta
 
             # Create TransferModel with all required fields
             self.ct_transfer_model = TransferModel(
@@ -34038,6 +34093,11 @@ Configuration:
             info_text += f"Method: {method.upper()}\n"
             info_text += f"Training Samples: {X_primary_common.shape[0]}\n"
             info_text += f"Wavelength Range: {wl_common[0]:.1f} - {wl_common[-1]:.1f} nm ({len(wl_common)} points)\n"
+            if roi_meta:
+                info_text += (
+                    f"Region of Interest: {roi_meta['start']:.1f} - {roi_meta['end']:.1f} nm "
+                    f"({roi_meta['n_wavelengths_region']} of {roi_meta['n_wavelengths_full']} wavelengths)\n"
+                )
 
             self.ct_transfer_info_text.config(state='normal')
             self.ct_transfer_info_text.delete('1.0', tk.END)
@@ -34782,6 +34842,31 @@ Configuration:
     # HELPER METHOD: Apply Transfer Model
     # ========================================================================
 
+    def _update_roi_controls(self):
+        """Enable/disable ROI entry fields based on radio selection."""
+        if self.ct_roi_mode_var.get() == 'roi':
+            self.ct_roi_start_entry.config(state='normal')
+            self.ct_roi_end_entry.config(state='normal')
+            self.ct_roi_info_label.config(text="Transfer params estimated on region only; apply splices back into full spectrum")
+        else:
+            self.ct_roi_start_entry.config(state='disabled')
+            self.ct_roi_end_entry.config(state='disabled')
+            self.ct_roi_info_label.config(text="Transfer params estimated on full spectrum")
+
+    def _get_roi_config(self):
+        """Parse ROI settings. Returns dict with 'enabled', 'start', 'end' or raises ValueError."""
+        if self.ct_roi_mode_var.get() != 'roi':
+            return {'enabled': False}
+        start_str = self.ct_roi_start_var.get().strip()
+        end_str = self.ct_roi_end_var.get().strip()
+        if not start_str or not end_str:
+            raise ValueError("ROI mode selected but Start/End wavelengths are empty.")
+        start = float(start_str)
+        end = float(end_str)
+        if start >= end:
+            raise ValueError(f"ROI Start ({start}) must be less than End ({end}).")
+        return {'enabled': True, 'start': start, 'end': end}
+
     def _apply_transfer_model(self, X_satellite, transfer_model):
         """Apply a transfer model to transform satellite spectra to primary domain.
 
@@ -34818,6 +34903,24 @@ Configuration:
             return apply_jypls_inv(X_satellite, params)
         else:
             raise ValueError(f"Unknown transfer method: {method}")
+
+    def _apply_transfer_with_roi(self, X_satellite, transfer_model):
+        """Apply transfer model, handling ROI splice if the model was built with one.
+
+        If the transfer model was built on a region of interest, this extracts
+        the ROI columns, applies the transfer to just those columns, and splices
+        the result back into the full spectrum. If no ROI was used, it falls
+        through to the standard apply.
+        """
+        roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
+        if roi_info.get('enabled', False):
+            roi_indices = np.array(roi_info['indices'])
+            X_region = X_satellite[:, roi_indices]
+            X_region_transferred = self._apply_transfer_model(X_region, transfer_model)
+            X_out = X_satellite.copy()
+            X_out[:, roi_indices] = X_region_transferred
+            return X_out
+        return self._apply_transfer_model(X_satellite, transfer_model)
 
     # ========================================================================
     # STEP 3A HELPER METHODS: Prediction Workflow
@@ -35413,7 +35516,7 @@ Configuration:
                 source_wl = common_wl
 
             # Transform satellite data to primary domain
-            X_transferred = self._apply_transfer_model(X_satellite, transfer_model)
+            X_transferred = self._apply_transfer_with_roi(X_satellite, transfer_model)
 
             # Step 2: Use prediction model to predict properties
             if self.current_prediction_model_dict is not None:
@@ -35949,32 +36052,8 @@ Configuration:
                 X_satellite_resampled = X_satellite
                 model_wavelengths = wavelengths_satellite
 
-            # Apply transfer based on method
-            method = transfer_model.method.lower()
-
-            if method == 'ds':
-                from spectral_predict.calibration_transfer import apply_ds
-                A = transfer_model.params['A']
-                X_transferred = apply_ds(X_satellite_resampled, A)
-            elif method == 'pds':
-                from spectral_predict.calibration_transfer import apply_pds
-                B = transfer_model.params['B']
-                window = transfer_model.params['window']
-                X_transferred = apply_pds(X_satellite_resampled, B, window)
-            elif method == 'tsr':
-                from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(X_satellite_resampled, transfer_model.params)
-            elif method == 'ctai':
-                from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(X_satellite_resampled, transfer_model.params)
-            elif method == 'jypls-inv':
-                from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(X_satellite_resampled, transfer_model.params)
-            elif method == 'nspfce':
-                from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(X_satellite_resampled, transfer_model.params)
-            else:
-                raise ValueError(f"Unsupported transfer method: {method}")
+            # Apply transfer (ROI-aware: splices region back into full spectrum)
+            X_transferred = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
 
             # Store transformed spectra
             self.transformed_spectra = (model_wavelengths, X_transferred)
@@ -37749,9 +37828,17 @@ Configuration:
                 X_values = X_current
                 sample_names = None
 
-            # Apply transfer using the dispatcher
+            # Apply transfer using the dispatcher (ROI-aware)
             try:
-                X_transferred = calibration_transfer.apply_transfer_dispatch(X_values, transfer_model)
+                roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
+                if roi_info.get('enabled', False):
+                    roi_indices = np.array(roi_info['indices'])
+                    X_region = X_values[:, roi_indices]
+                    X_region_transferred = calibration_transfer.apply_transfer_dispatch(X_region, transfer_model)
+                    X_transferred = X_values.copy()
+                    X_transferred[:, roi_indices] = X_region_transferred
+                else:
+                    X_transferred = calibration_transfer.apply_transfer_dispatch(X_values, transfer_model)
             except Exception as e:
                 messagebox.showerror("Transfer Error",
                                    f"Failed to apply transfer model {transfer_dict['description']}: {str(e)}")
@@ -38475,6 +38562,39 @@ Configuration:
                                              width=12)
         nspfce_selector_combo.pack(side='left')
         CreateToolTip(nspfce_selector_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
+
+        # --- Region of Interest (ROI) for estimation ---
+        roi_frame = ttk.LabelFrame(method_section, text="Estimation Region",
+                                   style='Card.TFrame', padding=5)
+        roi_frame.pack(fill='x', pady=(0, 10))
+
+        roi_radio_frame = ttk.Frame(roi_frame)
+        roi_radio_frame.pack(fill='x', pady=(0, 5))
+
+        self.ct_roi_mode_var = tk.StringVar(value='full')
+        ttk.Radiobutton(roi_radio_frame, text="Full spectrum",
+                        variable=self.ct_roi_mode_var, value='full',
+                        command=self._update_roi_controls).pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(roi_radio_frame, text="Region of interest",
+                        variable=self.ct_roi_mode_var, value='roi',
+                        command=self._update_roi_controls).pack(side='left')
+
+        roi_entries_frame = ttk.Frame(roi_frame)
+        roi_entries_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(roi_entries_frame, text="Start (nm):", style='CardLabel.TLabel').pack(side='left')
+        self.ct_roi_start_var = tk.StringVar(value='')
+        self.ct_roi_start_entry = ttk.Entry(roi_entries_frame, textvariable=self.ct_roi_start_var, width=10, state='disabled')
+        self.ct_roi_start_entry.pack(side='left', padx=(0, 15))
+
+        ttk.Label(roi_entries_frame, text="End (nm):", style='CardLabel.TLabel').pack(side='left')
+        self.ct_roi_end_var = tk.StringVar(value='')
+        self.ct_roi_end_entry = ttk.Entry(roi_entries_frame, textvariable=self.ct_roi_end_var, width=10, state='disabled')
+        self.ct_roi_end_entry.pack(side='left', padx=(0, 15))
+
+        self.ct_roi_info_label = ttk.Label(roi_frame, text="Transfer params estimated on full spectrum",
+                                           style='Caption.TLabel')
+        self.ct_roi_info_label.pack(anchor='w')
 
         # Build button
         build_btn_frame = ttk.Frame(self.ct_build_new_frame)

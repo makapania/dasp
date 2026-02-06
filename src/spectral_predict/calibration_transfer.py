@@ -73,6 +73,44 @@ def resample_to_grid(
     return X_resampled
 
 
+def clip_wavelengths_to_region(
+    X: np.ndarray,
+    wavelengths: np.ndarray,
+    region_start: float,
+    region_end: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Clip spectra and wavelengths to a region of interest.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectra of shape (n_samples, n_wavelengths).
+    wavelengths : np.ndarray
+        Wavelength array of shape (n_wavelengths,).
+    region_start : float
+        Start of the region (inclusive).
+    region_end : float
+        End of the region (inclusive).
+
+    Returns
+    -------
+    X_clipped : np.ndarray
+        Spectra clipped to the region, shape (n_samples, n_region).
+    wl_clipped : np.ndarray
+        Wavelengths in the region, shape (n_region,).
+    indices : np.ndarray
+        Boolean mask or integer indices into the original wavelength array.
+    """
+    mask = (wavelengths >= region_start) & (wavelengths <= region_end)
+    indices = np.where(mask)[0]
+    if len(indices) == 0:
+        raise ValueError(
+            f"No wavelengths found in region [{region_start}, {region_end}]. "
+            f"Available range: [{wavelengths.min():.1f}, {wavelengths.max():.1f}]"
+        )
+    return X[:, indices], wavelengths[indices], indices
+
+
 def estimate_ds(
     X_primary: np.ndarray,
     X_satellite: np.ndarray,
