@@ -2552,6 +2552,11 @@ class SpectralPredictApp:
         self.pred_results_color_var = tk.StringVar(value='Y Value')
         self.residual_color_var = tk.StringVar(value='Y Value')
 
+        # Explore tab coloring variables
+        self.explore_color_var = tk.StringVar(value='None')
+        self.explore_n_groups = tk.IntVar(value=4)
+        self.explore_bin_method = tk.StringVar(value='Equal freq')
+
         # Validation set tracking
         self.validation_enabled = tk.BooleanVar(value=False)
         self.validation_percentage = tk.DoubleVar(value=20.0)
@@ -3324,6 +3329,114 @@ class SpectralPredictApp:
                         values.dtype.name == 'category' or
                         not np.issubdtype(values.dtype, np.number))
             return False
+
+    def _get_explore_color_map(self):
+        """Build a per-sample color mapping for Explore tab spectral plots.
+
+        Returns
+        -------
+        tuple of (sample_colors, legend_entries, color_label)
+            sample_colors : dict  {positional_index: rgba_color}
+            legend_entries : list of (color, label) tuples for legend
+            color_label : str  label for legend title
+        """
+        color_by = self.explore_color_var.get()
+
+        if color_by == 'None':
+            return {}, [], ''
+
+        # Resolve values aligned with self.X rows
+        n_samples = len(self.X)
+        values = None
+        is_cat = False
+
+        if color_by == 'Y Value':
+            if self.y is None or len(self.y) == 0:
+                return {}, [], ''
+            values = self.y.values[:n_samples]
+            is_cat = self._is_categorical_target()
+            color_label = 'Y Value'
+        else:
+            # Metadata column
+            metadata_source = None
+            if (hasattr(self, 'combined_metadata_df')
+                    and self.combined_metadata_df is not None
+                    and color_by in self.combined_metadata_df.columns):
+                metadata_source = self.combined_metadata_df
+            elif self.ref is not None and color_by in self.ref.columns:
+                metadata_source = self.ref
+
+            if metadata_source is None:
+                return {}, [], ''
+
+            values = metadata_source[color_by].values[:n_samples]
+            is_cat = self._is_categorical_variable(color_by, pd.Series(values))
+            color_label = color_by
+
+        # Build color mapping
+        sample_colors: dict[int, tuple] = {}
+        legend_entries: list[tuple] = []
+
+        if is_cat:
+            # Categorical: one color per unique value
+            unique_vals = pd.unique(values[pd.notna(values)])
+            n_vals = len(unique_vals)
+            if n_vals <= 10:
+                cmap_colors = plt.cm.tab10(np.linspace(0, 1, 10))
+            else:
+                cmap_colors = plt.cm.tab20(np.linspace(0, 1, 20))
+
+            val_to_color = {val: cmap_colors[i % len(cmap_colors)]
+                           for i, val in enumerate(unique_vals)}
+
+            for i in range(n_samples):
+                v = values[i]
+                if pd.notna(v) and v in val_to_color:
+                    sample_colors[i] = val_to_color[v]
+                else:
+                    sample_colors[i] = (0.7, 0.7, 0.7, 1.0)  # gray for NaN
+
+            legend_entries = [(val_to_color[v], str(v)) for v in unique_vals]
+            if any(pd.isna(values)):
+                legend_entries.append(((0.7, 0.7, 0.7, 1.0), 'N/A'))
+        else:
+            # Continuous: bin into groups
+            try:
+                numeric_vals = pd.to_numeric(pd.Series(values), errors='coerce')
+                n_groups = self.explore_n_groups.get()
+                bin_method = self.explore_bin_method.get()
+
+                if bin_method == 'Equal freq':
+                    try:
+                        binned = pd.qcut(numeric_vals, q=n_groups, duplicates='drop')
+                    except (ValueError, IndexError):
+                        binned = pd.cut(numeric_vals, bins=n_groups, duplicates='drop')
+                else:
+                    binned = pd.cut(numeric_vals, bins=n_groups, duplicates='drop')
+
+                categories = binned.cat.categories
+                n_cats = len(categories)
+                cmap_colors = plt.cm.viridis(np.linspace(0.1, 0.9, n_cats))
+                cat_to_color = {cat: cmap_colors[i] for i, cat in enumerate(categories)}
+
+                for i in range(n_samples):
+                    b = binned.iloc[i]
+                    if pd.notna(b):
+                        sample_colors[i] = cat_to_color[b]
+                    else:
+                        sample_colors[i] = (0.7, 0.7, 0.7, 1.0)
+
+                legend_entries = [
+                    (cat_to_color[cat], f"{cat.left:.2f} - {cat.right:.2f}")
+                    for cat in categories
+                ]
+                if numeric_vals.isna().any():
+                    legend_entries.append(((0.7, 0.7, 0.7, 1.0), 'N/A'))
+            except Exception:
+                # Fallback: no coloring
+                return {}, [], ''
+
+        return sample_colors, legend_entries, color_label
 
     def _apply_color_scheme(self, ax, fig, x_data, y_data, color_by, indices=None, **scatter_kwargs):
         """Apply color scheme to scatter plot based on selected variable.
@@ -5643,6 +5756,45 @@ class SpectralPredictApp:
                   command=self._refresh_explore_plots,
                   style='Modern.TButton').pack(side='right')
 
+        # Color-by controls (between heading and refresh button)
+        color_controls_frame = ttk.Frame(header_frame)
+        color_controls_frame.pack(side='right', padx=(0, 20))
+
+        ttk.Label(color_controls_frame, text="Color by:").pack(side='left', padx=(0, 5))
+        self.explore_color_combo = ttk.Combobox(
+            color_controls_frame, textvariable=self.explore_color_var,
+            values=['None', 'Y Value'], state='readonly', width=18
+        )
+        self.explore_color_combo.pack(side='left', padx=(0, 10))
+        self.explore_color_combo.bind('<<ComboboxSelected>>', self._on_explore_color_changed)
+
+        # Bin method combo (hidden until continuous variable selected)
+        self.explore_bin_label = ttk.Label(color_controls_frame, text="Bin:")
+        self.explore_bin_combo = ttk.Combobox(
+            color_controls_frame, textvariable=self.explore_bin_method,
+            values=['Equal freq', 'Equal width'], state='readonly', width=10
+        )
+
+        # Groups spinbox (hidden until continuous variable selected)
+        self.explore_groups_label = ttk.Label(color_controls_frame, text="# Groups:")
+        self.explore_groups_spinbox = ttk.Spinbox(
+            color_controls_frame, from_=2, to=10, textvariable=self.explore_n_groups,
+            width=3
+        )
+
+        # Debounced trace for groups spinbox and bin method changes
+        self._explore_color_debounce_id = None
+
+        def _debounced_explore_recolor(*args):
+            if self._explore_color_debounce_id is not None:
+                self.root.after_cancel(self._explore_color_debounce_id)
+            self._explore_color_debounce_id = self.root.after(
+                500, self._regenerate_explore_spectra_only
+            )
+
+        self.explore_n_groups.trace_add('write', _debounced_explore_recolor)
+        self.explore_bin_method.trace_add('write', _debounced_explore_recolor)
+
         # Create notebook for sub-tabs
         self.explore_notebook = ttk.Notebook(content_frame)
         self.explore_notebook.pack(fill='both', expand=True, pady=10)
@@ -5736,6 +5888,41 @@ class SpectralPredictApp:
         self._generate_explore_plots()
         messagebox.showinfo("Plots Refreshed", "All exploration plots have been updated.")
 
+    def _on_explore_color_changed(self, event=None):
+        """Handle change in explore color-by combobox."""
+        color_by = self.explore_color_var.get()
+        is_continuous = (color_by not in ('None',)
+                        and not self._is_categorical_variable(color_by))
+
+        if is_continuous:
+            # Show groups and bin controls
+            self.explore_bin_label.pack(side='left', padx=(10, 5))
+            self.explore_bin_combo.pack(side='left', padx=(0, 10))
+            self.explore_groups_label.pack(side='left', padx=(0, 5))
+            self.explore_groups_spinbox.pack(side='left')
+        else:
+            # Hide groups and bin controls
+            self.explore_bin_label.pack_forget()
+            self.explore_bin_combo.pack_forget()
+            self.explore_groups_label.pack_forget()
+            self.explore_groups_spinbox.pack_forget()
+
+        if self.X is not None:
+            self._regenerate_explore_spectra_only()
+
+    def _regenerate_explore_spectra_only(self):
+        """Redraw only the 3 spectral plots (Raw, 1st Deriv, 2nd Deriv) in Explore tab."""
+        if self.X is None:
+            return
+        try:
+            self._generate_explore_spectra_plot()
+        except Exception as e:
+            print(f"Warning: Could not regenerate spectra plot: {e}")
+        try:
+            self._generate_explore_derivative_plots()
+        except Exception as e:
+            print(f"Warning: Could not regenerate derivative plots: {e}")
+
     def _generate_explore_plots(self):
         """Generate all plots for the Explore tab."""
         if not HAS_MATPLOTLIB:
@@ -5743,6 +5930,13 @@ class SpectralPredictApp:
 
         if self.X is None:
             return
+
+        # Refresh the color-by dropdown with available variables
+        if hasattr(self, 'explore_color_combo'):
+            new_options = self._get_available_color_variables()
+            self.explore_color_combo['values'] = new_options
+            if self.explore_color_var.get() not in new_options:
+                self.explore_color_var.set('None')
 
         # Clear and regenerate each plot frame (with error handling for each)
         try:
@@ -5770,13 +5964,19 @@ class SpectralPredictApp:
         ylabel = self._get_spectral_ylabel()
         data_transformed = self._apply_transformation(self.X.values)
 
+        # Get color mapping
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
         # Create plot
         self._create_explore_plot_in_frame(
             self.explore_spectra_frame,
             "Raw Spectra",
             data_transformed,
             ylabel,
-            "blue"
+            "blue",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
         )
 
     def _generate_explore_derivative_plots(self):
@@ -5790,6 +5990,9 @@ class SpectralPredictApp:
                          style='Caption.TLabel').pack(expand=True)
             return
 
+        # Get color mapping once for both derivative plots
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
         # 1st Derivative
         for widget in self.explore_deriv1_frame.winfo_children():
             widget.destroy()
@@ -5800,7 +6003,10 @@ class SpectralPredictApp:
             "1st Derivative",
             X_deriv1,
             "First Derivative",
-            "green"
+            "green",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
         )
 
         # 2nd Derivative
@@ -5813,7 +6019,10 @@ class SpectralPredictApp:
             "2nd Derivative",
             X_deriv2,
             "Second Derivative",
-            "red"
+            "red",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
         )
 
     def _generate_explore_target_distribution(self):
@@ -5897,7 +6106,9 @@ class SpectralPredictApp:
                      style='Caption.TLabel').pack(expand=True)
             print(f"Target distribution error: {e}")
 
-    def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color):
+    def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color,
+                                      color_map=None, legend_entries=None,
+                                      color_label=None):
         """Create an interactive spectral plot in a given frame.
 
         Args:
@@ -5905,13 +6116,18 @@ class SpectralPredictApp:
             title: Plot title
             data: Spectral data (samples x wavelengths)
             ylabel: Y-axis label
-            color: Line color
+            color: Default line color (used when color_map is empty)
+            color_map: Optional dict {positional_index: rgba_color}
+            legend_entries: Optional list of (color, label) for legend
+            color_label: Optional legend title string
         """
         fig = Figure(figsize=(12, 6))
         ax = fig.add_subplot(111)
 
         wavelengths = self.X.columns.values
         n_samples = len(data)
+
+        has_legend = color_map and legend_entries
 
         # Determine plotting strategy - always plot all samples
         # Use lower alpha for larger datasets
@@ -5921,6 +6137,9 @@ class SpectralPredictApp:
             alpha = 0.2
         else:
             alpha = 0.1
+        # Boost alpha slightly when coloring so groups are more visible
+        if has_legend:
+            alpha = min(alpha * 2.0, 0.6)
         indices = range(n_samples)
 
         # Plot spectra
@@ -5932,8 +6151,9 @@ class SpectralPredictApp:
                 current_alpha = alpha
                 current_linewidth = 1.0
 
+            line_color = color_map.get(i, color) if color_map else color
             line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
-                          color=color, linewidth=current_linewidth)
+                          color=line_color, linewidth=current_linewidth)
             # Store DataFrame index label as GID (not positional index)
             line.set_gid(str(self.X.index[i]))
             line.set_picker(5)
@@ -5945,6 +6165,15 @@ class SpectralPredictApp:
 
         if "Derivative" in title:
             ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
+
+        # Add legend if color mapping is active
+        if has_legend:
+            from matplotlib.lines import Line2D
+            handles = [Line2D([0], [0], color=c, linewidth=2, label=lbl)
+                      for c, lbl in legend_entries]
+            ax.legend(handles=handles, title=color_label or '',
+                     loc='upper left', bbox_to_anchor=(1.01, 1.0),
+                     fontsize=8, title_fontsize=9, framealpha=0.9)
 
         # Add click handler for toggling exclusion
         def on_pick(event):
@@ -5970,7 +6199,12 @@ class SpectralPredictApp:
                 fig.canvas.draw_idle()
 
         fig.canvas.mpl_connect('pick_event', on_pick)
-        fig.tight_layout()
+
+        # Reserve space for legend when active
+        if has_legend:
+            fig.tight_layout(rect=[0, 0, 0.85, 1])
+        else:
+            fig.tight_layout()
 
         # Embed in tkinter
         canvas = FigureCanvasTkAgg(fig, master=frame)
