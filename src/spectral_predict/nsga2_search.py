@@ -144,7 +144,7 @@ def _needs_resampling_pipeline(imbalance_method: Optional[str], task_type: str) 
 
     if task_type == 'classification':
         resampling_methods = {'smote', 'adasyn', 'borderline_smote',
-                              'random_undersampler', 'tomek_links', 'smote_tomek'}
+                              'random_undersampler', 'tomek_links', 'smote_tomek', 'smote_enn'}
         return imbalance_method.lower().replace('-', '_') in resampling_methods
     elif task_type == 'regression':
         resampling_methods = {'undersample', 'oversample', 'smogn', 'smotetomek'}
