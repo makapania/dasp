@@ -5242,6 +5242,55 @@ class SpectralPredictApp:
 
         ttk.Button(wl_frame, text="Trim Wavelengths", command=self._trim_wavelengths).grid(row=2, column=1, pady=10)
 
+        # === Section 2.5: Spectral Conversion ===
+        section, section_content = self._create_collapsible_section(
+            content_frame,
+            "🔄 Spectral Conversion",
+            expanded=True
+        )
+        section.grid(row=row, column=0, sticky='ew', pady=5)
+        row += 1
+
+        conv_frame = ttk.LabelFrame(section_content, text="Convert & Save Spectra", padding="10")
+        conv_frame.pack(fill='x', pady=5)
+
+        # Data type status label (mirrors Import tab)
+        self.dm_data_type_label = ttk.Label(
+            conv_frame, text="No data loaded",
+            font=('Segoe UI', 9), foreground=self.colors.get('text_light', 'gray')
+        )
+        self.dm_data_type_label.grid(row=0, column=0, columnspan=3, sticky='w', padx=5, pady=(2, 8))
+
+        # Conversion buttons
+        conv_btn_frame = ttk.Frame(conv_frame)
+        conv_btn_frame.grid(row=1, column=0, columnspan=3, sticky='w', padx=5, pady=2)
+
+        self.dm_convert_abs_btn = ttk.Button(
+            conv_btn_frame, text="Convert to Absorbance",
+            command=self._dm_convert_to_absorbance
+        )
+        self.dm_convert_abs_btn.pack(side='left', padx=(0, 5))
+
+        self.dm_convert_ref_btn = ttk.Button(
+            conv_btn_frame, text="Convert to Reflectance",
+            command=self._dm_convert_to_reflectance
+        )
+        self.dm_convert_ref_btn.pack(side='left', padx=5)
+
+        # Save buttons
+        save_btn_frame = ttk.Frame(conv_frame)
+        save_btn_frame.grid(row=2, column=0, columnspan=3, sticky='w', padx=5, pady=(8, 2))
+
+        ttk.Button(
+            save_btn_frame, text="Save as CSV",
+            command=self._quick_save_spectra_csv
+        ).pack(side='left', padx=(0, 5))
+
+        ttk.Button(
+            save_btn_frame, text="Save as Excel",
+            command=self._quick_save_spectra_excel
+        ).pack(side='left', padx=5)
+
         # === Section 3: Export Options ===
         section, section_content = self._create_collapsible_section(
             content_frame,
@@ -5936,9 +5985,13 @@ class SpectralPredictApp:
 
     def _run_explore_predictor_screening(self):
         """Run predictor screening from the Explore tab."""
-        if self.X is None or self.y is None:
-            messagebox.showwarning("No Data",
-                                  "Please load spectral data with a target variable first.")
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load spectral data first.")
+            return
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                                  "Predictor screening requires target (Y) values.\n"
+                                  "Please load a reference file with target data.")
             return
 
         # Clear previous results
@@ -12430,32 +12483,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "csv":
@@ -12464,32 +12517,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "csv_dir":
@@ -12502,28 +12555,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "spc":
@@ -12532,32 +12589,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "jcamp":
@@ -12568,32 +12625,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "ascii":
@@ -12604,32 +12661,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "opus":
@@ -12640,32 +12697,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "perkinelmer":
@@ -12676,32 +12733,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "excel":
@@ -12712,32 +12769,32 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
 
-                # Load reference data
-                if not self.reference_file.get():
-                    messagebox.showwarning("Missing Input", "Please select reference CSV/Excel file")
-                    return
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
 
-                ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True
+                    )
 
-                # Align data and get alignment info
-                X_aligned, y_aligned, alignment_info = align_xy(
-                    X, ref,
-                    self.spectral_file_column.get(),
-                    self.target_column.get(),
-                    return_alignment_info=True
-                )
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
 
-                # Show alignment report to user
-                self._show_alignment_report(alignment_info)
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
 
-                # Apply specimen ID column if not using filename
-                # DISABLED: This function can cause data misalignment
-                # X_aligned, y_aligned, ref = self._apply_specimen_id_column(X_aligned, y_aligned, ref)
-
-                # Store original unfiltered data
-                self.X_original = X_aligned
-                self.y = y_aligned
-                self.ref = ref
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             else:
@@ -12816,7 +12873,12 @@ class SpectralPredictApp:
 
             # Auto-detect and display task type
             if hasattr(self, 'task_type_detection_label') and self.task_type_detection_label:
-                if self.task_type.get() == "auto":
+                if self.y is None:
+                    self.task_type_detection_label.config(
+                        text="No target variable (spectra only)",
+                        foreground=self.colors.get('warning', 'orange')
+                    )
+                elif self.task_type.get() == "auto":
                     if self.y.nunique() == 2:
                         detected_type = "classification (binary)"
                     elif self.y.dtype == 'object' or self.y.nunique() < 10:
@@ -12865,6 +12927,17 @@ class SpectralPredictApp:
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to load data:\n{e}")
             self.tab1_status.config(text="[X] Error loading data")
+
+    def _show_spectra_only_info(self):
+        """Show info message when spectra are loaded without reference/target data."""
+        messagebox.showinfo(
+            "Spectra Only Mode",
+            "No reference file provided.\n\n"
+            "Spectra loaded without target (Y) values.\n"
+            "You can view, convert, and export spectra,\n"
+            "but model building will not be available."
+        )
+        print("> Spectra loaded without target (Y) values (Spectra Only Mode)")
 
     def _show_alignment_report(self, alignment_info):
         """Display a report showing which files were matched and which were excluded."""
@@ -13291,7 +13364,8 @@ class SpectralPredictApp:
                         validation_idx = list(self.validation_indices)
 
                     self.validation_X = self.X.loc[validation_idx]
-                    self.validation_y = self.y.loc[validation_idx]
+                    if self.y is not None:
+                        self.validation_y = self.y.loc[validation_idx]
                     print(f"DEBUG: Updated validation set after data type conversion (n={len(self.validation_X)})")
                 except Exception as e:
                     print(f"WARNING: Could not update validation_X after conversion: {e}")
@@ -13316,6 +13390,10 @@ class SpectralPredictApp:
             # Regenerate plots with new data and labels
             self._generate_plots()
             self._generate_explore_plots()  # Also update Explore tab plots
+
+            # Update Data Management tab label
+            self._update_dm_data_type_label()
+            self._populate_data_viewer()
 
             print(f"> Successfully converted data to {target_type}")
 
@@ -13387,6 +13465,123 @@ class SpectralPredictApp:
         else:
             self.use_absorbance.set(False)
             self.absorbance_checkbox.config(state='disabled')
+
+        # Also update the Data Management tab label if it exists
+        self._update_dm_data_type_label()
+
+    def _update_dm_data_type_label(self):
+        """Update the data type label on the Data Management tab's conversion section."""
+        if not hasattr(self, 'dm_data_type_label'):
+            return
+
+        if self.X is None:
+            self.dm_data_type_label.config(
+                text="No data loaded",
+                foreground=self.colors.get('text_light', 'gray')
+            )
+            return
+
+        data_type = self.current_data_type.get()
+        confidence = self.type_confidence
+
+        if confidence >= 70:
+            conf_str = f"{confidence:.0f}%"
+        else:
+            conf_str = f"{confidence:.0f}% [low]"
+
+        if self.data_has_been_converted:
+            status_text = f"Current: {data_type.capitalize()} (converted from {self.original_data_type.get()})"
+        else:
+            status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence)"
+
+        color = self.colors.get('success', 'green') if confidence >= 70 else self.colors.get('warning', 'orange')
+        self.dm_data_type_label.config(text=status_text, foreground=color)
+
+    def _dm_convert_to_absorbance(self):
+        """Convert to absorbance from the Data Management tab."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load data first.")
+            return
+        if self.current_data_type.get() == "absorbance":
+            messagebox.showinfo("Already Absorbance", "Data is already in absorbance format.")
+            return
+        self._convert_and_replot()
+        self._update_dm_data_type_label()
+
+    def _dm_convert_to_reflectance(self):
+        """Convert to reflectance from the Data Management tab."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load data first.")
+            return
+        if self.current_data_type.get() == "reflectance":
+            messagebox.showinfo("Already Reflectance", "Data is already in reflectance format.")
+            return
+        self._convert_and_replot()
+        self._update_dm_data_type_label()
+
+    def _quick_save_spectra_csv(self):
+        """Save current spectra to CSV with optional target column."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No spectral data loaded.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Save Spectra as CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+
+        try:
+            export_df = self.X.copy()
+            if self.y is not None:
+                export_df.insert(0, 'Target', self.y)
+            export_df.index.name = 'Sample_ID'
+            export_df.to_csv(filename, index=True)
+            messagebox.showinfo("Saved", f"Spectra saved to:\n{filename}")
+            print(f"> Saved spectra to CSV: {filename}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save:\n{str(e)}")
+
+    def _quick_save_spectra_excel(self):
+        """Save current spectra to Excel with optional target column."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No spectral data loaded.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Save Spectra as Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+
+        try:
+            with pd.ExcelWriter(filename) as writer:
+                export_df = self.X.copy()
+                if self.y is not None:
+                    export_df.insert(0, 'Target', self.y)
+                export_df.index.name = 'Sample_ID'
+                export_df.to_excel(writer, sheet_name='Spectral_Data')
+
+                # Add metadata sheet
+                metadata = pd.DataFrame({
+                    'Property': ['Samples', 'Wavelengths', 'Data_Type', 'Has_Targets'],
+                    'Value': [
+                        len(self.X),
+                        len(self.X.columns),
+                        self.current_data_type.get(),
+                        self.y is not None
+                    ]
+                })
+                metadata.to_excel(writer, sheet_name='Metadata', index=False)
+
+            messagebox.showinfo("Saved", f"Spectra saved to:\n{filename}")
+            print(f"> Saved spectra to Excel: {filename}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save:\n{str(e)}")
 
     def _reset_exclusions(self):
         """Reset all spectrum exclusions."""
@@ -13594,8 +13789,13 @@ class SpectralPredictApp:
 
     def _create_validation_set(self):
         """Create validation set using the selected algorithm."""
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showwarning("No Data", "Please load data first")
+            return
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                "Validation set creation requires target (Y) values.\n"
+                "Please load a reference file with target data.")
             return
 
         try:
@@ -13733,8 +13933,13 @@ class SpectralPredictApp:
     def _create_manual_validation_set(self):
         """Create validation set from manually selected rows in Data Viewer."""
         # Check if data is loaded
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showwarning("No Data", "Please load data first")
+            return
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                "Validation set creation requires target (Y) values.\n"
+                "Please load a reference file with target data.")
             return
 
         # Check if tksheet exists
@@ -14340,8 +14545,15 @@ class SpectralPredictApp:
                 "Outlier detection module not found. Please check installation.")
             return
 
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showerror("Error", "Please load data first in the 'Import & Preview' tab")
+            return
+
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                "Outlier detection requires target (Y) values.\n\n"
+                "Please load a reference file with target data\n"
+                "in the 'Import & Preview' tab.")
             return
 
         try:
@@ -15439,8 +15651,13 @@ class SpectralPredictApp:
 
     def _run_predictor_screening(self):
         """Run predictor screening and update plots."""
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showerror("Error", "Please load data first in the 'Import & Preview' tab")
+            return
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                "Predictor screening requires target (Y) values.\n"
+                "Please load a reference file with target data.")
             return
 
         self.screening_status.config(text="Computing...")
@@ -15680,11 +15897,19 @@ class SpectralPredictApp:
             new_indices = [f"src{len(self.data_sources)+1}_{idx}" for idx in X_new.index]
             new_index_mapping = dict(zip(X_new.index, new_indices))
             X_new.index = new_indices
-            y_new.index = X_new.index
+            if y_new is not None:
+                y_new.index = X_new.index
 
         # Concatenate spectral data
         X_merged = pd.concat([X_existing, X_new], axis=0)
-        y_merged = pd.concat([y_existing, y_new], axis=0)
+        if y_existing is not None and y_new is not None:
+            y_merged = pd.concat([y_existing, y_new], axis=0)
+        elif y_existing is not None:
+            y_merged = y_existing
+        elif y_new is not None:
+            y_merged = y_new
+        else:
+            y_merged = None
 
         # Merge reference data intelligently
         ref_merged = self._merge_metadata_frames(
@@ -16285,8 +16510,15 @@ class SpectralPredictApp:
     def _run_analysis(self):
         """Run analysis in background thread."""
         # Validate data is loaded
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showwarning("No Data", "Please load data first in the 'Import & Preview' tab")
+            return
+
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                "Model building requires target (Y) values.\n\n"
+                "Please load a reference file with target data\n"
+                "in the 'Import & Preview' tab.")
             return
 
         # Validate at least one model selected
@@ -21901,7 +22133,7 @@ For detailed documentation, see the User Guide.
         No pagination needed - smooth scrolling through entire dataset.
         """
         # Check if data is loaded
-        if self.X is None or self.y is None:
+        if self.X is None:
             self.data_viewer_info.config(
                 text="Load data in the Import & Preview tab to view it here.")
             self.data_viewer_status.config(text="")
@@ -21927,13 +22159,13 @@ For detailed documentation, see the User Guide.
             # Filter samples based on exclusion setting
             if show_excluded:
                 display_df = self.X.copy()
-                display_y = self.y.copy()
+                display_y = self.y.copy() if self.y is not None else None
                 excluded_indices = list(self.excluded_spectra)
             else:
                 # Filter out excluded samples
                 mask = ~self.X.index.isin(self.excluded_spectra)
                 display_df = self.X[mask].copy()
-                display_y = self.y[mask].copy()
+                display_y = self.y[mask].copy() if self.y is not None else None
                 excluded_indices = []
 
             # Check if metadata columns exist (from self.ref or self.combined_metadata_df)
@@ -21957,9 +22189,12 @@ For detailed documentation, see the User Guide.
                     display_metadata = self.ref[mask].copy()
                 metadata_cols = list(self.ref.columns)
 
-            # Build headers: Sample ID, Metadata columns, Target, then all wavelengths
+            # Build headers: Sample ID, Metadata columns, Target (if available), then all wavelengths
             wavelength_headers = [str(wl) for wl in display_df.columns]
-            headers = ['Sample ID'] + metadata_cols + [target_col] + wavelength_headers
+            if display_y is not None:
+                headers = ['Sample ID'] + metadata_cols + [target_col] + wavelength_headers
+            else:
+                headers = ['Sample ID'] + metadata_cols + wavelength_headers
 
             # Pre-format all data
             formatted_data = []
@@ -21980,16 +22215,22 @@ For detailed documentation, see the User Guide.
                         else:
                             metadata_vals.append(str(val))
 
-                # Target value
-                if np.issubdtype(display_y.dtype, np.number):
-                    target_val = f"{display_y.loc[idx]:.4f}"
+                # Target value (if available)
+                if display_y is not None:
+                    if np.issubdtype(display_y.dtype, np.number):
+                        target_val = f"{display_y.loc[idx]:.4f}"
+                    else:
+                        target_val = str(display_y.loc[idx])
                 else:
-                    target_val = str(display_y.loc[idx])
+                    target_val = None
 
                 # Spectral values (format to 5 decimals)
                 spectral_vals = [f"{val:.5f}" for val in display_df.loc[idx].values]
 
-                row_data = [sample_id] + metadata_vals + [target_val] + spectral_vals
+                if target_val is not None:
+                    row_data = [sample_id] + metadata_vals + [target_val] + spectral_vals
+                else:
+                    row_data = [sample_id] + metadata_vals + spectral_vals
                 formatted_data.append(row_data)
 
             # Set sheet data and headers
@@ -22041,7 +22282,7 @@ For detailed documentation, see the User Guide.
 
     def _export_data_viewer_to_csv(self):
         """Export the currently displayed data to a CSV file."""
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showwarning(
                 "No Data",
                 "No data to export. Load data first.")
@@ -22090,8 +22331,9 @@ For detailed documentation, see the User Guide.
                     export_df.insert(insert_position, col, self.ref[col])
                     insert_position += 1
 
-            # Add target column
-            export_df.insert(insert_position, target_col, self.y)
+            # Add target column (if available)
+            if self.y is not None:
+                export_df.insert(insert_position, target_col, self.y)
             export_df.index.name = 'Sample_ID'
 
             # Filter out excluded samples if checkbox is unchecked
@@ -25792,8 +26034,13 @@ F1 Score:  {f1:.4f}
 
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
-        if self.X is None or self.y is None:
+        if self.X is None:
             messagebox.showwarning("No Data", "Please load data first")
+            return
+        if self.y is None:
+            messagebox.showwarning("No Target Data",
+                "Model refinement requires target (Y) values.\n"
+                "Please load a reference file with target data.")
             return
 
         # Validate refinement parameters
