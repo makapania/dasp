@@ -2557,6 +2557,23 @@ class SpectralPredictApp:
         self.explore_n_groups = tk.IntVar(value=4)
         self.explore_bin_method = tk.StringVar(value='Equal freq')
 
+        # Explore tab derivative window control
+        self.explore_deriv_window = tk.IntVar(value=7)
+
+        # Explore tab baseline correction controls
+        self._explore_polybl_degree = tk.IntVar(value=2)
+        self._explore_als_lambda = tk.StringVar(value="1e5")
+        self._explore_als_p = tk.StringVar(value="0.001")
+
+        # Manual baseline state
+        self._mbl_points = []  # list of (wavelength, intensity) tuples
+        self._mbl_interp_var = tk.StringVar(value="Linear")
+        self._mbl_spectrum_var = tk.StringVar(value="Mean spectrum")
+        self._mbl_fig = None
+        self._mbl_ax_top = None
+        self._mbl_ax_bot = None
+        self._mbl_canvas = None
+
         # Validation set tracking
         self.validation_enabled = tk.BooleanVar(value=False)
         self.validation_percentage = tk.DoubleVar(value=20.0)
@@ -5833,6 +5850,32 @@ class SpectralPredictApp:
         self.explore_notebook.add(self.explore_predictor_frame, text="  Predictor Screening  ")
         self._setup_explore_predictor_screening()
 
+        # Rubber Band Baseline sub-tab
+        self.explore_rubberband_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_rubberband_frame, text="  Rubber Band  ")
+        ttk.Label(self.explore_rubberband_frame,
+                 text="Load data to see rubber band baseline corrected spectra",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # Polynomial Baseline sub-tab
+        self.explore_polybl_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_polybl_frame, text="  Polynomial BL  ")
+        ttk.Label(self.explore_polybl_frame,
+                 text="Load data to see polynomial baseline corrected spectra",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # ALS Baseline sub-tab
+        self.explore_als_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_als_frame, text="  ALS Baseline  ")
+        ttk.Label(self.explore_als_frame,
+                 text="Load data to see ALS baseline corrected spectra",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # Manual Baseline sub-tab
+        self.explore_manual_bl_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_manual_bl_frame, text="  Manual Baseline  ")
+        self._setup_explore_manual_baseline()
+
     def _setup_explore_predictor_screening(self):
         """Set up the Predictor Screening UI within the Explore tab."""
         frame = self.explore_predictor_frame
@@ -5911,7 +5954,7 @@ class SpectralPredictApp:
             self._regenerate_explore_spectra_only()
 
     def _regenerate_explore_spectra_only(self):
-        """Redraw only the 3 spectral plots (Raw, 1st Deriv, 2nd Deriv) in Explore tab."""
+        """Redraw spectral plots (Raw, Derivatives, Baselines) in Explore tab."""
         if self.X is None:
             return
         try:
@@ -5922,6 +5965,18 @@ class SpectralPredictApp:
             self._generate_explore_derivative_plots()
         except Exception as e:
             print(f"Warning: Could not regenerate derivative plots: {e}")
+        try:
+            self._generate_explore_rubberband_plot()
+        except Exception as e:
+            print(f"Warning: Could not regenerate rubber band plot: {e}")
+        try:
+            self._generate_explore_polybl_plot()
+        except Exception as e:
+            print(f"Warning: Could not regenerate polynomial baseline plot: {e}")
+        try:
+            self._generate_explore_als_plot()
+        except Exception as e:
+            print(f"Warning: Could not regenerate ALS baseline plot: {e}")
 
     def _generate_explore_plots(self):
         """Generate all plots for the Explore tab."""
@@ -5953,6 +6008,26 @@ class SpectralPredictApp:
             self._generate_explore_target_distribution()
         except Exception as e:
             print(f"Warning: Could not generate target distribution: {e}")
+
+        try:
+            self._generate_explore_rubberband_plot()
+        except Exception as e:
+            print(f"Warning: Could not generate rubber band plot: {e}")
+
+        try:
+            self._generate_explore_polybl_plot()
+        except Exception as e:
+            print(f"Warning: Could not generate polynomial baseline plot: {e}")
+
+        try:
+            self._generate_explore_als_plot()
+        except Exception as e:
+            print(f"Warning: Could not generate ALS baseline plot: {e}")
+
+        try:
+            self._init_manual_baseline_plot()
+        except Exception as e:
+            print(f"Warning: Could not initialize manual baseline plot: {e}")
 
     def _generate_explore_spectra_plot(self):
         """Generate the raw spectra plot in the Explore tab."""
@@ -5990,17 +6065,20 @@ class SpectralPredictApp:
                          style='Caption.TLabel').pack(expand=True)
             return
 
+        window = self.explore_deriv_window.get()
+
         # Get color mapping once for both derivative plots
         color_map, legend_entries, color_label = self._get_explore_color_map()
 
         # 1st Derivative
         for widget in self.explore_deriv1_frame.winfo_children():
             widget.destroy()
-        deriv1 = SavgolDerivative(deriv=1, window=7)
+        self._add_deriv_window_controls(self.explore_deriv1_frame)
+        deriv1 = SavgolDerivative(deriv=1, window=window)
         X_deriv1 = deriv1.transform(self.X.values)
         self._create_explore_plot_in_frame(
             self.explore_deriv1_frame,
-            "1st Derivative",
+            f"1st Derivative (SG window={window})",
             X_deriv1,
             "First Derivative",
             "green",
@@ -6012,11 +6090,12 @@ class SpectralPredictApp:
         # 2nd Derivative
         for widget in self.explore_deriv2_frame.winfo_children():
             widget.destroy()
-        deriv2 = SavgolDerivative(deriv=2, window=7)
+        self._add_deriv_window_controls(self.explore_deriv2_frame)
+        deriv2 = SavgolDerivative(deriv=2, window=window)
         X_deriv2 = deriv2.transform(self.X.values)
         self._create_explore_plot_in_frame(
             self.explore_deriv2_frame,
-            "2nd Derivative",
+            f"2nd Derivative (SG window={window})",
             X_deriv2,
             "Second Derivative",
             "red",
@@ -6024,6 +6103,38 @@ class SpectralPredictApp:
             legend_entries=legend_entries,
             color_label=color_label,
         )
+
+    def _add_deriv_window_controls(self, frame):
+        """Add SG window size control row to a derivative frame."""
+        ctrl = ttk.Frame(frame)
+        ctrl.pack(fill='x', padx=20, pady=(5, 0))
+        ttk.Label(ctrl, text="SG Window:").pack(side='left', padx=(0, 5))
+        sb = ttk.Spinbox(
+            ctrl, from_=5, to=21, increment=2,
+            textvariable=self.explore_deriv_window, width=4
+        )
+        sb.pack(side='left', padx=(0, 10))
+        ttk.Button(
+            ctrl, text="Refresh", style='Modern.TButton',
+            command=self._debounced_deriv_refresh
+        ).pack(side='left')
+
+    def _debounced_deriv_refresh(self):
+        """Debounced refresh for derivative window changes."""
+        if hasattr(self, '_deriv_debounce_id') and self._deriv_debounce_id is not None:
+            self.root.after_cancel(self._deriv_debounce_id)
+        self._deriv_debounce_id = self.root.after(
+            200, self._do_deriv_refresh
+        )
+
+    def _do_deriv_refresh(self):
+        """Actually regenerate derivative plots."""
+        self._deriv_debounce_id = None
+        if self.X is not None:
+            try:
+                self._generate_explore_derivative_plots()
+            except Exception as e:
+                print(f"Warning: Could not regenerate derivative plots: {e}")
 
     def _generate_explore_target_distribution(self):
         """Generate target distribution plot in the Explore tab."""
@@ -6105,6 +6216,521 @@ class SpectralPredictApp:
                      text=f"Could not generate target distribution: {str(e)}",
                      style='Caption.TLabel').pack(expand=True)
             print(f"Target distribution error: {e}")
+
+    # ------------------------------------------------------------------
+    # Baseline correction Explore subtabs
+    # ------------------------------------------------------------------
+
+    def _generate_explore_rubberband_plot(self):
+        """Generate rubber band baseline corrected plot in the Explore tab."""
+        from spectral_predict.baseline import rubber_band_baseline
+
+        for widget in self.explore_rubberband_frame.winfo_children():
+            widget.destroy()
+
+        # Save / Replace controls
+        ctrl = ttk.Frame(self.explore_rubberband_frame)
+        ctrl.pack(fill='x', padx=20, pady=(5, 0))
+        ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
+                   command=lambda: self._save_corrected_spectra("rubberband")).pack(side='left', padx=(0, 5))
+        ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
+                   command=lambda: self._replace_working_data("rubberband")).pack(side='left')
+
+        X_vals = self.X.values.copy()
+        corrected = np.zeros_like(X_vals)
+        for i in range(X_vals.shape[0]):
+            bl = rubber_band_baseline(X_vals[i])
+            corrected[i] = X_vals[i] - bl
+
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
+        self._create_explore_plot_in_frame(
+            self.explore_rubberband_frame,
+            "Rubber Band Baseline Corrected",
+            corrected,
+            "Corrected Intensity",
+            "teal",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
+        )
+
+    def _generate_explore_polybl_plot(self):
+        """Generate polynomial baseline corrected plot in the Explore tab."""
+        from spectral_predict.baseline import BaselinePolynomial
+
+        for widget in self.explore_polybl_frame.winfo_children():
+            widget.destroy()
+
+        # Control row
+        ctrl = ttk.Frame(self.explore_polybl_frame)
+        ctrl.pack(fill='x', padx=20, pady=(5, 0))
+        ttk.Label(ctrl, text="Degree:").pack(side='left', padx=(0, 5))
+        ttk.Spinbox(ctrl, from_=1, to=5, textvariable=self._explore_polybl_degree,
+                    width=3).pack(side='left', padx=(0, 10))
+        ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_polybl_plot).pack(side='left', padx=(0, 10))
+        ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
+                   command=lambda: self._save_corrected_spectra("polybl")).pack(side='left', padx=(0, 5))
+        ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
+                   command=lambda: self._replace_working_data("polybl")).pack(side='left')
+
+        degree = self._explore_polybl_degree.get()
+        bl = BaselinePolynomial(degree=degree)
+        corrected = bl.fit_transform(self.X.values)
+
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
+        self._create_explore_plot_in_frame(
+            self.explore_polybl_frame,
+            f"Polynomial Baseline Corrected (degree={degree})",
+            corrected,
+            "Corrected Intensity",
+            "purple",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
+        )
+
+    def _refresh_polybl_plot(self):
+        """Refresh polynomial baseline plot after parameter change."""
+        if self.X is not None:
+            try:
+                self._generate_explore_polybl_plot()
+            except Exception as e:
+                print(f"Warning: Could not regenerate polynomial baseline plot: {e}")
+
+    def _generate_explore_als_plot(self):
+        """Generate ALS baseline corrected plot in the Explore tab."""
+        from spectral_predict.baseline import BaselineALS
+
+        for widget in self.explore_als_frame.winfo_children():
+            widget.destroy()
+
+        # Control row
+        ctrl = ttk.Frame(self.explore_als_frame)
+        ctrl.pack(fill='x', padx=20, pady=(5, 0))
+
+        ttk.Label(ctrl, text="Lambda:").pack(side='left', padx=(0, 5))
+        lam_combo = ttk.Combobox(
+            ctrl, textvariable=self._explore_als_lambda,
+            values=["1e3", "1e4", "1e5", "1e6", "1e7"],
+            state='readonly', width=6
+        )
+        lam_combo.pack(side='left', padx=(0, 10))
+
+        ttk.Label(ctrl, text="p:").pack(side='left', padx=(0, 5))
+        p_combo = ttk.Combobox(
+            ctrl, textvariable=self._explore_als_p,
+            values=["0.001", "0.005", "0.01", "0.05", "0.1"],
+            state='readonly', width=6
+        )
+        p_combo.pack(side='left', padx=(0, 10))
+
+        ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_als_plot).pack(side='left', padx=(0, 10))
+        ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
+                   command=lambda: self._save_corrected_spectra("als")).pack(side='left', padx=(0, 5))
+        ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
+                   command=lambda: self._replace_working_data("als")).pack(side='left')
+
+        lambda_ = float(self._explore_als_lambda.get())
+        p = float(self._explore_als_p.get())
+        bl = BaselineALS(lambda_=lambda_, p=p)
+        corrected = bl.fit_transform(self.X.values)
+
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
+        self._create_explore_plot_in_frame(
+            self.explore_als_frame,
+            f"ALS Baseline Corrected (lambda={lambda_:.0e}, p={p})",
+            corrected,
+            "Corrected Intensity",
+            "darkorange",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
+        )
+
+    def _refresh_als_plot(self):
+        """Refresh ALS baseline plot after parameter change."""
+        if self.X is not None:
+            try:
+                self._generate_explore_als_plot()
+            except Exception as e:
+                print(f"Warning: Could not regenerate ALS baseline plot: {e}")
+
+    def _compute_corrected_spectra(self, method: str) -> np.ndarray:
+        """Compute baseline-corrected spectra for the given method.
+
+        Returns corrected array (n_samples x n_wavelengths).
+        """
+        X_vals = self.X.values.copy()
+        if method == "rubberband":
+            from spectral_predict.baseline import rubber_band_baseline
+            corrected = np.zeros_like(X_vals)
+            for i in range(X_vals.shape[0]):
+                bl = rubber_band_baseline(X_vals[i])
+                corrected[i] = X_vals[i] - bl
+        elif method == "polybl":
+            from spectral_predict.baseline import BaselinePolynomial
+            degree = self._explore_polybl_degree.get()
+            corrected = BaselinePolynomial(degree=degree).fit_transform(X_vals)
+        elif method == "als":
+            from spectral_predict.baseline import BaselineALS
+            lambda_ = float(self._explore_als_lambda.get())
+            p = float(self._explore_als_p.get())
+            corrected = BaselineALS(lambda_=lambda_, p=p).fit_transform(X_vals)
+        else:
+            raise ValueError(f"Unknown baseline method: {method}")
+        return corrected
+
+    def _save_corrected_spectra(self, method: str):
+        """Save baseline-corrected spectra to CSV."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "No spectral data loaded.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Export Changes",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+
+        try:
+            corrected = self._compute_corrected_spectra(method)
+            export_df = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
+            if self.y is not None:
+                export_df.insert(0, 'Target', self.y)
+            export_df.index.name = 'Sample_ID'
+            export_df.to_csv(filename, index=True)
+            messagebox.showinfo("Saved", f"Corrected spectra saved to:\n{filename}")
+            print(f"> Saved {method} corrected spectra to: {filename}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save:\n{str(e)}")
+
+    def _replace_working_data(self, method: str):
+        """Replace self.X with baseline-corrected spectra."""
+        if self.X is None:
+            return
+        if not messagebox.askyesno(
+            "Replace Working Data",
+            f"This will replace your current spectral data with {method} "
+            "baseline-corrected spectra.\n\nThis cannot be undone. Continue?"
+        ):
+            return
+
+        try:
+            corrected = self._compute_corrected_spectra(method)
+            self.X = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
+            self.X_original = self.X.copy()
+            self._generate_explore_plots()
+            messagebox.showinfo("Done", "Working data replaced with corrected spectra.")
+            print(f"> Replaced working data with {method} baseline correction")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to replace data:\n{str(e)}")
+
+    # ------------------------------------------------------------------
+    # Manual Baseline Interactive Subtab
+    # ------------------------------------------------------------------
+
+    def _setup_explore_manual_baseline(self):
+        """Build the Manual Baseline UI (called once from _create_explore_tab)."""
+        frame = self.explore_manual_bl_frame
+
+        # Control row
+        ctrl = ttk.Frame(frame)
+        ctrl.pack(fill='x', padx=20, pady=(5, 0))
+
+        ttk.Label(ctrl, text="Spectrum:").pack(side='left', padx=(0, 5))
+        self._mbl_spectrum_combo = ttk.Combobox(
+            ctrl, textvariable=self._mbl_spectrum_var,
+            values=["Mean spectrum"], state='readonly', width=20
+        )
+        self._mbl_spectrum_combo.pack(side='left', padx=(0, 10))
+        self._mbl_spectrum_combo.bind('<<ComboboxSelected>>', lambda e: self._init_manual_baseline_plot())
+
+        ttk.Label(ctrl, text="Interpolation:").pack(side='left', padx=(0, 5))
+        ttk.Radiobutton(ctrl, text="Linear", variable=self._mbl_interp_var,
+                        value="Linear", command=self._update_mbl_plot).pack(side='left', padx=(0, 5))
+        ttk.Radiobutton(ctrl, text="Cubic Spline", variable=self._mbl_interp_var,
+                        value="Cubic Spline", command=self._update_mbl_plot).pack(side='left', padx=(0, 15))
+
+        ttk.Button(ctrl, text="Undo Last Point", style='Modern.TButton',
+                   command=self._mbl_undo).pack(side='left', padx=(0, 5))
+        ttk.Button(ctrl, text="Clear All Points", style='Modern.TButton',
+                   command=self._mbl_clear).pack(side='left', padx=(0, 15))
+        ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
+                   command=self._mbl_save).pack(side='left', padx=(0, 5))
+        ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
+                   command=self._mbl_replace).pack(side='left')
+
+        # Status label
+        self._mbl_status = ttk.Label(
+            frame, text="Left-click: add point  |  Right-click: remove nearest",
+            style='Caption.TLabel'
+        )
+        self._mbl_status.pack(fill='x', padx=20, pady=(2, 0))
+
+        # Plot area (populated on data load)
+        self._mbl_plot_frame = ttk.Frame(frame)
+        self._mbl_plot_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        ttk.Label(self._mbl_plot_frame,
+                 text="Load data to use manual baseline correction",
+                 style='Caption.TLabel').pack(expand=True)
+
+    def _get_mbl_spectrum(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (wavelengths, spectrum_values) for the selected spectrum."""
+        wavelengths = self.X.columns.values.astype(float)
+        choice = self._mbl_spectrum_var.get()
+        if choice == "Mean spectrum":
+            spectrum = self.X.values.mean(axis=0)
+        else:
+            # Find by sample name
+            if choice in self.X.index:
+                spectrum = self.X.loc[choice].values.astype(float)
+            else:
+                spectrum = self.X.values.mean(axis=0)
+        return wavelengths, spectrum
+
+    def _init_manual_baseline_plot(self):
+        """Create/recreate the manual baseline interactive plot."""
+        if self.X is None:
+            return
+
+        # Update spectrum selector with sample names
+        sample_names = ["Mean spectrum"] + [str(s) for s in self.X.index[:200]]
+        self._mbl_spectrum_combo['values'] = sample_names
+
+        self._mbl_points = []
+
+        # Clear plot frame
+        for widget in self._mbl_plot_frame.winfo_children():
+            widget.destroy()
+
+        wavelengths, spectrum = self._get_mbl_spectrum()
+
+        self._mbl_fig = Figure(figsize=(12, 7))
+        self._mbl_ax_top = self._mbl_fig.add_subplot(211)
+        self._mbl_ax_bot = self._mbl_fig.add_subplot(212, sharex=self._mbl_ax_top)
+
+        # Draw spectrum on top
+        self._mbl_ax_top.plot(wavelengths, spectrum, 'b-', linewidth=1, label='Spectrum')
+        self._mbl_ax_top.set_ylabel('Intensity', fontsize=10)
+        self._mbl_ax_top.set_title('Manual Baseline Correction — click to add anchor points',
+                                    fontsize=12, fontweight='bold')
+        self._mbl_ax_top.grid(True, alpha=0.3)
+        self._mbl_ax_top.legend(fontsize=8)
+
+        # Bottom: placeholder
+        self._mbl_ax_bot.set_xlabel('Wavelength (nm)', fontsize=10)
+        self._mbl_ax_bot.set_ylabel('Corrected', fontsize=10)
+        self._mbl_ax_bot.set_title('Corrected Spectrum', fontsize=10)
+        self._mbl_ax_bot.grid(True, alpha=0.3)
+        self._mbl_ax_bot.text(0.5, 0.5, 'Add at least 2 anchor points above',
+                              transform=self._mbl_ax_bot.transAxes,
+                              ha='center', va='center', color='gray', fontsize=11)
+
+        self._mbl_fig.tight_layout()
+
+        self._mbl_canvas = FigureCanvasTkAgg(self._mbl_fig, master=self._mbl_plot_frame)
+        self._mbl_canvas.draw()
+        self._mbl_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # Connect click event
+        self._mbl_cid = self._mbl_canvas.mpl_connect('button_press_event', self._on_mbl_click)
+
+        # Toolbar
+        tb_frame = ttk.Frame(self._mbl_plot_frame)
+        tb_frame.pack(fill='x')
+        toolbar = NavigationToolbar2Tk(self._mbl_canvas, tb_frame)
+        toolbar.update()
+        self._mbl_toolbar = toolbar
+
+    def _on_mbl_click(self, event):
+        """Handle mouse click on manual baseline plot."""
+        if event.inaxes != self._mbl_ax_top:
+            return
+        # Skip if toolbar is in zoom/pan mode
+        if hasattr(self, '_mbl_toolbar') and self._mbl_toolbar.mode:
+            return
+
+        wavelengths, spectrum = self._get_mbl_spectrum()
+
+        if event.button == 1:  # Left click: add point
+            # Snap y to the actual spectrum value at the nearest wavelength
+            wl = event.xdata
+            idx = np.argmin(np.abs(wavelengths - wl))
+            snap_wl = wavelengths[idx]
+            snap_y = spectrum[idx]
+            self._mbl_points.append((snap_wl, snap_y))
+            self._mbl_points.sort(key=lambda p: p[0])
+        elif event.button == 3:  # Right click: remove nearest
+            if self._mbl_points:
+                dists = [abs(p[0] - event.xdata) for p in self._mbl_points]
+                nearest = np.argmin(dists)
+                self._mbl_points.pop(nearest)
+
+        self._update_mbl_plot()
+
+    def _update_mbl_plot(self):
+        """Redraw the manual baseline plot with current anchor points."""
+        if self._mbl_fig is None or self.X is None:
+            return
+
+        wavelengths, spectrum = self._get_mbl_spectrum()
+
+        self._mbl_ax_top.clear()
+        self._mbl_ax_bot.clear()
+
+        # Top: spectrum + anchor points + baseline
+        self._mbl_ax_top.plot(wavelengths, spectrum, 'b-', linewidth=1, label='Spectrum')
+        self._mbl_ax_top.set_ylabel('Intensity', fontsize=10)
+        self._mbl_ax_top.set_title('Manual Baseline Correction', fontsize=12, fontweight='bold')
+        self._mbl_ax_top.grid(True, alpha=0.3)
+
+        if self._mbl_points:
+            px = [p[0] for p in self._mbl_points]
+            py = [p[1] for p in self._mbl_points]
+            self._mbl_ax_top.plot(px, py, 'ro', markersize=7, zorder=5, label='Anchor points')
+
+            if len(self._mbl_points) >= 2:
+                baseline = self._compute_mbl_baseline(wavelengths)
+                self._mbl_ax_top.plot(wavelengths, baseline, 'r--', linewidth=1.5,
+                                       label='Baseline', alpha=0.8)
+
+                corrected = spectrum - baseline
+                self._mbl_ax_bot.plot(wavelengths, corrected, 'g-', linewidth=1)
+                self._mbl_ax_bot.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
+
+        self._mbl_ax_top.legend(fontsize=8)
+
+        self._mbl_ax_bot.set_xlabel('Wavelength (nm)', fontsize=10)
+        self._mbl_ax_bot.set_ylabel('Corrected', fontsize=10)
+        self._mbl_ax_bot.set_title('Corrected Spectrum', fontsize=10)
+        self._mbl_ax_bot.grid(True, alpha=0.3)
+
+        if len(self._mbl_points) < 2:
+            self._mbl_ax_bot.text(0.5, 0.5, 'Add at least 2 anchor points above',
+                                  transform=self._mbl_ax_bot.transAxes,
+                                  ha='center', va='center', color='gray', fontsize=11)
+
+        self._mbl_status.config(
+            text=f"Anchor points: {len(self._mbl_points)}  |  "
+                 f"Left-click: add  |  Right-click: remove nearest"
+        )
+
+        self._mbl_fig.tight_layout()
+        self._mbl_canvas.draw_idle()
+
+    def _compute_mbl_baseline(self, wavelengths: np.ndarray) -> np.ndarray:
+        """Interpolate baseline from anchor points across the full wavelength range."""
+        px = np.array([p[0] for p in self._mbl_points])
+        py = np.array([p[1] for p in self._mbl_points])
+
+        if self._mbl_interp_var.get() == "Cubic Spline" and len(px) >= 4:
+            from scipy.interpolate import CubicSpline
+            cs = CubicSpline(px, py, bc_type='clamped')
+            baseline = cs(wavelengths)
+            # Clamp extrapolation: flat beyond anchor range
+            baseline[wavelengths < px[0]] = py[0]
+            baseline[wavelengths > px[-1]] = py[-1]
+        else:
+            # Linear interpolation with flat extrapolation at edges
+            baseline = np.interp(wavelengths, px, py)
+
+        return baseline
+
+    def _mbl_apply_to_all(self) -> np.ndarray:
+        """Apply the manual baseline anchor points to all spectra.
+
+        For each spectrum, the baseline is computed at the same x-positions
+        but with y-values taken from that spectrum (not the mean).
+        """
+        wavelengths = self.X.columns.values.astype(float)
+        X_vals = self.X.values.copy()
+        corrected = np.zeros_like(X_vals)
+        px = np.array([p[0] for p in self._mbl_points])
+        # Map anchor wavelengths to nearest column indices
+        anchor_indices = [np.argmin(np.abs(wavelengths - w)) for w in px]
+
+        for i in range(X_vals.shape[0]):
+            py = X_vals[i, anchor_indices]
+            if self._mbl_interp_var.get() == "Cubic Spline" and len(px) >= 4:
+                from scipy.interpolate import CubicSpline
+                cs = CubicSpline(px, py, bc_type='clamped')
+                bl = cs(wavelengths)
+                bl[wavelengths < px[0]] = py[0]
+                bl[wavelengths > px[-1]] = py[-1]
+            else:
+                bl = np.interp(wavelengths, px, py)
+            corrected[i] = X_vals[i] - bl
+
+        return corrected
+
+    def _mbl_undo(self):
+        """Remove the last anchor point."""
+        if self._mbl_points:
+            self._mbl_points.pop()
+            self._update_mbl_plot()
+
+    def _mbl_clear(self):
+        """Clear all anchor points."""
+        self._mbl_points = []
+        self._update_mbl_plot()
+
+    def _mbl_save(self):
+        """Save manually baseline-corrected spectra to CSV."""
+        if self.X is None or len(self._mbl_points) < 2:
+            messagebox.showwarning("Cannot Save",
+                                   "Need loaded data and at least 2 anchor points.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Export Changes",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+
+        try:
+            corrected = self._mbl_apply_to_all()
+            export_df = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
+            if self.y is not None:
+                export_df.insert(0, 'Target', self.y)
+            export_df.index.name = 'Sample_ID'
+            export_df.to_csv(filename, index=True)
+            messagebox.showinfo("Saved", f"Corrected spectra saved to:\n{filename}")
+            print(f"> Saved manual baseline corrected spectra to: {filename}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save:\n{str(e)}")
+
+    def _mbl_replace(self):
+        """Replace working data with manually baseline-corrected spectra."""
+        if self.X is None or len(self._mbl_points) < 2:
+            messagebox.showwarning("Cannot Replace",
+                                   "Need loaded data and at least 2 anchor points.")
+            return
+        if not messagebox.askyesno(
+            "Replace Working Data",
+            "This will replace your current spectral data with manual "
+            "baseline-corrected spectra.\n\nThis cannot be undone. Continue?"
+        ):
+            return
+
+        try:
+            corrected = self._mbl_apply_to_all()
+            self.X = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
+            self.X_original = self.X.copy()
+            self._generate_explore_plots()
+            messagebox.showinfo("Done", "Working data replaced with corrected spectra.")
+            print("> Replaced working data with manual baseline correction")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to replace data:\n{str(e)}")
 
     def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color,
                                       color_map=None, legend_entries=None,

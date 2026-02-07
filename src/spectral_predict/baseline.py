@@ -6,6 +6,51 @@ from scipy.sparse.linalg import spsolve
 from sklearn.base import BaseEstimator, TransformerMixin
 
 
+def rubber_band_baseline(y: np.ndarray) -> np.ndarray:
+    """Compute rubber band (convex hull) baseline for a single spectrum.
+
+    Uses Andrew's monotone chain algorithm to find the lower convex hull,
+    which represents the baseline a rubber band would form if stretched
+    underneath the spectrum.
+
+    Parameters
+    ----------
+    y : array, shape (n_wavelengths,)
+        Single spectrum intensity values.
+
+    Returns
+    -------
+    baseline : array, shape (n_wavelengths,)
+        Estimated rubber band baseline.
+    """
+    n = len(y)
+    if n < 3:
+        return np.zeros(n)
+
+    # Andrew's monotone chain: compute lower convex hull.
+    # Points are (i, y[i]) already sorted by x (i = 0..n-1).
+    # We keep only vertices where the path makes right turns (clockwise).
+    lower = []  # list of (index, value) tuples
+    for i in range(n):
+        while len(lower) >= 2:
+            # Cross product of vectors (lower[-2] → lower[-1]) and (lower[-2] → (i, y[i]))
+            ox, oy = lower[-2]
+            ax, ay = lower[-1]
+            bx, by = i, y[i]
+            cross = (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
+            if cross <= 0:
+                lower.pop()
+            else:
+                break
+        lower.append((i, y[i]))
+
+    indices = [p[0] for p in lower]
+    values = [p[1] for p in lower]
+    baseline = np.interp(np.arange(n), indices, values)
+
+    return baseline
+
+
 class BaselineALS(BaseEstimator, TransformerMixin):
     """
     Asymmetric Least Squares (ALS) baseline correction.
