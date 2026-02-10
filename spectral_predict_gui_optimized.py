@@ -14588,8 +14588,16 @@ class SpectralPredictApp:
 
     # ==================== Plot-based Sample Exclusion Methods ====================
 
+    def _resolve_specimen_label(self, idx: int):
+        """Resolve a sample index to its specimen label from y or X index."""
+        if self.y is not None and hasattr(self.y, 'index'):
+            return self.y.index[idx]
+        if self.X is not None and hasattr(self.X, 'index'):
+            return self.X.index[idx]
+        return None
+
     def _show_exclude_context_menu(self, event, specimen_label, ax, x, y, canvas):
-        """Show a right-click context menu to exclude/re-include a sample from a model dev plot."""
+        """Show a right-click context menu to exclude/re-include a sample from a plot."""
         menu = tk.Menu(self.root, tearoff=0)
         is_excluded = specimen_label in self.excluded_spectra
 
@@ -14668,7 +14676,8 @@ class SpectralPredictApp:
             parent_frame,
             text=btn_text,
             command=lambda: self._exclude_sample_from_plot(
-                specimen_label, ax, x, y, canvas, exclude=action
+                specimen_label, ax, x, y, canvas, exclude=action,
+                parent_frame=parent_frame
             )
         )
         btn.pack(side=tk.BOTTOM, pady=5)
@@ -15730,7 +15739,7 @@ class SpectralPredictApp:
         ax = fig.add_subplot(111)
 
         scores = self.outlier_report['pca']['scores']
-        y_values = self.y.values
+        y_values = self.y.values if self.y is not None else None
         outliers = self.outlier_report['pca']['outlier_flags']
 
         # Get color variable selection
@@ -15904,11 +15913,8 @@ class SpectralPredictApp:
 
         # Mark already-excluded samples with red X
         for i in range(len(scores)):
-            if self.y is not None and hasattr(self.y, 'index'):
-                spec_label = self.y.index[i]
-            elif self.X is not None and hasattr(self.X, 'index'):
-                spec_label = self.X.index[i]
-            else:
+            spec_label = self._resolve_specimen_label(i)
+            if spec_label is None:
                 break
             if spec_label in self.excluded_spectra:
                 ax.plot(scores[i, 0], scores[i, 1], 'rx', markersize=14, markeredgewidth=3, zorder=10)
@@ -15947,11 +15953,8 @@ class SpectralPredictApp:
                 pc2 = scores[nearest_idx, 1]
 
                 # Resolve specimen label
-                if self.y is not None and hasattr(self.y, 'index'):
-                    specimen_label = self.y.index[nearest_idx]
-                elif self.X is not None and hasattr(self.X, 'index'):
-                    specimen_label = self.X.index[nearest_idx]
-                else:
+                specimen_label = self._resolve_specimen_label(nearest_idx)
+                if specimen_label is None:
                     return
 
                 if event.button == 3:
@@ -16011,11 +16014,8 @@ class SpectralPredictApp:
 
         # Mark already-excluded samples with red X
         for i in range(len(t2_values)):
-            if self.y is not None and hasattr(self.y, 'index'):
-                spec_label = self.y.index[i]
-            elif self.X is not None and hasattr(self.X, 'index'):
-                spec_label = self.X.index[i]
-            else:
+            spec_label = self._resolve_specimen_label(i)
+            if spec_label is None:
                 break
             if spec_label in self.excluded_spectra:
                 ax.plot(i, t2_values[i], 'rx', markersize=14, markeredgewidth=3, zorder=10)
@@ -16040,11 +16040,8 @@ class SpectralPredictApp:
             bar_idx = int(round(event.xdata))
             if 0 <= bar_idx < len(t2_values):
                 # Resolve specimen label
-                if self.y is not None and hasattr(self.y, 'index'):
-                    specimen_label = self.y.index[bar_idx]
-                elif self.X is not None and hasattr(self.X, 'index'):
-                    specimen_label = self.X.index[bar_idx]
-                else:
+                specimen_label = self._resolve_specimen_label(bar_idx)
+                if specimen_label is None:
                     return
 
                 t2_value = t2_values[bar_idx]
@@ -16094,11 +16091,8 @@ class SpectralPredictApp:
 
         # Mark already-excluded samples with red X
         for i in range(len(q_values)):
-            if self.y is not None and hasattr(self.y, 'index'):
-                spec_label = self.y.index[i]
-            elif self.X is not None and hasattr(self.X, 'index'):
-                spec_label = self.X.index[i]
-            else:
+            spec_label = self._resolve_specimen_label(i)
+            if spec_label is None:
                 break
             if spec_label in self.excluded_spectra:
                 ax.plot(i, q_values[i], 'rx', markersize=14, markeredgewidth=3, zorder=10)
@@ -16123,11 +16117,8 @@ class SpectralPredictApp:
             bar_idx = int(round(event.xdata))
             if 0 <= bar_idx < len(q_values):
                 # Resolve specimen label
-                if self.y is not None and hasattr(self.y, 'index'):
-                    specimen_label = self.y.index[bar_idx]
-                elif self.X is not None and hasattr(self.X, 'index'):
-                    specimen_label = self.X.index[bar_idx]
-                else:
+                specimen_label = self._resolve_specimen_label(bar_idx)
+                if specimen_label is None:
                     return
 
                 q_value = q_values[bar_idx]
@@ -16178,11 +16169,8 @@ class SpectralPredictApp:
 
         # Mark already-excluded samples with red X
         for i in range(len(distances)):
-            if self.y is not None and hasattr(self.y, 'index'):
-                spec_label = self.y.index[i]
-            elif self.X is not None and hasattr(self.X, 'index'):
-                spec_label = self.X.index[i]
-            else:
+            spec_label = self._resolve_specimen_label(i)
+            if spec_label is None:
                 break
             if spec_label in self.excluded_spectra:
                 ax.plot(i, distances[i], 'rx', markersize=14, markeredgewidth=3, zorder=10)
@@ -16207,11 +16195,8 @@ class SpectralPredictApp:
             bar_idx = int(round(event.xdata))
             if 0 <= bar_idx < len(distances):
                 # Resolve specimen label
-                if self.y is not None and hasattr(self.y, 'index'):
-                    specimen_label = self.y.index[bar_idx]
-                elif self.X is not None and hasattr(self.X, 'index'):
-                    specimen_label = self.X.index[bar_idx]
-                else:
+                specimen_label = self._resolve_specimen_label(bar_idx)
+                if specimen_label is None:
                     return
 
                 distance = distances[bar_idx]
