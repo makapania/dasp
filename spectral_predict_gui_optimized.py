@@ -2545,6 +2545,7 @@ class SpectralPredictApp:
         # Interactive plot annotation tracking
         self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
         self.active_annotation = None  # Currently visible annotation object
+        self._explore_plot_state = {}  # {frame_key: state_dict} for explore plot info bars
 
         # Plot coloring variables
         self.pca_color_var = tk.StringVar(value='Y Value')
@@ -5838,18 +5839,6 @@ class SpectralPredictApp:
                  text="Load data to see 2nd derivative plots",
                  style='Caption.TLabel').pack(expand=True)
 
-        # Target Distribution sub-tab
-        self.explore_target_dist_frame = ttk.Frame(self.explore_notebook)
-        self.explore_notebook.add(self.explore_target_dist_frame, text="  Target Distribution  ")
-        ttk.Label(self.explore_target_dist_frame,
-                 text="Load data with a target variable to see distribution",
-                 style='Caption.TLabel').pack(expand=True)
-
-        # Predictor Screening sub-tab
-        self.explore_predictor_frame = ttk.Frame(self.explore_notebook)
-        self.explore_notebook.add(self.explore_predictor_frame, text="  Predictor Screening  ")
-        self._setup_explore_predictor_screening()
-
         # Rubber Band Baseline sub-tab
         self.explore_rubberband_frame = ttk.Frame(self.explore_notebook)
         self.explore_notebook.add(self.explore_rubberband_frame, text="  Rubber Band  ")
@@ -5875,6 +5864,18 @@ class SpectralPredictApp:
         self.explore_manual_bl_frame = ttk.Frame(self.explore_notebook)
         self.explore_notebook.add(self.explore_manual_bl_frame, text="  Manual Baseline  ")
         self._setup_explore_manual_baseline()
+
+        # Target Distribution sub-tab
+        self.explore_target_dist_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_target_dist_frame, text="  Target Distribution  ")
+        ttk.Label(self.explore_target_dist_frame,
+                 text="Load data with a target variable to see distribution",
+                 style='Caption.TLabel').pack(expand=True)
+
+        # Predictor Screening sub-tab
+        self.explore_predictor_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_predictor_frame, text="  Predictor Screening  ")
+        self._setup_explore_predictor_screening()
 
     def _setup_explore_predictor_screening(self):
         """Set up the Predictor Screening UI within the Explore tab."""
@@ -6747,6 +6748,9 @@ class SpectralPredictApp:
             legend_entries: Optional list of (color, label) for legend
             color_label: Optional legend title string
         """
+        frame_key = id(frame)
+        self._explore_plot_state.pop(frame_key, None)
+
         fig = Figure(figsize=(12, 6))
         ax = fig.add_subplot(111)
 
@@ -6771,15 +6775,18 @@ class SpectralPredictApp:
         # Plot spectra
         for i in indices:
             if self.X.index[i] in self.excluded_spectra:
-                current_alpha = 0.05
-                current_linewidth = 0.5
+                current_alpha = alpha
+                current_linewidth = 0.8
+                current_linestyle = ':'
             else:
                 current_alpha = alpha
                 current_linewidth = 1.0
+                current_linestyle = '-'
 
             line_color = color_map.get(i, color) if color_map else color
             line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
-                          color=line_color, linewidth=current_linewidth)
+                          color=line_color, linewidth=current_linewidth,
+                          linestyle=current_linestyle)
             # Store DataFrame index label as GID (not positional index)
             line.set_gid(str(self.X.index[i]))
             line.set_picker(5)
@@ -6801,30 +6808,9 @@ class SpectralPredictApp:
                      loc='upper left', bbox_to_anchor=(1.01, 1.0),
                      fontsize=8, title_fontsize=9, framealpha=0.9)
 
-        # Add click handler for toggling exclusion
-        def on_pick(event):
-            if event.artist.get_gid():
-                gid = event.artist.get_gid()
-                # Convert GID back to original index type
-                # Try to convert to int if it looks like one, otherwise keep as string
-                try:
-                    sample_idx = int(gid) if gid.lstrip('-').isdigit() else gid
-                except (ValueError, AttributeError):
-                    sample_idx = gid
-
-                if sample_idx in self.excluded_spectra:
-                    self.excluded_spectra.discard(sample_idx)
-                    event.artist.set_alpha(alpha)
-                    event.artist.set_linewidth(1.0)
-                    print(f"> Sample {sample_idx} included")
-                else:
-                    self.excluded_spectra.add(sample_idx)
-                    event.artist.set_alpha(0.05)
-                    event.artist.set_linewidth(0.5)
-                    print(f"[X] Sample {sample_idx} excluded")
-                fig.canvas.draw_idle()
-
-        fig.canvas.mpl_connect('pick_event', on_pick)
+        # Connect pick event to shared handler
+        fig.canvas.mpl_connect('pick_event',
+            lambda event, fk=frame_key: self._on_explore_spectrum_pick(event, fk))
 
         # Reserve space for legend when active
         if has_legend:
@@ -6842,6 +6828,143 @@ class SpectralPredictApp:
         toolbar_frame.pack(fill='x')
         toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
         toolbar.update()
+
+        # Add info bar below toolbar
+        info_frame = ttk.Frame(frame)
+        info_frame.pack(fill='x', padx=10, pady=(2, 5))
+
+        info_label = ttk.Label(info_frame, text="Click a spectrum to see details",
+                               style='Caption.TLabel')
+        info_label.pack(side='left', padx=(5, 15))
+
+        toggle_btn = ttk.Button(info_frame, text="Exclude",
+                                state='disabled',
+                                command=lambda f=frame: self._on_explore_toggle_exclusion(f))
+        toggle_btn.pack(side='left', padx=(0, 15))
+
+        excl_count_label = ttk.Label(info_frame, text="", style='Caption.TLabel')
+        excl_count_label.pack(side='left')
+        self._update_explore_excl_count_label(excl_count_label)
+
+        # Store state for this frame
+        self._explore_plot_state[frame_key] = {
+            'fig': fig, 'canvas': canvas, 'ax': ax, 'frame': frame,
+            'info_label': info_label, 'toggle_btn': toggle_btn,
+            'excl_count_label': excl_count_label,
+            'selected_sample': None, 'alpha': alpha,
+        }
+
+    def _on_explore_spectrum_pick(self, event, frame_key):
+        """Handle click on a spectrum in an Explore plot — show annotation and info bar."""
+        if not event.artist.get_gid():
+            return
+        state = self._explore_plot_state.get(frame_key)
+        if state is None:
+            return
+
+        gid = event.artist.get_gid()
+        try:
+            sample_idx = int(gid) if gid.lstrip('-').isdigit() else gid
+        except (ValueError, AttributeError):
+            sample_idx = gid
+
+        # Get positional index for _format_specimen_info
+        try:
+            pos_idx = self.X.index.get_loc(sample_idx)
+        except KeyError:
+            return
+
+        # Get Y value if available
+        y_value = None
+        if self.y is not None:
+            try:
+                y_value = self.y.iloc[pos_idx]
+            except (IndexError, KeyError):
+                pass
+
+        # Build annotation text
+        info_text = self._format_specimen_info(pos_idx, y_value=y_value)
+
+        # Find midpoint of the clicked line for annotation placement
+        line = event.artist
+        xdata = line.get_xdata()
+        ydata = line.get_ydata()
+        mid = len(xdata) // 2
+        ann_x, ann_y = xdata[mid], ydata[mid]
+
+        self._create_or_update_annotation(state['ax'], ann_x, ann_y, info_text, state['canvas'])
+        state['canvas'].draw_idle()
+
+        # Update info bar label
+        label_parts = [f"Sample: {sample_idx}"]
+        if y_value is not None:
+            if isinstance(y_value, (float, np.floating)):
+                label_parts.append(f"Y: {y_value:.4f}")
+            else:
+                label_parts.append(f"Y: {y_value}")
+        state['info_label'].config(text="  |  ".join(label_parts))
+
+        # Store selected sample and enable toggle button
+        state['selected_sample'] = sample_idx
+        is_excluded = sample_idx in self.excluded_spectra
+        state['toggle_btn'].config(
+            text="Include" if is_excluded else "Exclude",
+            state='normal',
+        )
+
+        # Right-click: immediately toggle exclusion
+        if event.mouseevent.button == 3:
+            self._on_explore_toggle_exclusion(state['frame'])
+
+    def _on_explore_toggle_exclusion(self, frame):
+        """Toggle exclusion for the currently selected sample in an Explore plot."""
+        frame_key = id(frame)
+        state = self._explore_plot_state.get(frame_key)
+        if state is None or state['selected_sample'] is None:
+            return
+
+        sample_idx = state['selected_sample']
+        gid_str = str(sample_idx)
+
+        if sample_idx in self.excluded_spectra:
+            self.excluded_spectra.discard(sample_idx)
+            new_alpha_val = state['alpha']
+            new_lw = 1.0
+            new_ls = '-'
+            state['toggle_btn'].config(text="Exclude")
+            print(f"> Sample {sample_idx} included")
+        else:
+            self.excluded_spectra.add(sample_idx)
+            new_alpha_val = state['alpha']
+            new_lw = 0.8
+            new_ls = ':'
+            state['toggle_btn'].config(text="Include")
+            print(f"[X] Sample {sample_idx} excluded")
+
+        # Update line style across ALL explore plots
+        is_excluded = sample_idx in self.excluded_spectra
+        for fk, st in self._explore_plot_state.items():
+            for line in st['ax'].get_lines():
+                if line.get_gid() == gid_str:
+                    line.set_alpha(st['alpha'])
+                    line.set_linewidth(0.8 if is_excluded else 1.0)
+                    line.set_linestyle(':' if is_excluded else '-')
+                    break
+            st['canvas'].draw_idle()
+            self._update_explore_excl_count_label(st['excl_count_label'])
+
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+
+    def _update_explore_excl_count_label(self, label):
+        """Update an exclusion count label widget."""
+        n = len(self.excluded_spectra)
+        if n == 0:
+            label.config(text="")
+        elif n == 1:
+            label.config(text="1 spectrum excluded")
+        else:
+            label.config(text=f"{n} spectra excluded")
 
     def _run_explore_predictor_screening(self):
         """Run predictor screening from the Explore tab."""
@@ -15023,11 +15146,13 @@ class SpectralPredictApp:
             self.excluded_spectra.remove(sample_idx)
             line.set_alpha(0.3)  # Restore normal alpha
             line.set_linewidth(1.0)  # Restore normal linewidth
+            line.set_linestyle('-')  # Restore solid line
         else:
             # Exclude the spectrum
             self.excluded_spectra.add(sample_idx)
-            line.set_alpha(0.05)  # Make nearly transparent
-            line.set_linewidth(0.5)  # Make thinner
+            line.set_alpha(0.3)  # Keep same alpha
+            line.set_linewidth(0.8)  # Slightly thinner
+            line.set_linestyle(':')  # Dotted to indicate excluded
 
         event.canvas.draw()
         self._update_exclusion_status()
@@ -15051,6 +15176,9 @@ class SpectralPredictApp:
         specimen_id = None
         if self.y is not None and hasattr(self.y, 'index'):
             specimen_id = self.y.index[specimen_idx]
+            lines.append(f"Specimen: {specimen_id}")
+        elif self.X is not None and hasattr(self.X, 'index'):
+            specimen_id = self.X.index[specimen_idx]
             lines.append(f"Specimen: {specimen_id}")
 
         # Add ALL metadata columns if available (from combined file or reference file)
@@ -15431,14 +15559,17 @@ class SpectralPredictApp:
         for i in indices:
             # Determine if this spectrum is currently excluded
             if self.X.index[i] in self.excluded_spectra:
-                current_alpha = 0.05
-                current_linewidth = 0.5
+                current_alpha = alpha
+                current_linewidth = 0.8
+                current_linestyle = ':'
             else:
                 current_alpha = alpha
                 current_linewidth = 1.0
+                current_linestyle = '-'
 
             line, = ax.plot(wavelengths, data[i, :], alpha=current_alpha,
-                          color=color, linewidth=current_linewidth)
+                          color=color, linewidth=current_linewidth,
+                          linestyle=current_linestyle)
 
             # Make clickable for all spectra (raw and derivatives)
             # Store DataFrame index label as GID (not positional index)
@@ -36941,8 +37072,10 @@ Configuration:
                                "Please load or build a transfer model in Step 1 first.")
             return
 
-        # Reset metadata context
+        # Reset metadata context and transformed spectra (new data invalidates old transform)
         self.export_metadata_context = None
+        self.transformed_spectra = None
+        self._update_ct_use_as_working_btn_state()
 
         try:
             # Detect format (will be updated for directory formats)
@@ -37304,10 +37437,214 @@ Configuration:
             # Play success sound (removed popup - stats and plot shown)
             self.play_sound('success')
 
+            # Enable "Use as Working Data" button if metadata context qualifies
+            self._update_ct_use_as_working_btn_state()
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to transform spectra:\n{str(e)}\n\nDetails: {repr(e)}")
             import traceback
             traceback.print_exc()
+
+    def _update_ct_use_as_working_btn_state(self):
+        """Enable/disable the 'Use as Working Data' button based on current state."""
+        if not hasattr(self, 'ct_use_as_working_btn'):
+            return
+        if (self.transformed_spectra is not None
+                and self.export_metadata_context is not None
+                and self.export_metadata_context.get('source_format')
+                in ('smart_csv', 'smart_excel')):
+            self.ct_use_as_working_btn.config(state='normal')
+        else:
+            self.ct_use_as_working_btn.config(state='disabled')
+
+    def _ct_use_as_working_data(self):
+        """Push transformed spectra from Mode B into the main working data pipeline.
+
+        Only available for combined CSV/Excel files that have metadata + Y values.
+        Replaces all currently loaded data with the transformed spectra.
+        """
+        from tkinter import messagebox
+
+        # Guard checks
+        if self.transformed_spectra is None:
+            messagebox.showwarning("No Transformed Data",
+                                   "Please transform spectra first (Section D2).")
+            return
+
+        ctx = self.export_metadata_context
+        if ctx is None or ctx.get('source_format') not in ('smart_csv', 'smart_excel'):
+            messagebox.showwarning("Not Available",
+                                   "This feature is only available for combined CSV/Excel files "
+                                   "that include metadata columns.")
+            return
+
+        # Confirmation
+        if not messagebox.askyesno(
+            "Replace Working Data",
+            "This will replace all currently loaded data with the "
+            "calibration-transferred spectra.\n\nContinue?"
+        ):
+            return
+
+        try:
+            wavelengths, X_transferred = self.transformed_spectra
+            specimen_ids = ctx['specimen_ids']
+            metadata_df = ctx['metadata_df']
+
+            # --- Detect or select Y column ---
+            y_col = None
+            if metadata_df is not None and len(metadata_df.columns) > 0:
+                from spectral_predict.io import auto_detect_y_column
+                try:
+                    y_col = auto_detect_y_column(metadata_df, exclude_cols=[])
+                    messagebox.showinfo("Target Detected",
+                                        f"Auto-detected target column: '{y_col}'")
+                except (ValueError, IndexError):
+                    # Multiple candidates or none found — let user pick
+                    y_col = None
+
+                if y_col is None:
+                    # Show selection dialog
+                    y_col = self._ct_select_y_column_dialog(list(metadata_df.columns))
+                    if y_col is None:
+                        return  # User cancelled
+
+            # --- Build working data ---
+            col_floats = [float(w) for w in wavelengths]
+            self.X = pd.DataFrame(
+                X_transferred,
+                index=pd.RangeIndex(len(specimen_ids)),
+                columns=col_floats
+            )
+            self.X.index = list(specimen_ids) if hasattr(specimen_ids, '__iter__') else specimen_ids
+            self.X_original = self.X.copy()
+
+            # Set Y
+            if y_col is not None and metadata_df is not None:
+                y_series = metadata_df[y_col].copy()
+                y_series.index = self.X.index
+                self.y = y_series
+            else:
+                self.y = None
+
+            # Set metadata (remaining columns)
+            if metadata_df is not None:
+                meta_cols = [c for c in metadata_df.columns if c != y_col]
+                if meta_cols:
+                    self.combined_metadata_df = metadata_df[meta_cols].copy()
+                    self.combined_metadata_df.index = self.X.index
+                else:
+                    self.combined_metadata_df = None
+            else:
+                self.combined_metadata_df = None
+
+            self.ref = None  # Combined format uses combined_metadata_df
+
+            # Reset validation set (stale after data replacement)
+            self.validation_X = None
+            self.validation_y = None
+            if hasattr(self, 'validation_indices'):
+                self.validation_indices = None
+
+            # --- Detect data type from spectral values ---
+            try:
+                from spectral_predict.io import detect_spectral_data_type
+                temp_df = pd.DataFrame(X_transferred[:min(50, len(X_transferred))],
+                                       columns=col_floats)
+                data_type, confidence, method = detect_spectral_data_type(temp_df)
+                self.original_data_type.set(data_type)
+                self.current_data_type.set(data_type)
+                self.data_has_been_converted = False
+            except Exception:
+                self.current_data_type.set('reflectance')
+                self.original_data_type.set('reflectance')
+
+            # --- Update all UI state ---
+            self._generate_plots()
+            self._generate_explore_plots()
+            self._update_data_type_status_ui()
+            self._update_dm_data_type_label()
+            self._populate_data_viewer()
+
+            # Update task type detection
+            if hasattr(self, 'task_type_detection_label'):
+                if self.y is None:
+                    self.task_type_detection_label.config(
+                        text="No target variable (spectra only)",
+                        foreground=self.colors.get('warning', 'orange'))
+                else:
+                    self._on_task_type_changed()
+
+            # Update Analysis tab target dropdown
+            if hasattr(self, 'analysis_target_combo'):
+                target_options = self._get_available_target_columns()
+                self.analysis_target_combo['values'] = target_options
+
+            # Update status
+            n_samples = len(self.X)
+            n_wl = self.X.shape[1]
+            y_info = f" with target '{y_col}'" if y_col else " (spectra only)"
+            self.tab1_status.config(
+                text=f"> CT Working Data: {n_samples} samples × {n_wl} wavelengths{y_info}")
+
+            # Switch to Data Management tab to show the data viewer
+            self.notebook.select(1)
+
+            messagebox.showinfo("Success",
+                                f"Working data replaced with {n_samples} calibration-transferred "
+                                f"spectra ({n_wl} wavelengths){y_info}.")
+            print(f"> Replaced working data with CT-transferred spectra: "
+                  f"{n_samples} samples × {n_wl} wavelengths{y_info}")
+
+        except Exception as e:
+            messagebox.showerror("Error",
+                                 f"Failed to set working data:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _ct_select_y_column_dialog(self, columns: list[str]) -> str | None:
+        """Show a simple dialog for the user to select the target Y column.
+
+        Returns the selected column name, or None if cancelled.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Target Column")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        # Center on parent
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 200,
+            self.root.winfo_rooty() + 200))
+
+        ttk.Label(dialog, text="Multiple metadata columns found.\n"
+                  "Select the target (Y) column for modeling:",
+                  style='CardLabel.TLabel').pack(padx=20, pady=(15, 10))
+
+        selected = tk.StringVar(value=columns[0] if columns else '')
+        combo = ttk.Combobox(dialog, textvariable=selected,
+                             values=columns, state='readonly', width=30)
+        combo.pack(padx=20, pady=5)
+
+        result = [None]
+
+        def on_ok():
+            result[0] = selected.get()
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=(10, 15))
+        ttk.Button(btn_frame, text="OK", command=on_ok,
+                   style='Modern.TButton').pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel,
+                   style='Modern.TButton').pack(side='left', padx=5)
+
+        dialog.wait_window()
+        return result[0]
 
     def _plot_export_spectra_preview(self, wavelengths, X):
         """Plot preview of loaded spectra for Mode B export workflow."""
@@ -40246,6 +40583,13 @@ Configuration:
 
         self._create_accent_button(export_btn_frame, "Export Transformed Spectra",
                                    self._export_transformed_spectra).pack(side='left')
+
+        # "Use as Working Data" button - only for combined CSV/Excel files with metadata
+        self.ct_use_as_working_btn = self._create_accent_button(
+            export_btn_frame, "Use as Working Data",
+            self._ct_use_as_working_data)
+        self.ct_use_as_working_btn.pack(side='left', padx=(10, 0))
+        self.ct_use_as_working_btn.config(state='disabled')
 
         # Export status
         ttk.Label(export_section, text="Export Status:",
