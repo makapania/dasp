@@ -7,6 +7,7 @@ from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.linear_model import LogisticRegression, Ridge, Lasso, ElasticNet
 from sklearn.svm import SVR, SVC
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
 from .neural_boosted import NeuralBoostedRegressor, NeuralBoostedClassifier
 
 # Import gradient boosting libraries
@@ -1722,6 +1723,14 @@ def get_feature_importances(model, model_name, X, y):
     importances : ndarray
         Feature importance scores (higher = more important)
     """
+    # Unwrap sklearn Pipeline to get the actual estimator
+    # Models with StandardScaler preprocessing are stored as Pipeline([scaler, model])
+    if isinstance(model, Pipeline):
+        if 'model' in model.named_steps:
+            model = model.named_steps['model']
+        else:
+            model = model.steps[-1][1]
+
     if model_name in ["PLS", "PLS-DA"]:
         # Use VIP scores
         return compute_vip(model, X, y)

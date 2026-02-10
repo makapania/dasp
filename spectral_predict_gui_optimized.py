@@ -14462,6 +14462,82 @@ class SpectralPredictApp:
         else:
             self.exclusion_status.config(text=f"{n_excluded} spectra excluded")
 
+    # ==================== Plot-based Sample Exclusion Methods ====================
+
+    def _show_exclude_context_menu(self, event, specimen_label, ax, x, y, canvas):
+        """Show a right-click context menu to exclude/re-include a sample from a model dev plot."""
+        menu = tk.Menu(self.root, tearoff=0)
+        is_excluded = specimen_label in self.excluded_spectra
+
+        if is_excluded:
+            menu.add_command(
+                label=f"Re-include Sample [{specimen_label}]",
+                command=lambda: self._exclude_sample_from_plot(
+                    specimen_label, ax, x, y, canvas, exclude=False
+                )
+            )
+        else:
+            menu.add_command(
+                label=f"Exclude Sample [{specimen_label}]",
+                command=lambda: self._exclude_sample_from_plot(
+                    specimen_label, ax, x, y, canvas, exclude=True
+                )
+            )
+
+        # Post the menu at the mouse position
+        try:
+            menu.tk_popup(event.guiEvent.x_root, event.guiEvent.y_root)
+        finally:
+            menu.grab_release()
+
+    def _exclude_sample_from_plot(self, specimen_label, ax, x, y, canvas, exclude=True):
+        """Exclude or re-include a sample and mark it on the plot."""
+        if exclude:
+            self.excluded_spectra.add(specimen_label)
+            # Draw red X marker on the excluded point
+            ax.plot(x, y, 'rx', markersize=14, markeredgewidth=3, zorder=10)
+            canvas.draw_idle()
+        else:
+            self.excluded_spectra.discard(specimen_label)
+            # Redraw will happen on next analysis run; just update canvas
+            canvas.draw_idle()
+
+        # Update exclusion status labels
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+
+        n_excluded = len(self.excluded_spectra)
+        action = "excluded" if exclude else "re-included"
+        messagebox.showinfo(
+            "Sample Exclusion",
+            f"Sample [{specimen_label}] {action}.\n"
+            f"Total excluded: {n_excluded}\n\n"
+            f"Re-run analysis to apply changes."
+        )
+
+    def _show_exclude_button(self, parent_frame, specimen_label, ax, x, y, canvas):
+        """Show an 'Exclude Selected Sample' button below the plot."""
+        # Remove previous button if it exists
+        if hasattr(self, '_current_exclude_btn') and self._current_exclude_btn is not None:
+            try:
+                self._current_exclude_btn.destroy()
+            except tk.TclError:
+                pass
+
+        is_excluded = specimen_label in self.excluded_spectra
+        btn_text = f"Re-include [{specimen_label}]" if is_excluded else f"Exclude [{specimen_label}]"
+        action = not is_excluded  # True = exclude, False = re-include
+
+        btn = ttk.Button(
+            parent_frame,
+            text=btn_text,
+            command=lambda: self._exclude_sample_from_plot(
+                specimen_label, ax, x, y, canvas, exclude=action
+            )
+        )
+        btn.pack(side=tk.BOTTOM, pady=5)
+        self._current_exclude_btn = btn
+
     # ==================== Validation Set Selection Methods ====================
 
     def _validation_kennard_stone(self, X, n_samples):
@@ -25153,24 +25229,36 @@ Performance (Classification):
                     y_predicted = y_pred[nearest_idx]
                     residual = y_actual - y_predicted
 
-                    extra_info = {
-                        'Residual': residual
-                    }
+                    # Get specimen label for exclusion
+                    specimen_label = (self.refined_specimen_ids[nearest_idx]
+                                     if hasattr(self, 'refined_specimen_ids')
+                                     else self.y.index[original_idx])
 
-                    # Add color variable to extra_info if it's a metadata column
-                    if color_by not in ['None', 'Y Value'] and color_values is not None:
-                        color_val = color_values[nearest_idx]
-                        if pd.notna(color_val):
-                            if isinstance(color_val, (float, np.floating)):
-                                extra_info[color_by] = f"{color_val:.4f}"
+                    if event.button == 1:  # Left click - annotation + exclude button
+                        extra_info = {
+                            'Residual': residual
+                        }
+
+                        # Add color variable to extra_info if it's a metadata column
+                        if color_by not in ['None', 'Y Value'] and color_values is not None:
+                            color_val = color_values[nearest_idx]
+                            if pd.notna(color_val):
+                                if isinstance(color_val, (float, np.floating)):
+                                    extra_info[color_by] = f"{color_val:.4f}"
+                                else:
+                                    extra_info[color_by] = str(color_val)
                             else:
-                                extra_info[color_by] = str(color_val)
-                        else:
-                            extra_info[color_by] = "N/A"
+                                extra_info[color_by] = "N/A"
 
-                    info_text = self._format_specimen_info(original_idx, y_value=y_actual,
-                                                          y_pred=y_predicted, extra_info=extra_info)
-                    self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
+                        info_text = self._format_specimen_info(original_idx, y_value=y_actual,
+                                                              y_pred=y_predicted, extra_info=extra_info)
+                        self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
+                        self._show_exclude_button(self.refine_plot_frame, specimen_label,
+                                                  ax, y_actual, y_predicted, canvas)
+
+                    elif event.button == 3:  # Right click - context menu
+                        self._show_exclude_context_menu(event, specimen_label,
+                                                        ax, y_actual, y_predicted, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_prediction_click)
 
@@ -25865,22 +25953,34 @@ F1 Score:  {f1:.4f}
                 y_predicted = y_pred[nearest_idx]
                 residual_val = residuals[nearest_idx]
 
-                extra_info = {
-                    'Fitted': y_predicted,
-                    'Residual': residual_val
-                }
+                # Get specimen label for exclusion
+                specimen_label = (self.refined_specimen_ids[nearest_idx]
+                                 if hasattr(self, 'refined_specimen_ids')
+                                 else self.y.index[original_idx])
 
-                # Add color variable info if applicable
-                if color_values is not None and color_label:
-                    color_val = color_values[nearest_idx]
-                    if pd.notna(color_val):
-                        extra_info[color_label] = color_val
-                    else:
-                        extra_info[color_label] = 'N/A'
+                if event.button == 1:  # Left click
+                    extra_info = {
+                        'Fitted': y_predicted,
+                        'Residual': residual_val
+                    }
 
-                info_text = self._format_specimen_info(original_idx, y_value=y_actual,
-                                                      y_pred=y_predicted, extra_info=extra_info)
-                self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas)
+                    # Add color variable info if applicable
+                    if color_values is not None and color_label:
+                        color_val = color_values[nearest_idx]
+                        if pd.notna(color_val):
+                            extra_info[color_label] = color_val
+                        else:
+                            extra_info[color_label] = 'N/A'
+
+                    info_text = self._format_specimen_info(original_idx, y_value=y_actual,
+                                                          y_pred=y_predicted, extra_info=extra_info)
+                    self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas)
+                    self._show_exclude_button(self.residual_diagnostics_frame, specimen_label,
+                                              ax1, y_predicted, residual_val, canvas)
+
+                elif event.button == 3:  # Right click
+                    self._show_exclude_context_menu(event, specimen_label,
+                                                    ax1, y_predicted, residual_val, canvas)
 
         def on_residual_vs_index_click(event):
             if event.inaxes != ax2 or event.xdata is None:
@@ -25894,22 +25994,34 @@ F1 Score:  {f1:.4f}
                 y_predicted = y_pred[bar_idx]
                 residual_val = residuals[bar_idx]
 
-                extra_info = {
-                    'Fitted': y_predicted,
-                    'Residual': residual_val
-                }
+                # Get specimen label for exclusion
+                specimen_label = (self.refined_specimen_ids[bar_idx]
+                                 if hasattr(self, 'refined_specimen_ids')
+                                 else self.y.index[original_idx])
 
-                # Add color variable info if applicable
-                if color_values is not None and color_label:
-                    color_val = color_values[bar_idx]
-                    if pd.notna(color_val):
-                        extra_info[color_label] = color_val
-                    else:
-                        extra_info[color_label] = 'N/A'
+                if event.button == 1:  # Left click
+                    extra_info = {
+                        'Fitted': y_predicted,
+                        'Residual': residual_val
+                    }
 
-                info_text = self._format_specimen_info(original_idx, y_value=y_actual,
-                                                      y_pred=y_predicted, extra_info=extra_info)
-                self._create_or_update_annotation(ax2, bar_idx, residual_val, info_text, canvas)
+                    # Add color variable info if applicable
+                    if color_values is not None and color_label:
+                        color_val = color_values[bar_idx]
+                        if pd.notna(color_val):
+                            extra_info[color_label] = color_val
+                        else:
+                            extra_info[color_label] = 'N/A'
+
+                    info_text = self._format_specimen_info(original_idx, y_value=y_actual,
+                                                          y_pred=y_predicted, extra_info=extra_info)
+                    self._create_or_update_annotation(ax2, bar_idx, residual_val, info_text, canvas)
+                    self._show_exclude_button(self.residual_diagnostics_frame, specimen_label,
+                                              ax2, bar_idx, residual_val, canvas)
+
+                elif event.button == 3:  # Right click
+                    self._show_exclude_context_menu(event, specimen_label,
+                                                    ax2, bar_idx, residual_val, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_residual_vs_fitted_click)
         fig.canvas.mpl_connect('button_press_event', on_residual_vs_index_click)
@@ -31455,17 +31567,24 @@ Configuration:
                 y_predicted = y_pred[nearest_idx]
                 residual = y_actual - y_predicted
 
-                info_text = f"Sample: {sample_name}\nActual: {y_actual:.4f}\nPredicted: {y_predicted:.4f}\nResidual: {residual:.4f}"
+                if event.button == 1:  # Left click - annotation + exclude button
+                    info_text = f"Sample: {sample_name}\nActual: {y_actual:.4f}\nPredicted: {y_predicted:.4f}\nResidual: {residual:.4f}"
 
-                # Add color variable info if applicable
-                if color_values is not None and color_label:
-                    color_val = color_values[nearest_idx]
-                    if pd.notna(color_val):
-                        info_text += f"\n{color_label}: {color_val}"
-                    else:
-                        info_text += f"\n{color_label}: N/A"
+                    # Add color variable info if applicable
+                    if color_values is not None and color_label:
+                        color_val = color_values[nearest_idx]
+                        if pd.notna(color_val):
+                            info_text += f"\n{color_label}: {color_val}"
+                        else:
+                            info_text += f"\n{color_label}: N/A"
 
-                self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
+                    self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
+                    self._show_exclude_button(self.prediction_plots_frame, sample_name,
+                                              ax, y_actual, y_predicted, canvas)
+
+                elif event.button == 3:  # Right click - context menu
+                    self._show_exclude_context_menu(event, sample_name,
+                                                    ax, y_actual, y_predicted, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_click)
 
