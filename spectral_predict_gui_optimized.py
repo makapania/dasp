@@ -2541,6 +2541,7 @@ class SpectralPredictApp:
 
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
+        self._exclusion_markers = {}  # Dict mapping specimen_label → Line2D artist for red X markers
 
         # Interactive plot annotation tracking
         self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
@@ -6775,7 +6776,7 @@ class SpectralPredictApp:
         # Plot spectra
         for i in indices:
             if self.X.index[i] in self.excluded_spectra:
-                current_alpha = alpha
+                current_alpha = min(alpha + 0.1, 0.5)
                 current_linewidth = 0.8
                 current_linestyle = ':'
             else:
@@ -6935,7 +6936,7 @@ class SpectralPredictApp:
             print(f"> Sample {sample_idx} included")
         else:
             self.excluded_spectra.add(sample_idx)
-            new_alpha_val = state['alpha']
+            new_alpha_val = min(state['alpha'] + 0.1, 0.5)
             new_lw = 0.8
             new_ls = ':'
             state['toggle_btn'].config(text="Include")
@@ -6946,7 +6947,7 @@ class SpectralPredictApp:
         for fk, st in self._explore_plot_state.items():
             for line in st['ax'].get_lines():
                 if line.get_gid() == gid_str:
-                    line.set_alpha(st['alpha'])
+                    line.set_alpha(min(st['alpha'] + 0.1, 0.5) if is_excluded else st['alpha'])
                     line.set_linewidth(0.8 if is_excluded else 1.0)
                     line.set_linestyle(':' if is_excluded else '-')
                     break
@@ -14613,21 +14614,33 @@ class SpectralPredictApp:
         finally:
             menu.grab_release()
 
-    def _exclude_sample_from_plot(self, specimen_label, ax, x, y, canvas, exclude=True):
+    def _exclude_sample_from_plot(self, specimen_label, ax, x, y, canvas,
+                                    exclude=True, parent_frame=None):
         """Exclude or re-include a sample and mark it on the plot."""
         if exclude:
             self.excluded_spectra.add(specimen_label)
-            # Draw red X marker on the excluded point
-            ax.plot(x, y, 'rx', markersize=14, markeredgewidth=3, zorder=10)
+            # Draw red X marker on the excluded point and store the artist
+            marker_lines = ax.plot(x, y, 'rx', markersize=14, markeredgewidth=3, zorder=10)
+            self._exclusion_markers[specimen_label] = marker_lines[0]
             canvas.draw_idle()
         else:
             self.excluded_spectra.discard(specimen_label)
-            # Redraw will happen on next analysis run; just update canvas
+            # Remove the red X marker if it exists
+            marker = self._exclusion_markers.pop(specimen_label, None)
+            if marker is not None:
+                try:
+                    marker.remove()
+                except ValueError:
+                    pass  # Already removed from axes
             canvas.draw_idle()
 
         # Update exclusion status labels
         self._update_exclusion_status()
         self._update_tab3_exclusion_status()
+
+        # Refresh the exclude/re-include button to flip its text
+        if parent_frame is not None:
+            self._show_exclude_button(parent_frame, specimen_label, ax, x, y, canvas)
 
         n_excluded = len(self.excluded_spectra)
         action = "excluded" if exclude else "re-included"
@@ -15150,7 +15163,7 @@ class SpectralPredictApp:
         else:
             # Exclude the spectrum
             self.excluded_spectra.add(sample_idx)
-            line.set_alpha(0.3)  # Keep same alpha
+            line.set_alpha(0.4)  # Slightly boosted so dots are visible
             line.set_linewidth(0.8)  # Slightly thinner
             line.set_linestyle(':')  # Dotted to indicate excluded
 
@@ -15564,7 +15577,7 @@ class SpectralPredictApp:
         for i in indices:
             # Determine if this spectrum is currently excluded
             if self.X.index[i] in self.excluded_spectra:
-                current_alpha = alpha
+                current_alpha = min(alpha + 0.1, 0.5)
                 current_linewidth = 0.8
                 current_linestyle = ':'
             else:
@@ -15889,6 +15902,17 @@ class SpectralPredictApp:
                               linewidths=0.5, s=50, label='N/A')
                     ax.legend(loc='best', fontsize=8)
 
+        # Mark already-excluded samples with red X
+        for i in range(len(scores)):
+            if self.y is not None and hasattr(self.y, 'index'):
+                spec_label = self.y.index[i]
+            elif self.X is not None and hasattr(self.X, 'index'):
+                spec_label = self.X.index[i]
+            else:
+                break
+            if spec_label in self.excluded_spectra:
+                ax.plot(scores[i, 0], scores[i, 1], 'rx', markersize=14, markeredgewidth=3, zorder=10)
+
         ax.set_xlabel(f'PC1 ({self.outlier_report["pca"]["variance_explained"][0]*100:.1f}%)')
         ax.set_ylabel(f'PC2 ({self.outlier_report["pca"]["variance_explained"][1]*100:.1f}%)')
         ax.set_title('PCA Score Plot (PC1 vs PC2)')
@@ -15916,13 +15940,27 @@ class SpectralPredictApp:
             # Only show annotation if click is reasonably close (within 10% of plot range)
             x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
             y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
-            threshold = 0.1 * np.sqrt(x_range**2 + y_range**2)
+            click_threshold = 0.1 * np.sqrt(x_range**2 + y_range**2)
 
-            if distances[nearest_idx] < threshold:
-                # Get specimen info
-                y_value = y_values[nearest_idx]
+            if distances[nearest_idx] < click_threshold:
                 pc1 = scores[nearest_idx, 0]
                 pc2 = scores[nearest_idx, 1]
+
+                # Resolve specimen label
+                if self.y is not None and hasattr(self.y, 'index'):
+                    specimen_label = self.y.index[nearest_idx]
+                elif self.X is not None and hasattr(self.X, 'index'):
+                    specimen_label = self.X.index[nearest_idx]
+                else:
+                    return
+
+                if event.button == 3:
+                    # Right-click: show exclude/re-include context menu
+                    self._show_exclude_context_menu(event, specimen_label, ax, pc1, pc2, canvas)
+                    return
+
+                # Left-click: show annotation
+                y_value = y_values[nearest_idx] if y_values is not None else None
                 is_outlier = outliers[nearest_idx] if outliers is not None else False
 
                 extra_info = {
@@ -15971,6 +16009,17 @@ class SpectralPredictApp:
         ax.bar(range(len(t2_values)), t2_values, color=colors, alpha=0.7)
         ax.axhline(threshold, color='red', linestyle='--', linewidth=2, label=f'95% Threshold ({threshold:.2f})')
 
+        # Mark already-excluded samples with red X
+        for i in range(len(t2_values)):
+            if self.y is not None and hasattr(self.y, 'index'):
+                spec_label = self.y.index[i]
+            elif self.X is not None and hasattr(self.X, 'index'):
+                spec_label = self.X.index[i]
+            else:
+                break
+            if spec_label in self.excluded_spectra:
+                ax.plot(i, t2_values[i], 'rx', markersize=14, markeredgewidth=3, zorder=10)
+
         ax.set_xlabel('Sample Index')
         ax.set_ylabel('Hotelling T²')
         ax.set_title('Hotelling T² Statistic')
@@ -15990,9 +16039,23 @@ class SpectralPredictApp:
             # Find nearest bar (round to nearest integer)
             bar_idx = int(round(event.xdata))
             if 0 <= bar_idx < len(t2_values):
-                y_value = self.y.values[bar_idx]
+                # Resolve specimen label
+                if self.y is not None and hasattr(self.y, 'index'):
+                    specimen_label = self.y.index[bar_idx]
+                elif self.X is not None and hasattr(self.X, 'index'):
+                    specimen_label = self.X.index[bar_idx]
+                else:
+                    return
+
                 t2_value = t2_values[bar_idx]
                 is_outlier = outliers[bar_idx]
+
+                if event.button == 3:
+                    # Right-click: show exclude/re-include context menu
+                    self._show_exclude_context_menu(event, specimen_label, ax, bar_idx, t2_value, canvas)
+                    return
+
+                y_value = self.y.values[bar_idx] if self.y is not None else None
 
                 extra_info = {
                     'T²': t2_value,
@@ -16029,6 +16092,17 @@ class SpectralPredictApp:
         ax.bar(range(len(q_values)), q_values, color=colors, alpha=0.7)
         ax.axhline(threshold, color='red', linestyle='--', linewidth=2, label=f'95% Threshold ({threshold:.2f})')
 
+        # Mark already-excluded samples with red X
+        for i in range(len(q_values)):
+            if self.y is not None and hasattr(self.y, 'index'):
+                spec_label = self.y.index[i]
+            elif self.X is not None and hasattr(self.X, 'index'):
+                spec_label = self.X.index[i]
+            else:
+                break
+            if spec_label in self.excluded_spectra:
+                ax.plot(i, q_values[i], 'rx', markersize=14, markeredgewidth=3, zorder=10)
+
         ax.set_xlabel('Sample Index')
         ax.set_ylabel('Q-Residual (SPE)')
         ax.set_title('Q-Residuals (Squared Prediction Error)')
@@ -16048,9 +16122,23 @@ class SpectralPredictApp:
             # Find nearest bar (round to nearest integer)
             bar_idx = int(round(event.xdata))
             if 0 <= bar_idx < len(q_values):
-                y_value = self.y.values[bar_idx]
+                # Resolve specimen label
+                if self.y is not None and hasattr(self.y, 'index'):
+                    specimen_label = self.y.index[bar_idx]
+                elif self.X is not None and hasattr(self.X, 'index'):
+                    specimen_label = self.X.index[bar_idx]
+                else:
+                    return
+
                 q_value = q_values[bar_idx]
                 is_outlier = outliers[bar_idx]
+
+                if event.button == 3:
+                    # Right-click: show exclude/re-include context menu
+                    self._show_exclude_context_menu(event, specimen_label, ax, bar_idx, q_value, canvas)
+                    return
+
+                y_value = self.y.values[bar_idx] if self.y is not None else None
 
                 extra_info = {
                     'Q-Residual': q_value,
@@ -16088,6 +16176,17 @@ class SpectralPredictApp:
         ax.axhline(threshold, color='red', linestyle='--', linewidth=2,
                   label=f'Threshold ({threshold:.2f})')
 
+        # Mark already-excluded samples with red X
+        for i in range(len(distances)):
+            if self.y is not None and hasattr(self.y, 'index'):
+                spec_label = self.y.index[i]
+            elif self.X is not None and hasattr(self.X, 'index'):
+                spec_label = self.X.index[i]
+            else:
+                break
+            if spec_label in self.excluded_spectra:
+                ax.plot(i, distances[i], 'rx', markersize=14, markeredgewidth=3, zorder=10)
+
         ax.set_xlabel('Sample Index')
         ax.set_ylabel('Mahalanobis Distance')
         ax.set_title('Mahalanobis Distance in PCA Space')
@@ -16107,9 +16206,23 @@ class SpectralPredictApp:
             # Find nearest bar (round to nearest integer)
             bar_idx = int(round(event.xdata))
             if 0 <= bar_idx < len(distances):
-                y_value = self.y.values[bar_idx]
+                # Resolve specimen label
+                if self.y is not None and hasattr(self.y, 'index'):
+                    specimen_label = self.y.index[bar_idx]
+                elif self.X is not None and hasattr(self.X, 'index'):
+                    specimen_label = self.X.index[bar_idx]
+                else:
+                    return
+
                 distance = distances[bar_idx]
                 is_outlier = outliers[bar_idx]
+
+                if event.button == 3:
+                    # Right-click: show exclude/re-include context menu
+                    self._show_exclude_context_menu(event, specimen_label, ax, bar_idx, distance, canvas)
+                    return
+
+                y_value = self.y.values[bar_idx] if self.y is not None else None
 
                 extra_info = {
                     'Mahalanobis': distance,
