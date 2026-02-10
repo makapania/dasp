@@ -21949,6 +21949,10 @@ class SpectralPredictApp:
                     item['icon'].config(bg=accent)
                     item['label'].config(bg=accent)
 
+        # Refresh Data Viewer when switching to it
+        if self.notebook.select() == str(self.tab2):
+            self._populate_data_viewer()
+
         # Only keep timers for the current tab, cancel others
         tabs_to_cancel = []
         for canvas_id in list(self._configure_timers.keys()):
