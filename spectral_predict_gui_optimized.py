@@ -2699,6 +2699,7 @@ class SpectralPredictApp:
         self.baseline_poly_degree = tk.IntVar(value=2)
         self.baseline_asls_lambda = tk.StringVar(value="1e5")
         self.baseline_asls_p = tk.StringVar(value="0.01")
+        self.baseline_airpls_lambda = tk.StringVar(value="1e5")
         # Smoothing
         self.enable_smoothing = tk.BooleanVar(value=False)
         self.smoothing_window = tk.IntVar(value=17)
@@ -8212,7 +8213,7 @@ class SpectralPredictApp:
         ttk.Label(self.baseline_options_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         baseline_method_combo = ttk.Combobox(self.baseline_options_frame, textvariable=self.baseline_method,
                                               width=12, state='readonly')
-        baseline_method_combo['values'] = ['polynomial', 'asls']
+        baseline_method_combo['values'] = ['polynomial', 'asls', 'rubber_band', 'airpls']
         baseline_method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
         baseline_method_combo.bind('<<ComboboxSelected>>', self._on_baseline_method_changed)
 
@@ -8239,8 +8240,24 @@ class SpectralPredictApp:
         asls_p_combo['values'] = ['0.001', '0.005', '0.01', '0.05', '0.1']
         asls_p_combo.pack(side='left')
 
-        # Initially hide AsLS frame if polynomial is selected
+        # Rubber band options (no tuneable params)
+        self.baseline_rubberband_frame = ttk.Frame(self.baseline_options_frame)
+        self.baseline_rubberband_frame.grid(row=0, column=4, sticky=tk.W, padx=(15, 0))
+        ttk.Label(self.baseline_rubberband_frame, text="(No parameters - automatic)").pack(side='left')
+
+        # airPLS options
+        self.baseline_airpls_frame = ttk.Frame(self.baseline_options_frame)
+        self.baseline_airpls_frame.grid(row=0, column=5, sticky=tk.W, padx=(15, 0))
+        ttk.Label(self.baseline_airpls_frame, text="Lambda:").pack(side='left', padx=(0, 5))
+        airpls_lambda_combo = ttk.Combobox(self.baseline_airpls_frame, textvariable=self.baseline_airpls_lambda,
+                                            width=8, state='readonly')
+        airpls_lambda_combo['values'] = ['1e3', '1e4', '1e5', '1e6', '1e7']
+        airpls_lambda_combo.pack(side='left')
+
+        # Initially hide all non-default method frames
         self.baseline_asls_frame.grid_remove()
+        self.baseline_rubberband_frame.grid_remove()
+        self.baseline_airpls_frame.grid_remove()
 
         # Smoothing Section
         ttk.Separator(prestep_frame, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=10)
@@ -17901,13 +17918,21 @@ class SpectralPredictApp:
 
     def _on_baseline_method_changed(self, event):
         """Show/hide method-specific baseline options."""
+        # Hide all parameter frames first
+        self.baseline_poly_frame.grid_remove()
+        self.baseline_asls_frame.grid_remove()
+        self.baseline_rubberband_frame.grid_remove()
+        self.baseline_airpls_frame.grid_remove()
+
         method = self.baseline_method.get()
         if method == 'polynomial':
             self.baseline_poly_frame.grid()
-            self.baseline_asls_frame.grid_remove()
         elif method == 'asls':
-            self.baseline_poly_frame.grid_remove()
             self.baseline_asls_frame.grid()
+        elif method == 'rubber_band':
+            self.baseline_rubberband_frame.grid()
+        elif method == 'airpls':
+            self.baseline_airpls_frame.grid()
 
     def _get_baseline_params(self):
         """Get current baseline correction parameters."""
@@ -17928,6 +17953,13 @@ class SpectralPredictApp:
                 params['p'] = float(self.baseline_asls_p.get())
             except ValueError:
                 params['p'] = 0.01
+        elif method == 'rubber_band':
+            pass  # No parameters — fully automatic
+        elif method == 'airpls':
+            try:
+                params['lam'] = float(self.baseline_airpls_lambda.get())
+            except ValueError:
+                params['lam'] = 1e5
 
         return method, params
 
@@ -28033,7 +28065,7 @@ F1 Score:  {f1:.4f}
                 parts = preprocess_str.split('+')
 
                 # Check for baseline methods
-                baseline_methods = ['airpls', 'als', 'polynomial', 'modpoly', 'imodpoly']
+                baseline_methods = ['airpls', 'als', 'polynomial', 'modpoly', 'imodpoly', 'rubber_band']
                 for part in parts[:]:  # Use slice to avoid modifying during iteration
                     if part.lower() in baseline_methods:
                         result['baseline'] = part.lower()

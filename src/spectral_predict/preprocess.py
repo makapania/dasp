@@ -410,7 +410,9 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
     # Step 0.5: Baseline correction (applied before smoothing and transforms)
     if baseline_method is not None:
         try:
-            from spectral_predict.baseline import BaselineALS, BaselinePolynomial
+            from spectral_predict.baseline import (
+                BaselineALS, BaselineAirPLS, BaselinePolynomial, BaselineRubberBand,
+            )
 
             params = baseline_params or {}
 
@@ -423,6 +425,13 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
                 p = params.get('p', 0.01)
                 niter = params.get('niter', 10)
                 steps.append(("baseline", BaselineALS(lambda_=lam, p=p, niter=niter)))
+
+            elif baseline_method == 'rubber_band':
+                steps.append(("baseline", BaselineRubberBand()))
+
+            elif baseline_method == 'airpls':
+                lam = params.get('lam', 1e5)
+                steps.append(("baseline", BaselineAirPLS(lam=lam)))
 
             else:
                 print(f"WARNING: Unknown baseline method '{baseline_method}', skipping baseline correction")

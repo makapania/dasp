@@ -51,6 +51,48 @@ def rubber_band_baseline(y: np.ndarray) -> np.ndarray:
     return baseline
 
 
+class BaselineRubberBand(BaseEstimator, TransformerMixin):
+    """Rubber band (convex hull) baseline correction.
+
+    Stretches a virtual rubber band underneath each spectrum using the lower
+    convex hull, then subtracts the resulting baseline. Fully automatic — no
+    tuneable parameters.
+
+    Examples
+    --------
+    >>> from spectral_predict.baseline import BaselineRubberBand
+    >>> baseline = BaselineRubberBand()
+    >>> X_corrected = baseline.fit_transform(X)
+    """
+
+    def fit(self, X, y=None):
+        """Fit transformer (stores number of features)."""
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
+        return self
+
+    def transform(self, X):
+        """Apply rubber band baseline correction.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Spectral data.
+
+        Returns
+        -------
+        X_corrected : ndarray, shape (n_samples, n_features)
+            Baseline-corrected spectra.
+        """
+        X = np.asarray(X, dtype=np.float64)
+        X_corrected = np.zeros_like(X)
+        for i in range(X.shape[0]):
+            bl = rubber_band_baseline(X[i, :])
+            X_corrected[i, :] = X[i, :] - bl
+        return X_corrected
+
+
 class BaselineALS(BaseEstimator, TransformerMixin):
     """
     Asymmetric Least Squares (ALS) baseline correction.
