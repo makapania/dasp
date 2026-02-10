@@ -13673,9 +13673,18 @@ class SpectralPredictApp:
 
         if filename:
             try:
-                self.data_source_manager.export_to_csv(
-                    self.X, self.y, self.ref, filename
-                )
+                export_df = self.X.copy()
+                if self.y is not None:
+                    export_df.insert(0, 'Target', self.y)
+                if self.sample_sets is not None and self.sample_sets.notna().any():
+                    export_df.insert(0, 'Set', self.sample_sets)
+                if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                    for col in self.combined_metadata_df.columns:
+                        export_df.insert(0, col, self.combined_metadata_df[col])
+                elif self.ref is not None:
+                    for col in self.ref.columns:
+                        export_df.insert(0, col, self.ref[col])
+                export_df.to_csv(filename)
                 messagebox.showinfo("Success", f"Data exported to {filename}")
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to export: {str(e)}")
@@ -13703,6 +13712,8 @@ class SpectralPredictApp:
                     export_df = self.X.copy()
                     if self.y is not None:
                         export_df.insert(0, 'Target', self.y)
+                    if self.sample_sets is not None and self.sample_sets.notna().any():
+                        export_df.insert(0, 'Set', self.sample_sets)
                     # Add metadata columns (from combined file or reference file)
                     if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
                         for col in self.combined_metadata_df.columns:
@@ -14871,6 +14882,8 @@ class SpectralPredictApp:
             export_df = self.X.copy()
             if self.y is not None:
                 export_df.insert(0, 'Target', self.y)
+            if self.sample_sets is not None and self.sample_sets.notna().any():
+                export_df.insert(0, 'Set', self.sample_sets)
             export_df.index.name = 'Sample_ID'
             export_df.to_csv(filename, index=True)
             messagebox.showinfo("Saved", f"Spectra saved to:\n{filename}")
@@ -14897,6 +14910,8 @@ class SpectralPredictApp:
                 export_df = self.X.copy()
                 if self.y is not None:
                     export_df.insert(0, 'Target', self.y)
+                if self.sample_sets is not None and self.sample_sets.notna().any():
+                    export_df.insert(0, 'Set', self.sample_sets)
                 export_df.index.name = 'Sample_ID'
                 export_df.to_excel(writer, sheet_name='Spectral_Data')
 
@@ -15641,7 +15656,10 @@ class SpectralPredictApp:
 
     def _create_or_update_annotation(self, ax, x, y, text, canvas):
         """
-        Create or update annotation at the clicked point with smart positioning to stay in bounds.
+        Create or update annotation in a fixed corner with an arrow to the clicked point.
+
+        Places the annotation in a corner of the axes (using axes-fraction coordinates)
+        to avoid clipping and legend overlap, with a curved arrow pointing to the data point.
 
         Args:
             ax: Matplotlib axis object
@@ -15658,51 +15676,76 @@ class SpectralPredictApp:
                 pass
             self.active_annotation = None
 
-        # Get axis limits to determine position
-        xlim = ax.get_xlim()
-        ylim = ax.get_ylim()
+        # Corner candidates: (x_frac, y_frac, horizontal_align, vertical_align)
+        corners = {
+            'upper right': (0.97, 0.97, 'right', 'top'),
+            'upper left':  (0.03, 0.97, 'left',  'top'),
+            'lower right': (0.97, 0.03, 'right', 'bottom'),
+            'lower left':  (0.03, 0.03, 'left',  'bottom'),
+        }
 
-        # Calculate relative position of point (0-1 range for each axis)
+        # Determine which corners are occupied by legend / stats text / clicked point
+        occupied = set()
+
+        # Check legend location
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.set_zorder(5)  # Ensure legend renders below annotation
+            loc = legend._loc  # integer location code
+            loc_map = {1: 'upper right', 2: 'upper left',
+                       3: 'lower left', 4: 'lower right'}
+            if loc in loc_map:
+                occupied.add(loc_map[loc])
+
+        # Check for stats text box (e.g. R², RMSE in upper-left of pred vs actual)
+        for child in ax.get_children():
+            if isinstance(child, matplotlib.text.Text):
+                pos = child.get_position()
+                if abs(pos[0] - 0.05) < 0.1 and abs(pos[1] - 0.95) < 0.1:
+                    occupied.add('upper left')
+
+        # Avoid the quadrant the clicked point is in (so arrow is clearly visible)
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
         x_rel = (x - xlim[0]) / (xlim[1] - xlim[0]) if xlim[1] != xlim[0] else 0.5
         y_rel = (y - ylim[0]) / (ylim[1] - ylim[0]) if ylim[1] != ylim[0] else 0.5
+        if x_rel > 0.5 and y_rel > 0.5:
+            occupied.add('upper right')
+        elif x_rel <= 0.5 and y_rel > 0.5:
+            occupied.add('upper left')
+        elif x_rel > 0.5 and y_rel <= 0.5:
+            occupied.add('lower right')
+        else:
+            occupied.add('lower left')
 
-        # Determine annotation position based on point location
-        # Use larger offsets for points in the middle, smaller for edges
-        # Position annotation away from nearest edge
+        # Pick best available corner
+        preference = ['upper right', 'lower left', 'upper left', 'lower right']
+        chosen = preference[0]
+        for pref in preference:
+            if pref not in occupied:
+                chosen = pref
+                break
 
-        # Horizontal offset
-        if x_rel < 0.3:  # Point on left side
-            x_offset = 20
-        elif x_rel > 0.7:  # Point on right side
-            x_offset = -20
-        else:  # Point in middle
-            x_offset = 20
+        cx, cy, ha, va = corners[chosen]
 
-        # Vertical offset
-        if y_rel < 0.3:  # Point on bottom
-            y_offset = 20
-        elif y_rel > 0.7:  # Point on top
-            y_offset = -20
-        else:  # Point in middle
-            y_offset = 20
-
-        # Create new annotation with smart positioning
         annotation = ax.annotate(
             text,
             xy=(x, y),
-            xytext=(x_offset, y_offset),
-            textcoords='offset points',
-            bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8, edgecolor='black'),
-            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='black'),
+            xytext=(cx, cy),
+            textcoords='axes fraction',
+            bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.9, edgecolor='black'),
+            arrowprops=dict(
+                arrowstyle='->', connectionstyle='arc3,rad=0.2',
+                color='black', lw=1.5,
+            ),
             fontsize=9,
-            zorder=1000,  # Ensure annotation is on top
-            # Horizontal alignment based on position
-            ha='left' if x_offset > 0 else 'right',
-            va='bottom' if y_offset > 0 else 'top'
+            zorder=1000,
+            ha=ha,
+            va=va,
+            clip_on=False,
         )
 
         self.active_annotation = annotation
-        canvas.draw()
+        canvas.draw_idle()
 
     def _apply_transformation(self, data):
         """
@@ -17562,6 +17605,9 @@ class SpectralPredictApp:
 
             # Reset append mode
             self.append_mode.set(False)
+
+            # Reset sample sets
+            self._reset_sample_sets()
 
     # ========== END DATA SOURCE MANAGEMENT METHODS ==========
 
@@ -23713,12 +23759,20 @@ For detailed documentation, see the User Guide.
                     display_metadata = self.ref[mask].copy()
                 metadata_cols = list(self.ref.columns)
 
-            # Build headers: Sample ID, Metadata columns, Target (if available), then all wavelengths
+            # Check for sample sets
+            has_sets = (self.sample_sets is not None
+                        and self.sample_sets.notna().any())
+
+            # Build headers: Sample ID, Metadata columns, Set (optional),
+            # Target (if available), then all wavelengths
             wavelength_headers = [str(wl) for wl in display_df.columns]
+            set_header = ['Set'] if has_sets else []
             if display_y is not None:
-                headers = ['Sample ID'] + metadata_cols + [target_col] + wavelength_headers
+                headers = (['Sample ID'] + metadata_cols + set_header
+                           + [target_col] + wavelength_headers)
             else:
-                headers = ['Sample ID'] + metadata_cols + wavelength_headers
+                headers = (['Sample ID'] + metadata_cols + set_header
+                           + wavelength_headers)
 
             # Pre-format all data
             formatted_data = []
@@ -23739,6 +23793,12 @@ For detailed documentation, see the User Guide.
                         else:
                             metadata_vals.append(str(val))
 
+                # Set value (if any sets exist)
+                set_val = []
+                if has_sets:
+                    sv = self.sample_sets.loc[idx] if idx in self.sample_sets.index else None
+                    set_val = [str(sv) if sv is not None else '']
+
                 # Target value (if available)
                 if display_y is not None:
                     if np.issubdtype(display_y.dtype, np.number):
@@ -23752,9 +23812,11 @@ For detailed documentation, see the User Guide.
                 spectral_vals = [f"{val:.5f}" for val in display_df.loc[idx].values]
 
                 if target_val is not None:
-                    row_data = [sample_id] + metadata_vals + [target_val] + spectral_vals
+                    row_data = ([sample_id] + metadata_vals + set_val
+                                + [target_val] + spectral_vals)
                 else:
-                    row_data = [sample_id] + metadata_vals + spectral_vals
+                    row_data = ([sample_id] + metadata_vals + set_val
+                                + spectral_vals)
                 formatted_data.append(row_data)
 
             # Set sheet data and headers
@@ -23855,6 +23917,11 @@ For detailed documentation, see the User Guide.
                     export_df.insert(insert_position, col, self.ref[col])
                     insert_position += 1
 
+            # Add Set column (if available)
+            if self.sample_sets is not None and self.sample_sets.notna().any():
+                export_df.insert(insert_position, 'Set', self.sample_sets)
+                insert_position += 1
+
             # Add target column (if available)
             if self.y is not None:
                 export_df.insert(insert_position, target_col, self.y)
@@ -23909,6 +23976,7 @@ For detailed documentation, see the User Guide.
             # Identify column types
             sample_id_idx = 0
             target_idx = None
+            set_idx = None
             metadata_indices = []
             wavelength_start_idx = None
 
@@ -23917,6 +23985,8 @@ For detailed documentation, see the User Guide.
                     sample_id_idx = i
                 elif h == target_col_name or h == "Target":
                     target_idx = i
+                elif h == "Set":
+                    set_idx = i
                 elif h in [str(w) for w in wavelength_cols]:
                     if wavelength_start_idx is None:
                         wavelength_start_idx = i
@@ -23930,6 +24000,7 @@ For detailed documentation, see the User Guide.
             # Rebuild data from sheet
             new_indices = []
             new_y_values = []
+            new_set_values = []
             new_X_data = []
             new_metadata = {h: [] for i, h in enumerate(headers) if i in metadata_indices}
 
@@ -23944,6 +24015,11 @@ For detailed documentation, see the User Guide.
                 except (ValueError, TypeError):
                     pass  # Keep as string
                 new_y_values.append(target_val)
+
+                # Set value
+                if set_idx is not None:
+                    sv = row[set_idx]
+                    new_set_values.append(sv if sv and str(sv).strip() else None)
 
                 # Spectral values
                 spectral_vals = []
@@ -23965,6 +24041,13 @@ For detailed documentation, see the User Guide.
 
             # Update self.y
             self.y = pd.Series(new_y_values, index=new_indices)
+
+            # Update sample sets
+            if set_idx is not None:
+                self.sample_sets = pd.Series(new_set_values, index=new_indices, dtype=object)
+                unique = [v for v in pd.unique(new_set_values) if v is not None]
+                self.sample_set_names = unique
+                self._update_set_combo()
 
             # Update metadata (ref or combined_metadata_df)
             if new_metadata:
@@ -23998,6 +24081,8 @@ For detailed documentation, see the User Guide.
             'ref': self.ref.copy() if self.ref is not None else None,
             'combined_metadata_df': self.combined_metadata_df.copy() if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None else None,
             'excluded_spectra': self.excluded_spectra.copy(),
+            'sample_sets': self.sample_sets.copy() if self.sample_sets is not None else None,
+            'sample_set_names': list(self.sample_set_names),
         }
         self.data_viewer_undo_stack.append(state)
         # Limit stack size
@@ -24019,6 +24104,9 @@ For detailed documentation, see the User Guide.
         if state['combined_metadata_df'] is not None:
             self.combined_metadata_df = state['combined_metadata_df']
         self.excluded_spectra = state['excluded_spectra']
+        self.sample_sets = state.get('sample_sets')
+        self.sample_set_names = state.get('sample_set_names', [])
+        self._update_set_combo()
 
         # Refresh display
         self._populate_data_viewer()
