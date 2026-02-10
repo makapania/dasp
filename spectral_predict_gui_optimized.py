@@ -7084,6 +7084,203 @@ class SpectralPredictApp:
         self._update_tab3_exclusion_status()
         print("> All spectrum exclusions restored")
 
+    # ========== SAMPLE SETS METHODS ==========
+
+    def _init_sample_sets(self):
+        """Create sample_sets Series aligned with self.X.index, all None."""
+        if self.X is None:
+            return
+        self.sample_sets = pd.Series(
+            [None] * len(self.X), index=self.X.index, dtype=object
+        )
+
+    def _reset_sample_sets(self):
+        """Clear all sample sets and reset UI."""
+        self.sample_sets = None
+        self.sample_set_names = []
+        self._set_assign_mode.set(False)
+        self._current_set_name.set('')
+        if hasattr(self, '_set_combo'):
+            self._set_combo['values'] = []
+        if hasattr(self, '_set_count_label'):
+            self._set_count_label.config(text="")
+
+    def _on_set_new(self):
+        """Prompt user for a new set name, create it, auto-select and enable assign mode."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load spectral data first.")
+            return
+
+        name = simpledialog.askstring("New Sample Set", "Enter set name:")
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning("Invalid Name", "Set name cannot be empty.")
+            return
+        if name in ('None', 'Y Value'):
+            messagebox.showwarning("Reserved Name",
+                                   f"'{name}' is a reserved name. Choose another.")
+            return
+        if name in self.sample_set_names:
+            messagebox.showwarning("Duplicate Name",
+                                   f"A set named '{name}' already exists.")
+            return
+
+        # Initialize sample_sets Series if needed
+        if self.sample_sets is None:
+            self._init_sample_sets()
+
+        self.sample_set_names.append(name)
+        self._update_set_combo()
+        self._current_set_name.set(name)
+        self._set_assign_mode.set(True)
+        self._on_assign_mode_toggled()
+        self._update_set_count_label()
+
+    def _on_set_delete(self):
+        """Delete the currently selected set. Members become None."""
+        name = self._current_set_name.get()
+        if not name or name not in self.sample_set_names:
+            messagebox.showinfo("No Set Selected", "Select a set to delete.")
+            return
+
+        if not messagebox.askyesno("Delete Set",
+                                   f"Delete set '{name}'?\n"
+                                   "Members will become unassigned."):
+            return
+
+        # Clear members
+        if self.sample_sets is not None:
+            self.sample_sets[self.sample_sets == name] = None
+
+        self.sample_set_names.remove(name)
+
+        # If all sets deleted, reset
+        if not self.sample_set_names:
+            self.sample_sets = None
+            if self.explore_color_var.get() == 'Set':
+                self.explore_color_var.set('None')
+                self._on_explore_color_changed()
+
+        self._current_set_name.set(
+            self.sample_set_names[0] if self.sample_set_names else '')
+        self._set_assign_mode.set(False)
+        self._on_assign_mode_toggled()
+        self._update_set_combo()
+        self._update_set_count_label()
+
+        # Replot if colored by Set
+        if self.explore_color_var.get() == 'Set' and self.X is not None:
+            self._regenerate_explore_spectra_only()
+
+    def _update_set_combo(self):
+        """Refresh the set combobox values."""
+        if hasattr(self, '_set_combo'):
+            self._set_combo['values'] = self.sample_set_names
+        self._update_set_count_label()
+
+    def _update_set_count_label(self, *args):
+        """Show 'N members' for the currently selected set."""
+        if not hasattr(self, '_set_count_label'):
+            return
+        name = self._current_set_name.get()
+        if not name or self.sample_sets is None:
+            self._set_count_label.config(text="")
+            return
+        n = int((self.sample_sets == name).sum())
+        self._set_count_label.config(
+            text=f"{n} member{'s' if n != 1 else ''}")
+
+    def _assign_sample_to_set(self, sample_idx):
+        """Toggle membership: if already in this set -> None, else -> set name.
+
+        Returns an info message string.
+        """
+        name = self._current_set_name.get()
+        if not name or self.sample_sets is None:
+            return ""
+        if sample_idx not in self.sample_sets.index:
+            return ""
+
+        current = self.sample_sets.loc[sample_idx]
+        if current == name:
+            self.sample_sets.loc[sample_idx] = None
+            return f"Removed {sample_idx} from set '{name}'"
+        else:
+            self.sample_sets.loc[sample_idx] = name
+            return f"Added {sample_idx} to set '{name}'"
+
+    def _on_set_exclude(self):
+        """Add all members of the selected set to excluded_spectra."""
+        name = self._current_set_name.get()
+        if not name or self.sample_sets is None:
+            messagebox.showinfo("No Set", "Select a set first.")
+            return
+
+        members = self.sample_sets[self.sample_sets == name].index.tolist()
+        if not members:
+            messagebox.showinfo("Empty Set", f"Set '{name}' has no members.")
+            return
+
+        for idx in members:
+            self.excluded_spectra.add(idx)
+
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+        if self.X is not None:
+            self._regenerate_explore_spectra_only()
+        messagebox.showinfo("Set Excluded",
+                            f"Excluded {len(members)} members of set '{name}'.")
+
+    def _on_set_keep_only(self):
+        """Exclude everything NOT in the selected set."""
+        name = self._current_set_name.get()
+        if not name or self.sample_sets is None:
+            messagebox.showinfo("No Set", "Select a set first.")
+            return
+
+        members = set(
+            self.sample_sets[self.sample_sets == name].index.tolist())
+        if not members:
+            messagebox.showinfo("Empty Set",
+                                f"Set '{name}' has no members to keep.")
+            return
+
+        non_members = [idx for idx in self.X.index if idx not in members]
+        if not non_members:
+            messagebox.showinfo("All In Set",
+                                "All samples are already in this set.")
+            return
+
+        if not messagebox.askyesno(
+            "Keep Only",
+            f"This will exclude {len(non_members)} samples "
+            f"not in set '{name}'.\nContinue?"
+        ):
+            return
+
+        for idx in non_members:
+            self.excluded_spectra.add(idx)
+
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+        if self.X is not None:
+            self._regenerate_explore_spectra_only()
+
+    def _on_assign_mode_toggled(self):
+        """Update info labels when assign mode is toggled."""
+        if self._set_assign_mode.get() and self._current_set_name.get():
+            msg = (f"Assign mode: click spectra to add to "
+                   f"'{self._current_set_name.get()}'")
+            for fk, st in self._explore_plot_state.items():
+                st['info_label'].config(text=msg)
+        else:
+            for fk, st in self._explore_plot_state.items():
+                st['info_label'].config(text="")
+
+    # ========== END SAMPLE SETS METHODS ==========
+
     def _run_explore_predictor_screening(self):
         """Run predictor screening from the Explore tab."""
         if self.X is None:
