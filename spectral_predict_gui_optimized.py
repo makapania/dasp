@@ -2573,6 +2573,7 @@ class SpectralPredictApp:
         self._explore_polybl_degree = tk.IntVar(value=2)
         self._explore_als_lambda = tk.StringVar(value="1e5")
         self._explore_als_p = tk.StringVar(value="0.001")
+        self._explore_airpls_lambda = tk.StringVar(value="1e5")
 
         # Manual baseline state
         self._mbl_points = []  # list of (wavelength, intensity) tuples
@@ -5951,6 +5952,13 @@ class SpectralPredictApp:
                  text="Load data to see ALS baseline corrected spectra",
                  style='Caption.TLabel').pack(expand=True)
 
+        # airPLS Baseline sub-tab
+        self.explore_airpls_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_airpls_frame, text="  airPLS Baseline  ")
+        ttk.Label(self.explore_airpls_frame,
+                 text="Load data to see airPLS baseline corrected spectra",
+                 style='Caption.TLabel').pack(expand=True)
+
         # Manual Baseline sub-tab
         self.explore_manual_bl_frame = ttk.Frame(self.explore_notebook)
         self.explore_notebook.add(self.explore_manual_bl_frame, text="  Manual Baseline  ")
@@ -6069,6 +6077,10 @@ class SpectralPredictApp:
             self._generate_explore_als_plot()
         except Exception as e:
             print(f"Warning: Could not regenerate ALS baseline plot: {e}")
+        try:
+            self._generate_explore_airpls_plot()
+        except Exception as e:
+            print(f"Warning: Could not regenerate airPLS baseline plot: {e}")
 
     def _generate_explore_plots(self):
         """Generate all plots for the Explore tab."""
@@ -6120,6 +6132,11 @@ class SpectralPredictApp:
             self._generate_explore_als_plot()
         except Exception as e:
             print(f"Warning: Could not generate ALS baseline plot: {e}")
+
+        try:
+            self._generate_explore_airpls_plot()
+        except Exception as e:
+            print(f"Warning: Could not generate airPLS baseline plot: {e}")
 
         try:
             self._init_manual_baseline_plot()
@@ -6457,6 +6474,56 @@ class SpectralPredictApp:
             except Exception as e:
                 print(f"Warning: Could not regenerate ALS baseline plot: {e}")
 
+    def _generate_explore_airpls_plot(self):
+        """Generate airPLS baseline corrected plot in the Explore tab."""
+        from spectral_predict.baseline import BaselineAirPLS
+
+        for widget in self.explore_airpls_frame.winfo_children():
+            widget.destroy()
+
+        # Control row
+        ctrl = ttk.Frame(self.explore_airpls_frame)
+        ctrl.pack(fill='x', padx=20, pady=(5, 0))
+
+        ttk.Label(ctrl, text="Lambda:").pack(side='left', padx=(0, 5))
+        lam_combo = ttk.Combobox(
+            ctrl, textvariable=self._explore_airpls_lambda,
+            values=["1e3", "1e4", "1e5", "1e6", "1e7"],
+            state='readonly', width=6
+        )
+        lam_combo.pack(side='left', padx=(0, 10))
+
+        ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_airpls_plot).pack(side='left', padx=(0, 10))
+        ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
+                   command=lambda: self._save_corrected_spectra("airpls")).pack(side='left', padx=(0, 5))
+        ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
+                   command=lambda: self._replace_working_data("airpls")).pack(side='left')
+
+        lambda_ = float(self._explore_airpls_lambda.get())
+        corrected = BaselineAirPLS(lam=lambda_).fit_transform(self.X.values)
+
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
+        self._create_explore_plot_in_frame(
+            self.explore_airpls_frame,
+            f"airPLS Baseline Corrected (lambda={lambda_:.0e})",
+            corrected,
+            "Corrected Intensity",
+            "teal",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
+        )
+
+    def _refresh_airpls_plot(self):
+        """Refresh airPLS baseline plot after parameter change."""
+        if self.X is not None:
+            try:
+                self._generate_explore_airpls_plot()
+            except Exception as e:
+                print(f"Warning: Could not regenerate airPLS baseline plot: {e}")
+
     def _compute_corrected_spectra(self, method: str) -> np.ndarray:
         """Compute baseline-corrected spectra for the given method.
 
@@ -6478,6 +6545,10 @@ class SpectralPredictApp:
             lambda_ = float(self._explore_als_lambda.get())
             p = float(self._explore_als_p.get())
             corrected = BaselineALS(lambda_=lambda_, p=p).fit_transform(X_vals)
+        elif method == "airpls":
+            from spectral_predict.baseline import BaselineAirPLS
+            lambda_ = float(self._explore_airpls_lambda.get())
+            corrected = BaselineAirPLS(lam=lambda_).fit_transform(X_vals)
         else:
             raise ValueError(f"Unknown baseline method: {method}")
         return corrected
