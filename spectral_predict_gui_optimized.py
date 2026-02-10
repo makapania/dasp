@@ -2695,7 +2695,7 @@ class SpectralPredictApp:
         # Pre-processing steps (optional, applied before transforms)
         # Baseline correction
         self.enable_baseline = tk.BooleanVar(value=False)
-        self.baseline_method = tk.StringVar(value="polynomial")
+        self.baseline_method = tk.StringVar(value="als")
         self.baseline_poly_degree = tk.IntVar(value=2)
         self.baseline_asls_lambda = tk.StringVar(value="1e5")
         self.baseline_asls_p = tk.StringVar(value="0.01")
@@ -8248,7 +8248,7 @@ class SpectralPredictApp:
         ttk.Label(self.baseline_options_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         baseline_method_combo = ttk.Combobox(self.baseline_options_frame, textvariable=self.baseline_method,
                                               width=12, state='readonly')
-        baseline_method_combo['values'] = ['polynomial', 'asls', 'rubber_band', 'airpls']
+        baseline_method_combo['values'] = ['polynomial', 'als', 'rubber_band', 'airpls']
         baseline_method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
         baseline_method_combo.bind('<<ComboboxSelected>>', self._on_baseline_method_changed)
 
@@ -8290,7 +8290,7 @@ class SpectralPredictApp:
         airpls_lambda_combo.pack(side='left')
 
         # Initially hide all non-default method frames
-        self.baseline_asls_frame.grid_remove()
+        self.baseline_poly_frame.grid_remove()
         self.baseline_rubberband_frame.grid_remove()
         self.baseline_airpls_frame.grid_remove()
 
@@ -17972,7 +17972,7 @@ class SpectralPredictApp:
         method = self.baseline_method.get()
         if method == 'polynomial':
             self.baseline_poly_frame.grid()
-        elif method == 'asls':
+        elif method == 'als':
             self.baseline_asls_frame.grid()
         elif method == 'rubber_band':
             self.baseline_rubberband_frame.grid()
@@ -17989,7 +17989,7 @@ class SpectralPredictApp:
 
         if method == 'polynomial':
             params['degree'] = self.baseline_poly_degree.get()
-        elif method == 'asls':
+        elif method == 'als':
             try:
                 params['lam'] = float(self.baseline_asls_lambda.get())
             except ValueError:
@@ -19382,6 +19382,9 @@ class SpectralPredictApp:
                 'sg4': self.use_sg4.get(),
                 'deriv_snv': self.use_deriv_snv.get()
             }
+
+            # Collect baseline correction params for grid search toggle
+            baseline_method, baseline_params = self._get_baseline_params()
 
             # Collect subset analysis settings
             enable_variable_subsets = self.enable_variable_subsets.get()
@@ -21568,6 +21571,8 @@ class SpectralPredictApp:
                 max_iter=self.max_iter.get(),
                 models_to_test=selected_models,
                 preprocessing_methods=preprocessing_methods,
+                baseline_method=baseline_method,
+                baseline_params=baseline_params,
                 # interference_settings=interference_settings,  # DISABLED: Code stashed (broke R² reproducibility)
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,
@@ -25639,6 +25644,11 @@ Performance (Classification):
         preprocess = config.get('Preprocess', 'raw')
         deriv = config.get('Deriv', None)
 
+        # Strip baseline prefix (e.g., "als+snv" → "snv") for GUI preprocess matching
+        baseline_prefix = None
+        if '+' in preprocess:
+            baseline_prefix, preprocess = preprocess.split('+', 1)
+
         # Convert from search.py naming to GUI naming
         if preprocess == 'deriv' and deriv == 1:
             gui_preprocess = 'sg1'
@@ -25697,6 +25707,16 @@ Performance (Classification):
 
         if gui_preprocess in ['raw', 'snv', 'sg1', 'sg2', 'sg3', 'sg4', 'snv_sg1', 'snv_sg2', 'snv_sg3', 'snv_sg4', 'deriv_snv', 'ga_optimized']:
             self.refine_preprocess.set(gui_preprocess)
+
+        # Load baseline settings from prefix if present (e.g., "als+snv" had prefix "als")
+        if baseline_prefix:
+            self.enable_baseline.set(True)
+            self.baseline_method.set(baseline_prefix)
+            self._toggle_baseline_options()
+            print(f"> Baseline correction '{baseline_prefix}' loaded from results")
+        else:
+            self.enable_baseline.set(False)
+            self._toggle_baseline_options()
 
         # Detect and load GA preprocessing if present
         if 'ga_genes' in config and config['ga_genes']:
