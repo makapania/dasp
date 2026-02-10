@@ -431,6 +431,10 @@ def compute_validation_metrics_for_top_models(
         try:
             # === STEP 1: Get preprocessing config ===
             preprocess_name = row.get('Preprocess', 'raw')
+            # Strip baseline prefix (e.g., "als+snv" → "snv") and extract method
+            baseline_method = None
+            if '+' in str(preprocess_name):
+                baseline_method, preprocess_name = str(preprocess_name).split('+', 1)
             deriv = row.get('Deriv', 0)
             window = row.get('Window', None)
             poly = row.get('Poly', None)
@@ -486,7 +490,7 @@ def compute_validation_metrics_for_top_models(
                 # GA preprocessing: cache by genes hash
                 cache_key = ('ga', tuple(ga_genes))
             else:
-                cache_key = (preprocess_name, deriv, window, poly)
+                cache_key = (preprocess_name, deriv, window, poly, baseline_method)
 
             # === STEP 2: Preprocess FULL spectrum (matching search.py and Model Dev) ===
             if cache_key in preprocess_cache:
@@ -502,7 +506,8 @@ def compute_validation_metrics_for_top_models(
                         preprocess_name,
                         deriv=deriv,
                         window=window,
-                        polyorder=poly
+                        polyorder=poly,
+                        baseline_method=baseline_method,
                     )
 
                     if prep_steps:
@@ -1653,6 +1658,23 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 "smoothing_window": smoothing_window,
                 "smoothing_polyorder": smoothing_polyorder
             })
+
+    # --- Baseline toggle: when enabled, test both WITH and WITHOUT baseline ---
+    if baseline_method is not None and preprocess_configs:
+        configs_without = []
+        configs_with = []
+        for cfg in preprocess_configs:
+            # Without baseline
+            cfg_no = dict(cfg)
+            cfg_no["baseline_method"] = None
+            cfg_no["baseline_params"] = None
+            configs_without.append(cfg_no)
+            # With baseline
+            cfg_bl = dict(cfg)
+            cfg_bl["base_name"] = cfg.get("base_name", cfg["name"])
+            cfg_bl["name"] = f"{baseline_method}+{cfg['name']}"
+            configs_with.append(cfg_bl)
+        preprocess_configs = configs_without + configs_with
 
     # Create CV splitter
     if task_type == "regression":
@@ -4015,16 +4037,12 @@ def _run_single_config(
         imbalance_display = imbalance_method
 
     # Build result dictionary AFTER capturing complete params
-    # Use base_name for Preprocess column (for validation compatibility)
-    # but store full display name for reference
     preprocess_display = preprocess_cfg["name"]
-    preprocess_base = preprocess_cfg.get("base_name", preprocess_cfg["name"])
     result = {
         "Task": task_type,
         "Model": model_name,
         "Params": str(params),  # Now includes complete parameter set
-        "Preprocess": preprocess_base,  # Use base name for pipeline building
-        "PreprocessDisplay": preprocess_display,  # Full name for display
+        "Preprocess": preprocess_display,  # Full name including baseline prefix (e.g., als+snv)
         "Deriv": preprocess_cfg["deriv"],
         "Window": preprocess_cfg["window"],
         "Poly": preprocess_cfg["polyorder"],
