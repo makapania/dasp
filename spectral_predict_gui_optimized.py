@@ -28215,6 +28215,11 @@ F1 Score:  {f1:.4f}
                     print(f"  imbalance_method: {loaded_imbalance_method}")
                     print(f"  imbalance_params: {loaded_imbalance_params}")
 
+            # Initialize variables that may only be set in certain paths
+            # (needed later for validation prediction)
+            prep_pipeline = None
+            wavelength_indices = None
+
             # === GA PREPROCESSING PATH ===
             # If user selected 'ga_optimized' preprocessing, execute GA variable selection
             if preprocess == 'ga_optimized':
@@ -28743,6 +28748,12 @@ F1 Score:  {f1:.4f}
                 # Store regional performance for model saving
                 results['regional_rmse'] = regional_rmse
                 results['y_quartiles'] = quartiles.tolist()
+
+                # Compute RPD and Bias from aggregated CV predictions
+                rpd = float(np.std(all_y_true_arr)) / results['rmse_mean'] if results['rmse_mean'] > 0 else 0.0
+                bias_cv = float(np.mean(all_y_pred_arr - all_y_true_arr))
+                results['rpd'] = rpd
+                results['bias'] = bias_cv
             else:
                 results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
                 results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
@@ -28752,6 +28763,28 @@ F1 Score:  {f1:.4f}
                 results['recall_std'] = np.std([m['recall'] for m in fold_metrics])
                 results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
                 results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
+
+                # Compute ROC AUC from aggregated CV probabilities
+                results['roc_auc'] = np.nan
+                if all_y_proba:
+                    try:
+                        from sklearn.metrics import roc_auc_score
+                        y_true_arr = np.array(all_y_true)
+                        y_proba_arr = np.concatenate(all_y_proba, axis=0)
+                        unique_classes = np.unique(y_true_arr)
+                        if len(unique_classes) == 2:
+                            # Binary: use probability of positive class
+                            if y_proba_arr.ndim == 2:
+                                results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr[:, 1])
+                            else:
+                                results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr)
+                        elif len(unique_classes) > 2:
+                            # Multiclass: use OVR
+                            results['roc_auc'] = roc_auc_score(
+                                y_true_arr, y_proba_arr, multi_class='ovr', average='weighted'
+                            )
+                    except Exception as e:
+                        print(f"WARNING: Could not compute ROC AUC: {e}")
 
             # Format results with detailed diagnostics
             if task_type == "regression":
@@ -28802,18 +28835,35 @@ F1 Score:  {f1:.4f}
   {'> Within expected range' if abs_diff <= 0.03 else '[!]  Larger than expected - investigate'}
 """
 
-                results_text = f"""Refined Model Results:
+                # Build regional RMSE text
+                regional_text = ""
+                if 'regional_rmse' in results and 'y_quartiles' in results:
+                    q = results['y_quartiles']
+                    rr = results['regional_rmse']
+                    regional_text = f"""
+Regional Performance (by quartile):
+  Q1 (< {q[0]:.1f}):     RMSE = {rr.get('Q1', np.nan):.4f}
+  Q2 ({q[0]:.1f}-{q[1]:.1f}):  RMSE = {rr.get('Q2', np.nan):.4f}
+  Q3 ({q[1]:.1f}-{q[2]:.1f}):  RMSE = {rr.get('Q3', np.nan):.4f}
+  Q4 (>= {q[2]:.1f}):    RMSE = {rr.get('Q4', np.nan):.4f}
+"""
+
+                results_text_part1 = f"""Refined Model Results:
 
 Cross-Validation Performance ({self.refine_folds.get()} folds):
   RMSE: {results['rmse_mean']:.4f} ± {results['rmse_std']:.4f}
   R²: {results['r2_mean']:.4f} ± {results['r2_std']:.4f}
   MAE: {results['mae_mean']:.4f} ± {results['mae_std']:.4f}
+  RPD:  {results['rpd']:.2f}
+  Bias: {results['bias']:+.4f}
 
 COMPARISON TO LOADED MODEL:
   Original R² (from Results tab): {loaded_r2}
   Refined R² (just computed):     {results['r2_mean']:.4f}
   Difference:                     {r2_diff}
-{reproducibility_note}
+{reproducibility_note}{regional_text}"""
+
+                results_text_part2 = f"""
 Configuration:
   Model: {model_name}
   Task Type: {task_type}
@@ -28836,14 +28886,35 @@ DEBUG INFO:
 NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match search.py behavior and preserve derivative context.' if use_full_spectrum_preprocessing else ''}
 """
             else:
-                results_text = f"""Refined Model Results:
+                # Build comparison text for classification
+                loaded_acc = "N/A"
+                acc_diff = "N/A"
+                if self.selected_model_config is not None and 'Accuracy' in self.selected_model_config:
+                    loaded_acc_value = self.selected_model_config.get('Accuracy')
+                    if loaded_acc_value is not None and not pd.isna(loaded_acc_value):
+                        loaded_acc = f"{loaded_acc_value:.4f}"
+                        acc_diff_value = results['accuracy_mean'] - loaded_acc_value
+                        acc_diff = f"{acc_diff_value:+.4f}"
+
+                roc_auc_text = ""
+                if not np.isnan(results.get('roc_auc', np.nan)):
+                    roc_auc_text = f"\n  ROC AUC:   {results['roc_auc']:.4f}"
+
+                results_text_part1 = f"""Refined Model Results:
 
 Cross-Validation Performance ({self.refine_folds.get()} folds):
-  Accuracy: {results['accuracy_mean']:.4f} ± {results['accuracy_std']:.4f}
+  Accuracy:  {results['accuracy_mean']:.4f} ± {results['accuracy_std']:.4f}
   Precision: {results['precision_mean']:.4f} ± {results['precision_std']:.4f}
-  Recall: {results['recall_mean']:.4f} ± {results['recall_std']:.4f}
-  F1 Score: {results['f1_mean']:.4f} ± {results['f1_std']:.4f}
+  Recall:    {results['recall_mean']:.4f} ± {results['recall_std']:.4f}
+  F1 Score:  {results['f1_mean']:.4f} ± {results['f1_std']:.4f}{roc_auc_text}
 
+COMPARISON TO LOADED MODEL:
+  Original Accuracy (from Results tab): {loaded_acc}
+  Refined Accuracy (just computed):     {results['accuracy_mean']:.4f}
+  Difference:                           {acc_diff}
+"""
+
+                results_text_part2 = f"""
 Configuration:
   Model: {model_name}
   Task Type: {task_type}
@@ -28859,6 +28930,122 @@ Configuration:
             # Clone the pipeline and fit on all data
             final_pipe = clone(pipe)
             final_pipe.fit(X_raw, y_array)
+
+            # --- Calibration metrics (predict on training data) ---
+            cal_text = ""
+            try:
+                y_cal_pred = final_pipe.predict(X_raw)
+                if task_type == "regression":
+                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+                    cal_rmse = np.sqrt(mean_squared_error(y_array, y_cal_pred))
+                    cal_r2 = r2_score(y_array, y_cal_pred)
+                    results['cal_rmse'] = cal_rmse
+                    results['cal_r2'] = cal_r2
+                    cal_text = f"""
+Calibration Performance (n={len(y_array)}):
+  RMSE_cal: {cal_rmse:.4f}
+  R2_cal:   {cal_r2:.4f}
+"""
+                else:
+                    from sklearn.metrics import accuracy_score, f1_score
+                    cal_acc = accuracy_score(y_array, y_cal_pred)
+                    cal_f1 = f1_score(y_array, y_cal_pred, average='weighted', zero_division=0)
+                    results['cal_accuracy'] = cal_acc
+                    results['cal_f1'] = cal_f1
+                    cal_text = f"""
+Calibration Performance (n={len(y_array)}):
+  Accuracy_cal: {cal_acc:.4f}
+  F1_cal:       {cal_f1:.4f}
+"""
+            except Exception as e:
+                print(f"WARNING: Could not compute calibration metrics: {e}")
+
+            # --- External validation metrics ---
+            val_text = ""
+            if (self.validation_enabled.get() and
+                    self.validation_X is not None and
+                    self.validation_y is not None and
+                    len(self.validation_X) > 0):
+                try:
+                    # Prepare validation X based on preprocessing path
+                    if preprocess == 'ga_optimized' and self.refined_ga_genes is not None:
+                        # GA path: subset validation data by GA gene indices
+                        val_X_prepared = self.validation_X.values[:, self.refined_ga_genes]
+                    elif use_full_spectrum_preprocessing and prep_pipeline is not None:
+                        # Full-spectrum path: preprocess then subset
+                        val_X_full = self.validation_X.values
+                        val_X_preprocessed = prep_pipeline.transform(val_X_full)
+                        val_X_prepared = val_X_preprocessed[:, wavelength_indices]
+                    elif use_full_spectrum_preprocessing and prep_pipeline is None:
+                        # Full-spectrum path, raw preprocessing (no transform needed)
+                        val_X_full = self.validation_X.values
+                        if wavelength_indices is not None:
+                            val_X_prepared = val_X_full[:, wavelength_indices]
+                        else:
+                            val_X_prepared = self.validation_X[selected_cols].values
+                    else:
+                        # Standard path: subset columns (pipeline handles preprocessing)
+                        val_X_prepared = self.validation_X[selected_cols].values
+
+                    # Prepare validation y
+                    val_y = self.validation_y.values
+                    if local_label_encoder is not None:
+                        # Check for classes not seen during training
+                        unseen = set(val_y) - set(local_label_encoder.classes_)
+                        if unseen:
+                            print(f"WARNING: Validation set has classes not in training: {unseen}")
+                            raise ValueError(f"Validation contains unseen classes: {unseen}")
+                        val_y = local_label_encoder.transform(val_y)
+
+                    # Predict
+                    val_y_pred = final_pipe.predict(val_X_prepared)
+                    n_val = len(val_y)
+
+                    if task_type == "regression":
+                        from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+                        val_rmse = np.sqrt(mean_squared_error(val_y, val_y_pred))
+                        val_r2 = r2_score(val_y, val_y_pred)
+                        val_mae = mean_absolute_error(val_y, val_y_pred)
+                        val_bias = float(np.mean(val_y_pred - val_y))
+                        val_rpd = float(np.std(val_y)) / val_rmse if val_rmse > 0 else 0.0
+                        results['val_rmse'] = val_rmse
+                        results['val_r2'] = val_r2
+                        results['val_mae'] = val_mae
+                        results['val_bias'] = val_bias
+                        results['val_rpd'] = val_rpd
+                        val_text = f"""
+External Validation Performance (n={n_val}):
+  RMSEP:    {val_rmse:.4f}
+  R2pred:   {val_r2:.4f}
+  MAE_val:  {val_mae:.4f}
+  Bias_val: {val_bias:+.4f}
+  RPD_val:  {val_rpd:.2f}
+"""
+                    else:
+                        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+                        val_acc = accuracy_score(val_y, val_y_pred)
+                        val_prec = precision_score(val_y, val_y_pred, average='weighted', zero_division=0)
+                        val_rec = recall_score(val_y, val_y_pred, average='weighted', zero_division=0)
+                        val_f1 = f1_score(val_y, val_y_pred, average='weighted', zero_division=0)
+                        results['val_accuracy'] = val_acc
+                        results['val_precision'] = val_prec
+                        results['val_recall'] = val_rec
+                        results['val_f1'] = val_f1
+                        val_text = f"""
+External Validation Performance (n={n_val}):
+  Accuracy_val:  {val_acc:.4f}
+  Precision_val: {val_prec:.4f}
+  Recall_val:    {val_rec:.4f}
+  F1_val:        {val_f1:.4f}
+"""
+                    print(f"DEBUG: Validation prediction successful (n={n_val})")
+                except Exception as e:
+                    print(f"WARNING: Could not compute validation metrics: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # Combine final results text
+            results_text = results_text_part1 + cal_text + val_text + results_text_part2
 
             # Extract model and preprocessor from pipeline for saving
             # For PLS-DA, save the entire pipeline (PLS + LogisticRegression)
@@ -29150,21 +29337,39 @@ Configuration:
 
             # Add performance metrics based on task type
             if self.refined_config['task_type'] == 'regression':
-                metadata['performance'] = {
+                perf = {
                     'RMSE': self.refined_performance.get('rmse_mean'),
                     'RMSE_std': self.refined_performance.get('rmse_std'),
                     'R2': self.refined_performance.get('r2_mean'),
                     'R2_std': self.refined_performance.get('r2_std'),
                     'MAE': self.refined_performance.get('mae_mean'),
-                    'MAE_std': self.refined_performance.get('mae_std')
+                    'MAE_std': self.refined_performance.get('mae_std'),
                 }
+                # Add new CV metrics
+                for key in ('rpd', 'bias'):
+                    val = self.refined_performance.get(key)
+                    if val is not None:
+                        perf[key.upper() if key == 'rpd' else 'Bias'] = val
+                # Add calibration metrics
+                for key, label in [('cal_rmse', 'cal_RMSE'), ('cal_r2', 'cal_R2')]:
+                    val = self.refined_performance.get(key)
+                    if val is not None:
+                        perf[label] = val
+                # Add validation metrics
+                for key, label in [('val_rmse', 'val_RMSE'), ('val_r2', 'val_R2'),
+                                   ('val_mae', 'val_MAE'), ('val_bias', 'val_Bias'),
+                                   ('val_rpd', 'val_RPD')]:
+                    val = self.refined_performance.get(key)
+                    if val is not None:
+                        perf[label] = val
+                metadata['performance'] = perf
                 # Add regional performance for consensus predictions
                 if 'regional_rmse' in self.refined_performance:
                     metadata['regional_rmse'] = self.refined_performance['regional_rmse']
                 if 'y_quartiles' in self.refined_performance:
                     metadata['y_quartiles'] = self.refined_performance['y_quartiles']
             else:  # classification
-                metadata['performance'] = {
+                perf = {
                     'Accuracy': self.refined_performance.get('accuracy_mean'),
                     'Accuracy_std': self.refined_performance.get('accuracy_std'),
                     'Precision': self.refined_performance.get('precision_mean'),
@@ -29172,8 +29377,24 @@ Configuration:
                     'Recall': self.refined_performance.get('recall_mean'),
                     'Recall_std': self.refined_performance.get('recall_std'),
                     'F1': self.refined_performance.get('f1_mean'),
-                    'F1_std': self.refined_performance.get('f1_std')
+                    'F1_std': self.refined_performance.get('f1_std'),
                 }
+                # Add ROC AUC
+                roc_val = self.refined_performance.get('roc_auc')
+                if roc_val is not None and not np.isnan(roc_val):
+                    perf['ROC_AUC'] = roc_val
+                # Add calibration metrics
+                for key, label in [('cal_accuracy', 'cal_Accuracy'), ('cal_f1', 'cal_F1')]:
+                    val = self.refined_performance.get(key)
+                    if val is not None:
+                        perf[label] = val
+                # Add validation metrics
+                for key, label in [('val_accuracy', 'val_Accuracy'), ('val_precision', 'val_Precision'),
+                                   ('val_recall', 'val_Recall'), ('val_f1', 'val_F1')]:
+                    val = self.refined_performance.get(key)
+                    if val is not None:
+                        perf[label] = val
+                metadata['performance'] = perf
 
             # Save the model
             # Use refined_label_encoder if available (from Model Development tab),
