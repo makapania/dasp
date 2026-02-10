@@ -2547,6 +2547,7 @@ class SpectralPredictApp:
         self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
         self.active_annotation = None  # Currently visible annotation object
         self._explore_plot_state = {}  # {frame_key: state_dict} for explore plot info bars
+        self._highlight_timers = {}  # {sample_idx: after_id} for re-inclusion flash timers
 
         # Plot coloring variables
         self.pca_color_var = tk.StringVar(value='Y Value')
@@ -2561,6 +2562,12 @@ class SpectralPredictApp:
 
         # Explore tab derivative window control
         self.explore_deriv_window = tk.IntVar(value=7)
+
+        # Sample Sets feature
+        self.sample_sets = None          # pd.Series (index=specimen labels, values=set name or None)
+        self.sample_set_names = []       # ordered list of set names
+        self._set_assign_mode = tk.BooleanVar(value=False)
+        self._current_set_name = tk.StringVar(value='')
 
         # Explore tab baseline correction controls
         self._explore_polybl_degree = tk.IntVar(value=2)
@@ -5814,6 +5821,41 @@ class SpectralPredictApp:
         self.explore_n_groups.trace_add('write', _debounced_explore_recolor)
         self.explore_bin_method.trace_add('write', _debounced_explore_recolor)
 
+        # --- Sample Sets controls row ---
+        sets_frame = ttk.Frame(content_frame)
+        sets_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(sets_frame, text="Sets:").pack(side='left', padx=(0, 5))
+
+        self._set_combo = ttk.Combobox(
+            sets_frame, textvariable=self._current_set_name,
+            values=[], state='readonly', width=14
+        )
+        self._set_combo.pack(side='left', padx=(0, 5))
+        self._set_combo.bind('<<ComboboxSelected>>', lambda e: self._update_set_count_label())
+
+        ttk.Button(sets_frame, text="New", command=self._on_set_new,
+                   width=5).pack(side='left', padx=(0, 3))
+        ttk.Button(sets_frame, text="Delete", command=self._on_set_delete,
+                   width=6).pack(side='left', padx=(0, 10))
+
+        ttk.Separator(sets_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+
+        ttk.Checkbutton(
+            sets_frame, text="Assign Mode", variable=self._set_assign_mode,
+            command=self._on_assign_mode_toggled
+        ).pack(side='left', padx=(5, 10))
+
+        ttk.Separator(sets_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+
+        ttk.Button(sets_frame, text="Exclude Set", command=self._on_set_exclude,
+                   width=10).pack(side='left', padx=(5, 3))
+        ttk.Button(sets_frame, text="Keep Only", command=self._on_set_keep_only,
+                   width=9).pack(side='left', padx=(0, 10))
+
+        self._set_count_label = ttk.Label(sets_frame, text="", style='Caption.TLabel')
+        self._set_count_label.pack(side='left', padx=(5, 0))
+
         # Create notebook for sub-tabs
         self.explore_notebook = ttk.Notebook(content_frame)
         self.explore_notebook.pack(fill='both', expand=True, pady=10)
@@ -5987,6 +6029,11 @@ class SpectralPredictApp:
 
         if self.X is None:
             return
+
+        # Cancel any pending highlight timers (plots are being regenerated)
+        for timer_id in self._highlight_timers.values():
+            self.root.after_cancel(timer_id)
+        self._highlight_timers.clear()
 
         # Refresh the color-by dropdown with available variables
         if hasattr(self, 'explore_color_combo'):
@@ -6845,13 +6892,18 @@ class SpectralPredictApp:
 
         excl_count_label = ttk.Label(info_frame, text="", style='Caption.TLabel')
         excl_count_label.pack(side='left')
-        self._update_explore_excl_count_label(excl_count_label)
+
+        restore_all_btn = ttk.Button(info_frame, text="Restore All",
+                                     command=self._on_explore_restore_all)
+        # Initially hidden; shown when exclusions exist
+        self._update_explore_excl_count_label(excl_count_label, restore_all_btn)
 
         # Store state for this frame
         self._explore_plot_state[frame_key] = {
             'fig': fig, 'canvas': canvas, 'ax': ax, 'frame': frame,
             'info_label': info_label, 'toggle_btn': toggle_btn,
             'excl_count_label': excl_count_label,
+            'restore_all_btn': restore_all_btn,
             'selected_sample': None, 'alpha': alpha,
         }
 
@@ -6928,44 +6980,109 @@ class SpectralPredictApp:
         gid_str = str(sample_idx)
 
         if sample_idx in self.excluded_spectra:
+            # Re-including: use highlight flash
             self.excluded_spectra.discard(sample_idx)
-            new_alpha_val = state['alpha']
-            new_lw = 1.0
-            new_ls = '-'
             state['toggle_btn'].config(text="Exclude")
             print(f"> Sample {sample_idx} included")
+
+            # Cancel any pending highlight timer for this sample
+            old_timer = self._highlight_timers.pop(sample_idx, None)
+            if old_timer is not None:
+                self.root.after_cancel(old_timer)
+
+            # Apply highlight style across ALL explore plots, then schedule restore
+            for fk, st in self._explore_plot_state.items():
+                for line in st['ax'].get_lines():
+                    if line.get_gid() == gid_str:
+                        line.set_alpha(1.0)
+                        line.set_linewidth(2.5)
+                        line.set_linestyle('-')
+                        break
+                st['canvas'].draw_idle()
+                self._update_explore_excl_count_label(st['excl_count_label'],
+                                                      st.get('restore_all_btn'))
+
+            # Schedule fade-back to normal after 800ms
+            def _restore_normal(sid=sample_idx, gstr=gid_str):
+                self._highlight_timers.pop(sid, None)
+                for fk2, st2 in self._explore_plot_state.items():
+                    for line in st2['ax'].get_lines():
+                        if line.get_gid() == gstr:
+                            line.set_alpha(st2['alpha'])
+                            line.set_linewidth(1.0)
+                            break
+                    st2['canvas'].draw_idle()
+
+            timer_id = self.root.after(800, _restore_normal)
+            self._highlight_timers[sample_idx] = timer_id
         else:
             self.excluded_spectra.add(sample_idx)
-            new_alpha_val = min(state['alpha'] + 0.1, 0.5)
-            new_lw = 0.8
-            new_ls = ':'
             state['toggle_btn'].config(text="Include")
             print(f"[X] Sample {sample_idx} excluded")
 
-        # Update line style across ALL explore plots
-        is_excluded = sample_idx in self.excluded_spectra
-        for fk, st in self._explore_plot_state.items():
-            for line in st['ax'].get_lines():
-                if line.get_gid() == gid_str:
-                    line.set_alpha(min(st['alpha'] + 0.1, 0.5) if is_excluded else st['alpha'])
-                    line.set_linewidth(0.8 if is_excluded else 1.0)
-                    line.set_linestyle(':' if is_excluded else '-')
-                    break
-            st['canvas'].draw_idle()
-            self._update_explore_excl_count_label(st['excl_count_label'])
+            # Update line style across ALL explore plots
+            for fk, st in self._explore_plot_state.items():
+                for line in st['ax'].get_lines():
+                    if line.get_gid() == gid_str:
+                        line.set_alpha(min(st['alpha'] + 0.1, 0.5))
+                        line.set_linewidth(0.8)
+                        line.set_linestyle(':')
+                        break
+                st['canvas'].draw_idle()
+                self._update_explore_excl_count_label(st['excl_count_label'],
+                                                      st.get('restore_all_btn'))
 
         self._update_exclusion_status()
         self._update_tab3_exclusion_status()
 
-    def _update_explore_excl_count_label(self, label):
-        """Update an exclusion count label widget."""
+    def _update_explore_excl_count_label(self, label, restore_btn=None):
+        """Update an exclusion count label widget and show/hide restore button."""
         n = len(self.excluded_spectra)
         if n == 0:
             label.config(text="")
+            if restore_btn is not None:
+                restore_btn.pack_forget()
         elif n == 1:
             label.config(text="1 spectrum excluded")
+            if restore_btn is not None:
+                restore_btn.pack(side='left', padx=(10, 0))
         else:
             label.config(text=f"{n} spectra excluded")
+            if restore_btn is not None:
+                restore_btn.pack(side='left', padx=(10, 0))
+
+    def _on_explore_restore_all(self):
+        """Restore all excluded spectra from Explore plots (in-place, no full replot)."""
+        if not self.excluded_spectra:
+            return
+
+        # Cancel all pending highlight timers
+        for timer_id in self._highlight_timers.values():
+            self.root.after_cancel(timer_id)
+        self._highlight_timers.clear()
+
+        # Clear exclusions
+        self.excluded_spectra.clear()
+
+        # Restore line styles in-place across all explore plots
+        for fk, st in self._explore_plot_state.items():
+            for line in st['ax'].get_lines():
+                if line.get_gid():
+                    line.set_alpha(st['alpha'])
+                    line.set_linewidth(1.0)
+                    line.set_linestyle('-')
+            st['canvas'].draw_idle()
+            self._update_explore_excl_count_label(st['excl_count_label'],
+                                                  st.get('restore_all_btn'))
+            # Reset toggle button
+            st['toggle_btn'].config(text="Exclude", state='disabled')
+            st['selected_sample'] = None
+            st['info_label'].config(text="Click a spectrum to see details")
+
+        # Update global exclusion status
+        self._update_exclusion_status()
+        self._update_tab3_exclusion_status()
+        print("> All spectrum exclusions restored")
 
     def _run_explore_predictor_screening(self):
         """Run predictor screening from the Explore tab."""
@@ -11080,6 +11197,11 @@ class SpectralPredictApp:
         save_button_frame = tk.Frame(content_frame, bg=self.colors['bg'])
         save_button_frame.grid(row=row, column=0, columnspan=2, sticky='w', pady=(0, 20))
 
+        self.refine_run_button_results = self._create_accent_button(
+            save_button_frame, text="▶ Re-run Model",
+            command=self._run_refined_model, state='disabled')
+        self.refine_run_button_results.pack(side='left', padx=(0, 10))
+
         self.refine_save_button_results = self._create_accent_button(save_button_frame, text="💾 Save Model",
                                                                       command=self._save_refined_model, state='disabled')
         self.refine_save_button_results.pack(side='left', padx=(0, 10))
@@ -14569,6 +14691,10 @@ class SpectralPredictApp:
 
     def _reset_exclusions(self):
         """Reset all spectrum exclusions."""
+        # Cancel any pending highlight timers
+        for timer_id in self._highlight_timers.values():
+            self.root.after_cancel(timer_id)
+        self._highlight_timers.clear()
         self.excluded_spectra.clear()
         self._update_exclusion_status()
         self._update_tab3_exclusion_status()  # Also update Tab 3 status
@@ -24125,9 +24251,10 @@ For detailed documentation, see the User Guide.
         self.refine_mode_label.config(text="Mode: Fresh Development (Defaults Loaded)")
         self.refine_status.config(text="Ready to develop custom model")
 
-        # Enable the run buttons (both Configuration and Selection tabs)
+        # Enable the run buttons (Configuration, Selection, and Results tabs)
         self.refine_run_button.config(state='normal')
         self.refine_run_button_selection.config(state='normal')
+        self.refine_run_button_results.config(state='normal')
 
         # Update the wavelength count display
         self._update_wavelength_count()
@@ -25223,9 +25350,10 @@ Performance (Classification):
             self.refined_ga_model_type = None
             self.refined_ga_transform = None
 
-        # Enable the run buttons (both Configuration and Selection tabs)
+        # Enable the run buttons (Configuration, Selection, and Results tabs)
         self.refine_run_button.config(state='normal')
         self.refine_run_button_selection.config(state='normal')
+        self.refine_run_button_results.config(state='normal')
         self.refine_status.config(text=f"Loaded: {config.get('Model', 'N/A')} | {config.get('Preprocess', 'N/A')}")
 
         # Update mode label to indicate loaded from results
@@ -27261,9 +27389,10 @@ F1 Score:  {f1:.4f}
         if not self._validate_refinement_parameters():
             return
 
-        # Disable buttons during execution (both Configuration and Selection tabs)
+        # Disable buttons during execution (Configuration, Selection, and Results tabs)
         self.refine_run_button.config(state='disabled')
         self.refine_run_button_selection.config(state='disabled')
+        self.refine_run_button_results.config(state='disabled')
         self.refine_status.config(text="Running refined model...")
         self.root.config(cursor="wait")
 
@@ -29217,9 +29346,10 @@ External Validation Performance (n={n_val}):
         # Restore default cursor
         self.root.config(cursor="")
 
-        # Re-enable buttons (both Configuration and Selection tabs)
+        # Re-enable buttons (Configuration, Selection, and Results tabs)
         self.refine_run_button.config(state='normal')
         self.refine_run_button_selection.config(state='normal')
+        self.refine_run_button_results.config(state='normal')
 
         if is_error:
             self.refine_status.config(text="[X] Error running refined model")
