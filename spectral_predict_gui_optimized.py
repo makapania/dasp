@@ -15157,7 +15157,8 @@ class SpectralPredictApp:
         event.canvas.draw()
         self._update_exclusion_status()
 
-    def _format_specimen_info(self, specimen_idx, y_value=None, y_pred=None, extra_info=None):
+    def _format_specimen_info(self, specimen_idx, y_value=None, y_pred=None,
+                              extra_info=None, specimen_label=None):
         """
         Format specimen information for display in plot annotations.
 
@@ -15166,6 +15167,7 @@ class SpectralPredictApp:
             y_value: Actual Y value (if available)
             y_pred: Predicted Y value (if available, for Model Dev page)
             extra_info: Dict of additional information to display
+            specimen_label: Pre-resolved specimen ID (use instead of positional lookup)
 
         Returns:
             Formatted string for annotation display
@@ -15174,7 +15176,10 @@ class SpectralPredictApp:
 
         # Get specimen ID if available
         specimen_id = None
-        if self.y is not None and hasattr(self.y, 'index'):
+        if specimen_label is not None:
+            specimen_id = specimen_label
+            lines.append(f"Specimen: {specimen_id}")
+        elif self.y is not None and hasattr(self.y, 'index'):
             specimen_id = self.y.index[specimen_idx]
             lines.append(f"Specimen: {specimen_id}")
         elif self.X is not None and hasattr(self.X, 'index'):
@@ -25382,7 +25387,8 @@ Performance (Classification):
                                 extra_info[color_by] = "N/A"
 
                         info_text = self._format_specimen_info(original_idx, y_value=y_actual,
-                                                              y_pred=y_predicted, extra_info=extra_info)
+                                                              y_pred=y_predicted, extra_info=extra_info,
+                                                              specimen_label=specimen_label)
                         self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
                         self._show_exclude_button(self.refine_plot_frame, specimen_label,
                                                   ax, y_actual, y_predicted, canvas)
@@ -26104,7 +26110,8 @@ F1 Score:  {f1:.4f}
                             extra_info[color_label] = 'N/A'
 
                     info_text = self._format_specimen_info(original_idx, y_value=y_actual,
-                                                          y_pred=y_predicted, extra_info=extra_info)
+                                                          y_pred=y_predicted, extra_info=extra_info,
+                                                          specimen_label=specimen_label)
                     self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas)
                     self._show_exclude_button(self.residual_diagnostics_frame, specimen_label,
                                               ax1, y_predicted, residual_val, canvas)
@@ -26145,7 +26152,8 @@ F1 Score:  {f1:.4f}
                             extra_info[color_label] = 'N/A'
 
                     info_text = self._format_specimen_info(original_idx, y_value=y_actual,
-                                                          y_pred=y_predicted, extra_info=extra_info)
+                                                          y_pred=y_predicted, extra_info=extra_info,
+                                                          specimen_label=specimen_label)
                     self._create_or_update_annotation(ax2, bar_idx, residual_val, info_text, canvas)
                     self._show_exclude_button(self.residual_diagnostics_frame, specimen_label,
                                               ax2, bar_idx, residual_val, canvas)
@@ -26490,6 +26498,9 @@ F1 Score:  {f1:.4f}
                 original_idx = self.refined_cv_indices[nearest_idx]
                 y_value = self.refined_y_true[nearest_idx] if hasattr(self, 'refined_y_true') else None
                 leverage_val = leverage[nearest_idx]
+                specimen_label = (self.refined_specimen_ids[nearest_idx]
+                                  if hasattr(self, 'refined_specimen_ids')
+                                  else self.y.index[original_idx])
 
                 # Determine leverage category
                 if leverage_val > threshold_3p:
@@ -26504,7 +26515,9 @@ F1 Score:  {f1:.4f}
                     'Category': leverage_cat
                 }
 
-                info_text = self._format_specimen_info(original_idx, y_value=y_value, extra_info=extra_info)
+                info_text = self._format_specimen_info(original_idx, y_value=y_value,
+                                                       extra_info=extra_info,
+                                                       specimen_label=specimen_label)
                 self._create_or_update_annotation(ax, indices[nearest_idx], leverage_val, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_leverage_click)
