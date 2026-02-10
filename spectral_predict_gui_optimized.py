@@ -3323,6 +3323,22 @@ class SpectralPredictApp:
             options.extend(sorted(self.ref.columns.tolist()))
         return options
 
+    def _refresh_color_by_combos(self):
+        """Refresh all color-by combobox option lists."""
+        options = self._get_available_color_variables()
+        for attr, var in [
+            ('explore_color_combo', self.explore_color_var),
+            ('pca_color_combo', self.pca_color_var),
+            ('regression_pred_color_combo', self.regression_pred_color_var),
+            ('residual_color_combo', self.residual_color_var),
+            ('pred_results_color_combo', self.pred_results_color_var),
+        ]:
+            combo = getattr(self, attr, None)
+            if combo is not None:
+                combo['values'] = options
+                if var.get() not in options:
+                    var.set('None')
+
     def _is_categorical_variable(self, variable_name, values=None):
         """Check if a variable is categorical or continuous.
 
@@ -3546,6 +3562,26 @@ class SpectralPredictApp:
                 scatter = ax.scatter(x_data, y_data, c=numeric_y,
                                    cmap='viridis', **default_kwargs)
                 cbar = fig.colorbar(scatter, ax=ax, label='Y Value')
+                return scatter, False
+
+        elif color_by == 'Set':
+            if self.sample_sets is not None:
+                set_values = self.sample_sets.iloc[indices].values
+                unique_vals = np.unique(set_values[pd.notna(set_values)])
+                n_vals = len(unique_vals)
+                colors = plt.cm.tab10(np.linspace(0, 1, 10)) if n_vals <= 10 else plt.cm.tab20(np.linspace(0, 1, 20))
+                color_map = {val: colors[i % len(colors)] for i, val in enumerate(unique_vals)}
+                for val in unique_vals:
+                    mask = set_values == val
+                    if np.any(mask):
+                        ax.scatter(x_data[mask], y_data[mask], c=[color_map[val]], label=str(val), **default_kwargs)
+                nan_mask = pd.isna(set_values)
+                if np.any(nan_mask):
+                    ax.scatter(x_data[nan_mask], y_data[nan_mask], c='lightgray', label='Unassigned', **default_kwargs)
+                ax.legend(title='Set', loc='best', framealpha=0.9, fontsize=8)
+                return None, True
+            else:
+                scatter = ax.scatter(x_data, y_data, color='steelblue', **default_kwargs)
                 return scatter, False
 
         else:
@@ -7165,6 +7201,7 @@ class SpectralPredictApp:
 
         self.sample_set_names.append(name)
         self._update_set_combo()
+        self._refresh_color_by_combos()
         self._current_set_name.set(name)
         self._set_assign_mode.set(True)
         self._on_assign_mode_toggled()
@@ -7191,15 +7228,13 @@ class SpectralPredictApp:
         # If all sets deleted, reset
         if not self.sample_set_names:
             self.sample_sets = None
-            if self.explore_color_var.get() == 'Set':
-                self.explore_color_var.set('None')
-                self._on_explore_color_changed()
 
         self._current_set_name.set(
             self.sample_set_names[0] if self.sample_set_names else '')
         self._set_assign_mode.set(False)
         self._on_assign_mode_toggled()
         self._update_set_combo()
+        self._refresh_color_by_combos()
         self._update_set_count_label()
 
         # Replot if colored by Set
@@ -16137,13 +16172,13 @@ class SpectralPredictApp:
         ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
 
         color_options = self._get_available_color_variables()
-        color_combo = ttk.Combobox(control_frame,
+        self.pca_color_combo = ttk.Combobox(control_frame,
                                    textvariable=self.pca_color_var,
                                    values=color_options,
                                    width=20,
                                    state='readonly')
-        color_combo.pack(side='left', padx=5)
-        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_pca_scores())
+        self.pca_color_combo.pack(side='left', padx=5)
+        self.pca_color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_pca_scores())
 
         # Create plot frame
         plot_frame = ttk.Frame(self.pca_plot_frame)
@@ -16168,6 +16203,16 @@ class SpectralPredictApp:
             color_values = None
             is_categorical = False
             color_label = None
+        elif color_by == 'Set':
+            if self.sample_sets is not None:
+                specimen_ids = self.y.index
+                color_values = self.sample_sets.loc[specimen_ids].values
+                is_categorical = True
+                color_label = 'Set'
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
         else:
             # Metadata column - need to align with y_values using specimen IDs
             # Check combined file metadata first, then reference file metadata
@@ -25783,13 +25828,13 @@ Performance (Classification):
         ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
 
         color_options = self._get_available_color_variables()
-        color_combo = ttk.Combobox(control_frame,
+        self.regression_pred_color_combo = ttk.Combobox(control_frame,
                                    textvariable=self.regression_pred_color_var,
                                    values=color_options,
                                    width=20,
                                    state='readonly')
-        color_combo.pack(side='left', padx=5)
-        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_regression_predictions())
+        self.regression_pred_color_combo.pack(side='left', padx=5)
+        self.regression_pred_color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_regression_predictions())
 
         # Create plot frame
         plot_frame = ttk.Frame(self.refine_plot_frame)
@@ -25814,6 +25859,19 @@ Performance (Classification):
             color_values = None
             is_categorical = False
             color_label = None
+        elif color_by == 'Set':
+            if self.sample_sets is not None and hasattr(self, 'refined_cv_indices'):
+                if hasattr(self, 'refined_specimen_ids'):
+                    cv_specimen_ids = self.refined_specimen_ids
+                else:
+                    cv_specimen_ids = self.y.index[self.refined_cv_indices]
+                color_values = self.sample_sets.loc[cv_specimen_ids].values
+                is_categorical = True
+                color_label = 'Set'
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
         else:
             # Metadata column - need to map using refined_cv_indices
             if self.ref is not None and color_by in self.ref.columns and hasattr(self, 'refined_cv_indices'):
@@ -26554,13 +26612,13 @@ F1 Score:  {f1:.4f}
         ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
 
         color_options = self._get_available_color_variables()
-        color_combo = ttk.Combobox(control_frame,
+        self.residual_color_combo = ttk.Combobox(control_frame,
                                    textvariable=self.residual_color_var,
                                    values=color_options,
                                    width=20,
                                    state='readonly')
-        color_combo.pack(side='left', padx=5)
-        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_residual_diagnostics())
+        self.residual_color_combo.pack(side='left', padx=5)
+        self.residual_color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_residual_diagnostics())
 
         # Create plot frame
         plot_container = ttk.Frame(self.residual_diagnostics_frame)
@@ -26584,6 +26642,16 @@ F1 Score:  {f1:.4f}
             color_values = None
             is_categorical = False
             color_label = None
+        elif color_by == 'Set':
+            if self.sample_sets is not None and hasattr(self, 'refined_cv_indices'):
+                cv_specimen_ids = self.y.index[self.refined_cv_indices]
+                color_values = self.sample_sets.loc[cv_specimen_ids].values
+                is_categorical = True
+                color_label = 'Set'
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
         else:
             # Metadata column - align with CV indices
             if self.ref is not None and color_by in self.ref.columns and hasattr(self, 'refined_cv_indices'):
@@ -32342,13 +32410,13 @@ External Validation Performance (n={n_val}):
         ttk.Label(control_frame, text="Color by:", style='TLabel').pack(side='left', padx=5)
 
         color_options = self._get_available_color_variables()
-        color_combo = ttk.Combobox(control_frame,
+        self.pred_results_color_combo = ttk.Combobox(control_frame,
                                    textvariable=self.pred_results_color_var,
                                    values=color_options,
                                    width=20,
                                    state='readonly')
-        color_combo.pack(side='left', padx=5)
-        color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_prediction_results())
+        self.pred_results_color_combo.pack(side='left', padx=5)
+        self.pred_results_color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_prediction_results())
 
         # Create plot frame
         plot_container = ttk.Frame(self.prediction_plots_frame)
@@ -32382,6 +32450,16 @@ External Validation Performance (n={n_val}):
             color_values = None
             is_categorical = False
             color_label = None
+        elif color_by == 'Set':
+            if self.sample_sets is not None:
+                sample_ids = self.predictions_df['Sample'].values
+                color_values = self.sample_sets.loc[sample_ids].values
+                is_categorical = True
+                color_label = 'Set'
+            else:
+                color_values = None
+                is_categorical = False
+                color_label = None
         else:
             # Metadata column - align with prediction sample IDs
             if self.ref is not None and color_by in self.ref.columns:
