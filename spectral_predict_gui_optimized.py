@@ -3312,6 +3312,9 @@ class SpectralPredictApp:
         Returns list of options: ['None', 'Y Value', ...metadata columns]
         """
         options = ['None', 'Y Value']
+        # Sample Sets color option
+        if self.sample_sets is not None and self.sample_sets.notna().any():
+            options.append('Set')
         # Check combined file metadata first, then reference file metadata
         if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and len(self.combined_metadata_df.columns) > 0:
             options.extend(sorted(self.combined_metadata_df.columns.tolist()))
@@ -3338,6 +3341,8 @@ class SpectralPredictApp:
             return self._is_categorical_target()
         elif variable_name == 'None':
             return False
+        elif variable_name == 'Set':
+            return True
         else:
             # Check metadata column (from combined file or reference file)
             if values is None:
@@ -3382,6 +3387,12 @@ class SpectralPredictApp:
             values = self.y.values[:n_samples]
             is_cat = self._is_categorical_target()
             color_label = 'Y Value'
+        elif color_by == 'Set':
+            if self.sample_sets is None:
+                return {}, [], ''
+            values = self.sample_sets.values[:n_samples]
+            is_cat = True
+            color_label = 'Set'
         else:
             # Metadata column
             metadata_source = None
@@ -6925,6 +6936,26 @@ class SpectralPredictApp:
         try:
             pos_idx = self.X.index.get_loc(sample_idx)
         except KeyError:
+            return
+
+        # Sample Sets: assign mode intercept (left-click only)
+        if (event.mouseevent.button != 3
+                and self._set_assign_mode.get()
+                and self._current_set_name.get()):
+            msg = self._assign_sample_to_set(sample_idx)
+            if msg:
+                state['info_label'].config(text=msg)
+                self._update_set_count_label()
+                if self.explore_color_var.get() == 'Set':
+                    color_map, _, _ = self._get_explore_color_map()
+                    gid_str = str(sample_idx)
+                    new_color = color_map.get(pos_idx, 'steelblue')
+                    for fk, st in self._explore_plot_state.items():
+                        for line in st['ax'].get_lines():
+                            if line.get_gid() == gid_str:
+                                line.set_color(new_color)
+                                break
+                        st['canvas'].draw_idle()
             return
 
         # Get Y value if available
