@@ -22312,7 +22312,13 @@ For detailed documentation, see the User Guide.
             self.results_tree.delete(item)
 
         # Filter out internal metadata columns (used by Model Dev but not for display)
-        INTERNAL_COLUMNS = {'imbalance_method', 'imbalance_params'}
+        INTERNAL_COLUMNS = {
+            'imbalance_method', 'imbalance_params',
+            'PreprocessBase',
+            'ga_genes', 'ga_model_type', 'ga_config',
+            'smart_selected_wavelengths', 'smart_n_wavelengths',
+            'smart_score', 'smart_importance_method', 'smart_model_name',
+        }
         columns = [c for c in results_df.columns if c not in INTERNAL_COLUMNS]
 
         # Only configure columns on first load (not during sorting) to prevent jumping

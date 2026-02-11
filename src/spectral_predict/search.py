@@ -430,8 +430,9 @@ def compute_validation_metrics_for_top_models(
 
         try:
             # === STEP 1: Get preprocessing config ===
-            preprocess_name = row.get('Preprocess', 'raw')
-            # Strip baseline prefix (e.g., "als+snv" → "snv") and extract method
+            # Use PreprocessBase (clean pipeline name) if available, fall back to Preprocess
+            preprocess_name = row.get('PreprocessBase', row.get('Preprocess', 'raw'))
+            # Strip baseline prefix (e.g., "als+snv" → "snv") as fallback
             baseline_method = None
             if '+' in str(preprocess_name):
                 baseline_method, preprocess_name = str(preprocess_name).split('+', 1)
@@ -1177,16 +1178,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                 else:
                     pipeline_name = base_name
 
-                # Display name includes window
-                if window:
-                    display_name = f"{base_name}_w{window}"
-                else:
-                    display_name = base_name
-
-                # Include model name in display if model-specific
+                display_name = pipeline_name
                 model_name = cfg.get('model_name')
-                if model_name:
-                    display_name = f"{display_name}_{model_name}"
 
                 preprocess_configs.append({
                     "name": display_name,
@@ -1384,8 +1377,19 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             # Add all top-N configs for this model
             for i, cfg in enumerate(configs_list):
                 base_name = cfg.get('name', 'unknown')
+                # Clean display name: strip derivative order
+                if base_name in ('raw', 'snv'):
+                    clean_name = base_name
+                elif base_name.startswith('snv_deriv'):
+                    clean_name = 'snv_deriv'
+                elif base_name.endswith('_snv'):
+                    clean_name = 'deriv_snv'
+                elif base_name.startswith('deriv'):
+                    clean_name = 'deriv'
+                else:
+                    clean_name = base_name
                 preprocess_configs.append({
-                    "name": f"{base_name}_{model_name}_{i+1}",  # Display name with suffix
+                    "name": clean_name,
                     "base_name": base_name,  # Base name for build_preprocessing_pipeline
                     "deriv": cfg.get('deriv'),
                     "window": cfg.get('window'),
@@ -4038,11 +4042,13 @@ def _run_single_config(
 
     # Build result dictionary AFTER capturing complete params
     preprocess_display = preprocess_cfg["name"]
+    preprocess_base = preprocess_cfg.get("base_name", preprocess_cfg["name"])
     result = {
         "Task": task_type,
         "Model": model_name,
         "Params": str(params),  # Now includes complete parameter set
         "Preprocess": preprocess_display,  # Full name including baseline prefix (e.g., als+snv)
+        "PreprocessBase": preprocess_base,  # Clean pipeline name for build_preprocessing_pipeline()
         "Deriv": preprocess_cfg["deriv"],
         "Window": preprocess_cfg["window"],
         "Poly": preprocess_cfg["polyorder"],
