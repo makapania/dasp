@@ -46560,9 +46560,17 @@ def main():
     # Set window icon (taskbar and title bar)
     try:
         from src.spectral_predict.resource_paths import get_resource_path
-        icon_path = get_resource_path('asp_logo.ico')
-        if icon_path.exists():
-            root.iconbitmap(str(icon_path))
+        if sys.platform == 'darwin':
+            # macOS: use iconphoto with the PNG (iconbitmap doesn't work on Mac)
+            png_path = get_resource_path('asp_logo_final.png')
+            if png_path.exists():
+                from PIL import Image, ImageTk
+                icon_img = ImageTk.PhotoImage(Image.open(png_path))
+                root.iconphoto(True, icon_img)
+        else:
+            icon_path = get_resource_path('asp_logo.ico')
+            if icon_path.exists():
+                root.iconbitmap(str(icon_path))
     except Exception:
         pass  # Fail silently if icon can't be loaded
 
