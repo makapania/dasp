@@ -28306,10 +28306,11 @@ F1 Score:  {f1:.4f}
                     config_preprocess = self.selected_model_config.get('Preprocess', 'raw')
                     if config_preprocess:
                         import re
-                        # Coupled format has numbers in deriv (deriv1, deriv2) or + for baseline
+                        # Coupled format embeds numbers in deriv (deriv1, deriv2)
+                        # Note: '+' alone is NOT sufficient — grid search baseline results
+                        # like "als+snv" also contain '+' but are not coupled format.
                         has_deriv_number = bool(re.search(r'deriv\d', config_preprocess))
-                        has_baseline_plus = '+' in config_preprocess
-                        is_coupled_result = has_deriv_number or has_baseline_plus
+                        is_coupled_result = has_deriv_number
 
             # Determine derivative order and polyorder
             # Priority: Use actual derivative order from loaded config, otherwise use defaults
