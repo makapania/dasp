@@ -5509,8 +5509,10 @@ class SpectralPredictApp:
                   command=self._load_merged_to_viewer).pack(side='left', padx=5)
         ttk.Button(control_frame, text="🗑️ Delete Selected Column",
                   command=self._delete_merged_column).pack(side='left', padx=5)
-        ttk.Button(control_frame, text="💾 Save Changes",
-                  command=self._save_merged_changes).pack(side='left', padx=5)
+        self.revert_merged_btn = ttk.Button(control_frame, text="↩ Revert Changes",
+                                            command=self._revert_merged_changes,
+                                            state='disabled')
+        self.revert_merged_btn.pack(side='left', padx=5)
         ttk.Label(control_frame, text="Right-click column header to add column",
                  style='Caption.TLabel').pack(side='left', padx=15)
 
@@ -5547,6 +5549,16 @@ class SpectralPredictApp:
             "arrowkeys"       # Arrow keys to navigate
         )
         self.merged_data_sheet.pack(fill='both', expand=True)
+
+        # Bind edit events to auto-apply changes
+        self.merged_data_sheet.extra_bindings([
+            ("end_edit_cell", self._on_merged_sheet_edit),
+            ("end_paste", self._on_merged_sheet_edit),
+            ("end_delete", self._on_merged_sheet_edit),
+        ])
+
+        # Snapshot for revert
+        self.merged_original_state = None
 
         # Bind right-click on column headers
         self.merged_data_sheet.bind("<Button-3>", self._on_merged_sheet_right_click, add="+")
@@ -7637,17 +7649,13 @@ class SpectralPredictApp:
         edit_toolbar = ttk.Frame(content_frame)
         edit_toolbar.pack(fill='x', pady=(0, 10))
 
-        # Save button with modified indicator
-        self.data_viewer_modified = tk.BooleanVar(value=False)
-        self.save_data_btn = ttk.Button(edit_toolbar, text="💾 Save Changes",
-                                        command=self._save_data_viewer_changes,
-                                        style='Modern.TButton')
-        self.save_data_btn.pack(side='left', padx=(0, 5))
-
-        # Undo button
-        ttk.Button(edit_toolbar, text="↩️ Undo",
-                  command=self._undo_data_viewer,
-                  style='Modern.TButton').pack(side='left', padx=(0, 5))
+        # Revert button (restores to state when data was loaded into viewer)
+        self.data_viewer_modified = False
+        self.revert_data_btn = ttk.Button(edit_toolbar, text="↩ Revert Changes",
+                                          command=self._revert_data_viewer,
+                                          state='disabled',
+                                          style='Modern.TButton')
+        self.revert_data_btn.pack(side='left', padx=(0, 5))
 
         ttk.Separator(edit_toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
 
@@ -7674,10 +7682,6 @@ class SpectralPredictApp:
         ttk.Button(edit_toolbar, text="✅ Include Selected",
                   command=self._include_selected_rows,
                   style='Modern.TButton').pack(side='left', padx=(0, 5))
-
-        # Modified indicator
-        self.modified_label = ttk.Label(edit_toolbar, text="", foreground='#ff6b6b')
-        self.modified_label.pack(side='right', padx=10)
 
         # Status bar
         self.data_viewer_status = ttk.Label(content_frame, text="", style='Caption.TLabel')
@@ -7732,8 +7736,8 @@ class SpectralPredictApp:
         # Bind right-click for context menu on headers
         self.data_viewer_sheet.bind("<Button-3>", self._on_data_viewer_right_click)
 
-        # Initialize undo stack
-        self.data_viewer_undo_stack = []
+        # Snapshot of data state when the viewer was populated (for revert)
+        self.data_viewer_original_state = None
 
         self.data_viewer_sheet.grid(row=0, column=0, sticky='nsew')
         sheet_frame.grid_rowconfigure(0, weight=1)
@@ -13584,6 +13588,13 @@ class SpectralPredictApp:
         if merged.ref is not None:
             print(f"  Metadata columns: {', '.join(merged.ref.columns)}")
 
+        # Snapshot for revert
+        self.merged_original_state = {
+            'X': merged.X.copy(),
+            'ref': merged.ref.copy() if merged.ref is not None else None,
+        }
+        self.revert_merged_btn.config(state='disabled')
+
     def _delete_merged_column(self):
         """Delete selected column from merged data."""
         if not self.data_source_manager or not self.data_source_manager.merged_dataset:
@@ -13685,42 +13696,63 @@ class SpectralPredictApp:
         # Refresh viewer
         self._load_merged_to_viewer()
 
-    def _save_merged_changes(self):
-        """Save changes from sheet back to merged dataset."""
+    def _on_merged_sheet_edit(self, event=None):
+        """Called when user edits a cell in the merged data sheet — auto-apply."""
+        self._apply_merged_edits()
+
+    def _apply_merged_edits(self):
+        """Rebuild merged dataset from current sheet data."""
         if not self.data_source_manager or not self.data_source_manager.merged_dataset:
-            messagebox.showwarning("No Data", "No merged data to save")
             return
 
-        # Get data from sheet
-        data = self.merged_data_sheet.get_sheet_data()
-        headers = self.merged_data_sheet.headers()
+        try:
+            data = self.merged_data_sheet.get_sheet_data()
+            headers = self.merged_data_sheet.headers()
 
-        if not data or not headers:
+            if not data or not headers:
+                return
+
+            df = pd.DataFrame(data, columns=headers)
+
+            if '_sample_id_' in df.columns:
+                df = df.set_index('_sample_id_')
+
+            merged = self.data_source_manager.merged_dataset
+
+            wavelength_cols = [c for c in df.columns if c in merged.X.columns]
+            metadata_cols = [c for c in df.columns if c not in wavelength_cols]
+
+            if wavelength_cols:
+                # Convert wavelength data to numeric
+                merged.X = df[wavelength_cols].apply(pd.to_numeric, errors='coerce')
+
+            if metadata_cols:
+                merged.ref = df[metadata_cols]
+
+            self.revert_merged_btn.config(state='normal')
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+    def _revert_merged_changes(self):
+        """Revert merged data to the state when it was loaded into the viewer."""
+        if not self.merged_original_state:
+            messagebox.showinfo("Revert", "No saved state to revert to.")
             return
 
-        # Convert to dataframe
-        df = pd.DataFrame(data, columns=headers)
-
-        # Set index
-        if '_sample_id_' in df.columns:
-            df = df.set_index('_sample_id_')
+        if not self.data_source_manager or not self.data_source_manager.merged_dataset:
+            return
 
         merged = self.data_source_manager.merged_dataset
+        merged.X = self.merged_original_state['X'].copy()
+        merged.ref = self.merged_original_state['ref'].copy() if self.merged_original_state['ref'] is not None else None
 
-        # Separate wavelength columns from metadata
-        wavelength_cols = [c for c in df.columns if c in merged.X.columns]
-        metadata_cols = [c for c in df.columns if c not in wavelength_cols]
-
-        # Update X (wavelength data)
-        if wavelength_cols:
-            merged.X = df[wavelength_cols]
-
-        # Update ref (all metadata columns with real names)
-        if metadata_cols:
-            merged.ref = df[metadata_cols]
-
-        messagebox.showinfo("Success", "Changes saved to merged dataset")
-        print("Merged dataset updated from viewer")
+        # Refresh view
+        self._load_merged_to_viewer()
+        self.merged_info_label.config(
+            text=self.merged_info_label.cget('text') + " (reverted)"
+        )
 
     def _apply_sample_filter(self):
         """Apply sample filter to current dataset."""
@@ -17112,8 +17144,8 @@ class SpectralPredictApp:
 
         # Top N wavelengths
         ttk.Label(control_frame, text="Top N:").pack(side=tk.LEFT, padx=(0, 5))
-        self.screening_top_n = tk.IntVar(value=50)
-        top_n_spinbox = ttk.Spinbox(control_frame, from_=5, to=200, width=5,
+        self.screening_top_n = tk.IntVar(value=250)
+        top_n_spinbox = ttk.Spinbox(control_frame, from_=5, to=500, width=5,
                                     textvariable=self.screening_top_n)
         top_n_spinbox.pack(side=tk.LEFT, padx=(0, 15))
 
@@ -22070,6 +22102,18 @@ class SpectralPredictApp:
                     item['icon'].config(bg=accent)
                     item['label'].config(bg=accent)
 
+        # Force-commit any in-progress cell edit when leaving a tab
+        if hasattr(self, 'data_viewer_sheet'):
+            try:
+                self.data_viewer_sheet.deselect()
+            except Exception:
+                pass
+        if hasattr(self, 'merged_data_sheet'):
+            try:
+                self.merged_data_sheet.deselect()
+            except Exception:
+                pass
+
         # Refresh Data Viewer when switching to it
         if self.notebook.select() == str(self.tab2):
             self._populate_data_viewer()
@@ -24015,6 +24059,12 @@ For detailed documentation, see the User Guide.
             self.data_viewer_info.config(
                 text=f"Total dataset: {n_total_samples} samples × {n_total_wavelengths} wavelengths | Scroll to navigate")
 
+            # Snapshot state for revert (only on fresh load, not on revert itself)
+            if not getattr(self, '_populating_from_revert', False):
+                self._snapshot_data_viewer_state()
+                self.data_viewer_modified = False
+                self.revert_data_btn.config(state='disabled')
+
             # Restore cursor
             self.root.config(cursor=original_cursor)
 
@@ -24110,21 +24160,15 @@ For detailed documentation, see the User Guide.
     # ========== DATA VIEWER EDITING METHODS ==========
 
     def _on_data_viewer_edit(self, event=None):
-        """Called when user edits a cell in the data viewer."""
-        self.data_viewer_modified.set(True)
-        self.modified_label.config(text="[!] Unsaved changes")
+        """Called when user edits a cell — auto-apply changes to DataFrames."""
+        self._apply_data_viewer_edits()
 
-    def _save_data_viewer_changes(self):
-        """Save changes from the data viewer back to X, y, and ref."""
+    def _apply_data_viewer_edits(self):
+        """Rebuild self.X, self.y, etc. from current sheet data."""
         if self.X is None:
-            messagebox.showwarning("No Data", "No data loaded to save.")
             return
 
         try:
-            # Save current state to undo stack
-            self._push_data_viewer_undo()
-
-            # Get sheet data
             data = self.data_viewer_sheet.get_sheet_data()
             headers = self.data_viewer_sheet.headers()
 
@@ -24132,7 +24176,6 @@ For detailed documentation, see the User Guide.
                 return
 
             # Parse header structure: Sample ID, [metadata cols], Target, [wavelength cols]
-            # Find target column position
             target_col_name = self.target_column.get() if self.target_column.get() else "Target"
             wavelength_cols = list(self.X.columns)
 
@@ -24156,8 +24199,8 @@ For detailed documentation, see the User Guide.
                 else:
                     metadata_indices.append(i)
 
-            if target_idx is None or wavelength_start_idx is None:
-                messagebox.showerror("Error", "Could not parse data structure. Save cancelled.")
+            # Need at least wavelength columns to rebuild
+            if wavelength_start_idx is None:
                 return
 
             # Rebuild data from sheet
@@ -24172,12 +24215,13 @@ For detailed documentation, see the User Guide.
                 new_indices.append(sample_id)
 
                 # Target value
-                target_val = row[target_idx]
-                try:
-                    target_val = float(target_val)
-                except (ValueError, TypeError):
-                    pass  # Keep as string
-                new_y_values.append(target_val)
+                if target_idx is not None:
+                    target_val = row[target_idx]
+                    try:
+                        target_val = float(target_val)
+                    except (ValueError, TypeError):
+                        pass  # Keep as string
+                    new_y_values.append(target_val)
 
                 # Set value
                 if set_idx is not None:
@@ -24203,7 +24247,8 @@ For detailed documentation, see the User Guide.
             self.X_original = self.X.copy()
 
             # Update self.y
-            self.y = pd.Series(new_y_values, index=new_indices)
+            if target_idx is not None:
+                self.y = pd.Series(new_y_values, index=new_indices)
 
             # Update sample sets
             if set_idx is not None:
@@ -24220,24 +24265,21 @@ For detailed documentation, see the User Guide.
                 else:
                     self.ref = metadata_df
 
-            # Clear modified flag
-            self.data_viewer_modified.set(False)
-            self.modified_label.config(text="Saved")
-
-            # Update status
-            self.data_viewer_status.config(text=f"> Saved {len(self.X)} samples")
+            # Mark as modified so Revert button is available
+            self.data_viewer_modified = True
+            self.revert_data_btn.config(state='normal')
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Save Error", f"Failed to save changes:\n{str(e)}")
 
-    def _push_data_viewer_undo(self):
-        """Push current data state to undo stack."""
+    def _snapshot_data_viewer_state(self):
+        """Snapshot current data state for revert (called once when viewer is populated)."""
         if self.X is None:
+            self.data_viewer_original_state = None
             return
 
-        state = {
+        self.data_viewer_original_state = {
             'X': self.X.copy(),
             'X_original': self.X_original.copy() if self.X_original is not None else None,
             'y': self.y.copy() if self.y is not None else None,
@@ -24247,37 +24289,35 @@ For detailed documentation, see the User Guide.
             'sample_sets': self.sample_sets.copy() if self.sample_sets is not None else None,
             'sample_set_names': list(self.sample_set_names),
         }
-        self.data_viewer_undo_stack.append(state)
-        # Limit stack size
-        if len(self.data_viewer_undo_stack) > 20:
-            self.data_viewer_undo_stack.pop(0)
 
-    def _undo_data_viewer(self):
-        """Undo last data viewer change."""
-        if not self.data_viewer_undo_stack:
-            messagebox.showinfo("Undo", "Nothing to undo.")
+    def _revert_data_viewer(self):
+        """Revert data to the state when it was loaded into the viewer."""
+        if not self.data_viewer_original_state:
+            messagebox.showinfo("Revert", "No saved state to revert to.")
             return
 
-        state = self.data_viewer_undo_stack.pop()
+        state = self.data_viewer_original_state
 
-        self.X = state['X']
-        self.X_original = state['X_original']
-        self.y = state['y']
-        self.ref = state['ref']
+        self.X = state['X'].copy()
+        self.X_original = state['X_original'].copy() if state['X_original'] is not None else None
+        self.y = state['y'].copy() if state['y'] is not None else None
+        self.ref = state['ref'].copy() if state['ref'] is not None else None
         if state['combined_metadata_df'] is not None:
-            self.combined_metadata_df = state['combined_metadata_df']
-        self.excluded_spectra = state['excluded_spectra']
-        self.sample_sets = state.get('sample_sets')
-        self.sample_set_names = state.get('sample_set_names', [])
+            self.combined_metadata_df = state['combined_metadata_df'].copy()
+        self.excluded_spectra = state['excluded_spectra'].copy()
+        self.sample_sets = state['sample_sets'].copy() if state['sample_sets'] is not None else None
+        self.sample_set_names = list(state['sample_set_names'])
         self._update_set_combo()
 
-        # Refresh display
+        # Refresh display (skip re-snapshotting)
+        self._populating_from_revert = True
         self._populate_data_viewer()
+        self._populating_from_revert = False
 
-        # Update status
-        self.data_viewer_status.config(text="↩️ Undo successful")
-        self.modified_label.config(text="")
-        self.data_viewer_modified.set(False)
+        # Reset modified flag
+        self.data_viewer_modified = False
+        self.revert_data_btn.config(state='disabled')
+        self.data_viewer_status.config(text="> Reverted to original data")
 
     def _add_data_viewer_column(self):
         """Add a new metadata column to the data viewer."""
@@ -24297,7 +24337,7 @@ For detailed documentation, see the User Guide.
 
         try:
             # Push undo state
-            self._push_data_viewer_undo()
+            self._snapshot_data_viewer_state()
 
             # Add column to metadata
             if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
@@ -24358,7 +24398,7 @@ For detailed documentation, see the User Guide.
 
         try:
             # Push undo state
-            self._push_data_viewer_undo()
+            self._snapshot_data_viewer_state()
 
             # Remove from metadata
             if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and col_name in self.combined_metadata_df.columns:
@@ -24421,7 +24461,7 @@ For detailed documentation, see the User Guide.
             return
 
         try:
-            self._push_data_viewer_undo()
+            self._snapshot_data_viewer_state()
 
             # Add column to metadata
             if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
@@ -24443,7 +24483,7 @@ For detailed documentation, see the User Guide.
             return
 
         try:
-            self._push_data_viewer_undo()
+            self._snapshot_data_viewer_state()
 
             if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and col_name in self.combined_metadata_df.columns:
                 self.combined_metadata_df = self.combined_metadata_df.drop(columns=[col_name])
@@ -24472,12 +24512,12 @@ For detailed documentation, see the User Guide.
         data = self.data_viewer_sheet.get_sheet_data()
         indices_to_delete = [data[row][0] for row in selected]
 
-        if not messagebox.askyesno("Delete Rows", f"Permanently delete {len(indices_to_delete)} sample(s)?\n\nThis cannot be undone (except via Undo button)."):
+        if not messagebox.askyesno("Delete Rows", f"Permanently delete {len(indices_to_delete)} sample(s)?\n\nUse Revert Changes to restore original data."):
             return
 
         try:
             # Push undo state
-            self._push_data_viewer_undo()
+            self._snapshot_data_viewer_state()
 
             # Remove from X
             self.X = self.X.drop(index=indices_to_delete, errors='ignore')

@@ -247,10 +247,10 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
     random_state : int, optional
         Random seed for reproducibility (default: 42)
     baseline_method : str, optional
-        Baseline correction method: 'polynomial', 'asls', or None (default)
+        Baseline correction method: 'polynomial', 'als', or None (default)
     baseline_params : dict, optional
         Parameters for baseline correction (e.g., {'degree': 2} for polynomial,
-        {'lam': 1e5, 'p': 0.01} for asls)
+        {'lam': 1e5, 'p': 0.01} for als)
     smoothing : bool, default=False
         Whether to apply Savitzky-Golay smoothing before other transformations
     smoothing_window : int, default=17
@@ -420,7 +420,7 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
                 degree = params.get('degree', 2)
                 steps.append(("baseline", BaselinePolynomial(degree=degree)))
 
-            elif baseline_method == 'asls':
+            elif baseline_method == 'als':
                 lam = params.get('lam', 1e5)
                 p = params.get('p', 0.01)
                 niter = params.get('niter', 10)
