@@ -1680,19 +1680,26 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             configs_with.append(cfg_bl)
         preprocess_configs = configs_without + configs_with
 
-    # --- Smoothing indicator: when enabled, add "sg0" to config names ---
+    # --- Smoothing toggle: when enabled, test both WITH and WITHOUT smoothing ---
     if smoothing and preprocess_configs:
+        configs_without_smooth = []
+        configs_with_smooth = []
         for cfg in preprocess_configs:
-            if "base_name" not in cfg:
-                cfg["base_name"] = cfg["name"]
+            # Without smoothing
+            cfg_no = dict(cfg)
+            cfg_no["smoothing"] = False
+            configs_without_smooth.append(cfg_no)
+            # With smoothing
+            cfg_sm = dict(cfg)
+            cfg_sm["base_name"] = cfg.get("base_name", cfg["name"])
             name = cfg["name"]
             if "+" in name:
-                # Baseline already prefixed, e.g. "als+raw" → "als+sg0+raw"
                 parts = name.split("+", 1)
-                cfg["name"] = f"{parts[0]}+sg0+{parts[1]}"
+                cfg_sm["name"] = f"{parts[0]}+sg0+{parts[1]}"
             else:
-                # No baseline, e.g. "raw" → "sg0+raw"
-                cfg["name"] = f"sg0+{name}"
+                cfg_sm["name"] = f"sg0+{name}"
+            configs_with_smooth.append(cfg_sm)
+        preprocess_configs = configs_without_smooth + configs_with_smooth
 
     # Create CV splitter
     if task_type == "regression":
