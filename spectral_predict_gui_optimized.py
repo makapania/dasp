@@ -40640,7 +40640,7 @@ External Validation Performance (n={n_val}):
 
         # Initialize monitoring state
         self.live_monitoring_active = True
-        self.live_last_file_count = file_count
+        self.live_last_file_count = -1  # Force first scan to always load data
 
         # Update UI
         self.comparison_live_start_btn.config(state='disabled')
@@ -40671,8 +40671,14 @@ External Validation Performance (n={n_val}):
             current_count = self._count_spectral_files(folder_path)
             timestamp = datetime.now().strftime("%H:%M:%S")
 
+            # Skip if no spectral files found
+            if current_count == 0:
+                self.live_last_file_count = 0
+                self._update_live_status(
+                    f"● No spectral files found (Last scan: {timestamp})", 'orange')
+
             # Check if file count changed
-            if current_count != self.live_last_file_count:
+            elif current_count != self.live_last_file_count:
                 # Files changed - reload and re-run
                 self._update_live_status(f"● Files changed ({current_count}), updating...", 'green')
 
@@ -40692,8 +40698,18 @@ External Validation Performance (n={n_val}):
                         foreground='green'
                     )
 
+                    # Remember if user had previously converted data type
+                    was_converted = self.comparison_data_converted
+                    previous_target_type = self.comparison_data_type.get() if was_converted else None
+
                     # Auto-detect data type for new live data
                     self._detect_comparison_data_type()
+
+                    # Re-apply conversion if user had previously converted
+                    if was_converted and previous_target_type:
+                        detected_type = self.comparison_data_type.get()
+                        if detected_type != previous_target_type:
+                            self._comparison_convert_data_type()
 
                     # Auto-run comparison
                     self._run_comparison()
