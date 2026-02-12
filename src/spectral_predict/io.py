@@ -1336,21 +1336,28 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
         specimen_ids = df[specimen_id_col].astype(str)
 
     # Step 5: Identify y column (from remaining non-wavelength, non-ID columns)
-    if y_col is None:
+    no_target = (y_col == "__NONE__")
+
+    if no_target:
+        y_col = None
+    elif y_col is None:
         exclude_cols = wavelength_cols.copy()
         if not generated_ids and specimen_id_col != "__GENERATED__":
             exclude_cols.append(specimen_id_col)
 
         y_col = auto_detect_y_column(df, exclude_cols)
 
-    if y_col not in df.columns:
-        raise ValueError(f"Target y column '{y_col}' not found in file")
+    if not no_target:
+        if y_col not in df.columns:
+            raise ValueError(f"Target y column '{y_col}' not found in file")
 
     # Step 6: Identify and extract metadata columns
     # Metadata columns = all columns that are NOT wavelengths, NOT specimen ID, NOT target
     all_cols = set(df.columns)
     wavelength_cols_set = set(wavelength_cols)
-    used_cols = wavelength_cols_set | {y_col}
+    used_cols = wavelength_cols_set.copy()
+    if not no_target and y_col is not None:
+        used_cols.add(y_col)
     if not generated_ids and specimen_id_col != "__GENERATED__":
         used_cols.add(specimen_id_col)
 
@@ -1374,30 +1381,30 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
     X.columns = X.columns.astype(float)
     X = X.sort_index(axis=1)  # Sort by wavelength
 
-    # Extract target data
-    y = df[y_col].copy()
-    y.index = specimen_ids
-
-    # Try to convert target values to numeric, but preserve categorical data for classification
-    # Only convert if the data is actually numeric (for regression tasks)
-    y_numeric = pd.to_numeric(y, errors='coerce')
-
-    # If conversion resulted in mostly NaN values, keep original (likely categorical for classification)
-    # Use threshold: if more than 50% would be converted to NaN, keep as categorical
-    if y_numeric.isna().sum() > len(y) * 0.5:
-        # Keep original categorical/text values for classification tasks
-        # Check for truly missing values (None, np.nan, empty strings)
-        has_nan_y = y.isna() | (y == '') | y.isnull()
+    if no_target:
+        # No target variable mode
+        y = None
+        has_nan_y = pd.Series(False, index=X.index)
     else:
-        # Successfully converted to numeric (regression task)
-        y = y_numeric
-        has_nan_y = y.isna()
+        # Extract target data
+        y = df[y_col].copy()
+        y.index = specimen_ids
+
+        # Try to convert target values to numeric, but preserve categorical data for classification
+        y_numeric = pd.to_numeric(y, errors='coerce')
+
+        # If conversion resulted in mostly NaN values, keep original (likely categorical)
+        if y_numeric.isna().sum() > len(y) * 0.5:
+            has_nan_y = y.isna() | (y == '') | y.isnull()
+        else:
+            y = y_numeric
+            has_nan_y = y.isna()
 
     # Check for missing values (NaN) and remove affected specimens
     has_nan_X = X.isna().any(axis=1)
 
     # Determine which rows to remove based on drop_na_y parameter
-    if drop_na_y:
+    if drop_na_y and not no_target:
         has_nan = has_nan_X | has_nan_y
     else:
         has_nan = has_nan_X
@@ -1413,12 +1420,13 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
 
         # Remove rows with missing values
         X = X[~has_nan]
-        y = y[~has_nan]
+        if y is not None:
+            y = y[~has_nan]
         if metadata_df is not None:
             metadata_df = metadata_df[~has_nan]
 
     # Report on rows kept with missing y values if drop_na_y=False
-    if not drop_na_y and has_nan_y.any():
+    if not no_target and not drop_na_y and has_nan_y.any():
         n_missing_y = has_nan_y.sum()
         print(f"Info: Kept {n_missing_y} specimen(s) with missing target values (useful for prediction).")
 
@@ -1440,7 +1448,8 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
 
         # Apply renamed index to all DataFrames
         X.index = new_index
-        y.index = new_index
+        if y is not None:
+            y.index = new_index
         if metadata_df is not None:
             metadata_df.index = new_index
 
@@ -2795,21 +2804,28 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         specimen_ids = df[specimen_id_col].astype(str)
 
     # Step 5: Identify y column (from remaining non-wavelength, non-ID columns)
-    if y_col is None:
+    no_target = (y_col == "__NONE__")
+
+    if no_target:
+        y_col = None
+    elif y_col is None:
         exclude_cols = wavelength_cols.copy()
         if not generated_ids and specimen_id_col != "__GENERATED__":
             exclude_cols.append(specimen_id_col)
 
         y_col = auto_detect_y_column(df, exclude_cols)
 
-    if y_col not in df.columns:
-        raise ValueError(f"Target y column '{y_col}' not found in file")
+    if not no_target:
+        if y_col not in df.columns:
+            raise ValueError(f"Target y column '{y_col}' not found in file")
 
     # Step 6: Identify and extract metadata columns
     # Metadata columns = all columns that are NOT wavelengths, NOT specimen ID, NOT target
     all_cols = set(df.columns)
     wavelength_cols_set = set(wavelength_cols)
-    used_cols = wavelength_cols_set | {y_col}
+    used_cols = wavelength_cols_set.copy()
+    if not no_target and y_col is not None:
+        used_cols.add(y_col)
     if not generated_ids and specimen_id_col != "__GENERATED__":
         used_cols.add(specimen_id_col)
 
@@ -2833,30 +2849,29 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     X.columns = X.columns.astype(float)
     X = X.sort_index(axis=1)  # Sort by wavelength
 
-    # Extract target data
-    y = df[y_col].copy()
-    y.index = specimen_ids
-
-    # Try to convert target values to numeric, but preserve categorical data for classification
-    # Only convert if the data is actually numeric (for regression tasks)
-    y_numeric = pd.to_numeric(y, errors='coerce')
-
-    # If conversion resulted in mostly NaN values, keep original (likely categorical for classification)
-    # Use threshold: if more than 50% would be converted to NaN, keep as categorical
-    if y_numeric.isna().sum() > len(y) * 0.5:
-        # Keep original categorical/text values for classification tasks
-        # Check for truly missing values (None, np.nan, empty strings)
-        has_nan_y = y.isna() | (y == '') | y.isnull()
+    if no_target:
+        # No target variable mode
+        y = None
+        has_nan_y = pd.Series(False, index=X.index)
     else:
-        # Successfully converted to numeric (regression task)
-        y = y_numeric
-        has_nan_y = y.isna()
+        # Extract target data
+        y = df[y_col].copy()
+        y.index = specimen_ids
+
+        # Try to convert target values to numeric, but preserve categorical data
+        y_numeric = pd.to_numeric(y, errors='coerce')
+
+        if y_numeric.isna().sum() > len(y) * 0.5:
+            has_nan_y = y.isna() | (y == '') | y.isnull()
+        else:
+            y = y_numeric
+            has_nan_y = y.isna()
 
     # Check for missing values (NaN) and remove affected specimens
     has_nan_X = X.isna().any(axis=1)
 
     # Determine which rows to remove based on drop_na_y parameter
-    if drop_na_y:
+    if drop_na_y and not no_target:
         has_nan = has_nan_X | has_nan_y
     else:
         has_nan = has_nan_X
@@ -2872,12 +2887,13 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
 
         # Remove rows with missing values
         X = X[~has_nan]
-        y = y[~has_nan]
+        if y is not None:
+            y = y[~has_nan]
         if metadata_df is not None:
             metadata_df = metadata_df[~has_nan]
 
     # Report on rows kept with missing y values if drop_na_y=False
-    if not drop_na_y and has_nan_y.any():
+    if not no_target and not drop_na_y and has_nan_y.any():
         n_missing_y = has_nan_y.sum()
         print(f"Info: Kept {n_missing_y} specimen(s) with missing target values (useful for prediction).")
 
@@ -2899,7 +2915,8 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
 
         # Apply renamed index to all DataFrames
         X.index = new_index
-        y.index = new_index
+        if y is not None:
+            y.index = new_index
         if metadata_df is not None:
             metadata_df.index = new_index
 

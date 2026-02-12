@@ -2563,6 +2563,11 @@ class SpectralPredictApp:
         # Explore tab derivative window control
         self.explore_deriv_window = tk.IntVar(value=7)
 
+        # Explore tab PCA controls
+        self.explore_pca_n_components = tk.IntVar(value=5)
+        self.explore_pca_pc_x = tk.IntVar(value=1)
+        self.explore_pca_pc_y = tk.IntVar(value=2)
+
         # Sample Sets feature
         self.sample_sets = None          # pd.Series (index=specimen labels, values=set name or None)
         self.sample_set_names = []       # ordered list of set names
@@ -3312,8 +3317,11 @@ class SpectralPredictApp:
         """Get list of available variables for plot coloring.
 
         Returns list of options: ['None', 'Y Value', ...metadata columns]
+        Only includes 'Y Value' when target data is available.
         """
-        options = ['None', 'Y Value']
+        options = ['None']
+        if self.y is not None:
+            options.append('Y Value')
         # Sample Sets color option
         if self.sample_sets is not None and self.sample_sets.notna().any():
             options.append('Set')
@@ -5839,7 +5847,13 @@ class SpectralPredictApp:
         ttk.Label(header_frame, text="Spectral Data Exploration",
                  style='Heading.TLabel').pack(side='left')
 
-        ttk.Button(header_frame, text="🔄 Refresh Plots",
+        # Spectra-only mode indicator (hidden by default)
+        self.explore_mode_label = tk.Label(header_frame, text="  Spectra Only Mode  ",
+                                            fg='white', bg='#e67e22', font=('TkDefaultFont', 9, 'bold'),
+                                            padx=8, pady=2)
+        # Will be shown/hidden by _generate_explore_plots()
+
+        ttk.Button(header_frame, text="\U0001f504 Refresh Plots",
                   command=self._refresh_explore_plots,
                   style='Modern.TButton').pack(side='right')
 
@@ -5976,6 +5990,11 @@ class SpectralPredictApp:
         self.explore_notebook.add(self.explore_manual_bl_frame, text="  Manual Baseline  ")
         self._setup_explore_manual_baseline()
 
+        # PCA sub-tab
+        self.explore_pca_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_pca_frame, text="  PCA  ")
+        self._setup_explore_pca()
+
         # Target Distribution sub-tab
         self.explore_target_dist_frame = ttk.Frame(self.explore_notebook)
         self.explore_notebook.add(self.explore_target_dist_frame, text="  Target Distribution  ")
@@ -5987,6 +6006,188 @@ class SpectralPredictApp:
         self.explore_predictor_frame = ttk.Frame(self.explore_notebook)
         self.explore_notebook.add(self.explore_predictor_frame, text="  Predictor Screening  ")
         self._setup_explore_predictor_screening()
+
+    def _setup_explore_pca(self):
+        """Set up the PCA UI within the Explore tab."""
+        frame = self.explore_pca_frame
+
+        # Control panel at top
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(fill='x', padx=20, pady=10)
+
+        ttk.Label(control_frame, text="Components:").pack(side='left', padx=(0, 5))
+        ttk.Spinbox(control_frame, from_=2, to=20,
+                     textvariable=self.explore_pca_n_components,
+                     width=4).pack(side='left', padx=(0, 15))
+
+        ttk.Label(control_frame, text="PC X-axis:").pack(side='left', padx=(0, 5))
+        ttk.Spinbox(control_frame, from_=1, to=20,
+                     textvariable=self.explore_pca_pc_x,
+                     width=4).pack(side='left', padx=(0, 15))
+
+        ttk.Label(control_frame, text="PC Y-axis:").pack(side='left', padx=(0, 5))
+        ttk.Spinbox(control_frame, from_=1, to=20,
+                     textvariable=self.explore_pca_pc_y,
+                     width=4).pack(side='left', padx=(0, 15))
+
+        ttk.Button(control_frame, text="\u25b6 Run PCA",
+                   command=self._generate_explore_pca,
+                   style='Modern.TButton').pack(side='left')
+
+        # Separator
+        ttk.Separator(frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
+
+        # Results area (will be populated after running)
+        self.explore_pca_results_frame = ttk.Frame(frame)
+        self.explore_pca_results_frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+        # Initial placeholder
+        ttk.Label(self.explore_pca_results_frame,
+                  text="Load data and click 'Run PCA' to visualize principal components",
+                  style='Caption.TLabel').pack(expand=True)
+
+    def _generate_explore_pca(self):
+        """Generate PCA plots in the Explore PCA subtab."""
+        from sklearn.decomposition import PCA
+
+        if self.X is None:
+            messagebox.showinfo("No Data",
+                                "Please load spectral data first in the Import & Preview tab.")
+            return
+
+        n_components = self.explore_pca_n_components.get()
+        pc_x = self.explore_pca_pc_x.get()
+        pc_y = self.explore_pca_pc_y.get()
+
+        n_samples, n_features = self.X.shape
+        max_components = min(n_samples, n_features)
+
+        if n_components > max_components:
+            n_components = max_components
+            self.explore_pca_n_components.set(n_components)
+
+        if pc_x > n_components or pc_y > n_components:
+            messagebox.showwarning("Invalid PC",
+                                   f"PC axes must be <= number of components ({n_components}).")
+            return
+
+        # Clear results frame
+        for widget in self.explore_pca_results_frame.winfo_children():
+            widget.destroy()
+
+        self.root.update()
+
+        try:
+            # Prepare data - handle NaN/Inf
+            X_values = np.nan_to_num(self.X.values.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Run PCA
+            pca = PCA(n_components=n_components)
+            scores = pca.fit_transform(X_values)
+            explained_var = pca.explained_variance_ratio_
+            loadings = pca.components_
+            wavelengths = self.X.columns.values.astype(float)
+
+            # Get color map for scores plot
+            color_map, legend_entries, color_label = self._get_explore_color_map()
+
+            # Data state info
+            data_type = self.current_data_type.get() if hasattr(self, 'current_data_type') else "unknown"
+            info_text = f"Computed on: {n_samples} samples \u00d7 {n_features} wavelengths, {data_type}"
+
+            info_label = ttk.Label(self.explore_pca_results_frame, text=info_text,
+                                    style='Caption.TLabel')
+            info_label.pack(anchor='w', pady=(0, 5))
+
+            # Create 2x2 subplot figure
+            fig = Figure(figsize=(12, 9))
+            fig.suptitle("PCA — Quick overview of spectral variance and groupings",
+                         fontsize=11, fontweight='bold')
+
+            # --- Top-left: Scores plot ---
+            ax1 = fig.add_subplot(2, 2, 1)
+            pc_x_idx = pc_x - 1
+            pc_y_idx = pc_y - 1
+
+            if color_map and len(color_map) > 0:
+                for label_name, indices in color_map.items():
+                    if len(indices) > 0:
+                        color = legend_entries.get(label_name, 'steelblue') if legend_entries else 'steelblue'
+                        ax1.scatter(scores[indices, pc_x_idx], scores[indices, pc_y_idx],
+                                    c=color, alpha=0.6, edgecolors='black', linewidths=0.3,
+                                    s=30, label=str(label_name))
+                ax1.legend(fontsize=7, loc='best', title=color_label or '')
+            else:
+                ax1.scatter(scores[:, pc_x_idx], scores[:, pc_y_idx],
+                            c='steelblue', alpha=0.6, edgecolors='black', linewidths=0.3, s=30)
+
+            ax1.set_xlabel(f"PC{pc_x} ({explained_var[pc_x_idx]*100:.1f}%)", fontsize=9)
+            ax1.set_ylabel(f"PC{pc_y} ({explained_var[pc_y_idx]*100:.1f}%)", fontsize=9)
+            ax1.set_title("Scores Plot", fontsize=10)
+            ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+            ax1.axvline(x=0, color='gray', linestyle='--', linewidth=0.5)
+
+            # --- Top-right: Scree plot ---
+            ax2 = fig.add_subplot(2, 2, 2)
+            pc_labels = [f"PC{i+1}" for i in range(n_components)]
+            cumulative = np.cumsum(explained_var)
+
+            bars = ax2.bar(pc_labels, explained_var * 100, color='steelblue', alpha=0.7,
+                           label='Individual')
+            ax2.plot(pc_labels, cumulative * 100, 'ro-', markersize=4, label='Cumulative')
+            ax2.set_xlabel("Principal Component", fontsize=9)
+            ax2.set_ylabel("Variance Explained (%)", fontsize=9)
+            ax2.set_title("Scree Plot", fontsize=10)
+            ax2.legend(fontsize=7, loc='center right')
+            ax2.tick_params(axis='x', rotation=45, labelsize=7)
+
+            # --- Bottom-left: PCx loadings ---
+            ax3 = fig.add_subplot(2, 2, 3)
+            loading_x = loadings[pc_x_idx, :]
+            ax3.plot(wavelengths, loading_x, color='steelblue', linewidth=0.8)
+            # Highlight top 5% wavelengths
+            threshold = np.percentile(np.abs(loading_x), 95)
+            highlight_mask = np.abs(loading_x) >= threshold
+            if np.any(highlight_mask):
+                ax3.scatter(wavelengths[highlight_mask], loading_x[highlight_mask],
+                            c='red', s=15, zorder=5, label='Top 5%')
+                ax3.legend(fontsize=7)
+            ax3.set_xlabel("Wavelength", fontsize=9)
+            ax3.set_ylabel("Loading", fontsize=9)
+            ax3.set_title(f"PC{pc_x} Loadings", fontsize=10)
+
+            # --- Bottom-right: PCy loadings ---
+            ax4 = fig.add_subplot(2, 2, 4)
+            loading_y = loadings[pc_y_idx, :]
+            ax4.plot(wavelengths, loading_y, color='steelblue', linewidth=0.8)
+            threshold_y = np.percentile(np.abs(loading_y), 95)
+            highlight_mask_y = np.abs(loading_y) >= threshold_y
+            if np.any(highlight_mask_y):
+                ax4.scatter(wavelengths[highlight_mask_y], loading_y[highlight_mask_y],
+                            c='red', s=15, zorder=5, label='Top 5%')
+                ax4.legend(fontsize=7)
+            ax4.set_xlabel("Wavelength", fontsize=9)
+            ax4.set_ylabel("Loading", fontsize=9)
+            ax4.set_title(f"PC{pc_y} Loadings", fontsize=10)
+
+            fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+            # Embed in tkinter
+            canvas = FigureCanvasTkAgg(fig, master=self.explore_pca_results_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+
+            toolbar = NavigationToolbar2Tk(canvas, self.explore_pca_results_frame)
+            toolbar.update()
+
+            # Add export button
+            self._add_plot_export_button(self.explore_pca_results_frame, fig,
+                                          default_filename="explore_pca")
+
+        except Exception as e:
+            ttk.Label(self.explore_pca_results_frame,
+                      text=f"PCA failed: {e}",
+                      foreground='red').pack(expand=True)
 
     def _setup_explore_predictor_screening(self):
         """Set up the Predictor Screening UI within the Explore tab."""
@@ -6106,6 +6307,18 @@ class SpectralPredictApp:
         for timer_id in self._highlight_timers.values():
             self.root.after_cancel(timer_id)
         self._highlight_timers.clear()
+
+        # Show/hide spectra-only mode labels
+        if hasattr(self, 'explore_mode_label'):
+            if self.y is None:
+                self.explore_mode_label.pack(side='left', padx=(15, 0))
+            else:
+                self.explore_mode_label.pack_forget()
+        if hasattr(self, 'analysis_spectra_only_label'):
+            if self.y is None:
+                self.analysis_spectra_only_label.pack(side='left', padx=(20, 0))
+            else:
+                self.analysis_spectra_only_label.pack_forget()
 
         # Refresh the color-by dropdown with available variables
         if hasattr(self, 'explore_color_combo'):
@@ -8060,7 +8273,15 @@ class SpectralPredictApp:
         # Run Analysis button at the top with Pause/Resume/Stop controls
         run_frame = tk.Frame(content_frame, bg=self.colors['bg'])
         run_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(0, 20))
-        self._create_accent_button(run_frame, "▶ Run Analysis", self._run_analysis).pack(side='left')
+        self._create_accent_button(run_frame, "\u25b6 Run Analysis", self._run_analysis).pack(side='left')
+
+        # Spectra-only mode indicator (hidden by default, shown when y is None)
+        self.analysis_spectra_only_label = tk.Label(
+            run_frame,
+            text="  Spectra Only Mode \u2014 load a reference file to enable model building  ",
+            fg='white', bg='#e67e22', font=('TkDefaultFont', 9, 'bold'),
+            padx=10, pady=4
+        )
         row += 1
 
         # === Analysis Options ===
@@ -12168,7 +12389,7 @@ class SpectralPredictApp:
                 if available_cols:
                     self.spectral_file_combo['values'] = available_cols  # Not used for combined files but populate anyway
                     self.id_combo['values'] = ['N/A - Use Filename'] + available_cols
-                    self.target_combo['values'] = available_cols
+                    self.target_combo['values'] = ['(No target variable)'] + available_cols
 
                     # Pre-select auto-detected values
                     if metadata.get('generated_ids'):
@@ -12351,7 +12572,7 @@ class SpectralPredictApp:
             available_cols = sorted(available_cols)
 
             if available_cols:
-                self.target_combo['values'] = available_cols
+                self.target_combo['values'] = ['(No target variable)'] + available_cols
                 if metadata.get('y_col'):
                     self.target_column.set(metadata['y_col'])
 
@@ -13944,16 +14165,25 @@ class SpectralPredictApp:
                 # Combined format - all data in one file (CSV/TXT or Excel)
                 from spectral_predict.io import read_combined_csv, read_combined_excel
 
+                # Determine y_col: use __NONE__ sentinel if user opted out of target
+                target_selection = self.target_column.get()
+                if target_selection == '(No target variable)':
+                    y_col_arg = "__NONE__"
+                elif target_selection:
+                    y_col_arg = target_selection
+                else:
+                    y_col_arg = None
+
                 if self.detected_type == "combined_excel":
                     X_aligned, y_aligned, metadata_df, metadata = read_combined_excel(
                         self.combined_file_path,
-                        y_col=self.target_column.get() if self.target_column.get() else None,
+                        y_col=y_col_arg,
                         sheet_name=self.combined_sheet_name
                     )
                 else:
                     X_aligned, y_aligned, metadata_df, metadata = read_combined_csv(
                         self.combined_file_path,
-                        y_col=self.target_column.get() if self.target_column.get() else None
+                        y_col=y_col_arg
                     )
 
                 # Store data type detection results
@@ -13973,9 +14203,13 @@ class SpectralPredictApp:
                 print(f"  - Spectra: {metadata['n_spectra']}")
                 print(f"  - Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm")
                 print(f"  - Specimen ID: {metadata['specimen_id_col']}")
-                print(f"  - Target: {metadata['y_col']}")
+                print(f"  - Target: {metadata['y_col'] or '(none)'}")
                 if metadata.get('metadata_cols'):
                     print(f"  - Metadata columns: {', '.join(metadata['metadata_cols'])}")
+
+                # Trigger spectra-only mode if no target selected
+                if y_aligned is None:
+                    self._show_spectra_only_info()
 
             elif self.detected_type == "asd":
                 X, metadata = read_asd_dir(self.spectral_data_path.get())
@@ -14438,6 +14672,10 @@ class SpectralPredictApp:
             "but model building will not be available."
         )
         print("> Spectra loaded without target (Y) values (Spectra Only Mode)")
+
+        # Show spectra-only indicator in Analysis tab
+        if hasattr(self, 'analysis_spectra_only_label'):
+            self.analysis_spectra_only_label.pack(side='left', padx=(20, 0))
 
     def _show_alignment_report(self, alignment_info):
         """Display a report showing which files were matched and which were excluded."""
@@ -16195,20 +16433,19 @@ class SpectralPredictApp:
             messagebox.showerror("Error", "Please load data first in the 'Import & Preview' tab")
             return
 
-        if self.y is None:
-            messagebox.showwarning("No Target Data",
-                "Outlier detection requires target (Y) values.\n\n"
-                "Please load a reference file with target data\n"
-                "in the 'Import & Preview' tab.")
-            return
-
         try:
             # Get parameters
             n_components = self.n_pca_components.get()
 
-            # Hide Y range controls for categorical data
-            if self._is_categorical_target():
-                # Disable Y range input fields
+            # Handle Y range controls based on whether Y is available
+            if self.y is None:
+                # Spectra-only mode - disable Y range controls
+                self.y_min_entry.config(state='disabled')
+                self.y_max_entry.config(state='disabled')
+                y_min = None
+                y_max = None
+            elif self._is_categorical_target():
+                # Disable Y range input fields for categorical data
                 self.y_min_entry.config(state='disabled')
                 self.y_max_entry.config(state='disabled')
                 y_min = None
@@ -16227,8 +16464,9 @@ class SpectralPredictApp:
             self.tab2_status.config(text="Running outlier detection...")
             self.root.update()
 
+            y_values = self.y.values if self.y is not None else None
             self.outlier_report = generate_outlier_report(
-                X_data, self.y.values, n_components, y_min, y_max
+                X_data, y_values, n_components, y_min, y_max
             )
 
             # Update visualizations
@@ -16308,7 +16546,7 @@ class SpectralPredictApp:
             color_label = None
         elif color_by == 'Set':
             if self.sample_sets is not None:
-                specimen_ids = self.y.index
+                specimen_ids = self.X.index
                 color_values = self.sample_sets.loc[specimen_ids].values
                 is_categorical = True
                 color_label = 'Set'
@@ -16317,8 +16555,7 @@ class SpectralPredictApp:
                 is_categorical = False
                 color_label = None
         else:
-            # Metadata column - need to align with y_values using specimen IDs
-            # Check combined file metadata first, then reference file metadata
+            # Metadata column - need to align with specimen IDs
             metadata_source = None
             if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and color_by in self.combined_metadata_df.columns:
                 metadata_source = self.combined_metadata_df
@@ -16326,14 +16563,13 @@ class SpectralPredictApp:
                 metadata_source = self.ref
 
             if metadata_source is not None:
-                # Get specimen IDs from y (which aligns with scores)
-                specimen_ids = self.y.index
+                # Get specimen IDs from X (works with or without y)
+                specimen_ids = self.X.index
 
                 # Align metadata with these specimen IDs
                 try:
                     color_values = metadata_source.loc[specimen_ids, color_by].values
                 except KeyError:
-                    # Some specimen IDs not in ref - shouldn't happen but handle it
                     print(f"Warning: Some specimen IDs not found in metadata")
                     color_values = None
                     is_categorical = False
@@ -16790,6 +17026,18 @@ class SpectralPredictApp:
         if not HAS_MATPLOTLIB or self.outlier_report is None:
             return
 
+        if self.y is None:
+            # Spectra-only mode - show informational message
+            for widget in self.y_dist_plot_frame.winfo_children():
+                widget.destroy()
+            ttk.Label(self.y_dist_plot_frame,
+                      text="No target variable (spectra-only mode)\n\n"
+                           "Y distribution is not available without target values.\n"
+                           "PCA, Hotelling T\u00b2, Q-residuals, and Mahalanobis\n"
+                           "distance plots are still available above.",
+                      style='Caption.TLabel', justify='center').pack(expand=True)
+            return
+
         if self._is_categorical_target():
             self._plot_y_distribution_categorical()
         else:
@@ -16919,8 +17167,10 @@ class SpectralPredictApp:
         for idx, row in summary.iterrows():
             # Format Y value - handle both numeric and categorical
             y_val = row['Y_Value']
-            if isinstance(y_val, (int, float)):
+            if isinstance(y_val, (int, float)) and not np.isnan(y_val):
                 y_display = f"{y_val:.2f}"
+            elif isinstance(y_val, (int, float)) and np.isnan(y_val):
+                y_display = "N/A"
             else:
                 y_display = str(y_val)
 
@@ -42568,7 +42818,7 @@ External Validation Performance (n={n_val}):
         ttk.Label(data_source_frame, text="Data Source:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
 
         self.diag_data_source = tk.StringVar(value='Current Analysis')
-        diag_sources = ['Current Analysis', 'Application Tab (Tab 11C)', 'Load from File']
+        diag_sources = ['Current Working Data', 'Current Analysis', 'Application Tab (Tab 11C)', 'Load from File']
         for source in diag_sources:
             ttk.Radiobutton(data_source_frame, text=source,
                           variable=self.diag_data_source,
@@ -46107,7 +46357,19 @@ External Validation Performance (n={n_val}):
         """Handle data source selection change."""
         source = self.diag_data_source.get()
 
-        if source == 'Current Analysis':
+        if source == 'Current Working Data':
+            if self.X is not None:
+                self.diag_data_info_label.config(
+                    text=f"> Using current working data\n   {self.X.shape[0]} samples \u00d7 {self.X.shape[1]} wavelengths",
+                    foreground='green'
+                )
+            else:
+                self.diag_data_info_label.config(
+                    text="[!] No data loaded (load data in Import tab first)",
+                    foreground='orange'
+                )
+
+        elif source == 'Current Analysis':
             # Check if analysis results exist
             if hasattr(self, 'X_train') and self.X_train is not None:
                 self.diag_data_info_label.config(
@@ -46150,7 +46412,18 @@ External Validation Performance (n={n_val}):
         source = self.diag_data_source.get()
 
         try:
-            if source == 'Current Analysis':
+            if source == 'Current Working Data':
+                if self.X is None:
+                    messagebox.showerror("No Data",
+                                         "Load data in Import tab first.")
+                    return None
+                return {
+                    'X': self.X.values,
+                    'wavelengths': self.X.columns.values.astype(float),
+                    'method': 'Current Working Data'
+                }
+
+            elif source == 'Current Analysis':
                 # Get data from current analysis
                 if not hasattr(self, 'X_train') or self.X_train is None:
                     messagebox.showerror(

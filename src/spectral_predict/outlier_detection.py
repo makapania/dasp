@@ -481,7 +481,7 @@ def check_y_data_consistency(y, lower_bound=None, upper_bound=None):
     }
 
 
-def generate_outlier_report(X, y, n_pca_components=5,
+def generate_outlier_report(X, y=None, n_pca_components=5,
                            y_lower_bound=None, y_upper_bound=None):
     """
     Comprehensive outlier detection report combining all methods.
@@ -554,23 +554,34 @@ def generate_outlier_report(X, y, n_pca_components=5,
     - If X is a DataFrame, Sample_Index will be DataFrame index labels
     - If X is a numpy array, Sample_Index will be positional indices (0, 1, 2, ...)
     """
-    # Run all detection methods
+    # Run spectral-based detection methods (always available)
     pca_results = run_pca_outlier_detection(X, y, n_pca_components)
     q_results = compute_q_residuals(X, pca_results['pca_model'], n_pca_components)
     maha_results = compute_mahalanobis_distance(pca_results['scores'])
-    y_results = check_y_data_consistency(y, y_lower_bound, y_upper_bound)
 
-    # Convert y to array if needed
-    if isinstance(y, pd.Series):
-        y_array = y.values
+    # Run Y consistency check only when y is provided
+    n_samples = X.shape[0] if hasattr(X, 'shape') else len(X)
+    if y is not None:
+        y_results = check_y_data_consistency(y, y_lower_bound, y_upper_bound)
+        if isinstance(y, pd.Series):
+            y_array = y.values
+        else:
+            y_array = np.array(y)
     else:
-        y_array = np.array(y)
+        # No Y data - create dummy results with zero flags
+        y_results = {
+            'z_scores': np.zeros(n_samples),
+            'all_outliers': np.zeros(n_samples, dtype=bool),
+            'n_outliers': 0,
+            'outlier_indices': np.array([], dtype=int),
+        }
+        y_array = np.full(n_samples, np.nan)
 
     # Get sample indices - use DataFrame index if available, otherwise positional
     if isinstance(X, pd.DataFrame):
         sample_indices = X.index.tolist()
     else:
-        sample_indices = list(range(X.shape[0] if hasattr(X, 'shape') else len(X)))
+        sample_indices = list(range(n_samples))
 
     # Create summary DataFrame
     summary = pd.DataFrame({
