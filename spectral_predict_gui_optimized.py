@@ -6005,8 +6005,8 @@ class SpectralPredictApp:
         method_combo.pack(side='left', padx=(0, 20))
 
         ttk.Label(control_frame, text="Top N:").pack(side='left', padx=(0, 5))
-        self.explore_top_n = tk.IntVar(value=50)
-        ttk.Spinbox(control_frame, from_=5, to=200, textvariable=self.explore_top_n,
+        self.explore_top_n = tk.IntVar(value=250)
+        ttk.Spinbox(control_frame, from_=5, to=500, textvariable=self.explore_top_n,
                    width=5).pack(side='left', padx=(0, 20))
 
         # Wavelength range filter
