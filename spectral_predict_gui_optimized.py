@@ -28420,10 +28420,10 @@ F1 Score:  {f1:.4f}
                 wavelength_columns = self.X.columns
             else:
                 wavelength_columns = self.X_original.columns
-            wl_to_col = {float(col): col for col in wavelength_columns}
+            wl_to_col = {round(float(col), 6): col for col in wavelength_columns}
 
             # Get the actual column names for selected wavelengths
-            selected_cols = [wl_to_col[wl] for wl in selected_wl if wl in wl_to_col]
+            selected_cols = [wl_to_col[round(wl, 6)] for wl in selected_wl if round(wl, 6) in wl_to_col]
 
             if not selected_cols:
                 raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
