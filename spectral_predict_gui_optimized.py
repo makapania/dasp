@@ -39343,6 +39343,12 @@ External Validation Performance (n={n_val}):
         self.comparison_results = None
         self.comparison_rules = []
 
+        # Spectral data type tracking
+        self.comparison_data_type = tk.StringVar(value="unknown")
+        self.comparison_original_data_type = "unknown"
+        self.comparison_type_confidence = 0.0
+        self.comparison_data_converted = False
+
         # Transfer model storage
         self.transfer_models = []  # List of transfer model dicts with 'path', 'model', 'description'
         self.apply_transfer = tk.BooleanVar(value=False)
@@ -39577,6 +39583,61 @@ External Validation Performance (n={n_val}):
         self.comparison_data_status = ttk.Label(step2_frame, text="No data loaded",
                                                style='Caption.TLabel', foreground='gray')
         self.comparison_data_status.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # Data Type & Conversion section (hidden until data loaded)
+        self.comparison_data_type_frame = ttk.LabelFrame(
+            step2_frame, text="Data Type & Conversion (Optional)",
+            style='Card.TFrame', padding=10)
+        self.comparison_data_type_frame.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+
+        # Detection status row
+        comp_detect_frame = ttk.Frame(self.comparison_data_type_frame)
+        comp_detect_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(comp_detect_frame, text="Detected:",
+                  style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+
+        self.comparison_type_status = ttk.Label(comp_detect_frame, text="No data loaded",
+                                                style='CardLabel.TLabel')
+        self.comparison_type_status.pack(side='left')
+
+        # Radio buttons row
+        comp_radio_frame = ttk.Frame(self.comparison_data_type_frame)
+        comp_radio_frame.pack(fill='x', pady=(5, 5))
+
+        ttk.Label(comp_radio_frame, text="Override:",
+                  style='CardLabel.TLabel').pack(side='left', padx=(0, 10))
+
+        self.comparison_refl_radio = ttk.Radiobutton(comp_radio_frame, text="Reflectance",
+                                                     variable=self.comparison_data_type,
+                                                     value="reflectance",
+                                                     command=self._on_comparison_data_type_override,
+                                                     state='disabled')
+        self.comparison_refl_radio.pack(side='left', padx=(0, 15))
+
+        self.comparison_abs_radio = ttk.Radiobutton(comp_radio_frame, text="Absorbance",
+                                                    variable=self.comparison_data_type,
+                                                    value="absorbance",
+                                                    command=self._on_comparison_data_type_override,
+                                                    state='disabled')
+        self.comparison_abs_radio.pack(side='left')
+
+        # Conversion button row
+        comp_convert_frame = ttk.Frame(self.comparison_data_type_frame)
+        comp_convert_frame.pack(fill='x', pady=(5, 0))
+
+        self.comparison_convert_btn = ttk.Button(comp_convert_frame,
+                                                 text="Convert to Absorbance",
+                                                 command=self._comparison_convert_data_type,
+                                                 style='Modern.TButton', state='disabled')
+        self.comparison_convert_btn.pack(side='left', padx=(0, 15))
+
+        self.comparison_conversion_status = ttk.Label(comp_convert_frame, text="",
+                                                      style='CardLabel.TLabel')
+        self.comparison_conversion_status.pack(side='left')
+
+        # Hide until data is loaded
+        self.comparison_data_type_frame.grid_remove()
 
         self._on_comparison_source_change()  # Initialize UI state
 
@@ -39962,6 +40023,14 @@ External Validation Performance (n={n_val}):
         """Load data for comparison analysis."""
         source = self.comparison_data_source.get()
 
+        # Reset data type UI for fresh load
+        self.comparison_data_converted = False
+        self.comparison_data_type.set("unknown")
+        self.comparison_original_data_type = "unknown"
+        self.comparison_type_confidence = 0.0
+        self.comparison_conversion_status.config(text="")
+        self.comparison_data_type_frame.grid_remove()
+
         try:
             if source == 'validation':
                 # Use validation set from Tab 4
@@ -40020,10 +40089,138 @@ External Validation Performance (n={n_val}):
 
             self.comparison_status.config(text="Data loaded. Ready to run comparison.", foreground='green')
 
+            # Auto-detect spectral data type
+            self._detect_comparison_data_type()
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load comparison data:\n{str(e)}")
             import traceback
             traceback.print_exc()
+
+    def _detect_comparison_data_type(self):
+        """Auto-detect spectral data type for comparison data and update UI."""
+        if self.comparison_data is None:
+            return
+
+        try:
+            from spectral_predict.io import detect_spectral_data_type
+
+            data_type, confidence, _ = detect_spectral_data_type(self.comparison_data)
+            self.comparison_data_type.set(data_type)
+            self.comparison_original_data_type = data_type
+            self.comparison_type_confidence = confidence
+            self.comparison_data_converted = False
+
+            # Enable UI and show frame
+            self.comparison_refl_radio.config(state='normal')
+            self.comparison_abs_radio.config(state='normal')
+            self.comparison_convert_btn.config(state='normal')
+            self.comparison_data_type_frame.grid()
+
+            # Update status label
+            self._update_comparison_data_type_ui()
+
+        except Exception as e:
+            print(f"Data type detection failed: {e}")
+
+    def _update_comparison_data_type_ui(self):
+        """Update the comparison data type status label based on current state."""
+        if self.comparison_data is None:
+            self.comparison_type_status.config(text="No data loaded",
+                                              foreground=self.colors['text_light'])
+            self.comparison_refl_radio.config(state='disabled')
+            self.comparison_abs_radio.config(state='disabled')
+            self.comparison_convert_btn.config(state='disabled')
+            return
+
+        data_type = self.comparison_data_type.get()
+        confidence = self.comparison_type_confidence
+
+        if self.comparison_data_converted:
+            self.comparison_type_status.config(
+                text=f"{data_type.capitalize()} (converted)",
+                foreground=self.colors['accent']
+            )
+        elif data_type != self.comparison_original_data_type:
+            self.comparison_type_status.config(
+                text=f"[Override] {data_type.capitalize()} (detected: {self.comparison_original_data_type})",
+                foreground=self.colors['warning']
+            )
+        else:
+            color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            self.comparison_type_status.config(
+                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                foreground=color
+            )
+
+        # Update conversion button text
+        target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+        self.comparison_convert_btn.config(text=f"Convert to {target}")
+
+    def _on_comparison_data_type_override(self):
+        """Handle manual override of data type in Multi-Model tab (no conversion)."""
+        if self.comparison_data is None:
+            return
+
+        current = self.comparison_data_type.get()
+        original = self.comparison_original_data_type
+
+        # Update conversion button text
+        target = "Absorbance" if current == "reflectance" else "Reflectance"
+        self.comparison_convert_btn.config(text=f"Convert to {target}")
+
+        # Update status to show override
+        if current != original and not self.comparison_data_converted:
+            self.comparison_type_status.config(
+                text=f"[Override] {current.capitalize()} (detected: {original})",
+                foreground=self.colors['warning']
+            )
+        else:
+            self._update_comparison_data_type_ui()
+
+        # Clear conversion status when overriding
+        self.comparison_conversion_status.config(text="")
+
+    def _comparison_convert_data_type(self):
+        """Convert comparison data between reflectance and absorbance."""
+        from tkinter import messagebox
+
+        if self.comparison_data is None:
+            messagebox.showwarning("No Data", "Please load comparison data first.")
+            return
+
+        current_type = self.comparison_data_type.get()
+        target_type = "absorbance" if current_type == "reflectance" else "reflectance"
+
+        # Convert using existing conversion functions
+        if target_type == "absorbance":
+            converted_values = self._convert_reflectance_to_absorbance(self.comparison_data.values)
+        else:
+            converted_values = self._convert_absorbance_to_reflectance(self.comparison_data.values)
+
+        # Rebuild DataFrame preserving index and columns
+        import pandas as pd
+        self.comparison_data = pd.DataFrame(
+            converted_values,
+            index=self.comparison_data.index,
+            columns=self.comparison_data.columns
+        )
+
+        # Update state
+        self.comparison_data_type.set(target_type)
+        self.comparison_data_converted = True
+
+        # Update UI
+        next_target = "Absorbance" if target_type == "reflectance" else "Reflectance"
+        self.comparison_convert_btn.config(text=f"Convert to {next_target}")
+        self.comparison_type_status.config(
+            text=f"{target_type.capitalize()} (converted)",
+            foreground=self.colors['accent']
+        )
+        self.comparison_conversion_status.config(
+            text=f"Converted from {current_type} to {target_type}",
+            foreground=self.colors['success']
+        )
 
     def _browse_live_folder(self):
         """Browse for folder to monitor in live mode."""
@@ -40152,6 +40349,9 @@ External Validation Performance (n={n_val}):
                         text=f"> Loaded {len(self.comparison_data)} spectra (Live mode)",
                         foreground='green'
                     )
+
+                    # Auto-detect data type for new live data
+                    self._detect_comparison_data_type()
 
                     # Auto-run comparison
                     self._run_comparison()
@@ -40475,6 +40675,19 @@ External Validation Performance (n={n_val}):
         if self.comparison_data is None:
             messagebox.showerror("Error", "Please load comparison data first")
             return
+
+        # Check for data type mismatch with primary model
+        spectra_type = self.comparison_data_type.get()
+        if spectra_type not in ("unknown",):
+            model_type = self.comparison_primary_model.get('metadata', {}).get('data_type')
+            if model_type and model_type != spectra_type:
+                response = messagebox.askyesno(
+                    "Data Type Mismatch",
+                    f"Loaded spectra appear to be {spectra_type}, but the primary model "
+                    f"was trained on {model_type} data.\n\n"
+                    f"Predictions may be incorrect. Continue anyway?")
+                if not response:
+                    return
 
         try:
             self.comparison_status.config(text="Running comparison...", foreground='orange')
