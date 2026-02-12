@@ -39755,6 +39755,7 @@ External Validation Performance (n={n_val}):
         self.live_monitoring_active = False
         self.live_monitoring_timer_id = None
         self.live_last_file_count = 0
+        self.comparison_live_auto_convert = tk.StringVar(value="none")  # "none", "absorbance", "reflectance"
 
         # Create scrollable canvas
         canvas = tk.Canvas(self.tab9, bg=self.colors['bg'], highlightthickness=0)
@@ -39976,6 +39977,21 @@ External Validation Performance (n={n_val}):
                                                text="○ Monitoring stopped",
                                                style='Caption.TLabel', foreground='gray')
         self.comparison_live_status.pack(pady=(0, 5))
+
+        # Auto-convert controls
+        ttk.Separator(self.comparison_live_frame, orient='horizontal').pack(fill='x', pady=(5, 8))
+        ttk.Label(self.comparison_live_frame, text="Auto-convert incoming data to:",
+                  style='Caption.TLabel').pack(anchor='w')
+        auto_convert_frame = ttk.Frame(self.comparison_live_frame)
+        auto_convert_frame.pack(fill='x', pady=(3, 0))
+        ttk.Radiobutton(auto_convert_frame, text="Keep as detected",
+                        variable=self.comparison_live_auto_convert, value="none").pack(side='left', padx=(0, 12))
+        ttk.Radiobutton(auto_convert_frame, text="Absorbance",
+                        variable=self.comparison_live_auto_convert, value="absorbance").pack(side='left', padx=(0, 12))
+        ttk.Radiobutton(auto_convert_frame, text="Reflectance",
+                        variable=self.comparison_live_auto_convert, value="reflectance").pack(side='left')
+        ttk.Label(self.comparison_live_frame, text="(Conversion applied automatically after each scan)",
+                  style='Caption.TLabel', foreground='gray').pack(anchor='w', pady=(2, 0))
 
         # Data status
         self.comparison_data_status = ttk.Label(step2_frame, text="No data loaded",
@@ -40370,6 +40386,9 @@ External Validation Performance (n={n_val}):
             if self.live_monitoring_active:
                 self._stop_live_monitoring()
 
+            # Reset auto-convert preference
+            self.comparison_live_auto_convert.set("none")
+
             # Disable path controls
             self.comparison_path_label.config(state='disabled')
             self.comparison_data_path.set("Using pre-selected validation set from Analysis Configuration")
@@ -40383,6 +40402,9 @@ External Validation Performance (n={n_val}):
             # Stop monitoring if switching away from live
             if self.live_monitoring_active:
                 self._stop_live_monitoring()
+
+            # Reset auto-convert preference
+            self.comparison_live_auto_convert.set("none")
 
             # Enable path controls for directory/csv
             self.comparison_path_label.config(state='normal')
@@ -40749,16 +40771,19 @@ External Validation Performance (n={n_val}):
                         foreground='green'
                     )
 
-                    # Remember if user had previously converted data type
+                    # Remember if user had previously converted data type (legacy fallback)
                     was_converted = self.comparison_data_converted
                     previous_target_type = self.comparison_data_type.get() if was_converted else None
 
                     # Auto-detect data type for new live data
                     self._detect_comparison_data_type()
 
-                    # Re-apply conversion if user had previously converted
-                    if was_converted and previous_target_type:
-                        detected_type = self.comparison_data_type.get()
+                    # Apply conversion: auto-convert preference wins, then legacy manual fallback
+                    auto_pref = self.comparison_live_auto_convert.get()
+                    detected_type = self.comparison_data_type.get()
+                    if auto_pref in ("absorbance", "reflectance") and detected_type != auto_pref:
+                        self._comparison_convert_data_type()
+                    elif auto_pref == "none" and was_converted and previous_target_type:
                         if detected_type != previous_target_type:
                             self._comparison_convert_data_type()
 
