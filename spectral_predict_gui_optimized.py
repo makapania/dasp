@@ -36056,6 +36056,62 @@ External Validation Performance (n={n_val}):
         else:
             raise ValueError("No supported spectral files found in directory (ASD, CSV, or SPC)")
 
+    def _load_spectra_from_directory_as_df(self, directory: str) -> pd.DataFrame:
+        """Load spectra from a directory, returning a DataFrame with meaningful index.
+
+        Unlike _load_spectra_from_directory() which returns (wavelengths, X_numpy),
+        this returns a full DataFrame with filename stems as index for sample identification.
+        Used by Multi-Model Comparison tab to preserve sample names in exports.
+        """
+        from pathlib import Path
+
+        dir_path = Path(directory)
+
+        asd_files = sorted(dir_path.glob("*.asd"))
+        spc_files = sorted(dir_path.glob("*.spc"))
+        jcamp_files = sorted(
+            list(dir_path.glob("*.jdx")) + list(dir_path.glob("*.dx"))
+            + list(dir_path.glob("*.JDX")) + list(dir_path.glob("*.DX"))
+        )
+        ascii_files = sorted(
+            list(dir_path.glob("*.dpt")) + list(dir_path.glob("*.dat"))
+            + list(dir_path.glob("*.asc")) + list(dir_path.glob("*.DPT"))
+            + list(dir_path.glob("*.DAT")) + list(dir_path.glob("*.ASC"))
+        )
+        csv_files = sorted(dir_path.glob("*.csv"))
+
+        if asd_files:
+            from spectral_predict.io import read_asd_dir
+            df, _ = read_asd_dir(str(directory))
+            return df
+        elif spc_files:
+            from spectral_predict.io import read_spc_dir
+            df, _ = read_spc_dir(str(directory))
+            return df
+        elif jcamp_files:
+            from spectral_predict.io import read_jcamp_dir
+            df, _ = read_jcamp_dir(str(directory))
+            return df
+        elif ascii_files:
+            from spectral_predict.io import read_ascii_spectra
+            df, _ = read_ascii_spectra(str(directory))
+            return df
+        elif csv_files:
+            # CSV directory: use existing loader for parsing, then set meaningful index
+            wavelengths, X = self._load_spectra_from_directory(directory)
+            df = pd.DataFrame(X, columns=wavelengths)
+            # If one spectrum per file, use filenames as index
+            if len(csv_files) == len(df):
+                df.index = [f.stem for f in csv_files]
+            else:
+                df.index = [f"Sample_{i + 1}" for i in range(len(df))]
+            return df
+        else:
+            raise ValueError(
+                "No supported spectral files found in directory.\n"
+                "Supported formats: ASD, SPC, JCAMP-DX (.jdx/.dx), ASCII (.dpt/.dat/.asc), CSV"
+            )
+
     # ========================================================================
     # STEP 1 HELPER METHODS FOR NEW CALIBRATION TRANSFER WIZARD
     # ========================================================================
@@ -40389,40 +40445,35 @@ External Validation Performance (n={n_val}):
 
             elif source == 'directory':
                 # Load spectral files from directory
-                import pandas as pd
-
                 directory = self.comparison_data_path.get()
                 if not directory:
                     messagebox.showerror("Error", "Please select a directory")
                     return
 
-                # Use existing _load_spectra_from_directory method
-                wavelengths, X = self._load_spectra_from_directory(directory)
+                # Load as DataFrame with meaningful index (filenames as sample IDs)
+                self.comparison_data = self._load_spectra_from_directory_as_df(directory)
 
-                if X is None or len(X) == 0:
+                if self.comparison_data is None or len(self.comparison_data) == 0:
                     messagebox.showerror("Error", "No spectral files found in directory")
                     return
-
-                # Convert to DataFrame format (wavelengths as columns, spectra as rows)
-                self.comparison_data = pd.DataFrame(X, columns=wavelengths)
                 self.comparison_data_status.config(
                     text=f"> Loaded {len(self.comparison_data)} spectra from directory",
                     foreground='green')
 
             else:  # CSV or Excel
-                import pandas as pd
+                from spectral_predict.io import read_csv_spectra, read_excel_spectra
 
                 file_path = self.comparison_data_path.get()
                 if not file_path:
                     messagebox.showerror("Error", "Please select a CSV or Excel file")
                     return
 
-                # Detect file type and read accordingly (same as Import tab)
+                # Use io readers that set first column as index (sample IDs)
                 if file_path.lower().endswith(('.xlsx', '.xls')):
-                    self.comparison_data = pd.read_excel(file_path)
+                    self.comparison_data, _ = read_excel_spectra(file_path)
                     file_type = "Excel"
                 else:
-                    self.comparison_data = pd.read_csv(file_path)
+                    self.comparison_data, _ = read_csv_spectra(file_path)
                     file_type = "CSV"
 
                 self.comparison_data_status.config(
@@ -40682,15 +40733,15 @@ External Validation Performance (n={n_val}):
                 # Files changed - reload and re-run
                 self._update_live_status(f"● Files changed ({current_count}), updating...", 'green')
 
-                # Load data from folder
-                import pandas as pd
-                wavelengths, X = self._load_spectra_from_directory(folder_path)
+                # Load data from folder as DataFrame with meaningful index
+                try:
+                    self.comparison_data = self._load_spectra_from_directory_as_df(folder_path)
+                except ValueError:
+                    self.comparison_data = None
 
-                if X is None or len(X) == 0:
+                if self.comparison_data is None or len(self.comparison_data) == 0:
                     self._update_live_status(f"[!] No valid files found (Last scan: {timestamp})", 'orange')
                 else:
-                    # Convert to DataFrame
-                    self.comparison_data = pd.DataFrame(X, columns=wavelengths)
 
                     # Update data status
                     self.comparison_data_status.config(
@@ -41264,11 +41315,17 @@ External Validation Performance (n={n_val}):
                 # Multi-sheet Excel export
                 with pd.ExcelWriter(filepath, engine='xlsxwriter') as writer:
                     # Sheet 1: Summary (Primary + Flags only)
-                    primary_metadata = self.comparison_primary_model['metadata']
-                    primary_target = primary_metadata.get('target_variable', 'Primary')
+                    primary_filename = self.comparison_primary_model.get('filename', '')
 
                     summary_cols = ['Sample']
-                    primary_cols = [col for col in self.comparison_results.columns if primary_target in col]
+                    primary_cols = [col for col in self.comparison_results.columns
+                                    if col not in ('Sample', 'Flags') and primary_filename in col]
+                    # Fallback: if no match by filename, include first prediction column
+                    if not primary_cols:
+                        pred_cols = [col for col in self.comparison_results.columns
+                                     if col not in ('Sample', 'Flags')]
+                        if pred_cols:
+                            primary_cols = [pred_cols[0]]
                     summary_cols.extend(primary_cols)
                     if 'Flags' in self.comparison_results.columns:
                         summary_cols.append('Flags')
