@@ -34443,7 +34443,7 @@ External Validation Performance (n={n_val}):
             return
 
         try:
-            ct_data_type = getattr(self, 'ct_primary_spectral_type', None) or 'reflectance'
+            ct_data_type = self.ct_primary_data_type.get() if hasattr(self, 'ct_primary_data_type') else 'reflectance'
             data_type_suffix = "_abs" if ct_data_type == "absorbance" else "_ref"
             path_prefix = save_transfer_model(
                 self.ct_transfer_model,
@@ -36520,7 +36520,7 @@ External Validation Performance (n={n_val}):
 
         # Generate default filename with data type suffix
         method = self.ct_transfer_model.method
-        ct_data_type = getattr(self, 'ct_primary_spectral_type', None) or 'reflectance'
+        ct_data_type = self.ct_primary_data_type.get() if hasattr(self, 'ct_primary_data_type') else 'reflectance'
         data_type_suffix = "_abs" if ct_data_type == "absorbance" else "_ref"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"transfer_{method}_{timestamp}{data_type_suffix}.pkl"
@@ -40293,7 +40293,7 @@ External Validation Performance (n={n_val}):
 
         filepaths = filedialog.askopenfilenames(
             title="Select Transfer Models (in order of application)",
-            filetypes=[("Transfer Models", "*.json"), ("All Files", "*.*")]
+            filetypes=[("Transfer Models", "*.pkl *.json"), ("Pickle", "*.pkl"), ("JSON", "*.json"), ("All Files", "*.*")]
         )
 
         if not filepaths:
@@ -40304,9 +40304,15 @@ External Validation Performance (n={n_val}):
                 # Import calibration_transfer module
                 from spectral_predict import calibration_transfer
 
-                # Load the transfer model (json + npz pair)
-                prefix = filepath.replace('.json', '')
-                transfer_model = calibration_transfer.load_transfer_model(prefix)
+                # Load the transfer model (.pkl or .json+npz pair)
+                if filepath.endswith('.pkl'):
+                    import pickle
+                    with open(filepath, 'rb') as f:
+                        data = pickle.load(f)
+                    transfer_model = data['model']
+                else:
+                    prefix = filepath.replace('.json', '')
+                    transfer_model = calibration_transfer.load_transfer_model(prefix)
 
                 # Create display description
                 description = f"{transfer_model.method.upper()}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
@@ -40849,7 +40855,7 @@ External Validation Performance (n={n_val}):
         load_file_frame = ttk.Frame(self.ct_load_existing_frame)
         load_file_frame.pack(fill='x', pady=(0, 10))
 
-        ttk.Label(load_file_frame, text="Transfer Model File (.pkl):",
+        ttk.Label(load_file_frame, text="Transfer Model File:",
                  style='CardLabel.TLabel').pack(anchor='w', pady=(0, 5))
 
         browse_frame = ttk.Frame(load_file_frame)
