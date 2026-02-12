@@ -2708,7 +2708,7 @@ class SpectralPredictApp:
         self.baseline_airpls_lambda = tk.StringVar(value="1e5")
         # Smoothing
         self.enable_smoothing = tk.BooleanVar(value=False)
-        self.smoothing_window = tk.IntVar(value=17)
+        self.smoothing_window = tk.IntVar(value=11)
         self.smoothing_polyorder = tk.IntVar(value=2)
 
         # GA Preprocessing Optimization (Phase 4)
@@ -8697,7 +8697,7 @@ class SpectralPredictApp:
         ttk.Label(self.smoothing_options_frame, text="Window:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         smooth_window_combo = ttk.Combobox(self.smoothing_options_frame, textvariable=self.smoothing_window,
                                             width=5, state='readonly')
-        smooth_window_combo['values'] = [7, 11, 17, 21, 25]
+        smooth_window_combo['values'] = [7, 9, 11, 13, 15, 19]
         smooth_window_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
 
         ttk.Label(self.smoothing_options_frame, text="Polyorder:").grid(row=0, column=2, sticky=tk.W, padx=(15, 5))
@@ -22018,6 +22018,9 @@ class SpectralPredictApp:
                 preprocessing_methods=preprocessing_methods,
                 baseline_method=baseline_method,
                 baseline_params=baseline_params,
+                smoothing=self.enable_smoothing.get(),
+                smoothing_window=self.smoothing_window.get(),
+                smoothing_polyorder=self.smoothing_polyorder.get(),
                 # interference_settings=interference_settings,  # DISABLED: Code stashed (broke R² reproducibility)
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,

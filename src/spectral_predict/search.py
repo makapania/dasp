@@ -1680,6 +1680,20 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             configs_with.append(cfg_bl)
         preprocess_configs = configs_without + configs_with
 
+    # --- Smoothing indicator: when enabled, add "sg0" to config names ---
+    if smoothing and preprocess_configs:
+        for cfg in preprocess_configs:
+            if "base_name" not in cfg:
+                cfg["base_name"] = cfg["name"]
+            name = cfg["name"]
+            if "+" in name:
+                # Baseline already prefixed, e.g. "als+raw" → "als+sg0+raw"
+                parts = name.split("+", 1)
+                cfg["name"] = f"{parts[0]}+sg0+{parts[1]}"
+            else:
+                # No baseline, e.g. "raw" → "sg0+raw"
+                cfg["name"] = f"sg0+{name}"
+
     # Create CV splitter
     if task_type == "regression":
         cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
