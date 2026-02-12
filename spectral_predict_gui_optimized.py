@@ -6088,106 +6088,196 @@ class SpectralPredictApp:
             loadings = pca.components_
             wavelengths = self.X.columns.values.astype(float)
 
-            # Get color map for scores plot
-            color_map, legend_entries, color_label = self._get_explore_color_map()
+            # Store PCA results for lightweight recoloring later
+            self._explore_pca_results = {
+                'scores': scores,
+                'explained_var': explained_var,
+                'loadings': loadings,
+                'wavelengths': wavelengths,
+                'n_samples': n_samples,
+                'n_features': n_features,
+                'n_components': n_components,
+            }
 
-            # Data state info
-            data_type = self.current_data_type.get() if hasattr(self, 'current_data_type') else "unknown"
-            info_text = f"Computed on: {n_samples} samples \u00d7 {n_features} wavelengths, {data_type}"
-
-            info_label = ttk.Label(self.explore_pca_results_frame, text=info_text,
-                                    style='Caption.TLabel')
-            info_label.pack(anchor='w', pady=(0, 5))
-
-            # Create 2x2 subplot figure
-            fig = Figure(figsize=(12, 9))
-            fig.suptitle("PCA — Quick overview of spectral variance and groupings",
-                         fontsize=11, fontweight='bold')
-
-            # --- Top-left: Scores plot ---
-            ax1 = fig.add_subplot(2, 2, 1)
-            pc_x_idx = pc_x - 1
-            pc_y_idx = pc_y - 1
-
-            if color_map and len(color_map) > 0:
-                for label_name, indices in color_map.items():
-                    if len(indices) > 0:
-                        color = legend_entries.get(label_name, 'steelblue') if legend_entries else 'steelblue'
-                        ax1.scatter(scores[indices, pc_x_idx], scores[indices, pc_y_idx],
-                                    c=color, alpha=0.6, edgecolors='black', linewidths=0.3,
-                                    s=30, label=str(label_name))
-                ax1.legend(fontsize=7, loc='best', title=color_label or '')
-            else:
-                ax1.scatter(scores[:, pc_x_idx], scores[:, pc_y_idx],
-                            c='steelblue', alpha=0.6, edgecolors='black', linewidths=0.3, s=30)
-
-            ax1.set_xlabel(f"PC{pc_x} ({explained_var[pc_x_idx]*100:.1f}%)", fontsize=9)
-            ax1.set_ylabel(f"PC{pc_y} ({explained_var[pc_y_idx]*100:.1f}%)", fontsize=9)
-            ax1.set_title("Scores Plot", fontsize=10)
-            ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
-            ax1.axvline(x=0, color='gray', linestyle='--', linewidth=0.5)
-
-            # --- Top-right: Scree plot ---
-            ax2 = fig.add_subplot(2, 2, 2)
-            pc_labels = [f"PC{i+1}" for i in range(n_components)]
-            cumulative = np.cumsum(explained_var)
-
-            bars = ax2.bar(pc_labels, explained_var * 100, color='steelblue', alpha=0.7,
-                           label='Individual')
-            ax2.plot(pc_labels, cumulative * 100, 'ro-', markersize=4, label='Cumulative')
-            ax2.set_xlabel("Principal Component", fontsize=9)
-            ax2.set_ylabel("Variance Explained (%)", fontsize=9)
-            ax2.set_title("Scree Plot", fontsize=10)
-            ax2.legend(fontsize=7, loc='center right')
-            ax2.tick_params(axis='x', rotation=45, labelsize=7)
-
-            # --- Bottom-left: PCx loadings ---
-            ax3 = fig.add_subplot(2, 2, 3)
-            loading_x = loadings[pc_x_idx, :]
-            ax3.plot(wavelengths, loading_x, color='steelblue', linewidth=0.8)
-            # Highlight top 5% wavelengths
-            threshold = np.percentile(np.abs(loading_x), 95)
-            highlight_mask = np.abs(loading_x) >= threshold
-            if np.any(highlight_mask):
-                ax3.scatter(wavelengths[highlight_mask], loading_x[highlight_mask],
-                            c='red', s=15, zorder=5, label='Top 5%')
-                ax3.legend(fontsize=7)
-            ax3.set_xlabel("Wavelength", fontsize=9)
-            ax3.set_ylabel("Loading", fontsize=9)
-            ax3.set_title(f"PC{pc_x} Loadings", fontsize=10)
-
-            # --- Bottom-right: PCy loadings ---
-            ax4 = fig.add_subplot(2, 2, 4)
-            loading_y = loadings[pc_y_idx, :]
-            ax4.plot(wavelengths, loading_y, color='steelblue', linewidth=0.8)
-            threshold_y = np.percentile(np.abs(loading_y), 95)
-            highlight_mask_y = np.abs(loading_y) >= threshold_y
-            if np.any(highlight_mask_y):
-                ax4.scatter(wavelengths[highlight_mask_y], loading_y[highlight_mask_y],
-                            c='red', s=15, zorder=5, label='Top 5%')
-                ax4.legend(fontsize=7)
-            ax4.set_xlabel("Wavelength", fontsize=9)
-            ax4.set_ylabel("Loading", fontsize=9)
-            ax4.set_title(f"PC{pc_y} Loadings", fontsize=10)
-
-            fig.tight_layout(rect=[0, 0, 1, 0.95])
-
-            # Embed in tkinter
-            canvas = FigureCanvasTkAgg(fig, master=self.explore_pca_results_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill='both', expand=True)
-
-            toolbar = NavigationToolbar2Tk(canvas, self.explore_pca_results_frame)
-            toolbar.update()
-
-            # Add export button
-            self._add_plot_export_button(self.explore_pca_results_frame, fig,
-                                          default_filename="explore_pca")
+            self._draw_explore_pca_figure()
 
         except Exception as e:
             ttk.Label(self.explore_pca_results_frame,
                       text=f"PCA failed: {e}",
                       foreground='red').pack(expand=True)
+
+    def _draw_explore_pca_figure(self):
+        """Draw (or redraw) the PCA 2x2 figure using stored results + current color map."""
+        from matplotlib.lines import Line2D
+
+        results = self._explore_pca_results
+        scores = results['scores']
+        explained_var = results['explained_var']
+        loadings = results['loadings']
+        wavelengths = results['wavelengths']
+        n_samples = results['n_samples']
+        n_features = results['n_features']
+        n_components = results['n_components']
+
+        pc_x = self.explore_pca_pc_x.get()
+        pc_y = self.explore_pca_pc_y.get()
+        pc_x_idx = pc_x - 1
+        pc_y_idx = pc_y - 1
+
+        # Clear results frame
+        for widget in self.explore_pca_results_frame.winfo_children():
+            widget.destroy()
+
+        # Get color map for scores plot
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
+        # Data state info
+        data_type = self.current_data_type.get() if hasattr(self, 'current_data_type') else "unknown"
+        info_text = f"Computed on: {n_samples} samples \u00d7 {n_features} wavelengths, {data_type}"
+
+        info_label = ttk.Label(self.explore_pca_results_frame, text=info_text,
+                                style='Caption.TLabel')
+        info_label.pack(anchor='w', pady=(0, 5))
+
+        # Create 2x2 subplot figure
+        fig = Figure(figsize=(12, 9))
+        fig.suptitle("PCA \u2014 Quick overview of spectral variance and groupings",
+                     fontsize=11, fontweight='bold')
+
+        # --- Top-left: Scores plot ---
+        ax1 = fig.add_subplot(2, 2, 1)
+
+        if color_map and len(color_map) > 0:
+            # Build per-sample color array from the index->color dict
+            n = scores.shape[0]
+            sample_colors = [color_map.get(i, (0.3, 0.5, 0.8, 1.0)) for i in range(n)]
+            ax1.scatter(scores[:, pc_x_idx], scores[:, pc_y_idx],
+                        c=sample_colors, edgecolors='black', linewidths=0.3,
+                        s=30, alpha=0.6)
+            # Build legend from legend_entries (list of (color, label) tuples)
+            if legend_entries:
+                handles = [Line2D([0], [0], marker='o', color='w',
+                                  markerfacecolor=c, markersize=7, label=lbl)
+                           for c, lbl in legend_entries]
+                ax1.legend(handles=handles, fontsize=7, loc='best',
+                           title=color_label or '')
+        else:
+            ax1.scatter(scores[:, pc_x_idx], scores[:, pc_y_idx],
+                        c='steelblue', alpha=0.6, edgecolors='black',
+                        linewidths=0.3, s=30)
+
+        ax1.set_xlabel(f"PC{pc_x} ({explained_var[pc_x_idx]*100:.1f}%)", fontsize=9)
+        ax1.set_ylabel(f"PC{pc_y} ({explained_var[pc_y_idx]*100:.1f}%)", fontsize=9)
+        ax1.set_title("Scores Plot", fontsize=10)
+        ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+        ax1.axvline(x=0, color='gray', linestyle='--', linewidth=0.5)
+
+        # --- Top-right: Scree plot ---
+        ax2 = fig.add_subplot(2, 2, 2)
+        pc_labels = [f"PC{i+1}" for i in range(n_components)]
+        cumulative = np.cumsum(explained_var)
+
+        ax2.bar(pc_labels, explained_var * 100, color='steelblue', alpha=0.7,
+                label='Individual')
+        ax2.plot(pc_labels, cumulative * 100, 'ro-', markersize=4, label='Cumulative')
+        ax2.set_xlabel("Principal Component", fontsize=9)
+        ax2.set_ylabel("Variance Explained (%)", fontsize=9)
+        ax2.set_title("Scree Plot", fontsize=10)
+        ax2.legend(fontsize=7, loc='center right')
+        ax2.tick_params(axis='x', rotation=45, labelsize=7)
+
+        # --- Bottom-left: PCx loadings ---
+        ax3 = fig.add_subplot(2, 2, 3)
+        loading_x = loadings[pc_x_idx, :]
+        ax3.plot(wavelengths, loading_x, color='steelblue', linewidth=0.8)
+        threshold = np.percentile(np.abs(loading_x), 95)
+        highlight_mask = np.abs(loading_x) >= threshold
+        if np.any(highlight_mask):
+            ax3.scatter(wavelengths[highlight_mask], loading_x[highlight_mask],
+                        c='red', s=15, zorder=5, label='Top 5%')
+            ax3.legend(fontsize=7)
+        ax3.set_xlabel("Wavelength", fontsize=9)
+        ax3.set_ylabel("Loading", fontsize=9)
+        ax3.set_title(f"PC{pc_x} Loadings", fontsize=10)
+
+        # --- Bottom-right: PCy loadings ---
+        ax4 = fig.add_subplot(2, 2, 4)
+        loading_y = loadings[pc_y_idx, :]
+        ax4.plot(wavelengths, loading_y, color='steelblue', linewidth=0.8)
+        threshold_y = np.percentile(np.abs(loading_y), 95)
+        highlight_mask_y = np.abs(loading_y) >= threshold_y
+        if np.any(highlight_mask_y):
+            ax4.scatter(wavelengths[highlight_mask_y], loading_y[highlight_mask_y],
+                        c='red', s=15, zorder=5, label='Top 5%')
+            ax4.legend(fontsize=7)
+        ax4.set_xlabel("Wavelength", fontsize=9)
+        ax4.set_ylabel("Loading", fontsize=9)
+        ax4.set_title(f"PC{pc_y} Loadings", fontsize=10)
+
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+        # Embed in tkinter — pack bottom controls first so they aren't clipped
+        bottom_frame = ttk.Frame(self.explore_pca_results_frame)
+        bottom_frame.pack(side='bottom', fill='x')
+
+        canvas = FigureCanvasTkAgg(fig, master=self.explore_pca_results_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        toolbar = NavigationToolbar2Tk(canvas, bottom_frame)
+        toolbar.update()
+
+        self._add_plot_export_button(bottom_frame, fig,
+                                      default_filename="explore_pca")
+
+        # Click handler for scores plot point identification
+        _scores = scores
+        _pc_x_idx = pc_x_idx
+        _pc_y_idx = pc_y_idx
+        _ax1 = ax1
+
+        def on_explore_pca_click(event):
+            if event.inaxes != _ax1:
+                return
+            click_x, click_y = event.xdata, event.ydata
+            if click_x is None or click_y is None:
+                return
+
+            distances = np.sqrt(
+                (_scores[:, _pc_x_idx] - click_x) ** 2
+                + (_scores[:, _pc_y_idx] - click_y) ** 2
+            )
+            nearest_idx = np.argmin(distances)
+
+            x_range = _ax1.get_xlim()[1] - _ax1.get_xlim()[0]
+            y_range = _ax1.get_ylim()[1] - _ax1.get_ylim()[0]
+            threshold = 0.1 * np.sqrt(x_range ** 2 + y_range ** 2)
+            if distances[nearest_idx] >= threshold:
+                return
+
+            sc_x = _scores[nearest_idx, _pc_x_idx]
+            sc_y = _scores[nearest_idx, _pc_y_idx]
+
+            y_value = self.y.values[nearest_idx] if self.y is not None else None
+            extra_info = {
+                f'PC{pc_x}': f'{sc_x:.3f}',
+                f'PC{pc_y}': f'{sc_y:.3f}',
+            }
+            info_text = self._format_specimen_info(
+                nearest_idx, y_value=y_value, extra_info=extra_info
+            )
+            self._create_or_update_annotation(_ax1, sc_x, sc_y, info_text, canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_explore_pca_click)
+
+    def _recolor_explore_pca(self):
+        """Recolor an already-computed PCA plot when the color-by dropdown changes."""
+        if not hasattr(self, '_explore_pca_results') or self._explore_pca_results is None:
+            return
+        try:
+            self._draw_explore_pca_figure()
+        except Exception as e:
+            print(f"Warning: Could not recolor PCA plot: {e}")
 
     def _setup_explore_predictor_screening(self):
         """Set up the Predictor Screening UI within the Explore tab."""
@@ -6294,6 +6384,8 @@ class SpectralPredictApp:
             self._generate_explore_airpls_plot()
         except Exception as e:
             print(f"Warning: Could not regenerate airPLS baseline plot: {e}")
+        # Recolor PCA scores if already computed (no PCA recomputation)
+        self._recolor_explore_pca()
 
     def _generate_explore_plots(self):
         """Generate all plots for the Explore tab."""
