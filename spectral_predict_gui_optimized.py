@@ -6733,9 +6733,12 @@ class SpectralPredictApp:
         ctrl.pack(fill='x', padx=20, pady=(5, 0))
         ttk.Label(ctrl, text="Degree:").pack(side='left', padx=(0, 5))
         ttk.Spinbox(ctrl, from_=1, to=5, textvariable=self._explore_polybl_degree,
-                    width=3).pack(side='left', padx=(0, 10))
-        ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
-                   command=self._refresh_polybl_plot).pack(side='left', padx=(0, 10))
+                    width=3, command=self._auto_refresh_polybl).pack(side='left', padx=(0, 10))
+        refresh_btn = ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_polybl_plot)
+        refresh_btn.pack(side='left', padx=(0, 10))
+        if self._should_auto_refresh_explore():
+            refresh_btn['state'] = 'disabled'
         ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
                    command=lambda: self._save_corrected_spectra("polybl")).pack(side='left', padx=(0, 5))
         ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
@@ -6784,6 +6787,7 @@ class SpectralPredictApp:
             state='readonly', width=6
         )
         lam_combo.pack(side='left', padx=(0, 10))
+        lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_als)
 
         ttk.Label(ctrl, text="p:").pack(side='left', padx=(0, 5))
         p_combo = ttk.Combobox(
@@ -6792,9 +6796,13 @@ class SpectralPredictApp:
             state='readonly', width=6
         )
         p_combo.pack(side='left', padx=(0, 10))
+        p_combo.bind('<<ComboboxSelected>>', self._auto_refresh_als)
 
-        ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
-                   command=self._refresh_als_plot).pack(side='left', padx=(0, 10))
+        refresh_btn = ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_als_plot)
+        refresh_btn.pack(side='left', padx=(0, 10))
+        if self._should_auto_refresh_explore():
+            refresh_btn['state'] = 'disabled'
         ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
                    command=lambda: self._save_corrected_spectra("als")).pack(side='left', padx=(0, 5))
         ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
@@ -6844,9 +6852,13 @@ class SpectralPredictApp:
             state='readonly', width=6
         )
         lam_combo.pack(side='left', padx=(0, 10))
+        lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_airpls)
 
-        ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
-                   command=self._refresh_airpls_plot).pack(side='left', padx=(0, 10))
+        refresh_btn = ttk.Button(ctrl, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_airpls_plot)
+        refresh_btn.pack(side='left', padx=(0, 10))
+        if self._should_auto_refresh_explore():
+            refresh_btn['state'] = 'disabled'
         ttk.Button(ctrl, text="Export Changes", style='Modern.TButton',
                    command=lambda: self._save_corrected_spectra("airpls")).pack(side='left', padx=(0, 5))
         ttk.Button(ctrl, text="Replace Working Data", style='Modern.TButton',
@@ -7013,22 +7025,26 @@ class SpectralPredictApp:
         self._custom_smooth_sg_frame = ttk.Frame(smooth_lf)
         ttk.Label(self._custom_smooth_sg_frame, text="Window:").pack(side='left', padx=(5, 2))
         ttk.Spinbox(self._custom_smooth_sg_frame, textvariable=self._explore_custom_sg_window,
-                     from_=5, to=51, increment=2, width=4).pack(side='left', padx=(0, 8))
+                     from_=5, to=51, increment=2, width=4,
+                     command=self._auto_refresh_custom).pack(side='left', padx=(0, 8))
         ttk.Label(self._custom_smooth_sg_frame, text="Polyorder:").pack(side='left', padx=(0, 2))
         ttk.Spinbox(self._custom_smooth_sg_frame, textvariable=self._explore_custom_sg_polyorder,
-                     from_=1, to=5, increment=1, width=3).pack(side='left')
+                     from_=1, to=5, increment=1, width=3,
+                     command=self._auto_refresh_custom).pack(side='left')
 
         # MA params
         self._custom_smooth_ma_frame = ttk.Frame(smooth_lf)
         ttk.Label(self._custom_smooth_ma_frame, text="Window:").pack(side='left', padx=(5, 2))
         ttk.Spinbox(self._custom_smooth_ma_frame, textvariable=self._explore_custom_ma_window,
-                     from_=3, to=51, increment=2, width=4).pack(side='left')
+                     from_=3, to=51, increment=2, width=4,
+                     command=self._auto_refresh_custom).pack(side='left')
 
         # Gaussian params
         self._custom_smooth_gauss_frame = ttk.Frame(smooth_lf)
         ttk.Label(self._custom_smooth_gauss_frame, text="Sigma:").pack(side='left', padx=(5, 2))
         ttk.Spinbox(self._custom_smooth_gauss_frame, textvariable=self._explore_custom_gauss_sigma,
-                     from_=0.5, to=10.0, increment=0.5, width=5, format="%.1f").pack(side='left')
+                     from_=0.5, to=10.0, increment=0.5, width=5, format="%.1f",
+                     command=self._auto_refresh_custom).pack(side='left')
 
         # -- Baseline section --
         bl_lf = ttk.LabelFrame(params_frame, text="Baseline Correction")
@@ -7049,25 +7065,32 @@ class SpectralPredictApp:
         self._custom_bl_poly_frame = ttk.Frame(bl_lf)
         ttk.Label(self._custom_bl_poly_frame, text="Degree:").pack(side='left', padx=(5, 2))
         ttk.Spinbox(self._custom_bl_poly_frame, textvariable=self._explore_custom_bl_poly_degree,
-                     from_=1, to=5, increment=1, width=3).pack(side='left')
+                     from_=1, to=5, increment=1, width=3,
+                     command=self._auto_refresh_custom).pack(side='left')
 
         # ALS params
         self._custom_bl_als_frame = ttk.Frame(bl_lf)
         ttk.Label(self._custom_bl_als_frame, text="Lambda:").pack(side='left', padx=(5, 2))
-        ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_lambda,
+        als_lam_combo = ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_lambda,
                       values=["1e3", "1e4", "1e5", "1e6", "1e7"],
-                      state='readonly', width=6).pack(side='left', padx=(0, 8))
+                      state='readonly', width=6)
+        als_lam_combo.pack(side='left', padx=(0, 8))
+        als_lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
         ttk.Label(self._custom_bl_als_frame, text="p:").pack(side='left', padx=(0, 2))
-        ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_p,
+        als_p_combo = ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_p,
                       values=["0.001", "0.005", "0.01", "0.05", "0.1"],
-                      state='readonly', width=6).pack(side='left')
+                      state='readonly', width=6)
+        als_p_combo.pack(side='left')
+        als_p_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
 
         # airPLS params
         self._custom_bl_airpls_frame = ttk.Frame(bl_lf)
         ttk.Label(self._custom_bl_airpls_frame, text="Lambda:").pack(side='left', padx=(5, 2))
-        ttk.Combobox(self._custom_bl_airpls_frame, textvariable=self._explore_custom_bl_airpls_lambda,
+        airpls_lam_combo = ttk.Combobox(self._custom_bl_airpls_frame, textvariable=self._explore_custom_bl_airpls_lambda,
                       values=["1e3", "1e4", "1e5", "1e6", "1e7"],
-                      state='readonly', width=6).pack(side='left')
+                      state='readonly', width=6)
+        airpls_lam_combo.pack(side='left')
+        airpls_lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
 
         # -- SNV + Derivative row --
         row2 = ttk.Frame(frame)
@@ -7079,7 +7102,8 @@ class SpectralPredictApp:
         snv_lf = ttk.LabelFrame(row2, text="SNV")
         snv_lf.grid(row=0, column=0, sticky='nsew', padx=(0, 5), pady=2)
         ttk.Checkbutton(snv_lf, text="Apply SNV",
-                         variable=self._explore_custom_snv).pack(padx=5, pady=4, anchor='w')
+                         variable=self._explore_custom_snv,
+                         command=self._auto_refresh_custom).pack(padx=5, pady=4, anchor='w')
 
         # Derivative section
         deriv_lf = ttk.LabelFrame(row2, text="Derivative")
@@ -7099,16 +7123,19 @@ class SpectralPredictApp:
         self._custom_deriv_params_frame = ttk.Frame(deriv_lf)
         ttk.Label(self._custom_deriv_params_frame, text="Window:").pack(side='left', padx=(5, 2))
         ttk.Spinbox(self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_window,
-                     from_=5, to=31, increment=2, width=4).pack(side='left', padx=(0, 8))
+                     from_=5, to=31, increment=2, width=4,
+                     command=self._auto_refresh_custom).pack(side='left', padx=(0, 8))
         ttk.Label(self._custom_deriv_params_frame, text="Polyorder:").pack(side='left', padx=(0, 2))
         ttk.Spinbox(self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_polyorder,
-                     from_=2, to=5, increment=1, width=3).pack(side='left')
+                     from_=2, to=5, increment=1, width=3,
+                     command=self._auto_refresh_custom).pack(side='left')
 
         # --- Action buttons ---
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill='x', padx=10, pady=(4, 2))
-        ttk.Button(btn_frame, text="Refresh", style='Modern.TButton',
-                   command=self._refresh_custom_plot).pack(side='left', padx=(0, 10))
+        self._custom_refresh_btn = ttk.Button(btn_frame, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_custom_plot)
+        self._custom_refresh_btn.pack(side='left', padx=(0, 10))
         ttk.Button(btn_frame, text="Export Changes", style='Modern.TButton',
                    command=lambda: self._save_corrected_spectra("custom")).pack(side='left', padx=(0, 5))
         ttk.Button(btn_frame, text="Replace Working Data", style='Modern.TButton',
@@ -7136,6 +7163,7 @@ class SpectralPredictApp:
                 self._custom_order_vars[i].set(old_val)
                 break
         self._explore_custom_order[position] = new_val
+        self._auto_refresh_custom()
 
     def _on_custom_smooth_change(self, event=None):
         """Show/hide smoothing parameter frames based on selected method."""
@@ -7149,6 +7177,7 @@ class SpectralPredictApp:
             self._custom_smooth_ma_frame.pack(fill='x', pady=2)
         elif method == "Gaussian":
             self._custom_smooth_gauss_frame.pack(fill='x', pady=2)
+        self._auto_refresh_custom()
 
     def _on_custom_bl_change(self, event=None):
         """Show/hide baseline parameter frames based on selected method."""
@@ -7162,6 +7191,7 @@ class SpectralPredictApp:
             self._custom_bl_als_frame.pack(fill='x', pady=2)
         elif method == "airPLS":
             self._custom_bl_airpls_frame.pack(fill='x', pady=2)
+        self._auto_refresh_custom()
 
     def _on_custom_deriv_change(self, event=None):
         """Show/hide derivative params when order != None."""
@@ -7169,6 +7199,7 @@ class SpectralPredictApp:
             self._custom_deriv_params_frame.pack(fill='x', pady=2)
         else:
             self._custom_deriv_params_frame.pack_forget()
+        self._auto_refresh_custom()
 
     def _compute_custom_spectra(self) -> np.ndarray:
         """Apply the custom preprocessing chain in the user-configured order."""
@@ -7272,6 +7303,10 @@ class SpectralPredictApp:
 
     def _generate_explore_custom_plot(self):
         """Generate the custom preprocessing plot in the Explore tab."""
+        # Update Refresh button state based on dataset size
+        if hasattr(self, '_custom_refresh_btn'):
+            self._custom_refresh_btn['state'] = 'disabled' if self._should_auto_refresh_explore() else 'normal'
+
         # Clear plot area
         for widget in self.explore_custom_plot_frame.winfo_children():
             widget.destroy()
@@ -7304,6 +7339,34 @@ class SpectralPredictApp:
                 self._generate_explore_custom_plot()
             except Exception as e:
                 print(f"Warning: Could not generate custom preprocessing plot: {e}")
+
+    # ------------------------------------------------------------------
+    # Auto-refresh for Explore parameter tabs
+    # ------------------------------------------------------------------
+
+    def _should_auto_refresh_explore(self) -> bool:
+        """Return True if dataset is small enough for auto-refresh on parameter change."""
+        return self.X is not None and len(self.X) < 1000
+
+    def _auto_refresh_custom(self, *_args):
+        """Auto-refresh Custom tab plot if dataset is small enough."""
+        if self._should_auto_refresh_explore():
+            self._refresh_custom_plot()
+
+    def _auto_refresh_polybl(self, *_args):
+        """Auto-refresh Polynomial BL tab plot if dataset is small enough."""
+        if self._should_auto_refresh_explore():
+            self._refresh_polybl_plot()
+
+    def _auto_refresh_als(self, *_args):
+        """Auto-refresh ALS tab plot if dataset is small enough."""
+        if self._should_auto_refresh_explore():
+            self._refresh_als_plot()
+
+    def _auto_refresh_airpls(self, *_args):
+        """Auto-refresh airPLS tab plot if dataset is small enough."""
+        if self._should_auto_refresh_explore():
+            self._refresh_airpls_plot()
 
     # ------------------------------------------------------------------
     # Manual Baseline Interactive Subtab
