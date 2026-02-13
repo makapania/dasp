@@ -7122,13 +7122,17 @@ class SpectralPredictApp:
 
         self._custom_deriv_params_frame = ttk.Frame(deriv_lf)
         ttk.Label(self._custom_deriv_params_frame, text="Window:").pack(side='left', padx=(5, 2))
-        ttk.Spinbox(self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_window,
-                     from_=5, to=31, increment=2, width=4,
-                     command=self._auto_refresh_custom).pack(side='left', padx=(0, 8))
+        self._custom_deriv_window_sb = ttk.Spinbox(
+            self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_window,
+            from_=5, to=31, increment=2, width=4,
+            command=self._on_custom_deriv_window_change)
+        self._custom_deriv_window_sb.pack(side='left', padx=(0, 8))
         ttk.Label(self._custom_deriv_params_frame, text="Polyorder:").pack(side='left', padx=(0, 2))
-        ttk.Spinbox(self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_polyorder,
-                     from_=2, to=5, increment=1, width=3,
-                     command=self._auto_refresh_custom).pack(side='left')
+        self._custom_deriv_polyorder_sb = ttk.Spinbox(
+            self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_polyorder,
+            from_=2, to=5, increment=1, width=3,
+            command=self._on_custom_deriv_polyorder_change)
+        self._custom_deriv_polyorder_sb.pack(side='left')
 
         # --- Action buttons ---
         btn_frame = ttk.Frame(frame)
@@ -7194,11 +7198,54 @@ class SpectralPredictApp:
         self._auto_refresh_custom()
 
     def _on_custom_deriv_change(self, event=None):
-        """Show/hide derivative params when order != None."""
-        if self._explore_custom_deriv_order.get() != "None":
+        """Show/hide derivative params when order != None, and enforce valid ranges."""
+        order_str = self._explore_custom_deriv_order.get()
+        if order_str != "None":
             self._custom_deriv_params_frame.pack(fill='x', pady=2)
+            deriv_map = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4}
+            deriv = deriv_map[order_str]
+            self._explore_custom_deriv_polyorder.set(deriv + 1)
+            self._update_custom_deriv_constraints()
         else:
             self._custom_deriv_params_frame.pack_forget()
+        self._auto_refresh_custom()
+
+    def _update_custom_deriv_constraints(self):
+        """Enforce valid SG derivative parameter ranges based on current selections."""
+        order_str = self._explore_custom_deriv_order.get()
+        if order_str == "None":
+            return
+
+        deriv_map = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4}
+        deriv = deriv_map[order_str]
+
+        # Polyorder must be >= deriv + 1 (codebase standard)
+        min_poly = deriv + 1
+        self._custom_deriv_polyorder_sb.configure(from_=min_poly)
+        if self._explore_custom_deriv_polyorder.get() < min_poly:
+            self._explore_custom_deriv_polyorder.set(min_poly)
+
+        # Window must be > polyorder, odd, and >= polyorder + 2
+        poly = self._explore_custom_deriv_polyorder.get()
+        min_window = poly + 2
+        if min_window % 2 == 0:
+            min_window += 1
+        self._custom_deriv_window_sb.configure(from_=min_window)
+        cur_window = self._explore_custom_deriv_window.get()
+        if cur_window < min_window:
+            self._explore_custom_deriv_window.set(min_window)
+
+    def _on_custom_deriv_polyorder_change(self):
+        """Handle polyorder spinbox change: update constraints then auto-refresh."""
+        self._update_custom_deriv_constraints()
+        self._auto_refresh_custom()
+
+    def _on_custom_deriv_window_change(self):
+        """Handle window spinbox change: enforce odd value, update constraints, auto-refresh."""
+        cur = self._explore_custom_deriv_window.get()
+        if cur % 2 == 0:
+            self._explore_custom_deriv_window.set(cur + 1)
+        self._update_custom_deriv_constraints()
         self._auto_refresh_custom()
 
     def _compute_custom_spectra(self) -> np.ndarray:
