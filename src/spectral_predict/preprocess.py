@@ -1,6 +1,7 @@
 """Preprocessing transformers for spectral data."""
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
 from sklearn.base import BaseEstimator, TransformerMixin
 
@@ -217,6 +218,62 @@ class SavgolSmooth(BaseEstimator, TransformerMixin):
         )
 
         return X_smooth
+
+
+class MovingAverage(BaseEstimator, TransformerMixin):
+    """Moving average smoothing.
+
+    Parameters
+    ----------
+    window_length : int, default=5
+        Window length (must be odd; if even, will be incremented by 1).
+    """
+
+    def __init__(self, window_length: int = 5):
+        self.window_length = window_length
+
+    def fit(self, X, y=None):
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        window = self.window_length
+        if window % 2 == 0:
+            window += 1
+        window = min(window, X.shape[1])
+        if window < 1:
+            window = 1
+        kernel = np.ones(window) / window
+        out = np.empty_like(X)
+        for i in range(X.shape[0]):
+            out[i] = np.convolve(X[i], kernel, mode='same')
+        return out
+
+
+class GaussianSmooth(BaseEstimator, TransformerMixin):
+    """Gaussian smoothing via 1-D Gaussian filter.
+
+    Parameters
+    ----------
+    sigma : float, default=2.0
+        Standard deviation for the Gaussian kernel.
+    """
+
+    def __init__(self, sigma: float = 2.0):
+        self.sigma = sigma
+
+    def fit(self, X, y=None):
+        X = np.asarray(X)
+        self.n_features_in_ = X.shape[1]
+        self._is_fitted = True
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return gaussian_filter1d(X, sigma=self.sigma, axis=1)
 
 
 def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyorder=None,

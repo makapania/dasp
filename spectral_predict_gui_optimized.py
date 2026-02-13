@@ -2580,6 +2580,27 @@ class SpectralPredictApp:
         self._explore_als_p = tk.StringVar(value="0.001")
         self._explore_airpls_lambda = tk.StringVar(value="1e5")
 
+        # Custom Explore tab state — processing order
+        self._explore_custom_order = ["Smoothing", "Baseline", "SNV", "Derivative"]
+        # Smoothing params
+        self._explore_custom_smooth_method = tk.StringVar(value="None")
+        self._explore_custom_sg_window = tk.IntVar(value=17)
+        self._explore_custom_sg_polyorder = tk.IntVar(value=2)
+        self._explore_custom_ma_window = tk.IntVar(value=5)
+        self._explore_custom_gauss_sigma = tk.DoubleVar(value=2.0)
+        # Baseline params
+        self._explore_custom_bl_method = tk.StringVar(value="None")
+        self._explore_custom_bl_poly_degree = tk.IntVar(value=2)
+        self._explore_custom_bl_als_lambda = tk.StringVar(value="1e5")
+        self._explore_custom_bl_als_p = tk.StringVar(value="0.001")
+        self._explore_custom_bl_airpls_lambda = tk.StringVar(value="1e5")
+        # SNV
+        self._explore_custom_snv = tk.BooleanVar(value=False)
+        # Derivative params
+        self._explore_custom_deriv_order = tk.StringVar(value="None")
+        self._explore_custom_deriv_window = tk.IntVar(value=7)
+        self._explore_custom_deriv_polyorder = tk.IntVar(value=2)
+
         # Manual baseline state
         self._mbl_points = []  # list of (wavelength, intensity) tuples
         self._mbl_interp_var = tk.StringVar(value="Linear")
@@ -5990,6 +6011,11 @@ class SpectralPredictApp:
         self.explore_notebook.add(self.explore_manual_bl_frame, text="  Manual Baseline  ")
         self._setup_explore_manual_baseline()
 
+        # Custom preprocessing sub-tab
+        self.explore_custom_frame = ttk.Frame(self.explore_notebook)
+        self.explore_notebook.add(self.explore_custom_frame, text="  Custom  ")
+        self._setup_explore_custom()
+
         # PCA sub-tab
         self.explore_pca_frame = ttk.Frame(self.explore_notebook)
         self.explore_notebook.add(self.explore_pca_frame, text="  PCA  ")
@@ -6384,6 +6410,10 @@ class SpectralPredictApp:
             self._generate_explore_airpls_plot()
         except Exception as e:
             print(f"Warning: Could not regenerate airPLS baseline plot: {e}")
+        try:
+            self._generate_explore_custom_plot()
+        except Exception as e:
+            print(f"Warning: Could not regenerate custom preprocessing plot: {e}")
         # Recolor PCA scores if already computed (no PCA recomputation)
         self._recolor_explore_pca()
 
@@ -6459,6 +6489,11 @@ class SpectralPredictApp:
             self._init_manual_baseline_plot()
         except Exception as e:
             print(f"Warning: Could not initialize manual baseline plot: {e}")
+
+        try:
+            self._generate_explore_custom_plot()
+        except Exception as e:
+            print(f"Warning: Could not generate custom preprocessing plot: {e}")
 
     def _generate_explore_spectra_plot(self):
         """Generate the raw spectra plot in the Explore tab."""
@@ -6842,10 +6877,12 @@ class SpectralPredictApp:
                 print(f"Warning: Could not regenerate airPLS baseline plot: {e}")
 
     def _compute_corrected_spectra(self, method: str) -> np.ndarray:
-        """Compute baseline-corrected spectra for the given method.
+        """Compute corrected spectra for the given method.
 
         Returns corrected array (n_samples x n_wavelengths).
         """
+        if method == "custom":
+            return self._compute_custom_spectra()
         X_vals = self.X.values.copy()
         if method == "rubberband":
             from spectral_predict.baseline import rubber_band_baseline
@@ -6897,13 +6934,17 @@ class SpectralPredictApp:
             messagebox.showerror("Save Error", f"Failed to save:\n{str(e)}")
 
     def _replace_working_data(self, method: str):
-        """Replace self.X with baseline-corrected spectra."""
+        """Replace self.X with corrected spectra."""
         if self.X is None:
             return
+        if method == "custom":
+            desc = "custom preprocessing"
+        else:
+            desc = f"{method} baseline-corrected"
         if not messagebox.askyesno(
             "Replace Working Data",
-            f"This will replace your current spectral data with {method} "
-            "baseline-corrected spectra.\n\nThis cannot be undone. Continue?"
+            f"This will replace your current spectral data with {desc} "
+            "spectra.\n\nThis cannot be undone. Continue?"
         ):
             return
 
@@ -6913,9 +6954,356 @@ class SpectralPredictApp:
             self.X_original = self.X.copy()
             self._generate_explore_plots()
             messagebox.showinfo("Done", "Working data replaced with corrected spectra.")
-            print(f"> Replaced working data with {method} baseline correction")
+            print(f"> Replaced working data with {desc}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to replace data:\n{str(e)}")
+
+    # ------------------------------------------------------------------
+    # Custom Preprocessing Subtab
+    # ------------------------------------------------------------------
+
+    def _setup_explore_custom(self):
+        """Build the persistent UI for the Custom preprocessing subtab."""
+        frame = self.explore_custom_frame
+
+        # --- Processing Order row ---
+        order_frame = ttk.LabelFrame(frame, text="Processing Order")
+        order_frame.pack(fill='x', padx=10, pady=(5, 2))
+
+        order_inner = ttk.Frame(order_frame)
+        order_inner.pack(fill='x', padx=10, pady=5)
+
+        steps = ["Smoothing", "Baseline", "SNV", "Derivative"]
+        self._custom_order_vars = [tk.StringVar(value=s) for s in self._explore_custom_order]
+        self._custom_order_combos = []
+        for idx in range(4):
+            ttk.Label(order_inner, text=f"Step {idx + 1}:").pack(side='left', padx=(0 if idx == 0 else 10, 2))
+            combo = ttk.Combobox(
+                order_inner, textvariable=self._custom_order_vars[idx],
+                values=steps, state='readonly', width=10
+            )
+            combo.pack(side='left')
+            combo.bind('<<ComboboxSelected>>', lambda e, pos=idx: self._on_custom_order_change(pos))
+            self._custom_order_combos.append(combo)
+            if idx < 3:
+                ttk.Label(order_inner, text="\u2192").pack(side='left', padx=5)
+
+        # --- Parameter sections (fixed visual layout) ---
+        params_frame = ttk.Frame(frame)
+        params_frame.pack(fill='x', padx=10, pady=2)
+        params_frame.columnconfigure(0, weight=1)
+        params_frame.columnconfigure(1, weight=1)
+
+        # -- Smoothing section --
+        smooth_lf = ttk.LabelFrame(params_frame, text="Smoothing")
+        smooth_lf.grid(row=0, column=0, sticky='nsew', padx=(0, 5), pady=2)
+
+        smooth_top = ttk.Frame(smooth_lf)
+        smooth_top.pack(fill='x', padx=5, pady=2)
+        ttk.Label(smooth_top, text="Method:").pack(side='left', padx=(0, 5))
+        smooth_combo = ttk.Combobox(
+            smooth_top, textvariable=self._explore_custom_smooth_method,
+            values=["None", "Savitzky-Golay", "Moving Average", "Gaussian"],
+            state='readonly', width=14
+        )
+        smooth_combo.pack(side='left')
+        smooth_combo.bind('<<ComboboxSelected>>', self._on_custom_smooth_change)
+
+        # SG smooth params
+        self._custom_smooth_sg_frame = ttk.Frame(smooth_lf)
+        ttk.Label(self._custom_smooth_sg_frame, text="Window:").pack(side='left', padx=(5, 2))
+        ttk.Spinbox(self._custom_smooth_sg_frame, textvariable=self._explore_custom_sg_window,
+                     from_=5, to=51, increment=2, width=4).pack(side='left', padx=(0, 8))
+        ttk.Label(self._custom_smooth_sg_frame, text="Polyorder:").pack(side='left', padx=(0, 2))
+        ttk.Spinbox(self._custom_smooth_sg_frame, textvariable=self._explore_custom_sg_polyorder,
+                     from_=1, to=5, increment=1, width=3).pack(side='left')
+
+        # MA params
+        self._custom_smooth_ma_frame = ttk.Frame(smooth_lf)
+        ttk.Label(self._custom_smooth_ma_frame, text="Window:").pack(side='left', padx=(5, 2))
+        ttk.Spinbox(self._custom_smooth_ma_frame, textvariable=self._explore_custom_ma_window,
+                     from_=3, to=51, increment=2, width=4).pack(side='left')
+
+        # Gaussian params
+        self._custom_smooth_gauss_frame = ttk.Frame(smooth_lf)
+        ttk.Label(self._custom_smooth_gauss_frame, text="Sigma:").pack(side='left', padx=(5, 2))
+        ttk.Spinbox(self._custom_smooth_gauss_frame, textvariable=self._explore_custom_gauss_sigma,
+                     from_=0.5, to=10.0, increment=0.5, width=5, format="%.1f").pack(side='left')
+
+        # -- Baseline section --
+        bl_lf = ttk.LabelFrame(params_frame, text="Baseline Correction")
+        bl_lf.grid(row=0, column=1, sticky='nsew', padx=(5, 0), pady=2)
+
+        bl_top = ttk.Frame(bl_lf)
+        bl_top.pack(fill='x', padx=5, pady=2)
+        ttk.Label(bl_top, text="Method:").pack(side='left', padx=(0, 5))
+        bl_combo = ttk.Combobox(
+            bl_top, textvariable=self._explore_custom_bl_method,
+            values=["None", "Rubber Band", "Polynomial", "ALS", "airPLS"],
+            state='readonly', width=14
+        )
+        bl_combo.pack(side='left')
+        bl_combo.bind('<<ComboboxSelected>>', self._on_custom_bl_change)
+
+        # Polynomial params
+        self._custom_bl_poly_frame = ttk.Frame(bl_lf)
+        ttk.Label(self._custom_bl_poly_frame, text="Degree:").pack(side='left', padx=(5, 2))
+        ttk.Spinbox(self._custom_bl_poly_frame, textvariable=self._explore_custom_bl_poly_degree,
+                     from_=1, to=5, increment=1, width=3).pack(side='left')
+
+        # ALS params
+        self._custom_bl_als_frame = ttk.Frame(bl_lf)
+        ttk.Label(self._custom_bl_als_frame, text="Lambda:").pack(side='left', padx=(5, 2))
+        ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_lambda,
+                      values=["1e3", "1e4", "1e5", "1e6", "1e7"],
+                      state='readonly', width=6).pack(side='left', padx=(0, 8))
+        ttk.Label(self._custom_bl_als_frame, text="p:").pack(side='left', padx=(0, 2))
+        ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_p,
+                      values=["0.001", "0.005", "0.01", "0.05", "0.1"],
+                      state='readonly', width=6).pack(side='left')
+
+        # airPLS params
+        self._custom_bl_airpls_frame = ttk.Frame(bl_lf)
+        ttk.Label(self._custom_bl_airpls_frame, text="Lambda:").pack(side='left', padx=(5, 2))
+        ttk.Combobox(self._custom_bl_airpls_frame, textvariable=self._explore_custom_bl_airpls_lambda,
+                      values=["1e3", "1e4", "1e5", "1e6", "1e7"],
+                      state='readonly', width=6).pack(side='left')
+
+        # -- SNV + Derivative row --
+        row2 = ttk.Frame(frame)
+        row2.pack(fill='x', padx=10, pady=2)
+        row2.columnconfigure(0, weight=1)
+        row2.columnconfigure(1, weight=3)
+
+        # SNV section
+        snv_lf = ttk.LabelFrame(row2, text="SNV")
+        snv_lf.grid(row=0, column=0, sticky='nsew', padx=(0, 5), pady=2)
+        ttk.Checkbutton(snv_lf, text="Apply SNV",
+                         variable=self._explore_custom_snv).pack(padx=5, pady=4, anchor='w')
+
+        # Derivative section
+        deriv_lf = ttk.LabelFrame(row2, text="Derivative")
+        deriv_lf.grid(row=0, column=1, sticky='nsew', padx=(5, 0), pady=2)
+
+        deriv_top = ttk.Frame(deriv_lf)
+        deriv_top.pack(fill='x', padx=5, pady=2)
+        ttk.Label(deriv_top, text="Order:").pack(side='left', padx=(0, 5))
+        deriv_combo = ttk.Combobox(
+            deriv_top, textvariable=self._explore_custom_deriv_order,
+            values=["None", "1st", "2nd", "3rd", "4th"],
+            state='readonly', width=5
+        )
+        deriv_combo.pack(side='left')
+        deriv_combo.bind('<<ComboboxSelected>>', self._on_custom_deriv_change)
+
+        self._custom_deriv_params_frame = ttk.Frame(deriv_lf)
+        ttk.Label(self._custom_deriv_params_frame, text="Window:").pack(side='left', padx=(5, 2))
+        ttk.Spinbox(self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_window,
+                     from_=5, to=31, increment=2, width=4).pack(side='left', padx=(0, 8))
+        ttk.Label(self._custom_deriv_params_frame, text="Polyorder:").pack(side='left', padx=(0, 2))
+        ttk.Spinbox(self._custom_deriv_params_frame, textvariable=self._explore_custom_deriv_polyorder,
+                     from_=2, to=5, increment=1, width=3).pack(side='left')
+
+        # --- Action buttons ---
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill='x', padx=10, pady=(4, 2))
+        ttk.Button(btn_frame, text="Refresh", style='Modern.TButton',
+                   command=self._refresh_custom_plot).pack(side='left', padx=(0, 10))
+        ttk.Button(btn_frame, text="Export Changes", style='Modern.TButton',
+                   command=lambda: self._save_corrected_spectra("custom")).pack(side='left', padx=(0, 5))
+        ttk.Button(btn_frame, text="Replace Working Data", style='Modern.TButton',
+                   command=lambda: self._replace_working_data("custom")).pack(side='left')
+
+        # --- Plot area ---
+        ttk.Separator(frame, orient='horizontal').pack(fill='x', padx=10, pady=2)
+        self.explore_custom_plot_frame = ttk.Frame(frame)
+        self.explore_custom_plot_frame.pack(fill='both', expand=True, padx=10, pady=2)
+        ttk.Label(self.explore_custom_plot_frame,
+                  text="Load data and click Refresh to preview custom preprocessing",
+                  style='Caption.TLabel').pack(expand=True)
+
+    def _on_custom_order_change(self, position: int):
+        """Handle a change in one of the processing-order dropdowns (swap logic)."""
+        new_val = self._custom_order_vars[position].get()
+        old_val = self._explore_custom_order[position]
+        if new_val == old_val:
+            return
+        # Find which other position currently holds new_val
+        for i, step in enumerate(self._explore_custom_order):
+            if step == new_val and i != position:
+                # Swap
+                self._explore_custom_order[i] = old_val
+                self._custom_order_vars[i].set(old_val)
+                break
+        self._explore_custom_order[position] = new_val
+
+    def _on_custom_smooth_change(self, event=None):
+        """Show/hide smoothing parameter frames based on selected method."""
+        for f in (self._custom_smooth_sg_frame, self._custom_smooth_ma_frame,
+                  self._custom_smooth_gauss_frame):
+            f.pack_forget()
+        method = self._explore_custom_smooth_method.get()
+        if method == "Savitzky-Golay":
+            self._custom_smooth_sg_frame.pack(fill='x', pady=2)
+        elif method == "Moving Average":
+            self._custom_smooth_ma_frame.pack(fill='x', pady=2)
+        elif method == "Gaussian":
+            self._custom_smooth_gauss_frame.pack(fill='x', pady=2)
+
+    def _on_custom_bl_change(self, event=None):
+        """Show/hide baseline parameter frames based on selected method."""
+        for f in (self._custom_bl_poly_frame, self._custom_bl_als_frame,
+                  self._custom_bl_airpls_frame):
+            f.pack_forget()
+        method = self._explore_custom_bl_method.get()
+        if method == "Polynomial":
+            self._custom_bl_poly_frame.pack(fill='x', pady=2)
+        elif method == "ALS":
+            self._custom_bl_als_frame.pack(fill='x', pady=2)
+        elif method == "airPLS":
+            self._custom_bl_airpls_frame.pack(fill='x', pady=2)
+
+    def _on_custom_deriv_change(self, event=None):
+        """Show/hide derivative params when order != None."""
+        if self._explore_custom_deriv_order.get() != "None":
+            self._custom_deriv_params_frame.pack(fill='x', pady=2)
+        else:
+            self._custom_deriv_params_frame.pack_forget()
+
+    def _compute_custom_spectra(self) -> np.ndarray:
+        """Apply the custom preprocessing chain in the user-configured order."""
+        from spectral_predict.preprocess import (
+            SNV, SavgolDerivative, SavgolSmooth, MovingAverage, GaussianSmooth,
+        )
+        from spectral_predict.baseline import (
+            BaselinePolynomial, BaselineALS, BaselineAirPLS, rubber_band_baseline,
+        )
+
+        data = self.X.values.copy()
+
+        for step_name in self._explore_custom_order:
+            if step_name == "Smoothing":
+                method = self._explore_custom_smooth_method.get()
+                if method == "Savitzky-Golay":
+                    w = self._explore_custom_sg_window.get()
+                    p = self._explore_custom_sg_polyorder.get()
+                    data = SavgolSmooth(window_length=w, polyorder=p).fit_transform(data)
+                elif method == "Moving Average":
+                    w = self._explore_custom_ma_window.get()
+                    data = MovingAverage(window_length=w).fit_transform(data)
+                elif method == "Gaussian":
+                    s = self._explore_custom_gauss_sigma.get()
+                    data = GaussianSmooth(sigma=s).fit_transform(data)
+
+            elif step_name == "Baseline":
+                method = self._explore_custom_bl_method.get()
+                if method == "Rubber Band":
+                    corrected = np.zeros_like(data)
+                    for i in range(data.shape[0]):
+                        bl = rubber_band_baseline(data[i])
+                        corrected[i] = data[i] - bl
+                    data = corrected
+                elif method == "Polynomial":
+                    deg = self._explore_custom_bl_poly_degree.get()
+                    data = BaselinePolynomial(degree=deg).fit_transform(data)
+                elif method == "ALS":
+                    lam = float(self._explore_custom_bl_als_lambda.get())
+                    p = float(self._explore_custom_bl_als_p.get())
+                    data = BaselineALS(lambda_=lam, p=p).fit_transform(data)
+                elif method == "airPLS":
+                    lam = float(self._explore_custom_bl_airpls_lambda.get())
+                    data = BaselineAirPLS(lam=lam).fit_transform(data)
+
+            elif step_name == "SNV":
+                if self._explore_custom_snv.get():
+                    data = SNV().fit_transform(data)
+
+            elif step_name == "Derivative":
+                order_str = self._explore_custom_deriv_order.get()
+                if order_str != "None":
+                    deriv_map = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4}
+                    d = deriv_map[order_str]
+                    w = self._explore_custom_deriv_window.get()
+                    p = self._explore_custom_deriv_polyorder.get()
+                    data = SavgolDerivative(deriv=d, window=w, polyorder=p).fit_transform(data)
+
+        return data
+
+    def _build_custom_title(self) -> str:
+        """Build a descriptive title string showing active steps in configured order."""
+        parts = []
+        for step_name in self._explore_custom_order:
+            if step_name == "Smoothing":
+                method = self._explore_custom_smooth_method.get()
+                if method == "Savitzky-Golay":
+                    w = self._explore_custom_sg_window.get()
+                    parts.append(f"SG Smooth(w={w})")
+                elif method == "Moving Average":
+                    w = self._explore_custom_ma_window.get()
+                    parts.append(f"MA(w={w})")
+                elif method == "Gaussian":
+                    s = self._explore_custom_gauss_sigma.get()
+                    parts.append(f"Gauss(\u03c3={s})")
+            elif step_name == "Baseline":
+                method = self._explore_custom_bl_method.get()
+                if method == "Rubber Band":
+                    parts.append("RubberBand")
+                elif method == "Polynomial":
+                    deg = self._explore_custom_bl_poly_degree.get()
+                    parts.append(f"PolyBL(deg={deg})")
+                elif method == "ALS":
+                    lam = self._explore_custom_bl_als_lambda.get()
+                    p = self._explore_custom_bl_als_p.get()
+                    parts.append(f"ALS(\u03bb={lam}, p={p})")
+                elif method == "airPLS":
+                    lam = self._explore_custom_bl_airpls_lambda.get()
+                    parts.append(f"airPLS(\u03bb={lam})")
+            elif step_name == "SNV":
+                if self._explore_custom_snv.get():
+                    parts.append("SNV")
+            elif step_name == "Derivative":
+                order_str = self._explore_custom_deriv_order.get()
+                if order_str != "None":
+                    w = self._explore_custom_deriv_window.get()
+                    parts.append(f"{order_str} Deriv(w={w})")
+        if not parts:
+            return "Custom: No transforms (original data)"
+        return "Custom: " + " \u2192 ".join(parts)
+
+    def _generate_explore_custom_plot(self):
+        """Generate the custom preprocessing plot in the Explore tab."""
+        # Clear plot area
+        for widget in self.explore_custom_plot_frame.winfo_children():
+            widget.destroy()
+
+        try:
+            data = self._compute_custom_spectra()
+        except Exception as e:
+            ttk.Label(self.explore_custom_plot_frame,
+                      text=f"Error: {e}", foreground='red').pack(expand=True)
+            return
+
+        title = self._build_custom_title()
+        color_map, legend_entries, color_label = self._get_explore_color_map()
+
+        self._create_explore_plot_in_frame(
+            self.explore_custom_plot_frame,
+            title,
+            data,
+            "Intensity",
+            "purple",
+            color_map=color_map,
+            legend_entries=legend_entries,
+            color_label=color_label,
+        )
+
+    def _refresh_custom_plot(self):
+        """Refresh the custom preprocessing plot."""
+        if self.X is not None:
+            try:
+                self._generate_explore_custom_plot()
+            except Exception as e:
+                print(f"Warning: Could not generate custom preprocessing plot: {e}")
 
     # ------------------------------------------------------------------
     # Manual Baseline Interactive Subtab
