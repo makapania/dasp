@@ -14911,6 +14911,23 @@ class SpectralPredictApp:
         wl_min = self.wavelength_min.get().strip()
         wl_max = self.wavelength_max.get().strip()
 
+        # Round wavelength columns to integers for consistency
+        # (all_vars/top_vars store integers; spectrometer resolution is always >=1nm)
+        rounded_cols = self.X_original.columns.astype(float).round().astype(int)
+
+        # Guard: if rounding causes duplicate columns, the data has sub-nm spacing
+        if len(set(rounded_cols)) < len(rounded_cols):
+            n_dupes = len(rounded_cols) - len(set(rounded_cols))
+            messagebox.showerror(
+                "Sub-nanometer Wavelengths",
+                f"This dataset has {n_dupes} wavelengths that collapse when rounded "
+                f"to integers (e.g., 350.1 and 350.2 both become 350).\n\n"
+                f"Sub-nanometer resolution data is not currently supported."
+            )
+            return
+
+        self.X_original.columns = rounded_cols
+
         # Start with full data
         self.X = self.X_original.copy()
 
@@ -28424,24 +28441,12 @@ F1 Score:  {f1:.4f}
             else:
                 wavelength_columns = self.X_original.columns
 
-            # Use tolerance-based matching to handle float representation differences
-            # (e.g., JSON string→float vs pandas column→float can differ beyond round(6))
-            col_floats = np.array([float(col) for col in wavelength_columns])
-            selected_cols = []
-            for wl in selected_wl:
-                diffs = np.abs(col_floats - wl)
-                min_idx = int(np.argmin(diffs))
-                if diffs[min_idx] < 0.01:  # 0.01 nm tolerance (well below spectrometer resolution)
-                    selected_cols.append(wavelength_columns[min_idx])
+            wl_to_col = {float(col): col for col in wavelength_columns}
+
+            # Get the actual column names for selected wavelengths
+            selected_cols = [wl_to_col[wl] for wl in selected_wl if wl in wl_to_col]
 
             if not selected_cols:
-                # Diagnostic output to help debug the mismatch
-                print(f"DEBUG WAVELENGTH MISMATCH:")
-                print(f"  selected_wl type: {type(selected_wl[0]).__name__}, first 5: {selected_wl[:5]}")
-                print(f"  column type: {type(wavelength_columns[0]).__name__}, first 5: {list(wavelength_columns[:5])}")
-                print(f"  col_floats first 5: {col_floats[:5]}")
-                if len(selected_wl) > 0 and len(col_floats) > 0:
-                    print(f"  min diff between first selected and all cols: {np.min(np.abs(col_floats - selected_wl[0]))}")
                 raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
 
             # Determine how many folds we'll run so we can validate sample counts
