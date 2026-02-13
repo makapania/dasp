@@ -2627,6 +2627,8 @@ class SpectralPredictApp:
         self.rmse_ratio_filter_enabled = tk.BooleanVar(value=False)  # Toggle RMSE ratio filter
         self.expert_fit_enabled = tk.BooleanVar(value=True)        # Toggle expert fit indicators (top 3 per model type)
         self.rmse_ratio_threshold = tk.DoubleVar(value=1.2)          # RMSE ratio threshold (RMSEcv/RMSE)
+        self.rmsep_ratio_filter_enabled = tk.BooleanVar(value=False)  # Toggle RMSEP/RMSEcv ratio filter
+        self.rmsep_ratio_threshold = tk.DoubleVar(value=1.3)          # RMSEP/RMSEcv ratio threshold
 
         # Tier selection
         self.model_tier = tk.StringVar(value="quick")  # quick, standard, comprehensive, experimental, custom
@@ -23478,6 +23480,30 @@ For detailed documentation, see the User Guide.
             rmse_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmse_ratio_toggle_changed())
             ttk.Label(rmse_ratio_frame, text=")").pack(side='left')
 
+            # Regression only: RMSEP/RMSEcv ratio filter (only when validation data exists)
+            if (self.results_df is not None
+                    and 'RMSEP' in self.results_df.columns
+                    and self.results_df['RMSEP'].notna().any()):
+                rmsep_ratio_frame = ttk.Frame(self.filter_controls_frame)
+                rmsep_ratio_frame.pack(side='left', padx=(0, 10))
+                rmsep_ratio_checkbox = ttk.Checkbutton(
+                    rmsep_ratio_frame,
+                    text="RMSEP/RMSEcv (>",
+                    variable=self.rmsep_ratio_filter_enabled,
+                    command=self._on_rmsep_ratio_toggle_changed
+                )
+                rmsep_ratio_checkbox.pack(side='left')
+                rmsep_ratio_combo = ttk.Combobox(
+                    rmsep_ratio_frame,
+                    textvariable=self.rmsep_ratio_threshold,
+                    values=["1.1", "1.2", "1.3", "1.5", "2.0"],
+                    width=4,
+                    state="readonly"
+                )
+                rmsep_ratio_combo.pack(side='left', padx=2)
+                rmsep_ratio_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rmsep_ratio_toggle_changed())
+                ttk.Label(rmsep_ratio_frame, text=")").pack(side='left')
+
         # Expert Fit toggle (both classification and regression)
         expert_fit_frame = ttk.Frame(self.filter_controls_frame)
         expert_fit_frame.pack(side='left', padx=(0, 10))
@@ -23619,6 +23645,10 @@ For detailed documentation, see the User Guide.
         """Handle RMSE ratio filter toggle - refresh row styling."""
         self._refresh_row_tags()
 
+    def _on_rmsep_ratio_toggle_changed(self):
+        """Handle RMSEP/RMSEcv ratio filter toggle - refresh row styling."""
+        self._refresh_row_tags()
+
     def _on_expert_fit_toggle_changed(self):
         """Handle expert fit toggle - update Rank column to show/hide ★/● symbols."""
         if self.results_df is None:
@@ -23665,11 +23695,12 @@ For detailed documentation, see the User Guide.
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
         overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
         rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
+        rmsep_ratio_enabled = hasattr(self, 'rmsep_ratio_filter_enabled') and self.rmsep_ratio_filter_enabled.get()
         expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
 
         for row_id in self.results_tree.get_children():
             idx = int(row_id)
-            if color_enabled or overfit_enabled or rmse_ratio_enabled or expert_fit_enabled:
+            if color_enabled or overfit_enabled or rmse_ratio_enabled or rmsep_ratio_enabled or expert_fit_enabled:
                 # Re-apply appropriate tag based on rankings, expert choice, and overfit state
                 tag = self._get_highlight_tag_for_row(idx)
                 self.results_tree.item(row_id, tags=tag)
@@ -23692,7 +23723,8 @@ For detailed documentation, see the User Guide.
         is_overfit = self._is_model_overfit(idx)
         overfit_enabled = hasattr(self, 'overfit_filter_enabled') and self.overfit_filter_enabled.get()
         rmse_ratio_enabled = hasattr(self, 'rmse_ratio_filter_enabled') and self.rmse_ratio_filter_enabled.get()
-        any_overfit_filter = overfit_enabled or rmse_ratio_enabled
+        rmsep_ratio_enabled = hasattr(self, 'rmsep_ratio_filter_enabled') and self.rmsep_ratio_filter_enabled.get()
+        any_overfit_filter = overfit_enabled or rmse_ratio_enabled or rmsep_ratio_enabled
         color_enabled = hasattr(self, 'highlight_colors_enabled') and self.highlight_colors_enabled.get()
 
         # Check classification rankings first
@@ -23738,6 +23770,7 @@ For detailed documentation, see the User Guide.
         """Check if model exceeds R²/Acc threshold OR RMSE ratio threshold.
 
         For regression: Checks if (R2 - R2cv > threshold) OR (RMSEcv/RMSE > ratio_threshold)
+                       OR (RMSEP/RMSEcv > rmsep_ratio_threshold) when validation data exists
         For classification: Checks if Accuracy - Accuracycv > threshold
 
         Args:
@@ -23790,8 +23823,22 @@ For detailed documentation, see the User Guide.
                             ratio = rmsecv_val / rmse_val
                             rmse_ratio_overfit = ratio > self.rmse_ratio_threshold.get()
 
-            # OR logic: flag if either condition is met
-            return r2_acc_overfit or rmse_ratio_overfit
+            # Check RMSEP/RMSEcv ratio (regression only, requires validation data)
+            rmsep_ratio_overfit = False
+            if self.rmsep_ratio_filter_enabled.get():
+                if 'RMSEP' in cols and 'RMSEcv' in cols:
+                    rmsep = row.get('RMSEP')
+                    rmsecv = row.get('RMSEcv')
+                    if rmsep is not None and rmsecv is not None:
+                        if not pd.isna(rmsep) and not pd.isna(rmsecv):
+                            rmsep_val = float(rmsep)
+                            rmsecv_val = float(rmsecv)
+                            if rmsecv_val > 0:
+                                ratio = rmsep_val / rmsecv_val
+                                rmsep_ratio_overfit = ratio > self.rmsep_ratio_threshold.get()
+
+            # OR logic: flag if any condition is met
+            return r2_acc_overfit or rmse_ratio_overfit or rmsep_ratio_overfit
 
         except (KeyError, ValueError, TypeError):
             pass
