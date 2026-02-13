@@ -3167,7 +3167,7 @@ def _indices_to_wavelength_str(indices: List[int], wavelengths: np.ndarray = Non
     if wavelengths is not None:
         # Convert indices to actual wavelength values
         selected_wl = [wavelengths[i] for i in indices if i < len(wavelengths)]
-        return ','.join([f"{w:.0f}" for w in selected_wl])
+        return ','.join([f"{w:.1f}" for w in selected_wl])
     else:
         # Fallback to indices if wavelengths not available
         return ','.join([str(i) for i in indices])

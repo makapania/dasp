@@ -3054,9 +3054,32 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     prep_pipeline = Pipeline(prep_pipe_steps)
                     X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
 
-            # Edge masking will be handled in _run_single_config() to avoid double masking
+            # Apply edge masking for SG derivatives (matches grid search at line 1894)
+            # SG derivatives create boundary artifacts at first/last window//2 wavelengths
             wavelengths_for_model = wavelengths
             n_features_for_model = n_features
+            if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+                X_preprocessed, wavelengths_for_model, edge_zone_applied = _apply_edge_mask_to_data(
+                    X_preprocessed, wavelengths_for_model, preprocess_cfg
+                )
+                n_features_for_model = X_preprocessed.shape[1]
+                if edge_zone_applied > 0:
+                    prep_name = preprocess_cfg.get("name", "unknown")
+                    deriv_info = f"_d{preprocess_cfg['deriv']}"
+                    print(f"\n{'='*70}")
+                    print(f"BAYESIAN EDGE MASKING (after {prep_name}{deriv_info} preprocessing)")
+                    print(f"{'='*70}")
+                    print(f"  Derivative window: {preprocess_cfg['window']}")
+                    print(f"  Edge zone: {edge_zone_applied} wavelengths on each side")
+                    print(f"  Wavelengths after masking: {len(wavelengths_for_model)}")
+                    print(f"  Range: {wavelengths_for_model[0]:.1f} - {wavelengths_for_model[-1]:.1f} nm")
+                    print(f"{'='*70}\n")
+
+            # Recompute max_n_components with edge-masked feature count
+            config_max_n_components = max_n_components
+            if n_features_for_model < n_features:
+                config_max_n_components = min(max_n_components, n_features_for_model)
+                config_max_n_components = max(1, config_max_n_components)
 
             # Update progress callback
             if progress_callback:
@@ -3089,7 +3112,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 run_single_config_fn=_run_single_config,  # Use existing infrastructure
                 tier=tier,
                 n_features=n_features_for_model,  # Edge-masked feature count
-                max_n_components=max_n_components,
+                max_n_components=config_max_n_components,
                 enable_variable_subsets=enable_variable_subsets,
                 variable_counts=variable_counts,
                 variable_selection_methods=variable_selection_methods,
@@ -4171,11 +4194,11 @@ def _run_single_config(
     if subset_tag != "full" and subset_indices is not None:
         # Subset model: save only the subset wavelengths
         subset_wavelengths = wavelengths[subset_indices]
-        all_vars_str = ','.join([f"{w:.0f}" for w in subset_wavelengths])
+        all_vars_str = ','.join([f"{w:.1f}" for w in subset_wavelengths])
         result['all_vars'] = all_vars_str
     else:
         # Full model: save ALL wavelengths used (may be filtered by wl_min/wl_max)
-        all_vars_str = ','.join([f"{w:.0f}" for w in wavelengths])
+        all_vars_str = ','.join([f"{w:.1f}" for w in wavelengths])
         result['all_vars'] = all_vars_str
 
     # Continue with feature importance extraction if model was already fitted above
@@ -4223,7 +4246,7 @@ def _run_single_config(
                 top_wavelengths = wavelengths[top_indices]
 
             # Format as comma-separated string
-            top_vars_str = ','.join([f"{w:.0f}" for w in top_wavelengths])
+            top_vars_str = ','.join([f"{w:.1f}" for w in top_wavelengths])
             result['top_vars'] = top_vars_str
 
         except Exception as e:

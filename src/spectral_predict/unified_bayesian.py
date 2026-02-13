@@ -540,6 +540,35 @@ def compute_importances(
         return np.ones(n_features)
 
 
+def _apply_edge_mask_to_data(
+    X: np.ndarray,
+    wavelengths: np.ndarray,
+    preprocess_cfg: dict,
+) -> tuple:
+    """Remove edge wavelengths affected by Savitzky-Golay derivatives.
+
+    For derivative preprocessing with window W, the first and last W//2
+    wavelengths are unreliable due to boundary effects.
+
+    Returns
+    -------
+    tuple of (X_masked, wavelengths_masked, edge_zone)
+    """
+    deriv = preprocess_cfg.get("deriv")
+    window = preprocess_cfg.get("window")
+    if not deriv or not window:
+        return X, wavelengths, 0
+
+    edge_zone = window // 2
+    if edge_zone == 0:
+        return X, wavelengths, 0
+
+    if 2 * edge_zone >= X.shape[1]:
+        return X, wavelengths, 0
+
+    return X[:, edge_zone:-edge_zone], wavelengths[edge_zone:-edge_zone], edge_zone
+
+
 def create_unified_objective(
     X_raw: np.ndarray,
     y: np.ndarray,
@@ -654,6 +683,15 @@ def create_unified_objective(
             assert X_prep.shape[0] == X_raw.shape[0], \
                 f"Preprocessing changed sample count! {X_raw.shape[0]} -> {X_prep.shape[0]}"
 
+            # 2b. Apply edge masking for SG derivatives (matches grid search)
+            # SG derivatives create boundary artifacts at first/last window//2 wavelengths
+            wavelengths_for_trial = wavelengths
+            if preprocess_config.get('deriv') and preprocess_config.get('window'):
+                X_prep, wavelengths_for_trial, edge_zone_applied = _apply_edge_mask_to_data(
+                    X_prep, wavelengths_for_trial, preprocess_config
+                )
+                n_features_prep = X_prep.shape[1]
+
             # 3. Suggest subset type and size
             # IMPORTANT: Always suggest ALL parameters to maintain consistent parameter space
             # Optuna requires the same parameter names to have consistent value spaces
@@ -670,11 +708,11 @@ def create_unified_objective(
                     # This ensures regions are relevant to the current preprocessing
                     try:
                         # Create wavelengths for preprocessed data (may have different length)
-                        if n_features_prep == len(wavelengths):
-                            wl_prep = wavelengths
+                        if n_features_prep == len(wavelengths_for_trial):
+                            wl_prep = wavelengths_for_trial
                         else:
                             # Interpolate wavelengths if preprocessing changed feature count
-                            wl_prep = np.linspace(wavelengths[0], wavelengths[-1], n_features_prep)
+                            wl_prep = np.linspace(wavelengths_for_trial[0], wavelengths_for_trial[-1], n_features_prep)
 
                         dynamic_regions = create_region_subsets(
                             X_prep, y, wl_prep.astype(float),
@@ -1136,16 +1174,19 @@ def create_unified_objective(
             # CRITICAL: Do NOT sort - Model Development expects wavelengths in the same
             # order they were used during training. Grid Search also preserves training
             # order (see search.py line 3201).
+            # Use wavelengths_for_trial (edge-masked) to match actual training data
             if top_indices is not None:
-                selected_wavelengths = wavelengths[top_indices] if len(wavelengths) > max(top_indices) else []
+                selected_wavelengths = wavelengths_for_trial[top_indices] if len(wavelengths_for_trial) > max(top_indices) else []
                 # Store ALL wavelengths for model reconstruction (training order)
-                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.0f}" for w in selected_wavelengths]))
+                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.1f}" for w in selected_wavelengths]))
                 # Store first 50 for display (also training order - most important first)
                 trial.set_user_attr('selected_wavelengths',
-                    ','.join([f"{w:.0f}" for w in selected_wavelengths[:50]]))
+                    ','.join([f"{w:.1f}" for w in selected_wavelengths[:50]]))
             else:
-                # Full spectrum - store all wavelengths
-                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.0f}" for w in wavelengths]))
+                # Full spectrum - store all wavelengths (edge-masked)
+                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
+            # Store edge-masked feature count for full_vars
+            trial.set_user_attr('full_vars_masked', len(wavelengths_for_trial))
 
             return metric
 
@@ -1490,7 +1531,7 @@ def convert_study_to_dataframe(
             'Poly': trial.user_attrs.get('poly', 0),
             'Params': trial.user_attrs.get('model_params', '{}'),
             'n_vars': trial.user_attrs.get('n_vars', n_features),
-            'full_vars': n_features,
+            'full_vars': trial.user_attrs.get('full_vars_masked', n_features),
             'SubsetTag': trial.user_attrs.get('subset_tag', 'full'),
             'trial_number': trial.number,
             'Folds': cv_folds,
