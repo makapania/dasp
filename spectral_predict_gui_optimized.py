@@ -30335,15 +30335,17 @@ F1 Score:  {f1:.4f}
                 max_valid_components = max(1, max_valid_components)  # Ensure at least 1
 
                 if n_components > max_valid_components:
-                    print(f"WARNING: Clamping n_components from {n_components} to {max_valid_components} "
-                          f"(n_features={n_features_final}, min_train_samples={min_train_samples})")
-                    n_components = max_valid_components
-
-                    # Update the PLS model in the pipeline
-                    if 'pls' in pipe.named_steps:
-                        pipe.named_steps['pls'].set_params(n_components=n_components)
-                    elif 'model' in pipe.named_steps and hasattr(pipe.named_steps['model'], 'n_components'):
-                        pipe.named_steps['model'].set_params(n_components=n_components)
+                    error_msg = (
+                        f"Invalid PLS Configuration\n\n"
+                        f"PLS requires n_components < min(n_features, n_train_samples).\n\n"
+                        f"Current: n_components = {n_components}\n"
+                        f"Features: {n_features_final}\n"
+                        f"Min training samples per fold: {min_train_samples}\n"
+                        f"Maximum allowed: {max_valid_components}\n\n"
+                        f"Please reduce the number of latent variables to {max_valid_components} or fewer."
+                    )
+                    self.root.after(0, lambda msg=error_msg: self._update_refined_results(msg, is_error=True))
+                    return
 
             # DATA FINGERPRINT - verify same data as search.py
             import hashlib

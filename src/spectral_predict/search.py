@@ -2037,6 +2037,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     wavelength_restriction_active=wavelength_restriction_active,
                     early_stopping_rounds=early_stopping_rounds,
                 )
+                if result is None:
+                    print(f"  [WARNING] Full model invalid for {model_name}, skipping")
+                    continue
                 df_results = add_result(df_results, result)
 
                 # Show full model result (CV metrics for consistency)
@@ -2217,6 +2220,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
 
+                                    if subset_result is None:
+                                        continue
                                     df_results = add_result(df_results, subset_result)
 
                                     if task_type == "regression":
@@ -2646,6 +2651,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
 
+                                    if subset_result is None:
+                                        print(f"[SKIPPED]")
+                                        continue
+
                                     # Track if uniform fallback was used for this result
                                     subset_result["uniform_fallback"] = used_uniform_fallback
 
@@ -2721,24 +2730,27 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
 
-                                    opt_result["uniform_fallback"] = used_uniform_fallback
-                                    df_results = add_result(df_results, opt_result)
-                                    results_added_for_method += 1
-
-                                    if task_type == "regression":
-                                        print(f"R²cv={opt_result['R2cv']:.3f}, RMSEcv={opt_result['RMSEcv']:.3f} (method-optimal)")
+                                    if opt_result is None:
+                                        print(f"[SKIPPED]")
                                     else:
-                                        print(f"AUCcv={opt_result.get('ROC_AUCcv', 0):.3f}, Acccv={opt_result.get('Accuracycv', 0):.3f} (method-optimal)")
+                                        opt_result["uniform_fallback"] = used_uniform_fallback
+                                        df_results = add_result(df_results, opt_result)
+                                        results_added_for_method += 1
 
-                                    if best_model_so_far is None:
-                                        best_model_so_far = opt_result
-                                    else:
                                         if task_type == "regression":
-                                            if opt_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
-                                                best_model_so_far = opt_result
+                                            print(f"R²cv={opt_result['R2cv']:.3f}, RMSEcv={opt_result['RMSEcv']:.3f} (method-optimal)")
                                         else:
-                                            if opt_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
-                                                best_model_so_far = opt_result
+                                            print(f"AUCcv={opt_result.get('ROC_AUCcv', 0):.3f}, Acccv={opt_result.get('Accuracycv', 0):.3f} (method-optimal)")
+
+                                        if best_model_so_far is None:
+                                            best_model_so_far = opt_result
+                                        else:
+                                            if task_type == "regression":
+                                                if opt_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
+                                                    best_model_so_far = opt_result
+                                            else:
+                                                if opt_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
+                                                    best_model_so_far = opt_result
 
                                 # Summary for this variable selection method
                                 print(f"  [SUMMARY] {varsel_method}: Added {results_added_for_method} results to dataframe")
@@ -2784,6 +2796,9 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             wavelength_restriction_active=wavelength_restriction_active,
                             early_stopping_rounds=early_stopping_rounds,
                         )
+                        if region_result is None:
+                            print(f"[SKIPPED]")
+                            continue
                         df_results = add_result(df_results, region_result)
 
                         # Show result immediately (CV metrics for consistency)
@@ -3832,12 +3847,11 @@ def _run_single_config(
     else:
         n_vars = X.shape[1]
 
-    # Cap n_components to actual feature count (for PLS with small wavelength subsets)
-    # Clone model first to avoid affecting other iterations (model passed by reference)
-    if hasattr(model, 'n_components') and model.n_components is not None and model.n_components > n_vars:
-        model = clone(model)
-        capped_n_components = max(1, n_vars - 1)
-        model.set_params(n_components=capped_n_components)
+    # Skip invalid PLS n_components / feature count combinations
+    # When n_components >= n_vars, PLS is degenerate or invalid — skip instead of silently clamping
+    if hasattr(model, 'n_components') and model.n_components is not None and model.n_components >= n_vars:
+        print(f"  [SKIP] {model_name} n_components={model.n_components} >= n_vars={n_vars}, invalid combination")
+        return None
 
     # Use original wavelength count if provided (for wavelength filtering case)
     # Otherwise use current wavelength array length

@@ -311,6 +311,9 @@ def create_objective_function(
                 subset_tag="full",
                 **filtered_kwargs
             )
+            if full_result is None:
+                # Invalid config (e.g., PLS n_components >= n_vars) — return penalty
+                return 1e10
             trial_results.append(full_result)
 
             # Get base metric from full model
@@ -512,6 +515,8 @@ def create_objective_function(
                                     subset_tag=f"top{n_top}_{varsel_method}",
                                     **filtered_kwargs
                                 )
+                                if subset_result is None:
+                                    continue  # Skip invalid n_components / n_vars combination
                                 trial_results.append(subset_result)
 
                                 # Update best SUBSET metric if this subset is better
@@ -552,6 +557,8 @@ def create_objective_function(
                         subset_tag=region_tag,
                         **filtered_kwargs
                     )
+                    if region_result is None:
+                        continue  # Skip invalid n_components / n_vars combination
                     trial_results.append(region_result)
 
                     # Update best SUBSET metric if this region is better
