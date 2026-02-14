@@ -912,23 +912,23 @@ TOOLTIP_CONTENT = {
     # ===== RANKING PENALTIES =====
     'ranking': {
         'variable_penalty': (
-            "Controls how much using many wavelengths affects model ranking. Uses cubic scaling "
-            "for gentle impact at low values (exploration-friendly). "
+            "Controls how much using many wavelengths affects model ranking. Uses quadratic scaling "
+            "for gentle impact at low values (exploration-friendly). Penalty scales relative to the "
+            "actual performance range of results. "
             "0 = ignore variable count, rank only by performance (R² or Accuracy). "
-            "2 = minimal penalty (~1% impact for using all wavelengths). "
             "5 = balanced penalty favoring parsimony without dominating performance. "
-            "10 = strong preference for fewer wavelengths. "
+            "10 = strong preference for fewer wavelengths (max shift = 50% of perf range). "
             "Recommended: 2 for exploration, 5-7 for deployment model selection."
         ),
-        'complexity_penalty': (
-            "Controls how much model complexity (latent variables, tree depth) affects ranking. "
-            "Uses cubic scaling for gentle impact at low values. "
-            "0 = ignore complexity, rank only by performance. "
-            "2 = minimal penalty for complex models. "
-            "5 = balanced penalty preferring simpler models when performance is similar. "
-            "10 = strong preference for simple, interpretable models. "
-            "For PLS: penalizes many components. For trees: penalizes depth/estimators. "
-            "Recommended: 2 for exploration, 5-7 for interpretable models."
+        'gap_penalty': (
+            "Penalizes models with large calibration-CV gap (overfitting indicator). "
+            "Uses the actual RMSEcv/RMSE ratio (regression) or Accuracy/Accuracycv ratio (classification) "
+            "instead of hardcoded model family scores. Uses quadratic scaling. "
+            "0 = ignore gap, rank only by performance. "
+            "5 = balanced penalty preferring well-generalizing models. "
+            "10 = strong penalty for overfit models (max shift = 50% of perf range). "
+            "When 'Use validation gap' is checked: uses RMSEP/RMSEcv (or val_Accuracy) instead. "
+            "Recommended: 3-5 to push overfit models down without hiding them."
         ),
     },
 
@@ -2523,7 +2523,8 @@ class SpectralPredictApp:
         # NEW: User-friendly penalty system (0-10 scale)
         # 0 = only performance (R²) matters, 10 = strong penalty
         self.variable_penalty = tk.IntVar(value=0)     # Penalty for using many variables
-        self.complexity_penalty = tk.IntVar(value=0)   # Penalty for model complexity
+        self.gap_penalty = tk.IntVar(value=0)            # Penalty for calibration-CV gap
+        self.use_rmsep_gap = tk.BooleanVar(value=False)  # Use RMSEP/val_Accuracy for gap calc
 
         self.max_n_components = tk.IntVar(value=10)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
@@ -2618,7 +2619,7 @@ class SpectralPredictApp:
         self.validation_X = None  # Stored validation spectral data
         self.validation_y = None  # Stored validation target data
         self.show_validation_metrics = tk.BooleanVar(value=True)  # Show val metrics in results
-        self.validation_top_n = tk.IntVar(value=500)  # Number of top models for validation
+        self.validation_top_n = tk.IntVar(value=700)  # Number of top models for validation
 
         # Result display options
         self.highlight_colors_enabled = tk.BooleanVar(value=True)  # Toggle row highlighting colors
@@ -8923,17 +8924,33 @@ class SpectralPredictApp:
         var_penalty_spinbox.grid(row=3, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(var_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
 
-        # NEW: Model Complexity Penalty (0-10 scale)
-        comp_penalty_label = ttk.Label(options_frame, text="Model Complexity Penalty (0-10):", style='Subheading.TLabel')
-        comp_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
-        CreateToolTip(comp_penalty_label, text=TOOLTIP_CONTENT['ranking']['complexity_penalty'], delay=500)
-        comp_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.complexity_penalty, width=10)
-        comp_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
-        CreateToolTip(comp_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['complexity_penalty'], delay=500)
+        # Cal-CV Gap Penalty (0-10 scale)
+        gap_penalty_label = ttk.Label(options_frame, text="Cal-CV Gap Penalty (0-10):", style='Subheading.TLabel')
+        gap_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        CreateToolTip(gap_penalty_label, text=TOOLTIP_CONTENT['ranking']['gap_penalty'], delay=500)
+        gap_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.gap_penalty, width=10)
+        gap_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
+        CreateToolTip(gap_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['gap_penalty'], delay=500)
+
+        # RMSEP/validation gap checkbox (next to gap penalty)
+        self.use_rmsep_gap_checkbox = ttk.Checkbutton(
+            options_frame, text="Use validation gap (RMSEP/val_Accuracy)",
+            variable=self.use_rmsep_gap, state='disabled'
+        )
+        self.use_rmsep_gap_checkbox.grid(row=5, column=1, sticky=tk.W, padx=(15, 0))
+        CreateToolTip(self.use_rmsep_gap_checkbox,
+                      text="When checked, gap penalty uses RMSEP/RMSEcv (regression) or val_Accuracy "
+                           "(classification) instead of calibration metrics. Only available after search "
+                           "with validation data.", delay=500)
 
         # Info label explaining the penalty system
-        ttk.Label(options_frame, text="💡 Penalties affect ranking gently at low values (exploration-friendly). 0 = rank only by performance, 5 = balanced, 10 = strongly prefer simplicity",
+        ttk.Label(options_frame, text="Both penalties scale relative to actual performance range. 0 = rank only by performance, 5 = balanced, 10 = max shift = 50% of perf range",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+
+        # Bind penalty controls to live re-ranking
+        self.variable_penalty.trace_add('write', self._rerank_results)
+        self.gap_penalty.trace_add('write', self._rerank_results)
+        self.use_rmsep_gap.trace_add('write', self._rerank_results)
 
         # === Wavelength Restriction for Analysis ===
         ttk.Separator(options_frame, orient='horizontal').grid(row=7, column=0, columnspan=3, sticky='ew', pady=(20, 10))
@@ -11354,7 +11371,7 @@ class SpectralPredictApp:
         top_n_frame.pack(anchor='w', pady=(5, 0))
         ttk.Label(top_n_frame, text="Calculate for top").pack(side='left')
         self.validation_top_n_spinbox = ttk.Spinbox(
-            top_n_frame, from_=50, to=500, increment=50,
+            top_n_frame, from_=50, to=9999, increment=50,
             textvariable=self.validation_top_n, width=6, state='disabled'
         )
         self.validation_top_n_spinbox.pack(side='left', padx=5)
@@ -22627,7 +22644,7 @@ class SpectralPredictApp:
                 validation_count=n_validation,
                 total_samples_original=n_total_original,
                 variable_penalty=self.variable_penalty.get(),
-                complexity_penalty=self.complexity_penalty.get(),
+                gap_penalty=self.gap_penalty.get(),
                 max_n_components=adjusted_max_components,
                 max_iter=self.max_iter.get(),
                 models_to_test=selected_models,
@@ -23322,6 +23339,14 @@ For detailed documentation, see the User Guide.
                 print(f"Warning: Could not compute expert choices: {e}")
                 self._expert_choices = {}
 
+            # Enable/disable RMSEP gap checkbox based on available columns
+            has_validation = ('RMSEP' in results_df.columns or
+                              'val_Accuracy' in results_df.columns)
+            if hasattr(self, 'use_rmsep_gap_checkbox'):
+                self.use_rmsep_gap_checkbox.config(state='normal' if has_validation else 'disabled')
+                if not has_validation:
+                    self.use_rmsep_gap.set(False)
+
         # Clear existing items
         for item in self.results_tree.get_children():
             self.results_tree.delete(item)
@@ -23953,6 +23978,38 @@ For detailed documentation, see the User Guide.
             pass
 
         return False
+
+    def _rerank_results(self, *args):
+        """Re-rank results after user changes penalty settings."""
+        if not hasattr(self, 'results_df') or self.results_df is None or len(self.results_df) == 0:
+            return
+
+        from src.spectral_predict.scoring import compute_composite_score
+
+        task_type = "regression" if "R2cv" in self.results_df.columns else "classification"
+
+        # Strip old ranking columns to avoid duplicates
+        cols_to_drop = [c for c in ['Rank', 'CompositeScore', 'PerformanceScore',
+                                     'VarPenalty', 'GapPenalty', 'CompPenalty', 'ComplexityScore']
+                        if c in self.results_df.columns]
+        df_clean = self.results_df.drop(columns=cols_to_drop)
+
+        try:
+            self.results_df = compute_composite_score(
+                df_clean, task_type,
+                variable_penalty=self.variable_penalty.get(),
+                gap_penalty=self.gap_penalty.get(),
+                use_rmsep_gap=self.use_rmsep_gap.get()
+            )
+        except Exception as e:
+            print(f"Re-ranking failed: {e}")
+            return
+
+        # Recompute expert choices (independent of penalties)
+        self._expert_choices = self._compute_expert_choices(self.results_df)
+
+        # Refresh results table display
+        self._populate_results_table(self.results_df, is_sorted=False)
 
     def _compute_expert_choices(self, df) -> dict:
         """Find well-generalized models that an expert spectroscopist would recommend.

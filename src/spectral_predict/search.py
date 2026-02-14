@@ -741,7 +741,7 @@ def compute_validation_metrics_for_top_models(
 
 
 def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
-               total_samples_original=None, variable_penalty=0, complexity_penalty=0,
+               total_samples_original=None, variable_penalty=0, gap_penalty=0,
                max_n_components=10, max_iter=500, models_to_test=None, preprocessing_methods=None,
                interference_settings=None,
                window_sizes=None, n_estimators_list=None, learning_rates=None,
@@ -827,10 +827,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         'regression' or 'classification'
     folds : int
         Number of CV folds
-    variable_penalty : int (0-10), default=3
+    variable_penalty : int (0-10), default=0
         Penalty for using many variables (0=ignore, 10=strong penalty)
-    complexity_penalty : int (0-10), default=5
-        Penalty for model complexity (0=ignore, 10=strong penalty)
+    gap_penalty : int (0-10), default=0
+        Penalty for calibration-CV gap (0=ignore, 10=strong penalty)
     max_n_components : int, default=10
         Maximum number of PLS components to test
     max_iter : int, default=500
@@ -2821,7 +2821,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     if "SubsetTag" in df_results.columns:
         print(f"[DEBUG] SubsetTag counts BEFORE scoring:\n{df_results['SubsetTag'].value_counts().to_string()}")
 
-    df_ranked = compute_composite_score(df_results, task_type, variable_penalty, complexity_penalty)
+    df_ranked = compute_composite_score(df_results, task_type, variable_penalty, gap_penalty)
 
     # DEBUG: Count results after scoring
     print(f"\n[DEBUG] Results after scoring: {len(df_ranked)} rows")
@@ -3418,7 +3418,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         df_results,
         task_type=task_type,
         variable_penalty=0,  # Bayesian optimization doesn't penalize variables
-        complexity_penalty=0  # Bayesian optimization doesn't penalize complexity
+        gap_penalty=0  # Bayesian optimization doesn't penalize gap
     )
 
     # Rename CompositeScore to Score for consistency with grid search

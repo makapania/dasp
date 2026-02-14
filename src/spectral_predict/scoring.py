@@ -5,36 +5,25 @@ import pandas as pd
 from sklearn.metrics import confusion_matrix
 
 
-def compute_composite_score(df_results, task_type, variable_penalty=0, complexity_penalty=0, verbose=False):
+def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penalty=0,
+                            use_rmsep_gap=False, verbose=False):
     """
     Compute composite score with user-friendly penalty system.
 
-    NEW: User-friendly 0-10 penalty system
-    - variable_penalty (0-10): Penalty for using many variables
-    - complexity_penalty (0-10): Penalty for model complexity (LVs, etc.)
-    - 0 = only performance (R²) matters (DEFAULT - changed from 2)
-    - 10 = strong penalty for variables/complexity
+    Penalties (0-10 scale):
+    - variable_penalty: Penalty for using many variables
+    - gap_penalty: Penalty for calibration-CV gap (overfitting indicator)
+    - 0 = only performance matters (DEFAULT)
+    - 10 = strong penalty
 
-    REPRODUCIBILITY FIX: When both penalties are 0 (default), rank directly by
-    primary metric instead of using z-scores. This prevents z-score normalization
-    from amplifying tiny floating-point differences into ranking changes.
+    Both penalties scale by the actual performance range of the result set,
+    so same spinbox value = same relative impact regardless of dataset.
 
-    Parameters
-    ----------
-    verbose : bool, default=False
-        If True, print detailed scoring breakdown for top 20 models
-
-    Formula: Score = performance_score + variable_penalty_term + complexity_penalty_term
+    Formula: Score = performance_score + var_penalty_term + gap_penalty_term
 
     Performance score (lower is better):
-    - When penalties = 0: Direct metric (no z-score normalization)
-    - When penalties > 0:
-        - Regression: 0.5*z(RMSE) - 0.5*z(R2)  [combine both metrics]
-        - Classification: -z(ROC_AUC) - 0.3*z(Accuracy)
-
-    Penalty terms scale linearly with user settings (0-10).
-
-    Lower composite score is better.
+    - Regression: -R2cv
+    - Classification: -Accuracycv - 0.0001 * F1cv
 
     Parameters
     ----------
@@ -44,11 +33,16 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
         'regression' or 'classification'
     variable_penalty : int (0-10)
         Penalty for using many variables (default: 0)
-        0 = ignore variable count, 10 = strongly penalize many variables
-        Uses cubic scaling for gentle penalty at low values (exploration-friendly)
-    complexity_penalty : int (0-10)
-        Penalty for model complexity (default: 0)
-        0 = ignore complexity, 10 = strongly penalize complex models
+        Uses quadratic scaling for gentle impact at low values
+    gap_penalty : int (0-10)
+        Penalty for calibration-CV gap (default: 0)
+        Measures RMSEcv/RMSE ratio (regression) or Accuracy/Accuracycv (classification)
+        Higher ratio = more overfitting = bigger penalty
+    use_rmsep_gap : bool
+        If True and RMSEP/val_Accuracy column exists, use validation metrics
+        for gap calculation instead of calibration metrics
+    verbose : bool, default=False
+        If True, print detailed scoring breakdown for top 20 models
 
     Returns
     -------
@@ -57,125 +51,90 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
     """
     df = df_results.copy()
 
-    # REPRODUCIBILITY FIX: When both penalties are 0, skip z-score normalization
-    # Z-scores amplify tiny floating-point differences, causing ranking instability
-    # Instead, rank directly by primary metric for stable, reproducible results
-    use_zscore = (variable_penalty > 0) or (complexity_penalty > 0)
-
-    # Compute performance score (combining multiple metrics)
-    # CRITICAL: Use CV metrics for ranking (not calibration metrics)
-    # CV metrics are unbiased estimates of generalization performance
+    # Performance score (lower is better) — always use direct metric ranking
     if task_type == "regression":
-        if use_zscore:
-            # Z-score for RMSEcv (lower is better, positive z = bad)
-            z_rmse = (df["RMSEcv"] - df["RMSEcv"].mean()) / df["RMSEcv"].std()
-            z_rmse = z_rmse.fillna(0)
-
-            # Z-score for R2cv (higher is better, negative z = bad)
-            z_r2 = (df["R2cv"] - df["R2cv"].mean()) / df["R2cv"].std()
-            z_r2 = z_r2.fillna(0)
-
-            # Combined performance score (lower is better)
-            # Weight RMSEcv and R2cv equally, but negate R2cv since higher is better
-            performance_score = 0.5 * z_rmse - 0.5 * z_r2
-        else:
-            # Direct metric ranking (no z-score normalization)
-            # Use negative R2cv so lower is better (consistent with other scores)
-            performance_score = -df["R2cv"]
-
+        performance_score = -df["R2cv"]
     else:  # classification
-        if use_zscore:
-            # Z-score for Accuracycv (higher is better)
-            z_acc = (df["Accuracycv"] - df["Accuracycv"].mean()) / df["Accuracycv"].std()
-            z_acc = z_acc.fillna(0)
+        performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
-            # Z-score for F1cv (higher is better)
-            z_f1 = (df["F1cv"] - df["F1cv"].mean()) / df["F1cv"].std()
-            z_f1 = z_f1.fillna(0)
-
-            # Combined performance score (lower is better, so negate)
-            # Primary: Accuracycv, Secondary: F1cv (30% weight)
-            performance_score = -z_acc - 0.3 * z_f1
-        else:
-            # Direct metric ranking (no z-score normalization)
-            # Primary: Accuracycv, Secondary: F1cv as tiebreaker
-            # Use negative so lower is better (consistent with other scores)
-            performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
-
-    # NEW: User-friendly penalty system (0-10 scale)
-    # Performance z-scores typically range ±3, so we scale penalties to be meaningful but not overwhelming
+    # Compute performance range for penalty scaling
+    # Both penalties scale relative to this so same spinbox value = same max impact
+    if task_type == "regression":
+        perf_range = df["R2cv"].max() - df["R2cv"].min()
+    else:
+        perf_range = df["Accuracycv"].max() - df["Accuracycv"].min()
 
     # 1. Variable Count Penalty (0-10 scale)
-    # Normalize: fraction of variables used, scaled by user preference
-    if variable_penalty > 0:
+    if variable_penalty > 0 and perf_range >= 0.001:
         n_vars_array = np.asarray(df["n_vars"], dtype=np.float64)
         full_vars_array = np.asarray(df["full_vars"], dtype=np.float64)
         var_fraction = n_vars_array / full_vars_array  # 0-1 scale
 
-        # RESTORED PENALTY: Scale by user penalty (0-10) with quadratic scaling for meaningful impact
-        # At penalty=2, using all variables adds ~0.04 units (1-2% of z-score range)
-        # At penalty=5, using all variables adds ~0.25 units (4-8% of z-score range)
-        # At penalty=10, using all variables adds ~1.0 unit (comparable to ~0.3 std deviations in performance)
-        # This provides meaningful variable selection pressure while still allowing full spectrum exploration
-        var_penalty_term = ((variable_penalty / 10.0) ** 2) * var_fraction
+        penalty_scale = (variable_penalty / 10.0) ** 2  # quadratic 0-1
+        var_penalty_term = penalty_scale * var_fraction * perf_range * 0.5
     else:
         var_penalty_term = 0
 
-    # 2. Model Complexity Penalty (0-10 scale)
-    # Use model-type-specific complexity for fair comparison across different algorithms
-    if complexity_penalty > 0:
-        lvs = df["LVs"].fillna(0).infer_objects(copy=False).astype(np.float64)
+    # 2. Calibration-CV Gap Penalty (0-10 scale)
+    # Uses actual measured metrics instead of hardcoded model family scores
+    if gap_penalty > 0 and perf_range >= 0.001:
+        penalty_scale = (gap_penalty / 10.0) ** 2  # quadratic 0-1
 
-        # Get model types
-        models = df["Model"].astype(str)
+        if task_type == "regression":
+            rmse = df["RMSE"].astype(np.float64)
+            rmsecv = df["RMSEcv"].astype(np.float64)
 
-        # For PLS models: use latent variables
-        # Normalize LVs to [0, 1] scale (assume max useful LVs is ~25)
-        lv_fraction = lvs / 25.0
-        lv_fraction = np.minimum(lv_fraction, 1.0)  # Cap at 1.0
-
-        # For non-PLS models: use intrinsic model complexity
-        # Based on model type complexity scores (normalized to [0, 1])
-        model_complexity_map = {
-            "PLS": None,  # Use LVs for PLS
-            "Ridge": 0.25,
-            "Lasso": 0.30,
-            "ElasticNet": 0.28,
-            "RandomForest": 0.60,
-            "XGBoost": 0.65,
-            "LightGBM": 0.63,
-            "CatBoost": 0.64,
-            "MLP": 0.80,
-            "NeuralBoosted": 0.85,
-            "SVM": 0.55,
-            "KNN": 0.45
-        }
-
-        # Calculate complexity for each model
-        complexity_values = []
-        for idx, (model, lv_val, lv_frac) in enumerate(zip(models, lvs, lv_fraction)):
-            if lv_val > 0:  # PLS model with LVs
-                complexity_values.append(lv_frac)
+            # RMSEP/RMSEcv mode (post-search re-ranking with validation data)
+            if use_rmsep_gap and "RMSEP" in df.columns:
+                rmsep = df["RMSEP"].astype(np.float64)
+                has_rmsep = rmsep.notna() & (rmsecv > 1e-10)
+                gap_ratio = np.where(
+                    has_rmsep,
+                    rmsep / rmsecv,
+                    np.where(rmse > 1e-10, rmsecv / rmse, 1.0)
+                )
             else:
-                # Non-PLS: use model-specific complexity
-                complexity = model_complexity_map.get(model, 0.50)  # Default to 0.50 if unknown
-                complexity_values.append(complexity)
+                gap_ratio = np.where(
+                    (rmse > 1e-10) & (rmsecv > 1e-10),
+                    rmsecv / rmse,
+                    1.0
+                )
 
-        lv_fraction_adjusted = np.array(complexity_values, dtype=np.float64)
+            # Normalize: ratio 1.0 = no gap (0 penalty), ratio 5.0 = max penalty (1.0)
+            gap_fraction = np.clip((gap_ratio - 1.0) / 4.0, 0.0, 1.0)
 
-        # Scale by user penalty (0-10) with quadratic scaling for better behavior
-        comp_penalty_term = ((complexity_penalty / 10.0) ** 2) * lv_fraction_adjusted
+        else:  # classification
+            acc = df["Accuracy"].astype(np.float64)
+            acc_cv_col = "Accuracycv" if "Accuracycv" in df.columns else "AccuracyCV"
+            acc_cv = df[acc_cv_col].astype(np.float64)
+
+            # Validation mode
+            if use_rmsep_gap and "val_Accuracy" in df.columns:
+                val_acc = df["val_Accuracy"].astype(np.float64)
+                has_val = val_acc.notna() & (acc_cv > 1e-10)
+                gap_ratio = np.where(
+                    has_val,
+                    acc / val_acc,
+                    np.where(acc_cv > 1e-10, acc / acc_cv, 1.0)
+                )
+            else:
+                gap_ratio = np.where(acc_cv > 1e-10, acc / acc_cv, 1.0)
+
+            # Accuracy gaps are tighter — normalize over 0.2 range
+            # (Accuracy 1.0 vs Accuracycv 0.80 = ratio 1.25, maps to full penalty)
+            gap_fraction = np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0)
+
+        gap_penalty_term = penalty_scale * gap_fraction * perf_range * 0.5
     else:
-        comp_penalty_term = 0
+        gap_penalty_term = 0
 
     # Store individual components for diagnostics
     df["PerformanceScore"] = performance_score
     df["VarPenalty"] = var_penalty_term if not np.isscalar(var_penalty_term) else np.zeros(len(df))
-    df["CompPenalty"] = comp_penalty_term if not np.isscalar(comp_penalty_term) else np.zeros(len(df))
+    df["GapPenalty"] = gap_penalty_term if not np.isscalar(gap_penalty_term) else np.zeros(len(df))
 
     # Composite score (lower is better)
-    # Performance score dominates, but penalties can affect ranking meaningfully
-    df["CompositeScore"] = performance_score + var_penalty_term + comp_penalty_term
+    df["CompositeScore"] = performance_score + var_penalty_term + gap_penalty_term
 
     # Rank (1 = best)
     df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
@@ -184,18 +143,15 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
     df = df.sort_values("Rank").reset_index(drop=True)
 
     # Reorder columns: Rank first, top_vars last
-    # Get all columns except Rank and top_vars
     cols = [c for c in df.columns if c not in ['Rank', 'top_vars']]
-    # Construct new column order: Rank first, then everything else, then top_vars
     new_col_order = ['Rank'] + cols + ['top_vars']
     df = df[new_col_order]
 
     # Add unified complexity score (0-100 scale, higher = more complex)
-    # This is a new column for user convenience, doesn't affect ranking
+    # Informational column, doesn't affect ranking
     try:
         df["ComplexityScore"] = df.apply(_compute_unified_complexity, axis=1)
     except Exception as e:
-        # If complexity calculation fails, set to NaN (don't break pipeline)
         print(f"Warning: Unified complexity calculation failed: {e}")
         df["ComplexityScore"] = np.nan
 
@@ -204,28 +160,25 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, complexit
         print("\n" + "="*80)
         print("RANKING DIAGNOSTIC - Top 20 Models")
         print("="*80)
-        print(f"Penalty Settings: Variables={variable_penalty}/10, Complexity={complexity_penalty}/10")
-        print(f"Task Type: {task_type}")
+        print(f"Penalty Settings: Variables={variable_penalty}/10, Gap={gap_penalty}/10")
+        print(f"Task Type: {task_type}, RMSEP mode: {use_rmsep_gap}")
         print("\nScore Components (lower CompositeScore = better rank):")
-        print("  - PerformanceScore: Based on R²/RMSE (or AUC/Accuracy)")
+        print("  - PerformanceScore: Based on -R2cv (or -Accuracycv)")
         print("  - VarPenalty: Penalty for using many wavelengths")
-        print("  - CompPenalty: Penalty for model complexity")
+        print("  - GapPenalty: Penalty for calibration-CV gap (overfitting)")
         print("-"*80)
 
-        # Show top 20 models with score breakdown
         top20 = df.head(20).copy()
 
         if task_type == "regression":
-            display_cols = ["Rank", "Model", "R2", "RMSE", "R2cv", "RMSEcv", "n_vars", "LVs",
-                           "PerformanceScore", "VarPenalty", "CompPenalty", "CompositeScore"]
+            display_cols = ["Rank", "Model", "R2", "RMSE", "R2cv", "RMSEcv", "n_vars",
+                           "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
         else:
-            display_cols = ["Rank", "Model", "ROC_AUC", "Accuracy", "ROC_AUCcv", "Accuracycv", "n_vars", "LVs",
-                           "PerformanceScore", "VarPenalty", "CompPenalty", "CompositeScore"]
+            display_cols = ["Rank", "Model", "Accuracy", "Accuracycv", "n_vars",
+                           "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
 
-        # Filter to available columns
         display_cols = [c for c in display_cols if c in top20.columns]
 
-        # Format for display
         pd.set_option('display.max_columns', None)
         pd.set_option('display.width', None)
         pd.set_option('display.float_format', '{:.4f}'.format)
@@ -240,7 +193,7 @@ def _compute_unified_complexity(row):
     """
     Compute unified complexity score (0-100 scale, higher = more complex).
 
-    Formula: ComplexityScore = 0.25×Model + 0.30×Variables + 0.25×LVs + 0.20×Preprocessing
+    Formula: ComplexityScore = 0.25*Model + 0.30*Variables + 0.25*LVs + 0.20*Preprocessing
 
     Components:
     - Model Type (25%): Intrinsic model complexity
@@ -268,7 +221,7 @@ def _compute_unified_complexity(row):
     # 2. Variable Complexity (30% weight) - nonlinear penalty for many variables
     # Use sqrt-based nonlinear penalty: few vars = low penalty, many vars = high penalty
     n_vars = row.get("n_vars", 0)
-    # Normalize: 10 vars ≈ 2.0, 100 vars ≈ 20, 500 vars ≈ 100
+    # Normalize: 10 vars ~ 2.0, 100 vars ~ 20, 500 vars ~ 100
     var_complexity = min(100, np.sqrt(n_vars) * 4.5)
 
     # 3. Latent Variable Complexity (25% weight) - for PLS models
