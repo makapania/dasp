@@ -2289,6 +2289,29 @@ class SpectralPredictApp:
         self.results_sort_column = None  # Current column being sorted
         self.results_sort_reverse = False  # Sort direction (False = ascending, True = descending)
 
+        # Multi-level sort state (replaces single sort_column/sort_reverse)
+        self.results_sort_keys = []  # [(col, ascending), ...] up to 3 levels
+
+        # Active filter state
+        self.results_filtered_df = None  # Filtered view (None = no filter active)
+        self._filter_after_id = None     # Debounce timer
+        self._shift_key_held = False     # Track Shift key for multi-sort
+        root.bind_all('<KeyPress-Shift_L>', lambda e: setattr(self, '_shift_key_held', True))
+        root.bind_all('<KeyPress-Shift_R>', lambda e: setattr(self, '_shift_key_held', True))
+        root.bind_all('<KeyRelease-Shift_L>', lambda e: setattr(self, '_shift_key_held', False))
+        root.bind_all('<KeyRelease-Shift_R>', lambda e: setattr(self, '_shift_key_held', False))
+        self._clearing_filters = False   # Guard flag to suppress trace cascades
+
+        # Filter control variables (initialized here, UI created dynamically)
+        self.filter_model_var = tk.StringVar(value="All")
+        self.filter_preprocess_var = tk.StringVar(value="All")
+        self.filter_max_lvs_var = tk.IntVar(value=30)
+        self.filter_max_nvars_var = tk.IntVar(value=9999)
+        self.filter_min_r2cv_var = tk.DoubleVar(value=0.0)
+        self.filter_max_rmsecv_var = tk.DoubleVar(value=999.0)
+        self.filter_max_rmsep_var = tk.DoubleVar(value=999.0)
+        self.filter_min_val_acc_var = tk.DoubleVar(value=0.0)
+
         # Model Development tracking (for hyperparameter override logic)
         self.model_loaded_from_results = False  # Track if model was loaded from Results tab
         self.refine_hyperparams_modified = False  # Track if user modified hyperparams after loading
@@ -11467,23 +11490,34 @@ class SpectralPredictApp:
                                                               subtitle="All tested models ranked by performance. Click on any result row to load it into the 'Model Development' tab for further tuning.")
         results_card_outer.pack(fill='both', expand=True, pady=10, padx=5)
 
+        # Active filter bar (hidden until results arrive)
+        self.active_filter_frame = ttk.Frame(results_card)
+        # Don't pack yet — shown dynamically in _populate_results_table
+
+        # Sort hint label (hidden until results arrive)
+        self.sort_hint_label = ttk.Label(
+            results_card, text="Tip: Shift+Click column headers for multi-level sorting",
+            font=('Segoe UI', 8, 'italic'), foreground='#888888'
+        )
+        # Don't pack yet — shown dynamically in _populate_results_table
+
         # Create frame for treeview and scrollbars
-        tree_frame = ttk.Frame(results_card)
-        tree_frame.pack(fill='both', expand=True)
+        self.results_tree_frame = ttk.Frame(results_card)
+        self.results_tree_frame.pack(fill='both', expand=True)
 
         # Create Treeview with scrollbars
-        self.results_tree = ttk.Treeview(tree_frame, show='headings', selectmode='browse')
+        self.results_tree = ttk.Treeview(self.results_tree_frame, show='headings', selectmode='browse')
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.results_tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.results_tree.xview)
+        vsb = ttk.Scrollbar(self.results_tree_frame, orient="vertical", command=self.results_tree.yview)
+        hsb = ttk.Scrollbar(self.results_tree_frame, orient="horizontal", command=self.results_tree.xview)
         self.results_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
         self.results_tree.grid(row=0, column=0, sticky='nsew')
         vsb.grid(row=0, column=1, sticky='ns')
         hsb.grid(row=1, column=0, sticky='ew')
 
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
+        self.results_tree_frame.grid_rowconfigure(0, weight=1)
+        self.results_tree_frame.grid_columnconfigure(0, weight=1)
 
         # Bind double-click event
         self.results_tree.bind('<Double-Button-1>', self._on_result_double_click)
@@ -23210,39 +23244,99 @@ For detailed documentation, see the User Guide.
             )
 
     def _sort_results_by_column(self, col):
-        """Sort results table by the specified column."""
+        """Sort results table by the specified column (supports multi-level via Shift+Click)."""
         if self.results_df is None or len(self.results_df) == 0:
             return
 
-        # Toggle sort direction if clicking the same column
-        if self.results_sort_column == col:
-            self.results_sort_reverse = not self.results_sort_reverse
-        else:
-            self.results_sort_column = col
-            # For "higher is better" metrics, default to descending (best first)
-            higher_is_better_cols = ['R2', 'R²', 'Accuracy', 'ROC_AUC', 'F1']
-            if col in higher_is_better_cols:
-                self.results_sort_reverse = True  # Start with descending (best first)
+        # "Higher is better" columns default to descending
+        higher_is_better_cols = {
+            'R2', 'R2cv', 'R²', 'Accuracy', 'Accuracycv',
+            'ROC_AUC', 'F1', 'F1cv', 'ROC_AUCcv', 'RPD', 'RER',
+        }
+
+        if self._shift_key_held and self.results_sort_keys:
+            # Shift+Click: add/toggle secondary sort level
+            existing_idx = None
+            for i, (sort_col, asc) in enumerate(self.results_sort_keys):
+                if sort_col == col:
+                    existing_idx = i
+                    break
+
+            if existing_idx is not None:
+                # Toggle direction of existing sort key
+                old_asc = self.results_sort_keys[existing_idx][1]
+                self.results_sort_keys[existing_idx] = (col, not old_asc)
+            elif len(self.results_sort_keys) >= 3:
+                # Max 3 levels: replace the last secondary key (keep primary)
+                default_asc = col not in higher_is_better_cols
+                self.results_sort_keys[2] = (col, default_asc)
             else:
-                self.results_sort_reverse = False  # Start with ascending
+                # Add new sort level
+                default_asc = col not in higher_is_better_cols
+                self.results_sort_keys.append((col, default_asc))
+        else:
+            # Normal click: single-level sort
+            if self.results_sort_keys and self.results_sort_keys[0][0] == col:
+                # Toggle direction if same column
+                old_asc = self.results_sort_keys[0][1]
+                self.results_sort_keys = [(col, not old_asc)]
+            else:
+                default_asc = col not in higher_is_better_cols
+                self.results_sort_keys = [(col, default_asc)]
 
-        # Create a copy to sort
-        sorted_df = self.results_df.copy()
+        # Keep legacy sort vars in sync with primary key
+        if self.results_sort_keys:
+            self.results_sort_column = self.results_sort_keys[0][0]
+            self.results_sort_reverse = not self.results_sort_keys[0][1]
+        else:
+            self.results_sort_column = None
+            self.results_sort_reverse = False
 
-        # Convert column to numeric if possible for proper sorting
-        try:
-            sorted_df[col] = pd.to_numeric(sorted_df[col])
-        except (ValueError, TypeError):
-            pass  # Keep as string if not numeric
-
-        # Sort the dataframe
-        sorted_df = sorted_df.sort_values(by=col, ascending=not self.results_sort_reverse)
+        # Sort the appropriate source (filtered or full)
+        source_df = self.results_filtered_df if self.results_filtered_df is not None else self.results_df
+        sorted_df = self._apply_current_sort(source_df)
 
         # Repopulate with sorted data
         self._populate_results_table(sorted_df, is_sorted=True)
 
         # Ensure highlighting persists after sorting
         self._refresh_row_tags()
+
+    def _apply_current_sort(self, df):
+        """Sort a DataFrame using the current multi-level sort keys.
+
+        Args:
+            df: DataFrame to sort
+
+        Returns:
+            Sorted copy of the DataFrame
+        """
+        if df is None or len(df) == 0:
+            return df
+
+        if not self.results_sort_keys:
+            return df
+
+        sorted_df = df.copy()
+        sort_cols = [col for col, asc in self.results_sort_keys]
+        sort_asc = [asc for col, asc in self.results_sort_keys]
+
+        # Convert columns to numeric where possible for proper sorting
+        for col in sort_cols:
+            if col in sorted_df.columns:
+                try:
+                    sorted_df[col] = pd.to_numeric(sorted_df[col])
+                except (ValueError, TypeError):
+                    pass
+
+        # Only sort by columns that exist in the df
+        valid = [(col, asc) for col, asc in zip(sort_cols, sort_asc) if col in sorted_df.columns]
+        if valid:
+            sorted_df = sorted_df.sort_values(
+                by=[c for c, a in valid],
+                ascending=[a for c, a in valid]
+            )
+        return sorted_df
 
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
@@ -23255,6 +23349,20 @@ For detailed documentation, see the User Guide.
             self.results_df = results_df
             self.results_sort_column = None
             self.results_sort_reverse = False
+
+            # Reset multi-level sort and filter state for fresh results
+            self.results_sort_keys = []
+            self.results_filtered_df = None
+            self._clearing_filters = True
+            self.filter_model_var.set("All")
+            self.filter_preprocess_var.set("All")
+            self.filter_max_lvs_var.set(30)
+            self.filter_max_nvars_var.set(9999)
+            self.filter_min_r2cv_var.set(0.0)
+            self.filter_max_rmsecv_var.set(999.0)
+            self.filter_max_rmsep_var.set(999.0)
+            self.filter_min_val_acc_var.set(0.0)
+            self._clearing_filters = False
 
             # Initialize rankings
             self._regional_rankings = None
@@ -23353,9 +23461,21 @@ For detailed documentation, see the User Guide.
                 if not has_validation:
                     self.use_rmsep_gap.set(False)
 
-        # Clear existing items
-        for item in self.results_tree.get_children():
-            self.results_tree.delete(item)
+            # Create active filter controls with new data's unique values
+            self._create_active_filter_controls(is_classification)
+
+            # Pack active filter frame and sort hint above treeview (if not already packed)
+            self.active_filter_frame.pack_forget()
+            self.sort_hint_label.pack_forget()
+            self.active_filter_frame.pack(fill='x', padx=5, pady=(5, 0),
+                                          before=self.results_tree_frame)
+            self.sort_hint_label.pack(fill='x', padx=5, pady=(0, 2),
+                                      before=self.results_tree_frame)
+
+        # Clear existing items (batch deletion for performance)
+        children = self.results_tree.get_children()
+        if children:
+            self.results_tree.delete(*children)
 
         # Filter out internal metadata columns (used by Model Dev but not for display)
         INTERNAL_COLUMNS = {
@@ -23389,19 +23509,38 @@ For detailed documentation, see the User Guide.
                     width = 80
                 self.results_tree.column(col, width=width, anchor='center')
 
-        # Always update column headings (for sort indicators and click bindings)
+        # Always update column headings (for multi-sort indicators and click bindings)
+        superscripts = {1: '\u00b9', 2: '\u00b2', 3: '\u00b3'}
         for col in columns:
-            # Add sort indicator if this column is currently sorted
             header_text = col
-            if self.results_sort_column == col:
-                if self.results_sort_reverse:
-                    header_text = f"{col} ▼"  # Descending (high to low)
-                else:
-                    header_text = f"{col} ▲"  # Ascending (low to high)
+            for i, (sort_col, asc) in enumerate(self.results_sort_keys):
+                if sort_col == col:
+                    arrow = '\u25b2' if asc else '\u25bc'
+                    if len(self.results_sort_keys) > 1:
+                        header_text = f"{col} {arrow}{superscripts[i + 1]}"
+                    else:
+                        header_text = f"{col} {arrow}"
+                    break
 
             # Bind click event to sort by this column
             self.results_tree.heading(col, text=header_text,
                                      command=lambda c=col: self._sort_results_by_column(c))
+
+        # Update sort hint label
+        if hasattr(self, 'sort_hint_label'):
+            if self.results_sort_keys:
+                parts = []
+                for sort_col, asc in self.results_sort_keys:
+                    arrow = '\u25b2' if asc else '\u25bc'
+                    parts.append(f"{sort_col} {arrow}")
+                sort_desc = " > ".join(parts)
+                self.sort_hint_label.config(
+                    text=f"Sort: {sort_desc}  |  Tip: Shift+Click for multi-level sorting"
+                )
+            else:
+                self.sort_hint_label.config(
+                    text="Tip: Shift+Click column headers for multi-level sorting"
+                )
 
         # Insert data rows with regional/class highlighting
         expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
@@ -23540,6 +23679,317 @@ For detailed documentation, see the User Guide.
             current_values = list(self.results_tree.item(row_id, 'values'))
             current_values[0] = '☑' if self.results_df.loc[resolved_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
+
+    def _create_active_filter_controls(self, is_classification: bool = False):
+        """Build the active filter bar for hiding non-matching result rows.
+
+        Creates Model/Preprocess combos, LVs/n_vars/R2cv spinboxes,
+        Clear button, and showing-count label inside self.active_filter_frame.
+
+        Args:
+            is_classification: True for classification tasks, False for regression
+        """
+        # Remove old variable traces before rebuilding controls
+        for var, trace_id in getattr(self, '_filter_trace_ids', []):
+            try:
+                var.trace_remove('write', trace_id)
+            except (ValueError, tk.TclError):
+                pass
+        self._filter_trace_ids = []
+
+        # Clear existing children
+        for widget in self.active_filter_frame.winfo_children():
+            widget.destroy()
+
+        self._filter_is_classification = is_classification
+        df = self.results_df
+        if df is None or len(df) == 0:
+            return
+
+        # --- "Filter:" label ---
+        ttk.Label(
+            self.active_filter_frame, text="Filter:",
+            font=('Segoe UI', 9, 'bold')
+        ).pack(side='left', padx=(5, 3))
+
+        # --- Model combobox ---
+        ttk.Label(self.active_filter_frame, text="Model:").pack(side='left')
+        model_values = ["All"] + sorted(df['Model'].dropna().unique().tolist())
+        model_combo = ttk.Combobox(
+            self.active_filter_frame, textvariable=self.filter_model_var,
+            values=model_values, width=12, state='readonly'
+        )
+        model_combo.pack(side='left', padx=(2, 8))
+        model_combo.bind("<<ComboboxSelected>>", self._apply_filters_debounced)
+
+        # --- Preprocess combobox ---
+        ttk.Label(self.active_filter_frame, text="Preprocess:").pack(side='left')
+        preprocess_values = ["All"] + sorted(df['Preprocess'].dropna().unique().tolist()) if 'Preprocess' in df.columns else ["All"]
+        preprocess_combo = ttk.Combobox(
+            self.active_filter_frame, textvariable=self.filter_preprocess_var,
+            values=preprocess_values, width=14, state='readonly'
+        )
+        preprocess_combo.pack(side='left', padx=(2, 8))
+        preprocess_combo.bind("<<ComboboxSelected>>", self._apply_filters_debounced)
+
+        # --- LVs ≤ spinbox (only if column exists) ---
+        if 'LVs' in df.columns:
+            max_lvs = int(pd.to_numeric(df['LVs'], errors='coerce').dropna().max()) if df['LVs'].notna().any() else 30
+            self.filter_max_lvs_var.set(max_lvs)
+            self._filter_max_lvs_default = max_lvs
+            ttk.Label(self.active_filter_frame, text="LVs ≤").pack(side='left')
+            lvs_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=1, to=max_lvs,
+                textvariable=self.filter_max_lvs_var, width=4,
+                increment=1, format="%0.0f",
+                command=self._apply_filters_debounced
+            )
+            lvs_spinbox.pack(side='left', padx=(2, 8))
+        else:
+            self._filter_max_lvs_default = 30
+
+        # --- n_vars ≤ spinbox (only if column exists) ---
+        if 'n_vars' in df.columns:
+            max_nvars = int(pd.to_numeric(df['n_vars'], errors='coerce').dropna().max()) if df['n_vars'].notna().any() else 9999
+            self.filter_max_nvars_var.set(max_nvars)
+            self._filter_max_nvars_default = max_nvars
+            ttk.Label(self.active_filter_frame, text="n_vars ≤").pack(side='left')
+            nvars_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=1, to=max_nvars,
+                textvariable=self.filter_max_nvars_var, width=5,
+                increment=1, format="%0.0f",
+                command=self._apply_filters_debounced
+            )
+            nvars_spinbox.pack(side='left', padx=(2, 8))
+        else:
+            self._filter_max_nvars_default = 9999
+
+        # --- Accuracycv ≥ spinbox (classification only) ---
+        if is_classification and 'Accuracycv' in df.columns:
+            self.filter_min_r2cv_var.set(0.0)
+            ttk.Label(self.active_filter_frame, text="Acc_cv ≥").pack(side='left')
+            acccv_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=0.0, to=1.0, increment=0.01,
+                textvariable=self.filter_min_r2cv_var, width=5, format="%.2f",
+                command=self._apply_filters_debounced
+            )
+            acccv_spinbox.pack(side='left', padx=(2, 8))
+
+        # --- RMSEcv ≤ spinbox (when column exists) ---
+        if 'RMSEcv' in df.columns:
+            max_rmsecv = float(pd.to_numeric(df['RMSEcv'], errors='coerce').dropna().max()) if df['RMSEcv'].notna().any() else 999.0
+            self.filter_max_rmsecv_var.set(max_rmsecv)
+            self._filter_max_rmsecv_default = max_rmsecv
+            ttk.Label(self.active_filter_frame, text="RMSEcv ≤").pack(side='left')
+            rmsecv_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=0.0, to=max_rmsecv,
+                increment=round(max_rmsecv / 100, 2) or 0.01,
+                textvariable=self.filter_max_rmsecv_var, width=6, format="%.2f",
+                command=self._apply_filters_debounced
+            )
+            rmsecv_spinbox.pack(side='left', padx=(2, 8))
+        else:
+            self._filter_max_rmsecv_default = 999.0
+
+        # --- RMSEP ≤ spinbox (when validation data exists) ---
+        if 'RMSEP' in df.columns and df['RMSEP'].notna().any():
+            max_rmsep = float(pd.to_numeric(df['RMSEP'], errors='coerce').dropna().max()) if df['RMSEP'].notna().any() else 999.0
+            self.filter_max_rmsep_var.set(max_rmsep)
+            self._filter_max_rmsep_default = max_rmsep
+            ttk.Label(self.active_filter_frame, text="RMSEP ≤").pack(side='left')
+            rmsep_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=0.0, to=max_rmsep,
+                increment=round(max_rmsep / 100, 2) or 0.01,
+                textvariable=self.filter_max_rmsep_var, width=6, format="%.2f",
+                command=self._apply_filters_debounced
+            )
+            rmsep_spinbox.pack(side='left', padx=(2, 8))
+        else:
+            self._filter_max_rmsep_default = 999.0
+
+        # --- val_Accuracy ≥ spinbox (classification validation equivalent of RMSEP) ---
+        if 'val_Accuracy' in df.columns and df['val_Accuracy'].notna().any():
+            self.filter_min_val_acc_var.set(0.0)
+            ttk.Label(self.active_filter_frame, text="Val Acc ≥").pack(side='left')
+            val_acc_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=0.0, to=1.0, increment=0.01,
+                textvariable=self.filter_min_val_acc_var, width=5, format="%.2f",
+                command=self._apply_filters_debounced
+            )
+            val_acc_spinbox.pack(side='left', padx=(2, 8))
+
+        # --- Clear Filters button ---
+        clear_btn = ttk.Button(
+            self.active_filter_frame, text="Clear Filters",
+            command=self._clear_active_filters
+        )
+        clear_btn.pack(side='left', padx=(5, 8))
+
+        # --- "Showing X of Y" label ---
+        self.filter_count_label = ttk.Label(
+            self.active_filter_frame,
+            text=f"Showing {len(df)} of {len(df)}",
+            font=('Segoe UI', 8, 'italic'), foreground='#666666'
+        )
+        self.filter_count_label.pack(side='left', padx=5)
+
+        # Register variable traces so typed input triggers filtering too
+        # (Spinbox command= only fires on arrow clicks)
+        for var in [
+            self.filter_max_lvs_var, self.filter_max_nvars_var,
+            self.filter_min_r2cv_var, self.filter_max_rmsecv_var,
+            self.filter_max_rmsep_var, self.filter_min_val_acc_var,
+        ]:
+            tid = var.trace_add('write', self._apply_filters_debounced)
+            self._filter_trace_ids.append((var, tid))
+
+    def _apply_filters_debounced(self, *args):
+        """Debounced wrapper — delays filter application 300ms so rapid changes don't freeze UI."""
+        if self._clearing_filters:
+            return
+        if self._filter_after_id:
+            self.root.after_cancel(self._filter_after_id)
+        self._filter_after_id = self.root.after(300, self._apply_filters)
+
+    def _apply_filters(self):
+        """Apply active filters to results, hiding non-matching rows."""
+        if self.results_df is None or len(self.results_df) == 0:
+            return
+
+        try:
+            self._apply_filters_inner()
+        except (tk.TclError, ValueError):
+            # Ignore errors from intermediate typing states (e.g. empty spinbox)
+            return
+
+    def _apply_filters_inner(self):
+        """Core filter logic, separated so _apply_filters can catch mid-typing errors."""
+        df = self.results_df.copy()
+        any_active = False
+
+        # Model filter
+        model_val = self.filter_model_var.get()
+        if model_val != "All":
+            df = df[df['Model'] == model_val]
+            any_active = True
+
+        # Preprocess filter
+        preprocess_val = self.filter_preprocess_var.get()
+        if preprocess_val != "All" and 'Preprocess' in df.columns:
+            df = df[df['Preprocess'] == preprocess_val]
+            any_active = True
+
+        # LVs ≤ filter (NaN rows pass through — non-PLS models have no LVs)
+        if 'LVs' in self.results_df.columns:
+            max_lvs = self.filter_max_lvs_var.get()
+            default_max = getattr(self, '_filter_max_lvs_default', 30)
+            if max_lvs < default_max:
+                numeric_lvs = pd.to_numeric(df['LVs'], errors='coerce')
+                mask = df['LVs'].isna() | numeric_lvs.isna() | (numeric_lvs <= max_lvs)
+                df = df[mask]
+                any_active = True
+
+        # n_vars ≤ filter (NaN rows pass through)
+        if 'n_vars' in self.results_df.columns:
+            max_nvars = self.filter_max_nvars_var.get()
+            default_max = getattr(self, '_filter_max_nvars_default', 9999)
+            if max_nvars < default_max:
+                numeric_nvars = pd.to_numeric(df['n_vars'], errors='coerce')
+                mask = df['n_vars'].isna() | numeric_nvars.isna() | (numeric_nvars <= max_nvars)
+                df = df[mask]
+                any_active = True
+
+        # Accuracycv ≥ filter (classification)
+        if getattr(self, '_filter_is_classification', False):
+            threshold = self.filter_min_r2cv_var.get()
+            if threshold > 0.0 and 'Accuracycv' in df.columns:
+                numeric_metric = pd.to_numeric(df['Accuracycv'], errors='coerce')
+                mask = numeric_metric.isna() | (numeric_metric >= threshold)
+                df = df[mask]
+                any_active = True
+
+        # RMSEcv ≤ filter
+        if 'RMSEcv' in self.results_df.columns:
+            max_rmsecv = self.filter_max_rmsecv_var.get()
+            default_max = getattr(self, '_filter_max_rmsecv_default', 999.0)
+            if max_rmsecv < default_max:
+                numeric_rmsecv = pd.to_numeric(df['RMSEcv'], errors='coerce')
+                mask = df['RMSEcv'].isna() | numeric_rmsecv.isna() | (numeric_rmsecv <= max_rmsecv)
+                df = df[mask]
+                any_active = True
+
+        # RMSEP ≤ filter (when validation data exists)
+        if 'RMSEP' in self.results_df.columns:
+            max_rmsep = self.filter_max_rmsep_var.get()
+            default_max = getattr(self, '_filter_max_rmsep_default', 999.0)
+            if max_rmsep < default_max:
+                numeric_rmsep = pd.to_numeric(df['RMSEP'], errors='coerce')
+                mask = df['RMSEP'].isna() | numeric_rmsep.isna() | (numeric_rmsep <= max_rmsep)
+                df = df[mask]
+                any_active = True
+
+        # val_Accuracy ≥ filter (classification validation)
+        if 'val_Accuracy' in self.results_df.columns:
+            threshold = self.filter_min_val_acc_var.get()
+            if threshold > 0.0:
+                numeric_val_acc = pd.to_numeric(df['val_Accuracy'], errors='coerce')
+                mask = df['val_Accuracy'].isna() | numeric_val_acc.isna() | (numeric_val_acc >= threshold)
+                df = df[mask]
+                any_active = True
+
+        self.results_filtered_df = df if any_active else None
+
+        # Apply current sort
+        sorted_df = self._apply_current_sort(df)
+
+        # Populate table with filtered+sorted data
+        self._populate_results_table(sorted_df, is_sorted=True)
+
+        # Update counter label
+        if hasattr(self, 'filter_count_label'):
+            total = len(self.results_df)
+            shown = len(df)
+            if shown == 0:
+                self.filter_count_label.config(text=f"No models match filters (0 of {total})", foreground='#e74c3c')
+            elif any_active:
+                self.filter_count_label.config(text=f"Showing {shown} of {total}", foreground='#666666')
+            else:
+                self.filter_count_label.config(text=f"Showing {shown} of {total}", foreground='#666666')
+
+    def _clear_active_filters(self):
+        """Reset all active filters to defaults and re-apply."""
+        self._clearing_filters = True
+        self.filter_model_var.set("All")
+        self.filter_preprocess_var.set("All")
+        self.filter_max_lvs_var.set(getattr(self, '_filter_max_lvs_default', 30))
+        self.filter_max_nvars_var.set(getattr(self, '_filter_max_nvars_default', 9999))
+        self.filter_min_r2cv_var.set(0.0)
+        self.filter_max_rmsecv_var.set(getattr(self, '_filter_max_rmsecv_default', 999.0))
+        self.filter_max_rmsep_var.set(getattr(self, '_filter_max_rmsep_default', 999.0))
+        self.filter_min_val_acc_var.set(0.0)
+        self._clearing_filters = False
+        self._apply_filters()
+
+    def _has_active_filters(self) -> bool:
+        """Return True if any filter variable differs from its default."""
+        if self.filter_model_var.get() != "All":
+            return True
+        if self.filter_preprocess_var.get() != "All":
+            return True
+        cols = self.results_df.columns if self.results_df is not None else []
+        if 'LVs' in cols and self.filter_max_lvs_var.get() < getattr(self, '_filter_max_lvs_default', 30):
+            return True
+        if 'n_vars' in cols and self.filter_max_nvars_var.get() < getattr(self, '_filter_max_nvars_default', 9999):
+            return True
+        if self.filter_min_r2cv_var.get() > 0.0:
+            return True
+        if 'RMSEcv' in cols and self.filter_max_rmsecv_var.get() < getattr(self, '_filter_max_rmsecv_default', 999.0):
+            return True
+        if 'RMSEP' in cols and self.filter_max_rmsep_var.get() < getattr(self, '_filter_max_rmsep_default', 999.0):
+            return True
+        if 'val_Accuracy' in cols and self.filter_min_val_acc_var.get() > 0.0:
+            return True
+        return False
 
     def _update_filter_controls(self, is_classification: bool = False):
         """Update the filter controls frame (overfitting detection checkboxes).
@@ -24020,8 +24470,38 @@ For detailed documentation, see the User Guide.
         # Recompute expert choices (independent of penalties)
         self._expert_choices = self._compute_expert_choices(self.results_df)
 
-        # Refresh results table display
+        # Save current filter/sort state before repopulate (which resets them)
+        saved_sort_keys = list(self.results_sort_keys)
+        saved_filter_model = self.filter_model_var.get()
+        saved_filter_preprocess = self.filter_preprocess_var.get()
+        saved_filter_lvs = self.filter_max_lvs_var.get()
+        saved_filter_nvars = self.filter_max_nvars_var.get()
+        saved_filter_r2cv = self.filter_min_r2cv_var.get()
+        saved_filter_rmsecv = self.filter_max_rmsecv_var.get()
+        saved_filter_rmsep = self.filter_max_rmsep_var.get()
+        saved_filter_val_acc = self.filter_min_val_acc_var.get()
+
+        # Refresh results table display (resets state + recomputes rankings/expert choices)
         self._populate_results_table(self.results_df, is_sorted=False)
+
+        # Restore filter/sort state
+        self.results_sort_keys = saved_sort_keys
+        if self.results_sort_keys:
+            self.results_sort_column = self.results_sort_keys[0][0]
+            self.results_sort_reverse = not self.results_sort_keys[0][1]
+        self._clearing_filters = True
+        self.filter_model_var.set(saved_filter_model)
+        self.filter_preprocess_var.set(saved_filter_preprocess)
+        self.filter_max_lvs_var.set(saved_filter_lvs)
+        self.filter_max_nvars_var.set(saved_filter_nvars)
+        self.filter_min_r2cv_var.set(saved_filter_r2cv)
+        self.filter_max_rmsecv_var.set(saved_filter_rmsecv)
+        self.filter_max_rmsep_var.set(saved_filter_rmsep)
+        self.filter_min_val_acc_var.set(saved_filter_val_acc)
+        self._clearing_filters = False
+
+        # Re-apply filters with restored state
+        self._apply_filters()
 
     def _compute_expert_choices(self, df) -> dict:
         """Find well-generalized models that an expert spectroscopist would recommend.
@@ -24261,8 +24741,8 @@ For detailed documentation, see the User Guide.
                 else:
                     self.results_df.loc[idx, 'Select'] = False
 
-            # Refresh the display
-            self._populate_results_table(self.results_df, is_sorted=True)
+            # Refresh display preserving active filters/sort
+            self._apply_filters()
 
             # Show summary
             filter_desc = "any class" if region_filter == "All" else region_filter
@@ -24308,8 +24788,8 @@ For detailed documentation, see the User Guide.
                 else:
                     self.results_df.loc[idx, 'Select'] = False
 
-            # Refresh the display
-            self._populate_results_table(self.results_df, is_sorted=True)
+            # Refresh display preserving active filters/sort
+            self._apply_filters()
 
             # Show summary
             filter_desc = "any region" if region_filter == "All" else region_filter
@@ -45726,7 +46206,7 @@ External Validation Performance (n={n_val}):
             if path.suffix.lower() == '.csv':
                 import pandas as pd
                 df = pd.read_csv(path)
-            elif path.suffix.lower() == '.xlsx':
+            elif path.suffix.lower() in ('.xlsx', '.xls'):
                 import pandas as pd
                 df = pd.read_excel(path)
             elif path.suffix.lower() == '.npy':
