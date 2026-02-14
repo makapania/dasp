@@ -2122,3 +2122,216 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
     print(f"  Optimal: {subsets[best_subset_idx]['n_intervals']} intervals, "
           f"RMSECV={subsets[best_subset_idx]['rmsecv']:.4f}")
     return subsets
+
+
+# =============================================================================
+# MC-siPLS (Monte Carlo Synergy Interval PLS)
+# =============================================================================
+
+def mc_sipls(X, y, wavelengths, n_intervals=20, n_combinations=500,
+             max_combine=4, cv_folds=5, random_state=42):
+    """
+    Monte Carlo Synergy Interval PLS — randomly samples interval combinations
+    to find synergistic spectral regions that work better together than individually.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    wavelengths : np.ndarray
+        Wavelength values for each feature
+    n_intervals : int
+        Number of intervals to divide spectrum into
+    n_combinations : int
+        Total number of random combinations to evaluate
+    max_combine : int
+        Maximum number of intervals to combine (2..max_combine)
+    cv_folds : int
+        Number of cross-validation folds
+    random_state : int
+        Random seed for reproducibility
+
+    Returns
+    -------
+    subsets : list[dict]
+        Each dict has keys: indices, tag, rmsecv, r2, n_intervals, interval_ids, rank
+    """
+    from math import comb
+
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    wavelengths = np.asarray(wavelengths)
+    n_features = X.shape[1]
+
+    # Clamp n_intervals so each interval has at least 1 feature
+    n_intervals = min(n_intervals, n_features)
+
+    intervals = _create_intervals(wavelengths, n_intervals)
+    n_actual = len(intervals)
+
+    if n_actual < 2:
+        print("MC-siPLS: Not enough intervals (need >= 2), skipping")
+        return []
+
+    # Clamp max_combine to available intervals
+    max_combine = min(max_combine, n_actual)
+    if max_combine < 2:
+        max_combine = 2
+
+    rng = np.random.RandomState(random_state)
+
+    # Distribute combinations across sizes 2..max_combine
+    sizes = list(range(2, max_combine + 1))
+    combos_per_size = max(1, n_combinations // len(sizes))
+
+    seen = set()
+    results = []
+
+    print(f"\nMC-siPLS: {n_actual} intervals, sampling up to {n_combinations} combinations "
+          f"(sizes {sizes[0]}-{sizes[-1]})")
+
+    for size in sizes:
+        # Cap at the actual number of possible combos C(n_actual, size)
+        max_possible = comb(n_actual, size)
+        budget = min(combos_per_size, max_possible)
+        found = 0
+
+        for _ in range(budget * 3):  # allow retries for hash collisions
+            if found >= budget:
+                break
+            combo = tuple(sorted(rng.choice(n_actual, size=size, replace=False)))
+            if combo in seen:
+                continue
+            seen.add(combo)
+            found += 1
+
+            combo_list = list(combo)
+            combined_indices = _get_combined_indices(intervals, combo_list)
+
+            if len(combined_indices) < 2:
+                continue
+
+            rmsecv, r2 = _evaluate_interval_pls(X[:, combined_indices], y, cv_folds)
+
+            if np.isinf(rmsecv):
+                continue
+
+            wl_ranges = _get_wavelength_ranges(intervals, combo_list)
+            if len(wl_ranges) <= 3:
+                wl_str = '+'.join([f"{s:.0f}-{e:.0f}" for s, e in wl_ranges])
+                tag = f"siPLS_{size}int_{wl_str}nm"
+            else:
+                min_wl = min(s for s, e in wl_ranges)
+                max_wl = max(e for s, e in wl_ranges)
+                tag = f"siPLS_{size}int_{min_wl:.0f}-{max_wl:.0f}nm"
+
+            results.append({
+                'indices': combined_indices,
+                'tag': tag,
+                'rmsecv': rmsecv,
+                'r2': r2,
+                'n_intervals': size,
+                'interval_ids': combo_list,
+            })
+
+    # Sort by RMSECV and assign ranks
+    results.sort(key=lambda s: s['rmsecv'])
+    for i, s in enumerate(results):
+        s['rank'] = i + 1
+
+    print(f"MC-siPLS complete: {len(results)} unique subsets evaluated")
+    if results:
+        print(f"  Best: {results[0]['tag']}, RMSECV={results[0]['rmsecv']:.4f}")
+    return results
+
+
+# =============================================================================
+# MWPLS (Moving Window PLS)
+# =============================================================================
+
+def mwpls(X, y, wavelengths, window_sizes=None, step_size=None, cv_folds=5):
+    """
+    Moving Window PLS — slides windows of different sizes across the spectrum
+    to find optimal contiguous regions.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    wavelengths : np.ndarray
+        Wavelength values for each feature
+    window_sizes : list[int] or None
+        Window sizes (in number of variables). None = auto-select based on feature count.
+    step_size : int or None
+        Step size for sliding. None = window_size // 4 for each window.
+    cv_folds : int
+        Number of cross-validation folds
+
+    Returns
+    -------
+    subsets : list[dict]
+        Each dict has keys: indices, tag, rmsecv, r2, n_intervals, interval_ids, rank
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    wavelengths = np.asarray(wavelengths)
+    n_features = X.shape[1]
+
+    # Auto-select window sizes if not provided
+    if window_sizes is None:
+        candidates = [10, 20, 40, 80]
+        window_sizes = [w for w in candidates if w < n_features]
+        if not window_sizes:
+            window_sizes = [max(2, n_features // 4)]
+
+    results = []
+
+    # Filter out invalid window sizes
+    valid_sizes = [w for w in window_sizes if 2 <= w < n_features]
+    if not valid_sizes:
+        print(f"\nMWPLS: No valid window sizes for {n_features} features "
+              f"(requested: {window_sizes}), skipping")
+        return []
+
+    print(f"\nMWPLS: {n_features} features, window sizes: {valid_sizes}")
+
+    for wsize in valid_sizes:
+
+        step = step_size if step_size is not None else max(1, wsize // 4)
+
+        start = 0
+        while start + wsize <= n_features:
+            end = start + wsize
+            indices = np.arange(start, end, dtype=int)
+
+            rmsecv, r2 = _evaluate_interval_pls(X[:, indices], y, cv_folds)
+
+            if not np.isinf(rmsecv):
+                start_wl = wavelengths[start]
+                end_wl = wavelengths[end - 1]
+                tag = f"MWPLS_w{wsize}_{start_wl:.0f}-{end_wl:.0f}nm"
+
+                results.append({
+                    'indices': indices,
+                    'tag': tag,
+                    'rmsecv': rmsecv,
+                    'r2': r2,
+                    'n_intervals': 1,
+                    'interval_ids': [],
+                })
+
+            start += step
+
+    # Sort by RMSECV and assign ranks
+    results.sort(key=lambda s: s['rmsecv'])
+    for i, s in enumerate(results):
+        s['rank'] = i + 1
+
+    print(f"MWPLS complete: {len(results)} windows evaluated")
+    if results:
+        print(f"  Best: {results[0]['tag']}, RMSECV={results[0]['rmsecv']:.4f}")
+    return results

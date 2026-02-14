@@ -3259,6 +3259,8 @@ class SpectralPredictApp:
         self.varsel_ipls = tk.BooleanVar(value=False)
         self.varsel_ipls_forward = tk.BooleanVar(value=False)  # Forward iPLS
         self.varsel_ipls_backward = tk.BooleanVar(value=False)  # Backward iPLS
+        self.varsel_mc_sipls = tk.BooleanVar(value=False)  # MC-siPLS
+        self.varsel_mwpls = tk.BooleanVar(value=False)  # MWPLS
         self.varsel_cars = tk.BooleanVar(value=False)
         self.varsel_cars_tree = tk.BooleanVar(value=False)  # CARS-Tree for tree models
         self.varsel_vcpa = tk.BooleanVar(value=False)
@@ -3275,6 +3277,9 @@ class SpectralPredictApp:
         self.ipls_n_intervals = tk.IntVar(value=20)  # Number of intervals for iPLS
         self.ipls_max_combine = tk.IntVar(value=5)  # Max intervals to combine in forward iPLS
         self.ipls_subset_limit = tk.StringVar(value="Top 10")  # Dropdown: Top 5, Top 10, Top 20, All
+        self.sipls_n_combinations = tk.IntVar(value=500)  # MC-siPLS random combinations
+        self.mwpls_window_sizes_str = tk.StringVar(value="10, 20, 40")  # MWPLS window sizes
+        self.mwpls_step_size = tk.StringVar(value="")  # MWPLS step size (empty = auto)
         # GA parameters
         self.ga_population_size = tk.IntVar(value=64)
         self.ga_generations = tk.IntVar(value=100)
@@ -9475,72 +9480,82 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Progressively removes worst intervals",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
-                       variable=self.varsel_cars).grid(row=7, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
+        ttk.Checkbutton(varsel_frame, text="MC-siPLS (Monte Carlo Synergy iPLS)",
+                       variable=self.varsel_mc_sipls).grid(row=7, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Random interval combinations for synergistic regions",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
-                       variable=self.varsel_cars_tree).grid(row=8, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
+        ttk.Checkbutton(varsel_frame, text="MWPLS (Moving Window PLS)",
+                       variable=self.varsel_mwpls).grid(row=8, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Optimal contiguous spectral windows",
                  style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
-                       variable=self.varsel_vcpa).grid(row=9, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
+                       variable=self.varsel_cars).grid(row=9, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
                  style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
 
+        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
+                       variable=self.varsel_cars_tree).grid(row=10, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
+                 style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
+                       variable=self.varsel_vcpa).grid(row=11, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
+                 style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
+
         ga_row_frame = ttk.Frame(varsel_frame)
-        ga_row_frame.grid(row=10, column=0, sticky=tk.W, pady=2)
+        ga_row_frame.grid(row=12, column=0, sticky=tk.W, pady=2)
         ttk.Checkbutton(ga_row_frame, text="GA (Genetic Algorithm)",
                        variable=self.varsel_ga).pack(side=tk.LEFT)
         ttk.Checkbutton(ga_row_frame, text="Quick",
                        variable=self.ga_quick_mode).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(varsel_frame, text="Evolutionary optimization (Quick: ~10× faster)",
-                 style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
-
-        # Hybrid methods separator
-        ttk.Label(varsel_frame, text="Hybrid Methods (multi-stage pipelines):", style='Subheading.TLabel').grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
-
-        ttk.Checkbutton(varsel_frame, text="UVE-SPA",
-                       variable=self.varsel_uve_spa).grid(row=12, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Noise filtering + collinearity reduction",
                  style='Caption.TLabel').grid(row=12, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-CARS",
-                       variable=self.varsel_uve_cars).grid(row=13, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Noise filtering + adaptive selection",
-                 style='Caption.TLabel').grid(row=13, column=1, sticky=tk.W, padx=15)
+        # Hybrid methods separator
+        ttk.Label(varsel_frame, text="Hybrid Methods (multi-stage pipelines):", style='Subheading.TLabel').grid(row=13, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
 
-        ttk.Checkbutton(varsel_frame, text="UVE-CARS-Tree",
-                       variable=self.varsel_uve_cars_tree).grid(row=14, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Noise filtering + tree-based selection",
+        ttk.Checkbutton(varsel_frame, text="UVE-SPA",
+                       variable=self.varsel_uve_spa).grid(row=14, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filtering + collinearity reduction",
                  style='Caption.TLabel').grid(row=14, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-CARS-SPA",
-                       variable=self.varsel_uve_cars_spa).grid(row=15, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Noise filter + adaptive + collinearity reduction",
+        ttk.Checkbutton(varsel_frame, text="UVE-CARS",
+                       variable=self.varsel_uve_cars).grid(row=15, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filtering + adaptive selection",
                  style='Caption.TLabel').grid(row=15, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
-                       variable=self.varsel_fipls_spa).grid(row=16, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Region selection + collinearity reduction",
+        ttk.Checkbutton(varsel_frame, text="UVE-CARS-Tree",
+                       variable=self.varsel_uve_cars_tree).grid(row=16, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filtering + tree-based selection",
                  style='Caption.TLabel').grid(row=16, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
-                       variable=self.varsel_fipls_cars).grid(row=17, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Region selection + adaptive selection",
+        ttk.Checkbutton(varsel_frame, text="UVE-CARS-SPA",
+                       variable=self.varsel_uve_cars_spa).grid(row=17, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filter + adaptive + collinearity reduction",
                  style='Caption.TLabel').grid(row=17, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
+                       variable=self.varsel_fipls_spa).grid(row=18, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Region selection + collinearity reduction",
+                 style='Caption.TLabel').grid(row=18, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
+                       variable=self.varsel_fipls_cars).grid(row=19, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Region selection + adaptive selection",
+                 style='Caption.TLabel').grid(row=19, column=1, sticky=tk.W, padx=15)
 
         # UVE Prefilter option
         ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
-                       variable=self.apply_uve_prefilter).grid(row=18, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+                       variable=self.apply_uve_prefilter).grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
 
         # Method parameters
-        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=19, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
+        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=21, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
 
         params_frame = ttk.Frame(varsel_frame)
-        params_frame.grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=5)
+        params_frame.grid(row=22, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # UVE parameters
         ttk.Label(params_frame, text="UVE Cutoff:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -9563,24 +9578,36 @@ class SpectralPredictApp:
         ttk.Spinbox(params_frame, from_=1, to=10, textvariable=self.ipls_max_combine, width=8).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Label(params_frame, text="(default: 5)", style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="iPLS Subsets to Test:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Label(params_frame, text="siPLS Combinations:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=50, to=5000, textvariable=self.sipls_n_combinations, width=8).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 500)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="MWPLS Window Sizes:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Entry(params_frame, textvariable=self.mwpls_window_sizes_str, width=14).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(comma-separated, e.g. 10, 20, 40)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="MWPLS Step Size:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Entry(params_frame, textvariable=self.mwpls_step_size, width=8).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(empty = window/4)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(params_frame, text="Subsets to Test:").grid(row=8, column=0, sticky=tk.W, padx=(0, 5), pady=5)
         ttk.Combobox(params_frame, textvariable=self.ipls_subset_limit,
                      values=["Top 5", "Top 10", "Top 20", "All"],
-                     state='readonly', width=10).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(limit subsets tested)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
+                     state='readonly', width=10).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(limit subsets tested)", style='Caption.TLabel').grid(row=8, column=2, sticky=tk.W, padx=10)
 
         # GA parameters
-        ttk.Label(params_frame, text="GA Population:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Population:").grid(row=9, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=9, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=9, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="GA Generations:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Generations:").grid(row=10, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=10, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=10, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="GA Runs:").grid(row=8, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=8, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Runs:").grid(row=11, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=11, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=11, column=2, sticky=tk.W, padx=10)
 
     def _create_tab4c_model_configuration(self):
         """Subtab 4C: Model Configuration - Model selection and advanced model options."""
@@ -22067,6 +22094,25 @@ class SpectralPredictApp:
                 except ValueError:
                     self._log_progress("[!] Warning: Invalid UVE n_components, using auto-determination")
 
+            # Parse MWPLS parameters
+            mwpls_window_sizes = None
+            mwpls_ws_str = self.mwpls_window_sizes_str.get().strip()
+            if mwpls_ws_str:
+                try:
+                    mwpls_window_sizes = [int(x.strip()) for x in mwpls_ws_str.split(',') if x.strip()]
+                except ValueError:
+                    self._log_progress("[!] Warning: Invalid MWPLS window sizes, using auto")
+                    mwpls_window_sizes = None
+
+            mwpls_step_size = None
+            mwpls_ss_str = self.mwpls_step_size.get().strip()
+            if mwpls_ss_str:
+                try:
+                    mwpls_step_size = int(mwpls_ss_str)
+                except ValueError:
+                    self._log_progress("[!] Warning: Invalid MWPLS step size, using auto")
+                    mwpls_step_size = None
+
             # Collect selected variable selection methods
             selected_varsel_methods = []
             if self.varsel_importance.get():
@@ -22083,6 +22129,10 @@ class SpectralPredictApp:
                 selected_varsel_methods.append('ipls_forward')
             if self.varsel_ipls_backward.get():
                 selected_varsel_methods.append('ipls_backward')
+            if self.varsel_mc_sipls.get():
+                selected_varsel_methods.append('mc_sipls')
+            if self.varsel_mwpls.get():
+                selected_varsel_methods.append('mwpls')
             if self.varsel_cars.get():
                 selected_varsel_methods.append('cars')
             if self.varsel_cars_tree.get():
@@ -22666,6 +22716,9 @@ class SpectralPredictApp:
                 ipls_n_intervals=self.ipls_n_intervals.get(),
                 ipls_max_combine=self.ipls_max_combine.get(),
                 ipls_subset_limit=self.ipls_subset_limit.get(),
+                sipls_n_combinations=self.sipls_n_combinations.get(),
+                mwpls_window_sizes=mwpls_window_sizes,
+                mwpls_step_size=mwpls_step_size,
                 # GA variable selection parameters
                 ga_population_size=self.ga_population_size.get(),
                 ga_generations=self.ga_generations.get(),

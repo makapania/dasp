@@ -29,7 +29,8 @@ from .variable_selection import (
     spa_selection, uve_selection, uve_spa_selection,
     ipls_selection, ipls_forward, ipls_backward, cars_selection,
     get_uve_threshold, uve_cars_selection, uve_cars_spa_selection,
-    fipls_spa_selection, fipls_cars_selection
+    fipls_spa_selection, fipls_cars_selection,
+    mc_sipls, mwpls
 )
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
@@ -778,6 +779,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
                spa_n_random_starts=10, ipls_n_intervals=20,
                ipls_max_combine=5, ipls_subset_limit="Top 10",
+               sipls_n_combinations=500,
+               mwpls_window_sizes=None, mwpls_step_size=None,
                tier='standard', enabled_models=None,
                analysis_wl_min=None, analysis_wl_max=None,
                analysis_wl_regions=None,  # List of (min, max) tuples for multi-region support
@@ -936,7 +939,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa', 'fipls_spa', 'fipls_cars']
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'mc_sipls', 'mwpls', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa', 'fipls_spa', 'fipls_cars']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # If UVE-hybrid variant is selected alongside base method, drop the base (hybrid subsumes it)
@@ -2098,8 +2101,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             if controller and not controller.check_and_wait():
                                 break
 
-                            # ===== NEW BRANCH: Forward/Backward iPLS (subset-returning methods) =====
-                            if varsel_method in ('ipls_forward', 'ipls_backward'):
+                            # ===== Subset-returning methods (iPLS, MC-siPLS, MWPLS) =====
+                            if varsel_method in ('ipls_forward', 'ipls_backward', 'mc_sipls', 'mwpls'):
                                 print(f"  -> Running {varsel_method}...")
 
                                 # Call appropriate function
@@ -2113,7 +2116,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         cv_folds=folds,
                                         random_state=random_state
                                     )
-                                else:  # ipls_backward
+                                elif varsel_method == 'ipls_backward':
                                     subsets = ipls_backward(
                                         X_transformed_varsel,
                                         y_np,
@@ -2121,6 +2124,26 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         n_intervals=ipls_n_intervals,
                                         cv_folds=folds,
                                         random_state=random_state
+                                    )
+                                elif varsel_method == 'mc_sipls':
+                                    subsets = mc_sipls(
+                                        X_transformed_varsel,
+                                        y_np,
+                                        wavelengths=wavelengths_varsel,
+                                        n_intervals=ipls_n_intervals,
+                                        n_combinations=sipls_n_combinations,
+                                        max_combine=ipls_max_combine,
+                                        cv_folds=folds,
+                                        random_state=random_state
+                                    )
+                                elif varsel_method == 'mwpls':
+                                    subsets = mwpls(
+                                        X_transformed_varsel,
+                                        y_np,
+                                        wavelengths=wavelengths_varsel,
+                                        window_sizes=mwpls_window_sizes,
+                                        step_size=mwpls_step_size,
+                                        cv_folds=folds
                                     )
 
                                 if subsets is None or len(subsets) == 0:
