@@ -2525,6 +2525,7 @@ class SpectralPredictApp:
         self.variable_penalty = tk.IntVar(value=0)     # Penalty for using many variables
         self.gap_penalty = tk.IntVar(value=0)            # Penalty for calibration-CV gap
         self.use_rmsep_gap = tk.BooleanVar(value=False)  # Use RMSEP/val_Accuracy for gap calc
+        self._rerank_after_id = None  # For debounced reranking
 
         self.max_n_components = tk.IntVar(value=10)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
@@ -8934,23 +8935,23 @@ class SpectralPredictApp:
 
         # RMSEP/validation gap checkbox (next to gap penalty)
         self.use_rmsep_gap_checkbox = ttk.Checkbutton(
-            options_frame, text="Use validation gap (RMSEP/val_Accuracy)",
+            options_frame, text="Use validation gap instead of calibration gap",
             variable=self.use_rmsep_gap, state='disabled'
         )
         self.use_rmsep_gap_checkbox.grid(row=5, column=1, sticky=tk.W, padx=(15, 0))
         CreateToolTip(self.use_rmsep_gap_checkbox,
-                      text="When checked, gap penalty uses RMSEP/RMSEcv (regression) or val_Accuracy "
-                           "(classification) instead of calibration metrics. Only available after search "
-                           "with validation data.", delay=500)
+                      text="When checked, gap penalty uses validation metrics (RMSEP/RMSEcv for regression, "
+                           "Validation Accuracy/CV Accuracy for classification) instead of calibration-CV gap. "
+                           "Only available after search with validation data.", delay=500)
 
         # Info label explaining the penalty system
         ttk.Label(options_frame, text="Both penalties scale relative to actual performance range. 0 = rank only by performance, 5 = balanced, 10 = max shift = 50% of perf range",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
 
         # Bind penalty controls to live re-ranking
-        self.variable_penalty.trace_add('write', self._rerank_results)
-        self.gap_penalty.trace_add('write', self._rerank_results)
-        self.use_rmsep_gap.trace_add('write', self._rerank_results)
+        self.variable_penalty.trace_add('write', self._rerank_results_debounced)
+        self.gap_penalty.trace_add('write', self._rerank_results_debounced)
+        self.use_rmsep_gap.trace_add('write', self._rerank_results_debounced)
 
         # === Wavelength Restriction for Analysis ===
         ttk.Separator(options_frame, orient='horizontal').grid(row=7, column=0, columnspan=3, sticky='ew', pady=(20, 10))
@@ -23344,6 +23345,11 @@ For detailed documentation, see the User Guide.
                               'val_Accuracy' in results_df.columns)
             if hasattr(self, 'use_rmsep_gap_checkbox'):
                 self.use_rmsep_gap_checkbox.config(state='normal' if has_validation else 'disabled')
+                if has_validation:
+                    if is_classification:
+                        self.use_rmsep_gap_checkbox.config(text="Use validation gap (Val Acc vs CV Acc)")
+                    else:
+                        self.use_rmsep_gap_checkbox.config(text="Use validation gap (RMSEP vs RMSEcv)")
                 if not has_validation:
                     self.use_rmsep_gap.set(False)
 
@@ -23978,6 +23984,12 @@ For detailed documentation, see the User Guide.
             pass
 
         return False
+
+    def _rerank_results_debounced(self, *args):
+        """Debounced wrapper — delays rerank 400ms so rapid changes don't freeze UI."""
+        if self._rerank_after_id:
+            self.after_cancel(self._rerank_after_id)
+        self._rerank_after_id = self.after(400, self._rerank_results)
 
     def _rerank_results(self, *args):
         """Re-rank results after user changes penalty settings."""
