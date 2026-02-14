@@ -11726,7 +11726,7 @@ class SpectralPredictApp:
 
         # Instructions
         ttk.Label(content_frame,
-            text="Double-click a result from the Results tab to load it here for refinement, or click 'Reset to Defaults' for fresh development.",
+            text="Configure your model below and click 'Run Model', or double-click a result from the Results tab to load a previous configuration.",
             style='Caption.TLabel').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
         row += 1
 
@@ -23097,6 +23097,13 @@ class SpectralPredictApp:
         if hasattr(self, 'live_monitoring_active') and self.live_monitoring_active:
             if current_tab != 9:  # Tab 10 (Multi-Model) is now index 9
                 self._stop_live_monitoring()
+
+        # Auto-initialize Model Development tab with defaults when first visited with data
+        if self.notebook.select() == str(self.tab7):
+            if (hasattr(self, 'refine_run_button_selection')
+                    and str(self.refine_run_button_selection.cget('state')) == 'disabled'
+                    and self.X_original is not None and self.y is not None):
+                self._load_default_parameters()
 
         # Auto-refresh calibration transfer instruments when switching to that tab (index 10)
         if current_tab == 10 and hasattr(self, 'instrument_profiles') and self.instrument_profiles:
