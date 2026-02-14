@@ -45805,30 +45805,32 @@ External Validation Performance (n={n_val}):
 
     def _contam_load_clean_data(self):
         """Load clean (uncontaminated) spectral data from file or folder."""
-        # Ask user whether to load file or folder
+        # Ask user whether to load directory or file
         choice = messagebox.askquestion(
             "Load Clean Data",
-            "Do you want to load from a FILE?\n\n"
-            "Click 'Yes' to browse for a file (CSV, Excel, NPY)\n"
-            "Click 'No' to browse for a FOLDER of raw spectra (ASD, SPC, OPUS, etc.)"
+            "Load a directory of spectral files?\n\n"
+            "Yes = Directory (ASD, CSV, SPC files)\n"
+            "No = Single combined file (CSV, Excel, NPY)",
+            icon='question'
         )
 
         if choice == 'yes':
+            # Load from folder
+            filepath = filedialog.askdirectory(title="Select Folder with Clean Spectra")
+            if not filepath:
+                return
+        else:
             # Load from file
             filepath = filedialog.askopenfilename(
                 title="Select Clean Spectra File",
                 filetypes=[
+                    ("All Supported", "*.csv *.xlsx *.xls *.npy"),
                     ("CSV files", "*.csv"),
-                    ("Excel files", "*.xlsx"),
+                    ("Excel files", "*.xlsx *.xls"),
                     ("NumPy files", "*.npy"),
                     ("All files", "*.*")
                 ]
             )
-            if not filepath:
-                return
-        else:
-            # Load from folder
-            filepath = filedialog.askdirectory(title="Select Folder with Clean Spectra")
             if not filepath:
                 return
 
@@ -45868,30 +45870,32 @@ External Validation Performance (n={n_val}):
             messagebox.showwarning("Warning", f"Group '{label}' already exists")
             return
 
-        # Ask user whether to load file or folder
+        # Ask user whether to load directory or file
         choice = messagebox.askquestion(
             f"Add Group: {label}",
-            "Do you want to load from a FILE?\n\n"
-            "Click 'Yes' to browse for a file (CSV, Excel, NPY)\n"
-            "Click 'No' to browse for a FOLDER of raw spectra (ASD, SPC, OPUS, etc.)"
+            "Load a directory of spectral files?\n\n"
+            "Yes = Directory (ASD, CSV, SPC files)\n"
+            "No = Single combined file (CSV, Excel, NPY)",
+            icon='question'
         )
 
         if choice == 'yes':
+            # Load from folder
+            filepath = filedialog.askdirectory(title=f"Select Folder with Spectra for Group: {label}")
+            if not filepath:
+                return
+        else:
             # Load from file
             filepath = filedialog.askopenfilename(
                 title=f"Select Spectra for Group: {label}",
                 filetypes=[
+                    ("All Supported", "*.csv *.xlsx *.xls *.npy"),
                     ("CSV files", "*.csv"),
-                    ("Excel files", "*.xlsx"),
+                    ("Excel files", "*.xlsx *.xls"),
                     ("NumPy files", "*.npy"),
                     ("All files", "*.*")
                 ]
             )
-            if not filepath:
-                return
-        else:
-            # Load from folder
-            filepath = filedialog.askdirectory(title=f"Select Folder with Spectra for Group: {label}")
             if not filepath:
                 return
 
