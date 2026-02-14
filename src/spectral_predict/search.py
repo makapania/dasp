@@ -939,6 +939,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa', 'fipls_spa', 'fipls_cars']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
+    # If UVE-hybrid variant is selected alongside base method, drop the base (hybrid subsumes it)
+    if 'uve_cars' in selected_methods and 'cars' in selected_methods:
+        selected_methods.remove('cars')
+        print("Info: Removed 'cars' — 'uve_cars' includes CARS with UVE pre-filtering")
+    if 'uve_cars_tree' in selected_methods and 'cars-tree' in selected_methods:
+        selected_methods.remove('cars-tree')
+        print("Info: Removed 'cars-tree' — 'uve_cars_tree' includes CARS-Tree with UVE pre-filtering")
+
     # Warn about unimplemented methods
     unimplemented = [m for m in variable_selection_methods if m not in implemented_methods]
     if unimplemented:
