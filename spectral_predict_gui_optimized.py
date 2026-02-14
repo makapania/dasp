@@ -6949,7 +6949,7 @@ class SpectralPredictApp:
             corrected = self._compute_corrected_spectra(method)
             export_df = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
             if self.y is not None:
-                export_df.insert(0, 'Target', self.y)
+                export_df.insert(0, self.target_column.get() or 'Target', self.y)
             export_df.index.name = 'Sample_ID'
             export_df.to_csv(filename, index=True)
             messagebox.showinfo("Saved", f"Corrected spectra saved to:\n{filename}")
@@ -7696,7 +7696,7 @@ class SpectralPredictApp:
             corrected = self._mbl_apply_to_all()
             export_df = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
             if self.y is not None:
-                export_df.insert(0, 'Target', self.y)
+                export_df.insert(0, self.target_column.get() or 'Target', self.y)
             export_df.index.name = 'Sample_ID'
             export_df.to_csv(filename, index=True)
             messagebox.showinfo("Saved", f"Corrected spectra saved to:\n{filename}")
@@ -14702,8 +14702,9 @@ class SpectralPredictApp:
         if filename:
             try:
                 export_df = self.X.copy()
+                target_col = self.target_column.get() or 'Target'
                 if self.y is not None:
-                    export_df.insert(0, 'Target', self.y)
+                    export_df.insert(0, target_col, self.y)
                 if self.sample_sets is not None and self.sample_sets.notna().any():
                     export_df.insert(0, 'Set', self.sample_sets)
                 if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
@@ -14711,6 +14712,8 @@ class SpectralPredictApp:
                         export_df.insert(0, col, self.combined_metadata_df[col])
                 elif self.ref is not None:
                     for col in self.ref.columns:
+                        if col == target_col:
+                            continue
                         export_df.insert(0, col, self.ref[col])
                 export_df.to_csv(filename)
                 messagebox.showinfo("Success", f"Data exported to {filename}")
@@ -14738,8 +14741,9 @@ class SpectralPredictApp:
                 with pd.ExcelWriter(filename) as writer:
                     # Export spectral data
                     export_df = self.X.copy()
+                    target_col = self.target_column.get() or 'Target'
                     if self.y is not None:
-                        export_df.insert(0, 'Target', self.y)
+                        export_df.insert(0, target_col, self.y)
                     if self.sample_sets is not None and self.sample_sets.notna().any():
                         export_df.insert(0, 'Set', self.sample_sets)
                     # Add metadata columns (from combined file or reference file)
@@ -14748,6 +14752,8 @@ class SpectralPredictApp:
                             export_df.insert(0, col, self.combined_metadata_df[col])
                     elif self.ref is not None:
                         for col in self.ref.columns:
+                            if col == target_col:
+                                continue
                             export_df.insert(0, col, self.ref[col])
 
                     export_df.to_excel(writer, sheet_name='Spectral_Data')
@@ -15943,7 +15949,7 @@ class SpectralPredictApp:
         try:
             export_df = self.X.copy()
             if self.y is not None:
-                export_df.insert(0, 'Target', self.y)
+                export_df.insert(0, self.target_column.get() or 'Target', self.y)
             if self.sample_sets is not None and self.sample_sets.notna().any():
                 export_df.insert(0, 'Set', self.sample_sets)
             export_df.index.name = 'Sample_ID'
@@ -15971,7 +15977,7 @@ class SpectralPredictApp:
             with pd.ExcelWriter(filename) as writer:
                 export_df = self.X.copy()
                 if self.y is not None:
-                    export_df.insert(0, 'Target', self.y)
+                    export_df.insert(0, self.target_column.get() or 'Target', self.y)
                 if self.sample_sets is not None and self.sample_sets.notna().any():
                     export_df.insert(0, 'Set', self.sample_sets)
                 export_df.index.name = 'Sample_ID'
@@ -24939,9 +24945,7 @@ For detailed documentation, see the User Guide.
             show_excluded = self.show_excluded_data_viewer.get()
 
             # Get target column name
-            target_col = "Target"
-            if hasattr(self, 'target_col') and self.target_col.get():
-                target_col = self.target_col.get()
+            target_col = self.target_column.get() if self.target_column.get() else "Target"
 
             # Filter samples based on exclusion setting
             if show_excluded:
@@ -24974,7 +24978,7 @@ For detailed documentation, see the User Guide.
                     display_metadata = self.ref.copy()
                 else:
                     display_metadata = self.ref[mask].copy()
-                metadata_cols = list(self.ref.columns)
+                metadata_cols = [c for c in self.ref.columns if c != target_col]
 
             # Check for sample sets
             has_sets = (self.sample_sets is not None
@@ -25039,6 +25043,14 @@ For detailed documentation, see the User Guide.
             # Set sheet data and headers
             self.data_viewer_sheet.set_sheet_data(formatted_data)
             self.data_viewer_sheet.headers(headers)
+
+            # Highlight target column header in blue
+            if display_y is not None and target_col in headers:
+                target_col_idx = headers.index(target_col)
+                self.data_viewer_sheet.highlight_cells(
+                    row=0, column=target_col_idx, canvas="header",
+                    bg="#D4E6F1", fg="#1A5276",
+                )
 
             # Reset all row backgrounds to default (clear any previous highlighting)
             # Use None instead of "" - empty string causes tksheet color parsing errors on selection
@@ -25121,9 +25133,7 @@ For detailed documentation, see the User Guide.
             show_excluded = self.show_excluded_data_viewer.get()
 
             # Get target column name
-            target_col = "Target"
-            if hasattr(self, 'target_col') and self.target_col.get():
-                target_col = self.target_col.get()
+            target_col = self.target_column.get() if self.target_column.get() else "Target"
 
             # Create combined dataframe
             export_df = self.X.copy()
@@ -25137,6 +25147,8 @@ For detailed documentation, see the User Guide.
                     insert_position += 1
             elif self.ref is not None and len(self.ref.columns) > 0:
                 for col in self.ref.columns:
+                    if col == target_col:
+                        continue
                     export_df.insert(insert_position, col, self.ref[col])
                     insert_position += 1
 
