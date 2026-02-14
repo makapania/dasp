@@ -3263,6 +3263,11 @@ class SpectralPredictApp:
         self.varsel_cars_tree = tk.BooleanVar(value=False)  # CARS-Tree for tree models
         self.varsel_vcpa = tk.BooleanVar(value=False)
         self.varsel_ga = tk.BooleanVar(value=False)  # Genetic Algorithm
+        self.varsel_uve_cars = tk.BooleanVar(value=False)  # UVE-CARS hybrid
+        self.varsel_uve_cars_tree = tk.BooleanVar(value=False)  # UVE-CARS-Tree hybrid
+        self.varsel_uve_cars_spa = tk.BooleanVar(value=False)  # UVE-CARS-SPA 3-stage
+        self.varsel_fipls_spa = tk.BooleanVar(value=False)  # Forward iPLS-SPA
+        self.varsel_fipls_cars = tk.BooleanVar(value=False)  # Forward iPLS-CARS
         self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
         self.uve_cutoff_multiplier = tk.DoubleVar(value=1.0)  # UVE threshold (0.7-1.5)
         self.uve_n_components = tk.StringVar(value="")  # PLS components for UVE (empty = auto)
@@ -9499,15 +9504,43 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Evolutionary optimization (Quick: ~10× faster)",
                  style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
 
+        # Hybrid methods separator
+        ttk.Label(varsel_frame, text="Hybrid Methods (multi-stage pipelines):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
+
+        ttk.Checkbutton(varsel_frame, text="UVE-CARS",
+                       variable=self.varsel_uve_cars).grid(row=13, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filtering + adaptive selection",
+                 style='Caption.TLabel').grid(row=13, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="UVE-CARS-Tree",
+                       variable=self.varsel_uve_cars_tree).grid(row=14, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filtering + tree-based selection",
+                 style='Caption.TLabel').grid(row=14, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="UVE-CARS-SPA",
+                       variable=self.varsel_uve_cars_spa).grid(row=15, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filter + adaptive + collinearity reduction",
+                 style='Caption.TLabel').grid(row=15, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
+                       variable=self.varsel_fipls_spa).grid(row=16, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Region selection + collinearity reduction",
+                 style='Caption.TLabel').grid(row=16, column=1, sticky=tk.W, padx=15)
+
+        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
+                       variable=self.varsel_fipls_cars).grid(row=17, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Region selection + adaptive selection",
+                 style='Caption.TLabel').grid(row=17, column=1, sticky=tk.W, padx=15)
+
         # UVE Prefilter option
         ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
-                       variable=self.apply_uve_prefilter).grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+                       variable=self.apply_uve_prefilter).grid(row=18, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
 
         # Method parameters
-        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=13, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
+        ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=19, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
 
         params_frame = ttk.Frame(varsel_frame)
-        params_frame.grid(row=14, column=0, columnspan=2, sticky=tk.W, pady=5)
+        params_frame.grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # UVE parameters
         ttk.Label(params_frame, text="UVE Cutoff:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -22058,6 +22091,16 @@ class SpectralPredictApp:
                 selected_varsel_methods.append('vcpa-iriv')
             if self.varsel_ga.get():
                 selected_varsel_methods.append('ga')
+            if self.varsel_uve_cars.get():
+                selected_varsel_methods.append('uve_cars')
+            if self.varsel_uve_cars_tree.get():
+                selected_varsel_methods.append('uve_cars_tree')
+            if self.varsel_uve_cars_spa.get():
+                selected_varsel_methods.append('uve_cars_spa')
+            if self.varsel_fipls_spa.get():
+                selected_varsel_methods.append('fipls_spa')
+            if self.varsel_fipls_cars.get():
+                selected_varsel_methods.append('fipls_cars')
 
             # Default to importance if none selected
             if not selected_varsel_methods:

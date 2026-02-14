@@ -821,6 +821,433 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
     return combined_importances
 
 
+def uve_cars_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, uve_cv_folds=5,
+                       n_iterations=50, pls_components=5, cars_cv_folds=5,
+                       monte_carlo_samples=80, random_state=42,
+                       model_type=None, use_hybrid_importance=False,
+                       hybrid_importance_weight=0.5, task_type='regression'):
+    """
+    UVE-CARS Hybrid - combines noise filtering (UVE) with adaptive selection (CARS).
+
+    First applies UVE to eliminate uninformative variables, then runs CARS on the
+    surviving variables. Also handles UVE-CARS-tree when model_type and
+    use_hybrid_importance are set.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Preprocessed spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    cutoff_multiplier : float, default=1.0
+        UVE noise threshold multiplier
+    uve_n_components : int or None
+        Number of PLS components for UVE
+    uve_cv_folds : int, default=5
+        Number of CV folds for UVE
+    n_iterations : int, default=50
+        CARS Monte Carlo iterations
+    pls_components : int, default=5
+        PLS components for CARS
+    cars_cv_folds : int, default=5
+        CV folds for CARS
+    monte_carlo_samples : int, default=80
+        CARS Monte Carlo samples
+    random_state : int, default=42
+        Random seed
+    model_type : str or None
+        Model name for model-aware CARS (None = standard PLS-CARS)
+    use_hybrid_importance : bool, default=False
+        Use hybrid importance for tree models (CARS-tree variant)
+    hybrid_importance_weight : float, default=0.5
+        Weight for hybrid importance blending
+    task_type : str, default='regression'
+        Task type ('regression' or 'classification')
+
+    Returns
+    -------
+    importances : np.ndarray
+        Combined importance scores. Shape: (n_features,)
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    n_samples, n_vars = X.shape
+
+    variant = "UVE-CARS-Tree" if use_hybrid_importance else "UVE-CARS"
+    print(f"\n=== {variant} Hybrid Selection ===")
+    print(f"Starting with {n_vars} variables")
+
+    # Step 1: UVE filtering
+    print(f"\nStep 1: UVE filtering...")
+    uve_importances, threshold, uve_mask = get_uve_threshold(
+        X, y,
+        cutoff_multiplier=cutoff_multiplier,
+        n_components=uve_n_components,
+        cv_folds=uve_cv_folds,
+        random_state=random_state
+    )
+
+    n_uve_selected = int(np.sum(uve_mask))
+    print(f"UVE selected {n_uve_selected} / {n_vars} variables (threshold: {threshold:.4f})")
+
+    if n_uve_selected == 0:
+        print("Warning: UVE eliminated all variables. Returning UVE importances only.")
+        return uve_importances
+
+    if n_uve_selected < 10:
+        print(f"Warning: UVE kept only {n_uve_selected} variables (< 10). Returning UVE importances only.")
+        return uve_importances
+
+    # Step 2: CARS on UVE survivors
+    print(f"\nStep 2: CARS on {n_uve_selected} UVE-selected variables...")
+    X_uve_selected = X[:, uve_mask]
+
+    cars_importances_reduced = cars_selection(
+        X_uve_selected, y,
+        n_iterations=n_iterations,
+        pls_components=pls_components,
+        cv_folds=cars_cv_folds,
+        monte_carlo_samples=monte_carlo_samples,
+        random_state=random_state,
+        model_type=model_type,
+        use_hybrid_importance=use_hybrid_importance,
+        hybrid_importance_weight=hybrid_importance_weight,
+        task_type=task_type
+    )
+
+    # Map back to full indices
+    combined_importances = np.zeros(n_vars)
+    uve_indices = np.where(uve_mask)[0]
+    combined_importances[uve_indices] = cars_importances_reduced
+
+    n_final = int(np.sum(combined_importances > 0))
+    print(f"\n=== {variant} Final Results ===")
+    print(f"UVE eliminated: {n_vars - n_uve_selected} variables")
+    print(f"CARS selected: {n_final} variables from UVE-kept set")
+
+    return combined_importances
+
+
+def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, uve_cv_folds=5,
+                           n_iterations=50, pls_components=5, cars_cv_folds=5,
+                           monte_carlo_samples=80, spa_n_features=None,
+                           spa_n_random_starts=10, spa_cv_folds=5,
+                           random_state=42, task_type='regression'):
+    """
+    UVE-CARS-SPA 3-stage hybrid: noise filtering → adaptive selection → collinearity reduction.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Preprocessed spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    cutoff_multiplier : float, default=1.0
+        UVE noise threshold multiplier
+    uve_n_components : int or None
+        Number of PLS components for UVE
+    uve_cv_folds : int, default=5
+        CV folds for UVE
+    n_iterations : int, default=50
+        CARS Monte Carlo iterations
+    pls_components : int, default=5
+        PLS components for CARS
+    cars_cv_folds : int, default=5
+        CV folds for CARS
+    monte_carlo_samples : int, default=80
+        CARS Monte Carlo samples
+    spa_n_features : int or None
+        Target features for SPA (None = use all CARS survivors)
+    spa_n_random_starts : int, default=10
+        SPA random starts
+    spa_cv_folds : int, default=5
+        CV folds for SPA
+    random_state : int, default=42
+        Random seed
+    task_type : str, default='regression'
+        Task type
+
+    Returns
+    -------
+    importances : np.ndarray
+        Combined importance scores. Shape: (n_features,)
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    n_samples, n_vars = X.shape
+
+    print(f"\n=== UVE-CARS-SPA 3-Stage Hybrid Selection ===")
+    print(f"Starting with {n_vars} variables")
+
+    # Step 1: UVE filtering
+    print(f"\nStep 1: UVE filtering...")
+    uve_importances, threshold, uve_mask = get_uve_threshold(
+        X, y,
+        cutoff_multiplier=cutoff_multiplier,
+        n_components=uve_n_components,
+        cv_folds=uve_cv_folds,
+        random_state=random_state
+    )
+
+    n_uve_selected = int(np.sum(uve_mask))
+    print(f"UVE selected {n_uve_selected} / {n_vars} variables")
+
+    if n_uve_selected == 0:
+        print("Warning: UVE eliminated all variables. Returning UVE importances only.")
+        return uve_importances
+
+    if n_uve_selected < 10:
+        print(f"Warning: UVE kept only {n_uve_selected} variables (< 10). Returning UVE importances only.")
+        return uve_importances
+
+    # Step 2: CARS on UVE survivors
+    print(f"\nStep 2: CARS on {n_uve_selected} UVE-selected variables...")
+    X_uve_selected = X[:, uve_mask]
+
+    cars_importances_reduced = cars_selection(
+        X_uve_selected, y,
+        n_iterations=n_iterations,
+        pls_components=pls_components,
+        cv_folds=cars_cv_folds,
+        monte_carlo_samples=monte_carlo_samples,
+        random_state=random_state,
+        task_type=task_type
+    )
+
+    # Get CARS survivors (non-zero importances)
+    cars_survivor_mask = cars_importances_reduced > 0
+    n_cars_survivors = int(np.sum(cars_survivor_mask))
+    print(f"CARS selected {n_cars_survivors} variables from UVE-kept set")
+
+    if n_cars_survivors < 3:
+        print(f"Warning: Too few CARS survivors ({n_cars_survivors}) for SPA. Returning UVE-CARS importances.")
+        combined = np.zeros(n_vars)
+        uve_indices = np.where(uve_mask)[0]
+        combined[uve_indices] = cars_importances_reduced
+        return combined
+
+    # Step 3: SPA on CARS survivors
+    print(f"\nStep 3: SPA on {n_cars_survivors} CARS-selected variables...")
+    X_cars_selected = X_uve_selected[:, cars_survivor_mask]
+
+    spa_n = min(spa_n_features or n_cars_survivors, n_cars_survivors)
+    spa_importances_reduced = spa_selection(
+        X_cars_selected, y,
+        n_features=spa_n,
+        n_random_starts=spa_n_random_starts,
+        cv_folds=spa_cv_folds,
+        random_state=random_state
+    )
+
+    # Map back through both stages to full indices
+    combined_importances = np.zeros(n_vars)
+    uve_indices = np.where(uve_mask)[0]
+    cars_indices_in_uve = np.where(cars_survivor_mask)[0]
+    full_indices = uve_indices[cars_indices_in_uve]
+    combined_importances[full_indices] = spa_importances_reduced
+
+    n_final = int(np.sum(combined_importances > 0))
+    print(f"\n=== UVE-CARS-SPA Final Results ===")
+    print(f"UVE: {n_vars} → {n_uve_selected} | CARS: → {n_cars_survivors} | SPA: → {n_final}")
+
+    return combined_importances
+
+
+def fipls_spa_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
+                        ipls_cv_folds=5, spa_n_features=None,
+                        spa_n_random_starts=10, spa_cv_folds=5,
+                        random_state=42):
+    """
+    Forward iPLS → SPA hybrid: region selection followed by collinearity reduction.
+
+    First runs forward iPLS to find the best spectral interval combination, then
+    applies SPA on those variables to select a minimally correlated subset.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    wavelengths : np.ndarray
+        Wavelength values for each feature
+    n_intervals : int, default=20
+        Number of intervals for iPLS
+    max_combine : int, default=5
+        Max intervals to combine in forward selection
+    ipls_cv_folds : int, default=5
+        CV folds for iPLS
+    spa_n_features : int or None
+        Target features for SPA (None = use all iPLS-selected)
+    spa_n_random_starts : int, default=10
+        SPA random starts
+    spa_cv_folds : int, default=5
+        CV folds for SPA
+    random_state : int, default=42
+        Random seed
+
+    Returns
+    -------
+    importances : np.ndarray
+        Combined importance scores. Shape: (n_features,)
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    n_samples, n_vars = X.shape
+
+    print(f"\n=== Forward iPLS-SPA Hybrid Selection ===")
+    print(f"Starting with {n_vars} variables")
+
+    # Step 1: Forward iPLS
+    print(f"\nStep 1: Forward iPLS ({n_intervals} intervals, max_combine={max_combine})...")
+    subsets = ipls_forward(
+        X, y, wavelengths,
+        n_intervals=n_intervals,
+        max_combine=max_combine,
+        cv_folds=ipls_cv_folds,
+        random_state=random_state
+    )
+
+    if not subsets:
+        print("Warning: Forward iPLS returned no subsets. Returning uniform importances.")
+        return np.ones(n_vars)
+
+    # Find best subset (lowest RMSECV)
+    best = min(subsets, key=lambda s: s['rmsecv'])
+    best_indices = best['indices']
+    n_ipls_selected = len(best_indices)
+    print(f"Best iPLS subset: {best['tag']} ({n_ipls_selected} vars, RMSECV={best['rmsecv']:.4f})")
+
+    if n_ipls_selected < 3:
+        print(f"Warning: Too few iPLS variables ({n_ipls_selected}) for SPA. Returning iPLS-only importances.")
+        importances = np.zeros(n_vars)
+        importances[best_indices] = 1.0
+        return importances
+
+    # Step 2: SPA on iPLS-selected variables
+    print(f"\nStep 2: SPA on {n_ipls_selected} iPLS-selected variables...")
+    X_ipls_selected = X[:, best_indices]
+
+    spa_n = min(spa_n_features or n_ipls_selected, n_ipls_selected)
+    spa_importances_reduced = spa_selection(
+        X_ipls_selected, y,
+        n_features=spa_n,
+        n_random_starts=spa_n_random_starts,
+        cv_folds=spa_cv_folds,
+        random_state=random_state
+    )
+
+    # Map SPA scores back to full indices
+    combined_importances = np.zeros(n_vars)
+    combined_importances[best_indices] = spa_importances_reduced
+
+    n_final = int(np.sum(combined_importances > 0))
+    print(f"\n=== Fwd iPLS-SPA Final Results ===")
+    print(f"iPLS: {n_vars} → {n_ipls_selected} | SPA: → {n_final}")
+
+    return combined_importances
+
+
+def fipls_cars_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
+                         ipls_cv_folds=5, n_iterations=50, pls_components=5,
+                         cars_cv_folds=5, monte_carlo_samples=80,
+                         random_state=42, task_type='regression'):
+    """
+    Forward iPLS → CARS hybrid: region selection followed by adaptive variable selection.
+
+    First runs forward iPLS to find the best spectral interval combination, then
+    applies CARS on those variables for further refinement.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Spectral data (n_samples, n_features)
+    y : np.ndarray
+        Target values
+    wavelengths : np.ndarray
+        Wavelength values for each feature
+    n_intervals : int, default=20
+        Number of intervals for iPLS
+    max_combine : int, default=5
+        Max intervals to combine in forward selection
+    ipls_cv_folds : int, default=5
+        CV folds for iPLS
+    n_iterations : int, default=50
+        CARS Monte Carlo iterations
+    pls_components : int, default=5
+        PLS components for CARS
+    cars_cv_folds : int, default=5
+        CV folds for CARS
+    monte_carlo_samples : int, default=80
+        CARS Monte Carlo samples
+    random_state : int, default=42
+        Random seed
+    task_type : str, default='regression'
+        Task type
+
+    Returns
+    -------
+    importances : np.ndarray
+        Combined importance scores. Shape: (n_features,)
+    """
+    X = np.asarray(X)
+    y = np.asarray(y).ravel()
+    n_samples, n_vars = X.shape
+
+    print(f"\n=== Forward iPLS-CARS Hybrid Selection ===")
+    print(f"Starting with {n_vars} variables")
+
+    # Step 1: Forward iPLS
+    print(f"\nStep 1: Forward iPLS ({n_intervals} intervals, max_combine={max_combine})...")
+    subsets = ipls_forward(
+        X, y, wavelengths,
+        n_intervals=n_intervals,
+        max_combine=max_combine,
+        cv_folds=ipls_cv_folds,
+        random_state=random_state
+    )
+
+    if not subsets:
+        print("Warning: Forward iPLS returned no subsets. Returning uniform importances.")
+        return np.ones(n_vars)
+
+    # Find best subset (lowest RMSECV)
+    best = min(subsets, key=lambda s: s['rmsecv'])
+    best_indices = best['indices']
+    n_ipls_selected = len(best_indices)
+    print(f"Best iPLS subset: {best['tag']} ({n_ipls_selected} vars, RMSECV={best['rmsecv']:.4f})")
+
+    if n_ipls_selected < 10:
+        print(f"Warning: Too few iPLS variables ({n_ipls_selected}) for CARS. Returning iPLS-only importances.")
+        importances = np.zeros(n_vars)
+        importances[best_indices] = 1.0
+        return importances
+
+    # Step 2: CARS on iPLS-selected variables
+    print(f"\nStep 2: CARS on {n_ipls_selected} iPLS-selected variables...")
+    X_ipls_selected = X[:, best_indices]
+
+    cars_importances_reduced = cars_selection(
+        X_ipls_selected, y,
+        n_iterations=n_iterations,
+        pls_components=pls_components,
+        cv_folds=cars_cv_folds,
+        monte_carlo_samples=monte_carlo_samples,
+        random_state=random_state,
+        task_type=task_type
+    )
+
+    # Map CARS scores back to full indices
+    combined_importances = np.zeros(n_vars)
+    combined_importances[best_indices] = cars_importances_reduced
+
+    n_final = int(np.sum(combined_importances > 0))
+    print(f"\n=== Fwd iPLS-CARS Final Results ===")
+    print(f"iPLS: {n_vars} → {n_ipls_selected} | CARS: → {n_final}")
+
+    return combined_importances
+
+
 def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
                    monte_carlo_samples=80, random_state=42, model_type=None,
                    use_hybrid_importance=False, hybrid_importance_weight=0.5, task_type='regression'):

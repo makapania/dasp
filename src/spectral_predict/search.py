@@ -27,7 +27,9 @@ from .scoring import create_results_dataframe, add_result, compute_specificity
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import (
     spa_selection, uve_selection, uve_spa_selection,
-    ipls_selection, ipls_forward, ipls_backward, cars_selection
+    ipls_selection, ipls_forward, ipls_backward, cars_selection,
+    get_uve_threshold, uve_cars_selection, uve_cars_spa_selection,
+    fipls_spa_selection, fipls_cars_selection
 )
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
@@ -934,7 +936,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         variable_selection_methods = ['importance']
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga']
+    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa', 'fipls_spa', 'fipls_cars']
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # Warn about unimplemented methods
@@ -2195,6 +2197,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
                             # ===== EXISTING CODE: Standard importance-returning methods =====
                             # Get importances computed on preprocessed data
+                            uve_selected_mask = None  # Captured by UVE for method-optimal count
                             try:
                                 if varsel_method == 'importance':
                                     importances = get_feature_importances(
@@ -2217,7 +2220,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
                                 elif varsel_method == 'uve':
                                     # UVE: Uninformative Variable Elimination - filters noise
-                                    importances = uve_selection(
+                                    # Use get_uve_threshold to also capture selected_mask for method-optimal count
+                                    importances, _uve_threshold, uve_selected_mask = get_uve_threshold(
                                         X_transformed_varsel, y_np,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         n_components=uve_n_components,
@@ -2280,7 +2284,86 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         random_state=random_state,
                                         model_type=model_type_for_cars,
                                         use_hybrid_importance=use_hybrid,
-                                        hybrid_importance_weight=0.5
+                                        hybrid_importance_weight=0.5,
+                                        task_type=task_type
+                                    )
+
+                                elif varsel_method in ('uve_cars', 'uve_cars_tree'):
+                                    # UVE-CARS / UVE-CARS-Tree: Noise filtering + adaptive selection
+                                    if varsel_method == 'uve_cars':
+                                        mt_for_cars = None
+                                        uh_for_cars = False
+                                        print(f"    -> Running UVE-CARS")
+                                    else:
+                                        mt_for_cars = model_name
+                                        uh_for_cars = True
+                                        print(f"    -> Running UVE-CARS-Tree for {model_name}")
+
+                                    importances = uve_cars_selection(
+                                        X_transformed_varsel, y_np,
+                                        cutoff_multiplier=uve_cutoff_multiplier,
+                                        uve_n_components=uve_n_components,
+                                        uve_cv_folds=folds,
+                                        n_iterations=50,
+                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        cars_cv_folds=folds,
+                                        monte_carlo_samples=80,
+                                        random_state=random_state,
+                                        model_type=mt_for_cars,
+                                        use_hybrid_importance=uh_for_cars,
+                                        hybrid_importance_weight=0.5,
+                                        task_type=task_type
+                                    )
+
+                                elif varsel_method == 'uve_cars_spa':
+                                    # UVE-CARS-SPA: 3-stage hybrid
+                                    print(f"    -> Running UVE-CARS-SPA (3-stage)")
+                                    importances = uve_cars_spa_selection(
+                                        X_transformed_varsel, y_np,
+                                        cutoff_multiplier=uve_cutoff_multiplier,
+                                        uve_n_components=uve_n_components,
+                                        uve_cv_folds=folds,
+                                        n_iterations=50,
+                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        cars_cv_folds=folds,
+                                        monte_carlo_samples=80,
+                                        spa_n_features=None,
+                                        spa_n_random_starts=spa_n_random_starts,
+                                        spa_cv_folds=folds,
+                                        random_state=random_state,
+                                        task_type=task_type
+                                    )
+
+                                elif varsel_method == 'fipls_spa':
+                                    # Forward iPLS → SPA: Region selection + collinearity reduction
+                                    print(f"    -> Running Forward iPLS-SPA")
+                                    importances = fipls_spa_selection(
+                                        X_transformed_varsel, y_np,
+                                        wavelengths=wavelengths_varsel,
+                                        n_intervals=ipls_n_intervals,
+                                        max_combine=5,
+                                        ipls_cv_folds=folds,
+                                        spa_n_features=None,
+                                        spa_n_random_starts=spa_n_random_starts,
+                                        spa_cv_folds=folds,
+                                        random_state=random_state
+                                    )
+
+                                elif varsel_method == 'fipls_cars':
+                                    # Forward iPLS → CARS: Region selection + adaptive selection
+                                    print(f"    -> Running Forward iPLS-CARS")
+                                    importances = fipls_cars_selection(
+                                        X_transformed_varsel, y_np,
+                                        wavelengths=wavelengths_varsel,
+                                        n_intervals=ipls_n_intervals,
+                                        max_combine=5,
+                                        ipls_cv_folds=folds,
+                                        n_iterations=50,
+                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        cars_cv_folds=folds,
+                                        monte_carlo_samples=80,
+                                        random_state=random_state,
+                                        task_type=task_type
                                     )
 
                                 elif varsel_method == 'vcpa-iriv':
@@ -2429,6 +2512,32 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 if not wavelength_restriction_active:
                                     importances = _apply_edge_mask(importances, preprocess_cfg)
 
+                                # Compute method-optimal variable count (natural cutoff from method)
+                                n_method_optimal = 0
+                                method_has_natural_optimal = False
+
+                                if not used_uniform_fallback:
+                                    if varsel_method in ('cars', 'cars-aware', 'cars-tree', 'uve_spa',
+                                                         'uve_cars', 'uve_cars_tree', 'uve_cars_spa',
+                                                         'fipls_spa', 'fipls_cars'):
+                                        n_method_optimal = int(np.count_nonzero(importances))
+                                        method_has_natural_optimal = True
+                                    elif varsel_method == 'uve' and uve_selected_mask is not None:
+                                        n_method_optimal = int(np.sum(uve_selected_mask))
+                                        method_has_natural_optimal = True
+                                    elif varsel_method == 'vcpa-iriv':
+                                        n_method_optimal = int(np.count_nonzero(importances))
+                                        method_has_natural_optimal = True
+
+                                if method_has_natural_optimal:
+                                    if n_method_optimal <= 0 or n_method_optimal >= n_features_for_validation:
+                                        method_has_natural_optimal = False
+                                    elif n_method_optimal in valid_variable_counts:
+                                        print(f"  -> Method-optimal for {varsel_method}: {n_method_optimal} already in counts, skipping")
+                                        method_has_natural_optimal = False
+                                    else:
+                                        print(f"  -> Method-optimal for {varsel_method}: {n_method_optimal} vars (will test)")
+
                                 # Run subsets with user-selected counts
                                 results_added_for_method = 0
                                 for n_top in valid_variable_counts:
@@ -2528,6 +2637,77 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                         else:  # classification
                                             if subset_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
                                                 best_model_so_far = subset_result
+
+                                # Run method-optimal subset if applicable
+                                if method_has_natural_optimal and n_method_optimal > 0:
+                                    print(f"  -> Testing method-optimal {n_method_optimal} vars ({varsel_method})...", end=" ")
+                                    top_indices_opt = np.argsort(importances, kind='stable')[-n_method_optimal:][::-1]
+
+                                    if preprocess_cfg["deriv"] is not None:
+                                        opt_result = _run_single_config(
+                                            X_transformed_varsel, y_np,
+                                            wavelengths_varsel,
+                                            model, model_name, params,
+                                            preprocess_cfg, cv_splitter,
+                                            task_type, is_binary_classification,
+                                            subset_indices=top_indices_opt,
+                                            subset_tag=f"{varsel_method}",
+                                            top_n_vars=30,
+                                            skip_preprocessing=False,
+                                            skip_spectral_preprocessing=True,
+                                            excluded_count=excluded_count,
+                                            imbalance_method=imbalance_method,
+                                            imbalance_params=imbalance_params,
+                                            validation_count=validation_count,
+                                            total_samples_original=total_samples_original,
+                                            folds=folds,
+                                            full_vars_original=n_original_wavelengths,
+                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            wavelength_restriction_active=wavelength_restriction_active,
+                                            early_stopping_rounds=early_stopping_rounds,
+                                        )
+                                    else:
+                                        opt_result = _run_single_config(
+                                            X_transformed_varsel, y_np,
+                                            wavelengths_varsel,
+                                            model, model_name, params,
+                                            preprocess_cfg, cv_splitter,
+                                            task_type, is_binary_classification,
+                                            subset_indices=top_indices_opt,
+                                            subset_tag=f"{varsel_method}",
+                                            top_n_vars=30,
+                                            skip_preprocessing=False,
+                                            skip_spectral_preprocessing=True,
+                                            excluded_count=excluded_count,
+                                            validation_count=validation_count,
+                                            total_samples_original=total_samples_original,
+                                            folds=folds,
+                                            imbalance_method=imbalance_method,
+                                            imbalance_params=imbalance_params,
+                                            full_vars_original=n_original_wavelengths,
+                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            wavelength_restriction_active=wavelength_restriction_active,
+                                            early_stopping_rounds=early_stopping_rounds,
+                                        )
+
+                                    opt_result["uniform_fallback"] = used_uniform_fallback
+                                    df_results = add_result(df_results, opt_result)
+                                    results_added_for_method += 1
+
+                                    if task_type == "regression":
+                                        print(f"R²cv={opt_result['R2cv']:.3f}, RMSEcv={opt_result['RMSEcv']:.3f} (method-optimal)")
+                                    else:
+                                        print(f"AUCcv={opt_result.get('ROC_AUCcv', 0):.3f}, Acccv={opt_result.get('Accuracycv', 0):.3f} (method-optimal)")
+
+                                    if best_model_so_far is None:
+                                        best_model_so_far = opt_result
+                                    else:
+                                        if task_type == "regression":
+                                            if opt_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
+                                                best_model_so_far = opt_result
+                                        else:
+                                            if opt_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
+                                                best_model_so_far = opt_result
 
                                 # Summary for this variable selection method
                                 print(f"  [SUMMARY] {varsel_method}: Added {results_added_for_method} results to dataframe")
