@@ -9460,52 +9460,52 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-SPA Hybrid",
-                       variable=self.varsel_uve_spa).grid(row=4, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Combines noise filtering + collinearity reduction",
+        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
+                       variable=self.varsel_ipls).grid(row=4, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
-                       variable=self.varsel_ipls).grid(row=5, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Region-based analysis",
+        ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
+                       variable=self.varsel_ipls_forward).grid(row=5, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Tests individual intervals + best combinations",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
-                       variable=self.varsel_ipls_forward).grid(row=6, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Tests individual intervals + best combinations",
+        ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
+                       variable=self.varsel_ipls_backward).grid(row=6, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Progressively removes worst intervals",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
-                       variable=self.varsel_ipls_backward).grid(row=7, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Progressively removes worst intervals",
+        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
+                       variable=self.varsel_cars).grid(row=7, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS (PLS-based)",
-                       variable=self.varsel_cars).grid(row=8, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Best for linear models (PLS, Ridge, ElasticNet)",
+        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
+                       variable=self.varsel_cars_tree).grid(row=8, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
                  style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="CARS-Tree (Hybrid Importance)",
-                       variable=self.varsel_cars_tree).grid(row=9, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Best for tree models (LightGBM, RF, XGBoost)",
+        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
+                       variable=self.varsel_vcpa).grid(row=9, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
                  style='Caption.TLabel').grid(row=9, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="VCPA-IRIV (Variable Combination Population Analysis)",
-                       variable=self.varsel_vcpa).grid(row=10, column=0, sticky=tk.W, pady=2)
-        ttk.Label(varsel_frame, text="Advanced iterative selection (recommended)",
-                 style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
-
         ga_row_frame = ttk.Frame(varsel_frame)
-        ga_row_frame.grid(row=11, column=0, sticky=tk.W, pady=2)
+        ga_row_frame.grid(row=10, column=0, sticky=tk.W, pady=2)
         ttk.Checkbutton(ga_row_frame, text="GA (Genetic Algorithm)",
                        variable=self.varsel_ga).pack(side=tk.LEFT)
         ttk.Checkbutton(ga_row_frame, text="Quick",
                        variable=self.ga_quick_mode).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(varsel_frame, text="Evolutionary optimization (Quick: ~10× faster)",
-                 style='Caption.TLabel').grid(row=11, column=1, sticky=tk.W, padx=15)
+                 style='Caption.TLabel').grid(row=10, column=1, sticky=tk.W, padx=15)
 
         # Hybrid methods separator
-        ttk.Label(varsel_frame, text="Hybrid Methods (multi-stage pipelines):", style='Subheading.TLabel').grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
+        ttk.Label(varsel_frame, text="Hybrid Methods (multi-stage pipelines):", style='Subheading.TLabel').grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
+
+        ttk.Checkbutton(varsel_frame, text="UVE-SPA",
+                       variable=self.varsel_uve_spa).grid(row=12, column=0, sticky=tk.W, pady=2)
+        ttk.Label(varsel_frame, text="Noise filtering + collinearity reduction",
+                 style='Caption.TLabel').grid(row=12, column=1, sticky=tk.W, padx=15)
 
         ttk.Checkbutton(varsel_frame, text="UVE-CARS",
                        variable=self.varsel_uve_cars).grid(row=13, column=0, sticky=tk.W, pady=2)
