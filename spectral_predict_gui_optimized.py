@@ -11491,12 +11491,21 @@ class SpectralPredictApp:
         self.active_filter_frame = ttk.Frame(results_card)
         # Don't pack yet — shown dynamically in _populate_results_table
 
-        # Sort hint label (hidden until results arrive)
+        # Sort hint frame with label and reset button (hidden until results arrive)
+        self.sort_hint_frame = ttk.Frame(results_card)
+        # Don't pack yet — shown dynamically in _populate_results_table
+
         self.sort_hint_label = ttk.Label(
-            results_card, text="Tip: Shift+Click column headers for multi-level sorting",
+            self.sort_hint_frame, text="Tip: Shift+Click column headers for multi-level sorting",
             font=('Segoe UI', 8, 'italic'), foreground='#888888'
         )
-        # Don't pack yet — shown dynamically in _populate_results_table
+        self.sort_hint_label.pack(side='left', fill='x', expand=True)
+
+        self.reset_columns_btn = ttk.Button(
+            self.sort_hint_frame, text="Reset Columns",
+            command=self._reset_results_column_widths, width=14
+        )
+        self.reset_columns_btn.pack(side='right', padx=(5, 0))
 
         # Create frame for treeview and scrollbars
         self.results_tree_frame = ttk.Frame(results_card)
@@ -23335,6 +23344,16 @@ For detailed documentation, see the User Guide.
             )
         return sorted_df
 
+    def _reset_results_column_widths(self):
+        """Reset all results table columns to their default widths."""
+        if not hasattr(self, '_results_default_col_widths'):
+            return
+        for col, width in self._results_default_col_widths.items():
+            try:
+                self.results_tree.column(col, width=width, stretch=False)
+            except Exception:
+                pass
+
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
         if results_df is None or len(results_df) == 0:
@@ -23463,10 +23482,10 @@ For detailed documentation, see the User Guide.
 
             # Pack active filter frame and sort hint above treeview (if not already packed)
             self.active_filter_frame.pack_forget()
-            self.sort_hint_label.pack_forget()
+            self.sort_hint_frame.pack_forget()
             self.active_filter_frame.pack(fill='x', padx=5, pady=(5, 0),
                                           before=self.results_tree_frame)
-            self.sort_hint_label.pack(fill='x', padx=5, pady=(0, 2),
+            self.sort_hint_frame.pack(fill='x', padx=5, pady=(0, 2),
                                       before=self.results_tree_frame)
 
         # Clear existing items (batch deletion for performance)
@@ -23504,7 +23523,12 @@ For detailed documentation, see the User Guide.
                     width = 70  # Quartile RMSE or Class F1 columns
                 else:
                     width = 80
-                self.results_tree.column(col, width=width, anchor='center')
+                self.results_tree.column(col, width=width, anchor='center', stretch=False)
+
+            # Store default widths for reset functionality
+            self._results_default_col_widths = {
+                col: self.results_tree.column(col, 'width') for col in columns
+            }
 
         # Always update column headings (for multi-sort indicators and click bindings)
         superscripts = {1: '\u00b9', 2: '\u00b2', 3: '\u00b3'}
@@ -23526,7 +23550,7 @@ For detailed documentation, see the User Guide.
             if is_sorted and col in sorted_col_names:
                 cur_width = self.results_tree.column(col, 'width')
                 if cur_width < 200:  # don't widen already-wide columns
-                    self.results_tree.column(col, width=cur_width + 22)
+                    self.results_tree.column(col, width=cur_width + 22, stretch=False)
 
         # Update sort hint label — prominent blue bar when sorting, subtle hint otherwise
         if hasattr(self, 'sort_hint_label'):
