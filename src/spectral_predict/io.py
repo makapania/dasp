@@ -2653,10 +2653,21 @@ def read_excel_spectra(
         id_col = df.columns[0]
         df = df.set_index(id_col)
 
-        try:
-            wl_cols = {col: float(col) for col in df.columns}
-        except ValueError as e:
-            raise ValueError(f"Could not parse all column names as wavelengths: {e}")
+        # Parse column names as wavelengths, filtering out non-numeric columns
+        wl_cols = {}
+        non_wl_cols = []
+        for col in df.columns:
+            try:
+                wl_cols[col] = float(col)
+            except ValueError:
+                non_wl_cols.append(col)
+
+        if not wl_cols:
+            raise ValueError(f"No numeric wavelength columns found. Columns: {list(df.columns)}")
+
+        if non_wl_cols:
+            print(f"Note: Ignoring non-wavelength columns: {non_wl_cols}")
+            df = df.drop(columns=non_wl_cols)
 
         df = df.rename(columns=wl_cols)
         df = df[sorted(df.columns)]
