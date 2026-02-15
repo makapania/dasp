@@ -23538,6 +23538,9 @@ For detailed documentation, see the User Guide.
                     text="Tip: Shift+Click column headers for multi-level sorting"
                 )
 
+        # Columns that must display as integers (no decimal places)
+        INTEGER_COLUMNS = {'Deriv', 'Window', 'Poly', 'LVs', 'n_vars', 'full_vars', 'Rank'}
+
         # Insert data rows with regional/class highlighting
         expert_fit_enabled = hasattr(self, 'expert_fit_enabled') and self.expert_fit_enabled.get()
         for idx, row in results_df.iterrows():
@@ -23550,12 +23553,23 @@ For detailed documentation, see the User Guide.
                     # Add symbol prefix to Rank for expert choices
                     expert_status = self._expert_choices[idx]
                     rank_val = row[col]
+                    try:
+                        rank_val = int(rank_val)
+                    except (ValueError, TypeError):
+                        pass
                     if expert_status == 'expert_choice':
                         values.append(f"★ {rank_val}")  # Star for best
                     elif expert_status == 'good':
                         values.append(f"● {rank_val}")  # Dot for good
                     else:
                         values.append(rank_val)
+                elif col in INTEGER_COLUMNS:
+                    val = row[col]
+                    try:
+                        val = int(val)
+                    except (ValueError, TypeError):
+                        pass
+                    values.append(val)
                 else:
                     values.append(row[col])
 
@@ -24445,8 +24459,8 @@ For detailed documentation, see the User Guide.
     def _rerank_results_debounced(self, *args):
         """Debounced wrapper — delays rerank 400ms so rapid changes don't freeze UI."""
         if self._rerank_after_id:
-            self.after_cancel(self._rerank_after_id)
-        self._rerank_after_id = self.after(400, self._rerank_results)
+            self.root.after_cancel(self._rerank_after_id)
+        self._rerank_after_id = self.root.after(400, self._rerank_results)
 
     def _rerank_results(self, *args):
         """Re-rank results after user changes penalty settings."""
@@ -45853,6 +45867,42 @@ External Validation Performance (n={n_val}):
                   command=self._contam_run_difference_analysis,
                   style='Modern.TButton').pack(anchor=tk.W, pady=(0, 10))
 
+        # Preprocessing (shared variables with 13C)
+        diff_preproc_frame = ttk.Frame(control_frame, style='TFrame')
+        diff_preproc_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(diff_preproc_frame, text="Preprocessing:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        diff_preproc_options = [
+            'None (Raw)', 'SNV', '1st Derivative', '2nd Derivative',
+            'SNV + 1st Derivative', 'SNV + 2nd Derivative'
+        ]
+        diff_preproc_combo = ttk.Combobox(
+            diff_preproc_frame, textvariable=self.contam_preprocessing,
+            values=diff_preproc_options, state='readonly', width=22
+        )
+        diff_preproc_combo.pack(side=tk.LEFT)
+        diff_preproc_combo.bind('<<ComboboxSelected>>', lambda e: self._contam_update_deriv_window_visibility())
+
+        # Derivative window spinbox for 13B
+        diff_deriv_frame = ttk.Frame(control_frame, style='TFrame')
+        diff_deriv_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(diff_deriv_frame, text="Derivative Window Size:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Spinbox(
+            diff_deriv_frame, from_=5, to=35, increment=2,
+            textvariable=self.contam_deriv_window, width=10
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            diff_deriv_frame, text="(odd, larger = smoother)",
+            style='Small.TLabel', foreground='gray'
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Label(
+            control_frame,
+            text="Derivatives reveal narrow peaks hidden in raw spectra",
+            style='Small.TLabel', foreground='gray'
+        ).pack(anchor=tk.W, pady=(0, 5))
+
         # Peak detection threshold
         threshold_frame = ttk.Frame(control_frame, style='TFrame')
         threshold_frame.pack(fill='x', pady=(0, 5))
@@ -46567,13 +46617,18 @@ External Validation Performance (n={n_val}):
             return
 
         try:
+            # Preprocess data before analysis
+            preproc = self.contam_preprocessing.get()
+            clean_data = self._contam_preprocess_data(self.contam_clean_data)
+
             # Compute differences for each group
             differences = {}
             analyzers = {}
             for label, contam_data in self.contam_groups.items():
+                preprocessed_contam = self._contam_preprocess_data(contam_data)
                 # Create and fit difference analyzer for each group
                 analyzer = DifferenceAnalyzer()
-                analyzer.fit(contam_data, self.contam_clean_data)
+                analyzer.fit(preprocessed_contam, clean_data)
                 differences[label] = analyzer.get_difference_spectrum()
                 analyzers[label] = analyzer
 
@@ -46609,7 +46664,8 @@ External Validation Performance (n={n_val}):
                 ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
                 ax.set_xlabel('Wavelength (nm)' if self.contam_wavelengths is not None else 'Index')
                 ax.set_ylabel('Difference (Contaminated - Clean)')
-                ax.set_title('Difference Spectra: Contaminant Influence')
+                preproc_label = f" ({preproc})" if preproc != 'None (Raw)' else ""
+                ax.set_title(f'Difference Spectra: Contaminant Influence{preproc_label}')
                 ax.legend(loc='upper right')
                 ax.grid(True, alpha=0.3)
                 fig.tight_layout()
@@ -46625,9 +46681,11 @@ External Validation Performance (n={n_val}):
                 print(f"Plot creation failed: {plot_error}")
 
             # Show success message
+            preproc_msg = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else "\nPreprocessing: None (raw data)"
             messagebox.showinfo("Success",
                 f"Difference analysis complete!\n"
-                f"Analyzed {len(self.contam_groups)} contaminant groups.")
+                f"Analyzed {len(self.contam_groups)} contaminant groups."
+                f"{preproc_msg}")
 
             # Update peak detection
             self._contam_update_peak_detection()
@@ -47090,6 +47148,25 @@ External Validation Performance (n={n_val}):
                 messagebox.showerror("Error", "No main dataset loaded (Tab 1).")
                 return
             X_to_correct = self.X.values if hasattr(self.X, 'values') else self.X
+            # Check wavelength alignment
+            n_main = X_to_correct.shape[1]
+            n_contam = self.contam_clean_data.shape[1]
+            if n_main != n_contam:
+                if method == 'Exclude Regions':
+                    messagebox.showerror("Wavelength Mismatch",
+                        f"Main dataset has {n_main} wavelengths but contaminant data has {n_contam}.\n\n"
+                        f"Exclude Regions uses contaminant wavelength positions, so both datasets "
+                        f"must have the same wavelength range.\n\n"
+                        f"Load contaminant data with matching wavelength range.")
+                    return
+                else:
+                    messagebox.showerror("Wavelength Mismatch",
+                        f"Main dataset has {n_main} wavelengths but contaminant data has {n_contam}.\n\n"
+                        f"For {method}, both must have the same wavelength range.\n"
+                        f"Options:\n"
+                        f"  • Load contaminant data with matching wavelength range\n"
+                        f"  • Use wavelength filtering to align both datasets first")
+                    return
         elif target == 'Contaminant Groups':
             # Combine all contaminant groups
             X_to_correct = np.vstack(list(self.contam_groups.values()))
