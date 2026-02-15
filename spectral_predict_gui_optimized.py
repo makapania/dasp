@@ -2504,7 +2504,7 @@ class SpectralPredictApp:
         self.contam_wavelengths = None
         self.contam_results = None  # Analysis results dict
         self.contam_method = tk.StringVar(value='Estimated EPO')
-        self.contam_threshold = tk.DoubleVar(value=0.5)
+        self.contam_threshold = tk.DoubleVar(value=0.15)
         self.contam_n_components = tk.IntVar(value=2)
         self.contam_aggregation = tk.StringVar(value='max')
         self.contam_preprocessing = tk.StringVar(value='1st Derivative')
@@ -46042,9 +46042,15 @@ External Validation Performance (n={n_val}):
         threshold_frame.pack(fill='x', pady=(0, 5))
 
         ttk.Label(threshold_frame, text="Detection Threshold:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Entry(threshold_frame, textvariable=self.contam_threshold, width=10).pack(side=tk.LEFT)
-        ttk.Label(threshold_frame, text="(influence weight threshold)", style='Small.TLabel',
-                 foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Scale(threshold_frame, from_=0.05, to=0.80, orient=tk.HORIZONTAL,
+                 variable=self.contam_threshold, length=200).pack(side=tk.LEFT, padx=(0, 10))
+        self.contam_threshold_value_label = ttk.Label(threshold_frame, text="0.15",
+                 style='TLabel', width=6)
+        self.contam_threshold_value_label.pack(side=tk.LEFT)
+        self.contam_threshold.trace_add('write', lambda *_: self.contam_threshold_value_label.config(
+            text=f"{self.contam_threshold.get():.2f}"))
+        ttk.Label(threshold_frame, text="(lower = more sensitive, 0.10\u20130.20 typical)",
+                 style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
 
         # Aggregation method (for multi-contaminant)
         agg_frame = ttk.Frame(params_frame, style='TFrame')
@@ -46121,13 +46127,13 @@ External Validation Performance (n={n_val}):
         row += 1
 
         # Wavelength influence plot
-        plot_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
-        plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        self.contam_influence_plot_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        self.contam_influence_plot_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         content_frame.grid_rowconfigure(row, weight=1)
 
         self.contam_influence_plot_label = ttk.Label(
-            plot_frame,
-            text="📊 Run analysis to view wavelength influence plot\n\n(Shows contaminant influence across wavelengths)",
+            self.contam_influence_plot_frame,
+            text="Run detection to view influence plot",
             style='TLabel', justify=tk.CENTER
         )
         self.contam_influence_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
@@ -46912,13 +46918,14 @@ External Validation Performance (n={n_val}):
 
             # Update regions display
             self._contam_display_exclusion_regions(results)
+            self._contam_plot_influence(results)
 
             preproc_line = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else ""
             messagebox.showinfo("Success",
                 f"Automated detection complete!\n"
                 f"Method: {method}{preproc_line}\n"
                 f"Found {len(results.get('exclusion_regions', []))} regions to exclude.\n\n"
-                f"(Influence plot would appear in production)")
+                f"See influence plot below for details.")
 
         except Exception as e:
             self.contam_detection_status_label.config(
@@ -46960,6 +46967,51 @@ External Validation Performance (n={n_val}):
         self.contam_regions_text.delete('1.0', tk.END)
         self.contam_regions_text.insert('1.0', text)
         self.contam_regions_text.config(state='disabled')
+
+    def _contam_plot_influence(self, results: dict) -> None:
+        """Plot combined influence curve with threshold and exclusion regions."""
+        combined = results.get('combined_influence')
+        if combined is None:
+            return
+
+        import numpy as np
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        threshold = self.contam_threshold.get()
+        wavelengths = results.get('wavelengths')
+        if wavelengths is None:
+            wavelengths = np.arange(len(combined))
+        regions = results.get('exclusion_regions', [])
+
+        # Hide placeholder label
+        self.contam_influence_plot_label.pack_forget()
+
+        # Clear existing canvas
+        if hasattr(self, '_contam_influence_canvas'):
+            self._contam_influence_canvas.get_tk_widget().destroy()
+
+        fig = Figure(figsize=(10, 4), dpi=100)
+        ax = fig.add_subplot(111)
+
+        ax.plot(wavelengths, combined, color='#2196F3', linewidth=1.5, label='Combined Influence')
+        ax.axhline(y=threshold, color='red', linestyle='--', alpha=0.7,
+                   label=f'Threshold ({threshold:.2f})')
+
+        for region in regions:
+            ax.axvspan(region[0], region[1], alpha=0.2, color='red')
+
+        ax.set_xlabel('Wavelength (nm)')
+        ax.set_ylabel('Normalized Influence (0\u20131)')
+        ax.set_title('Contaminant Influence by Wavelength')
+        ax.set_ylim(0, max(1.05, float(np.max(combined)) * 1.1) if len(combined) > 0 else 1.05)
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        self._contam_influence_canvas = FigureCanvasTkAgg(fig, master=self.contam_influence_plot_frame)
+        self._contam_influence_canvas.draw()
+        self._contam_influence_canvas.get_tk_widget().pack(fill='both', expand=True)
 
     def _contam_compute_clean_regions(self, exclusion_regions: list) -> str:
         """Compute clean (non-excluded) wavelength regions as a formatted string.
