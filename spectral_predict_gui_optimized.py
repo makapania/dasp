@@ -46896,6 +46896,13 @@ External Validation Performance (n={n_val}):
                 self.contam_diff_canvas.draw()
                 self.contam_diff_canvas.get_tk_widget().pack(fill='both', expand=True)
 
+                toolbar = self._contam_add_toolbar(
+                    self.contam_diff_canvas, self.contam_diff_plot_frame,
+                    '_contam_diff_toolbar_frame')
+                if self.contam_wavelengths is not None:
+                    self._contam_diff_click_ref = self._contam_create_wavelength_click_handler(
+                        fig, ax, self.contam_diff_canvas, self.contam_wavelengths, toolbar)
+
             except Exception as plot_error:
                 # Restore placeholder if plot fails
                 self.contam_diff_plot_label.pack(expand=True, fill='both', pady=30)
@@ -47023,6 +47030,20 @@ External Validation Performance (n={n_val}):
             fig, master=self.contam_clean_overview_plot_frame)
         self._contam_clean_overview_canvas.draw()
         self._contam_clean_overview_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        toolbar = self._contam_add_toolbar(
+            self._contam_clean_overview_canvas, self.contam_clean_overview_plot_frame,
+            '_contam_clean_overview_toolbar_frame')
+
+        def extra_exclusion_info(idx, wl):
+            for region in all_peak_regions:
+                if region[0] <= wl <= region[1]:
+                    return ["\u26a0 In exclusion region"]
+            return ["\u2713 Retained wavelength"]
+
+        self._contam_clean_overview_click_ref = self._contam_create_wavelength_click_handler(
+            fig, ax, self._contam_clean_overview_canvas, wavelengths, toolbar,
+            extra_info_fn=extra_exclusion_info)
 
     def _contam_export_difference_spectra(self):
         """Export difference spectra to file."""
@@ -47305,6 +47326,21 @@ External Validation Performance (n={n_val}):
         self._contam_influence_canvas.draw()
         self._contam_influence_canvas.get_tk_widget().pack(fill='both', expand=True)
 
+        toolbar = self._contam_add_toolbar(
+            self._contam_influence_canvas, self.contam_influence_plot_frame,
+            '_contam_influence_toolbar_frame')
+
+        def extra_influence_info(idx, wl):
+            if idx < len(combined):
+                val = combined[idx]
+                status = "ABOVE" if val >= threshold else "below"
+                return [f"Threshold: {threshold:.2f}", f"Status: {status} threshold"]
+            return []
+
+        self._contam_influence_click_ref = self._contam_create_wavelength_click_handler(
+            fig, ax, self._contam_influence_canvas, wavelengths, toolbar,
+            extra_info_fn=extra_influence_info)
+
     # ── Feature 5: Data type detection & conversion ──────────────────────
 
     def _contam_detect_data_type(self) -> None:
@@ -47408,6 +47444,65 @@ External Validation Performance (n={n_val}):
         if hasattr(self, '_contam_group_spectra_canvas'):
             self._contam_plot_group_spectra(preprocess=False)
 
+    # ── Shared helpers for interactive contaminant plots ─────────────────
+
+    def _contam_add_toolbar(self, canvas, parent_frame, attr_name: str):
+        """Add NavigationToolbar2Tk to a contaminant plot, destroying any previous one.
+
+        Args:
+            canvas: FigureCanvasTkAgg instance
+            parent_frame: tk frame to pack toolbar into
+            attr_name: attribute name on self to store toolbar_frame (e.g. '_contam_diff_toolbar_frame')
+
+        Returns:
+            The NavigationToolbar2Tk instance.
+        """
+        # Destroy previous toolbar frame if it exists
+        old_frame = getattr(self, attr_name, None)
+        if old_frame is not None:
+            old_frame.destroy()
+
+        toolbar_frame = ttk.Frame(parent_frame)
+        toolbar_frame.pack(fill='x')
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+        setattr(self, attr_name, toolbar_frame)
+        return toolbar
+
+    def _contam_create_wavelength_click_handler(self, fig, ax, canvas, wavelengths, toolbar, extra_info_fn=None):
+        """Attach click-to-identify-wavelength handler to a contaminant plot.
+
+        Args:
+            fig: matplotlib Figure
+            ax: matplotlib Axes
+            canvas: FigureCanvasTkAgg
+            wavelengths: numpy array of wavelength values
+            toolbar: NavigationToolbar2Tk (checked for mode to skip during zoom/pan)
+            extra_info_fn: optional callable(idx, wl) -> list[str] for additional info lines
+        """
+        import numpy as np
+
+        def on_click(event):
+            if event.inaxes != ax:
+                return
+            if toolbar.mode:
+                return
+            idx = np.argmin(np.abs(wavelengths - event.xdata))
+            wl = wavelengths[idx]
+            lines = [f"Wavelength: {wl:.1f} nm"]
+            for line_artist in ax.get_lines():
+                label = line_artist.get_label()
+                if label and not label.startswith('_'):
+                    ydata = line_artist.get_ydata()
+                    if idx < len(ydata):
+                        lines.append(f"{label}: {ydata[idx]:.4f}")
+            if extra_info_fn:
+                lines.extend(extra_info_fn(idx, wl))
+            self._create_or_update_annotation(ax, wl, event.ydata, "\n".join(lines), canvas)
+
+        fig.canvas.mpl_connect('button_press_event', on_click)
+        return on_click  # prevent GC
+
     # ── Feature 1: Group spectra plot ────────────────────────────────────
 
     def _contam_auto_populate_spectra_plot(self) -> None:
@@ -47482,6 +47577,12 @@ External Validation Performance (n={n_val}):
         self._contam_group_spectra_canvas.draw()
         self._contam_group_spectra_canvas.get_tk_widget().pack(fill='both', expand=True)
 
+        toolbar = self._contam_add_toolbar(
+            self._contam_group_spectra_canvas, self.contam_group_spectra_plot_frame,
+            '_contam_group_spectra_toolbar_frame')
+        self._contam_group_click_ref = self._contam_create_wavelength_click_handler(
+            fig, ax, self._contam_group_spectra_canvas, wavelengths, toolbar)
+
         self._add_plot_export_button(self.contam_group_spectra_plot_frame, fig, "contam_group_spectra")
 
     # ── Feature 2: Spectra with exclusion regions on 13C ─────────────────
@@ -47551,6 +47652,20 @@ External Validation Performance (n={n_val}):
         self._contam_spectra_exclusion_canvas = FigureCanvasTkAgg(fig, master=self.contam_spectra_exclusion_plot_frame)
         self._contam_spectra_exclusion_canvas.draw()
         self._contam_spectra_exclusion_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        toolbar = self._contam_add_toolbar(
+            self._contam_spectra_exclusion_canvas, self.contam_spectra_exclusion_plot_frame,
+            '_contam_spectra_exclusion_toolbar_frame')
+
+        def extra_exclusion_info(idx, wl):
+            for region in exclusion_regions:
+                if region[0] <= wl <= region[1]:
+                    return ["\u26a0 In exclusion region"]
+            return ["\u2713 Retained wavelength"]
+
+        self._contam_exclusion_click_ref = self._contam_create_wavelength_click_handler(
+            fig, ax, self._contam_spectra_exclusion_canvas, wavelengths, toolbar,
+            extra_info_fn=extra_exclusion_info)
 
         self._add_plot_export_button(self.contam_spectra_exclusion_plot_frame, fig, "contam_spectra_exclusions")
 
