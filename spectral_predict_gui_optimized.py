@@ -2509,6 +2509,19 @@ class SpectralPredictApp:
         self.contam_aggregation = tk.StringVar(value='max')
         self.contam_preprocessing = tk.StringVar(value='1st Derivative')
         self.contam_deriv_window = tk.IntVar(value=15)
+        # Feature 5: Absorbance/reflectance conversion
+        self.contam_original_data_type = tk.StringVar(value="reflectance")
+        self.contam_current_data_type = tk.StringVar(value="reflectance")
+        self.contam_type_confidence = 0.0
+        self.contam_type_detection_method = ""
+        self.contam_data_value_scale = 1.0
+        self.contam_data_converted = False
+        # Feature 3: Combined file upload
+        self.contam_combined_file_path = tk.StringVar()
+        self.contam_combined_group_col = tk.StringVar()
+        self.contam_combined_clean_value = tk.StringVar()
+        self._contam_combined_df = None
+        self._contam_combined_wl_cols = None
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -45787,6 +45800,57 @@ External Validation Performance (n={n_val}):
         self.contam_clean_info_label.pack(anchor=tk.W, pady=(5, 0))
         row += 1
 
+        # Section 1b: Combined File Upload (Feature 3)
+        self._create_section_header(content_frame, "Or: Load Combined File (All Groups in One File)", row=row, columnspan=2)
+        row += 1
+
+        combined_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        combined_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # Browse button + path
+        combined_btn_frame = ttk.Frame(combined_frame, style='TFrame')
+        combined_btn_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Button(combined_btn_frame, text="📂 Browse Combined File",
+                  command=self._contam_load_combined_file,
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(combined_btn_frame, textvariable=self.contam_combined_file_path, width=60,
+                 state='readonly').pack(side=tk.LEFT, fill='x', expand=True)
+
+        # Group Column dropdown
+        gcol_frame = ttk.Frame(combined_frame, style='TFrame')
+        gcol_frame.pack(fill='x', pady=(5, 5))
+
+        ttk.Label(gcol_frame, text="Group Column:", style='TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        self._contam_combined_group_combo = ttk.Combobox(
+            gcol_frame, textvariable=self.contam_combined_group_col,
+            state='readonly', width=25
+        )
+        self._contam_combined_group_combo.pack(side=tk.LEFT, padx=(0, 15))
+        self._contam_combined_group_combo.bind('<<ComboboxSelected>>', self._contam_on_group_col_selected)
+
+        # Clean Value dropdown
+        ttk.Label(gcol_frame, text="Clean/Uncontaminated Value:", style='TLabel').pack(side=tk.LEFT, padx=(0, 5))
+        self._contam_combined_clean_combo = ttk.Combobox(
+            gcol_frame, textvariable=self.contam_combined_clean_value,
+            state='readonly', width=20
+        )
+        self._contam_combined_clean_combo.pack(side=tk.LEFT)
+
+        # Process button + status
+        combined_action_frame = ttk.Frame(combined_frame, style='TFrame')
+        combined_action_frame.pack(fill='x', pady=(5, 0))
+
+        ttk.Button(combined_action_frame, text="▶️ Process Combined Data",
+                  command=self._contam_process_combined_file,
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=(0, 10))
+
+        self._contam_combined_status = ttk.Label(
+            combined_action_frame, text="", style='Small.TLabel', foreground='gray'
+        )
+        self._contam_combined_status.pack(side=tk.LEFT)
+        row += 1
+
         # Section 2: Define Contaminant Groups
         self._create_section_header(content_frame, "2. Define Contaminant Groups", row=row, columnspan=2)
         row += 1
@@ -45893,6 +45957,53 @@ External Validation Performance (n={n_val}):
                     "Helps identify characteristic wavelength regions affected by contaminants.")
         ttk.Label(content_frame, text=info_text, style='Small.TLabel',
                  foreground='gray').grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 15))
+        row += 1
+
+        # --- Data Type Section (Feature 5) ---
+        self._create_section_header(content_frame, "Data Type", row=row, columnspan=2)
+        row += 1
+
+        dtype_frame = ttk.Frame(content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        dtype_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        dtype_inner = ttk.Frame(dtype_frame, style='TFrame')
+        dtype_inner.pack(fill='x')
+
+        self.contam_dtype_status_label = ttk.Label(
+            dtype_inner, text="Load data on 13A to detect data type",
+            style='TLabel', foreground='gray'
+        )
+        self.contam_dtype_status_label.pack(side=tk.LEFT, padx=(0, 15))
+
+        ttk.Radiobutton(dtype_inner, text="Reflectance", variable=self.contam_current_data_type,
+                        value="reflectance", style='TRadiobutton',
+                        command=self._contam_on_data_type_override).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Radiobutton(dtype_inner, text="Absorbance", variable=self.contam_current_data_type,
+                        value="absorbance", style='TRadiobutton',
+                        command=self._contam_on_data_type_override).pack(side=tk.LEFT, padx=(0, 15))
+
+        self.contam_convert_btn = ttk.Button(
+            dtype_inner, text="Convert to Absorbance",
+            command=self._contam_convert_data_type, style='Modern.TButton'
+        )
+        self.contam_convert_btn.pack(side=tk.LEFT)
+        row += 1
+
+        # --- Group Spectra Plot (Feature 1 placeholder) ---
+        self._create_section_header(content_frame, "Preprocessed Group Spectra", row=row, columnspan=2)
+        row += 1
+
+        self.contam_group_spectra_plot_frame = ttk.Frame(
+            content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        self.contam_group_spectra_plot_frame.grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+
+        self.contam_group_spectra_plot_label = ttk.Label(
+            self.contam_group_spectra_plot_frame,
+            text="Load data on 13A to view group spectra",
+            style='TLabel', justify=tk.CENTER
+        )
+        self.contam_group_spectra_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
         row += 1
 
         # Analysis controls
@@ -46189,6 +46300,23 @@ External Validation Performance (n={n_val}):
             style='TLabel', justify=tk.CENTER
         )
         self.contam_influence_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
+        row += 1
+
+        # Spectra with Exclusion Regions plot (Feature 2)
+        self._create_section_header(content_frame, "Spectra with Exclusion Regions", row=row, columnspan=2)
+        row += 1
+
+        self.contam_spectra_exclusion_plot_frame = ttk.Frame(
+            content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        self.contam_spectra_exclusion_plot_frame.grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+
+        self.contam_spectra_exclusion_plot_label = ttk.Label(
+            self.contam_spectra_exclusion_plot_frame,
+            text="Run detection to view spectra with exclusion regions",
+            style='TLabel', justify=tk.CENTER
+        )
+        self.contam_spectra_exclusion_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
         row += 1
 
         # Exclusion regions table
@@ -46499,61 +46627,30 @@ External Validation Performance (n={n_val}):
             # Update summary
             self._contam_update_summary()
 
+            # Detect data type (Feature 5)
+            self._contam_detect_data_type()
+
+            # Auto-populate spectra plot if groups already loaded (Feature 1)
+            self._contam_auto_populate_spectra_plot()
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load clean data:\n{str(e)}")
 
-    def _contam_add_group(self):
-        """Add a new contaminant group from file or folder."""
-        label = self.contam_new_group_label.get().strip()
+    def _contam_add_single_group(self, label: str, filepath: str) -> bool:
+        """Load, validate, and store a single contaminant group.
 
-        if not label:
-            messagebox.showwarning("Warning", "Please enter a group label")
-            return
-
-        if label in self.contam_groups:
-            messagebox.showwarning("Warning", f"Group '{label}' already exists")
-            return
-
-        # Ask user whether to load directory or file
-        choice = messagebox.askquestion(
-            f"Add Group: {label}",
-            "Load a directory of spectral files?\n\n"
-            "Yes = Directory (ASD, CSV, SPC files)\n"
-            "No = Single combined file (CSV, Excel, NPY)",
-            icon='question'
-        )
-
-        if choice == 'yes':
-            # Load from folder
-            filepath = filedialog.askdirectory(title=f"Select Folder with Spectra for Group: {label}")
-            if not filepath:
-                return
-        else:
-            # Load from file
-            filepath = filedialog.askopenfilename(
-                title=f"Select Spectra for Group: {label}",
-                filetypes=[
-                    ("All Supported", "*.csv *.xlsx *.xls *.npy"),
-                    ("CSV files", "*.csv"),
-                    ("Excel files", "*.xlsx *.xls"),
-                    ("NumPy files", "*.npy"),
-                    ("All files", "*.*")
-                ]
-            )
-            if not filepath:
-                return
-
+        Returns True on success, False on failure.
+        """
         try:
-            # Load data using helper method
             group_data, group_wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
 
             # Validate wavelengths match if we have wavelengths loaded
             if self.contam_wavelengths is not None and group_wavelengths is not None:
                 if not np.allclose(self.contam_wavelengths, group_wavelengths, atol=0.1):
                     messagebox.showerror("Error",
-                        "Wavelengths do not match clean data!\n"
+                        f"Wavelengths for '{label}' do not match clean data!\n"
                         "All groups must have identical wavelength axes.")
-                    return
+                    return False
 
             # Store group data
             self.contam_groups[label] = group_data
@@ -46563,15 +46660,81 @@ External Validation Performance (n={n_val}):
             n_samples, n_wavelengths = group_data.shape
             display_text = f"{label}: {n_samples} spectra, {n_wavelengths} wavelengths"
             self.contam_groups_listbox.insert(tk.END, display_text)
-
-            # Clear entry
-            self.contam_new_group_label.delete(0, tk.END)
-
-            # Update summary
-            self._contam_update_summary()
+            return True
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load group data:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to load group '{label}':\n{str(e)}")
+            return False
+
+    def _contam_add_group(self):
+        """Add contaminant group(s) from file(s) or folder."""
+        label = self.contam_new_group_label.get().strip()
+
+        # Ask user whether to load directory or file
+        choice = messagebox.askquestion(
+            "Add Contaminant Group",
+            "Load a directory of spectral files?\n\n"
+            "Yes = Directory (ASD, CSV, SPC files)\n"
+            "No = File(s) (CSV, Excel, NPY — multi-select supported)",
+            icon='question'
+        )
+
+        if choice == 'yes':
+            # Directory mode — requires a label
+            if not label:
+                messagebox.showwarning("Warning", "Please enter a group label for directory loading")
+                return
+            if label in self.contam_groups:
+                messagebox.showwarning("Warning", f"Group '{label}' already exists")
+                return
+            filepath = filedialog.askdirectory(title=f"Select Folder with Spectra for Group: {label}")
+            if not filepath:
+                return
+            if self._contam_add_single_group(label, filepath):
+                self.contam_new_group_label.delete(0, tk.END)
+                self._contam_update_summary()
+                self._contam_auto_populate_spectra_plot()
+        else:
+            # File mode — support multi-select
+            filepaths = filedialog.askopenfilenames(
+                title="Select Spectra File(s) for Contaminant Group(s)",
+                filetypes=[
+                    ("All Supported", "*.csv *.xlsx *.xls *.npy"),
+                    ("CSV files", "*.csv"),
+                    ("Excel files", "*.xlsx *.xls"),
+                    ("NumPy files", "*.npy"),
+                    ("All files", "*.*")
+                ]
+            )
+            if not filepaths:
+                return
+
+            if len(filepaths) == 1 and label:
+                # Single file with user-typed label — existing behavior
+                if label in self.contam_groups:
+                    messagebox.showwarning("Warning", f"Group '{label}' already exists")
+                    return
+                if self._contam_add_single_group(label, filepaths[0]):
+                    self.contam_new_group_label.delete(0, tk.END)
+                    self._contam_update_summary()
+                    self._contam_auto_populate_spectra_plot()
+            else:
+                # Multi-file or single file without label — use filenames
+                from pathlib import Path
+                added = 0
+                for fp in filepaths:
+                    base_label = Path(fp).stem
+                    final_label = base_label
+                    suffix = 2
+                    while final_label in self.contam_groups:
+                        final_label = f"{base_label}_{suffix}"
+                        suffix += 1
+                    if self._contam_add_single_group(final_label, fp):
+                        added += 1
+                if added > 0:
+                    self.contam_new_group_label.delete(0, tk.END)
+                    self._contam_update_summary()
+                    self._contam_auto_populate_spectra_plot()
 
     def _contam_remove_group(self):
         """Remove selected contaminant group."""
@@ -46747,6 +46910,9 @@ External Validation Performance (n={n_val}):
 
             # Update peak detection
             self._contam_update_peak_detection()
+
+            # Update group spectra plot with preprocessing (Feature 1)
+            self._contam_plot_group_spectra(preprocess=True)
 
         except Exception as e:
             messagebox.showerror("Error", f"Difference analysis failed:\n{str(e)}")
@@ -47037,6 +47203,7 @@ External Validation Performance (n={n_val}):
             # Update regions display
             self._contam_display_exclusion_regions(results)
             self._contam_plot_influence(results)
+            self._contam_plot_spectra_with_exclusions(results)
 
             preproc_line = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else ""
             messagebox.showinfo("Success",
@@ -47137,6 +47304,395 @@ External Validation Performance (n={n_val}):
         self._contam_influence_canvas = FigureCanvasTkAgg(fig, master=self.contam_influence_plot_frame)
         self._contam_influence_canvas.draw()
         self._contam_influence_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+    # ── Feature 5: Data type detection & conversion ──────────────────────
+
+    def _contam_detect_data_type(self) -> None:
+        """Detect whether contaminant data is absorbance or reflectance."""
+        if self.contam_clean_data is None or self.contam_wavelengths is None:
+            return
+        try:
+            from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
+            df = pd.DataFrame(self.contam_clean_data, columns=self.contam_wavelengths)
+            data_type, confidence, method = detect_spectral_data_type(df)
+            scale = infer_reflectance_scale(df)
+
+            self.contam_original_data_type.set(data_type)
+            self.contam_current_data_type.set(data_type)
+            self.contam_type_confidence = confidence
+            self.contam_type_detection_method = method
+            self.contam_data_value_scale = scale
+            self.contam_data_converted = False
+
+            # Update UI
+            conf_color = 'green' if confidence >= 70 else 'orange'
+            self.contam_dtype_status_label.config(
+                text=f"Detected: {data_type} ({confidence:.0f}% confidence, {method})",
+                foreground=conf_color
+            )
+            target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+            self.contam_convert_btn.config(text=f"Convert to {target}")
+        except Exception as e:
+            self.contam_dtype_status_label.config(
+                text=f"Detection failed: {e}", foreground='red'
+            )
+
+    def _contam_convert_data_type(self) -> None:
+        """Convert contaminant data between absorbance and reflectance."""
+        if self.contam_clean_data is None:
+            messagebox.showerror("Error", "No data loaded to convert")
+            return
+
+        current = self.contam_current_data_type.get()
+        target = "absorbance" if current == "reflectance" else "reflectance"
+
+        # Warn if overriding high-confidence detection
+        original = self.contam_original_data_type.get()
+        if target == original and self.contam_data_converted and self.contam_type_confidence >= 70:
+            if not messagebox.askyesno("Confirm",
+                    f"Data was originally detected as {original} with "
+                    f"{self.contam_type_confidence:.0f}% confidence.\n\n"
+                    "Convert back to original type?"):
+                return
+
+        try:
+            # Temporarily set scale for conversion methods
+            saved_scale = getattr(self, 'data_value_scale', 1.0)
+            saved_source = getattr(self, 'source_data_type', 'reflectance')
+            self.data_value_scale = self.contam_data_value_scale
+
+            if target == "absorbance":
+                self.source_data_type = 'reflectance'
+                self.contam_clean_data = self._convert_reflectance_to_absorbance(self.contam_clean_data)
+                for label in list(self.contam_groups.keys()):
+                    self.contam_groups[label] = self._convert_reflectance_to_absorbance(self.contam_groups[label])
+            else:
+                self.source_data_type = 'reflectance'
+                self.contam_clean_data = self._convert_absorbance_to_reflectance(self.contam_clean_data)
+                for label in list(self.contam_groups.keys()):
+                    self.contam_groups[label] = self._convert_absorbance_to_reflectance(self.contam_groups[label])
+
+            # Restore main data state
+            self.data_value_scale = saved_scale
+            self.source_data_type = saved_source
+
+            self.contam_current_data_type.set(target)
+            self.contam_data_converted = not self.contam_data_converted
+
+            # Update UI
+            new_target = "Absorbance" if target == "reflectance" else "Reflectance"
+            self.contam_convert_btn.config(text=f"Convert to {new_target}")
+            self.contam_dtype_status_label.config(
+                text=f"Converted to {target}" + (" (originally " + original + ")" if target != original else ""),
+                foreground='blue'
+            )
+
+            # Re-plot group spectra if visible
+            self._contam_plot_group_spectra(preprocess=False)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Conversion failed:\n{e}")
+
+    def _contam_on_data_type_override(self) -> None:
+        """Handle manual radio button data type override (no conversion)."""
+        current = self.contam_current_data_type.get()
+        original = self.contam_original_data_type.get()
+        if current != original and not self.contam_data_converted:
+            self.contam_dtype_status_label.config(
+                text=f"Override: treating data as {current} (detected: {original})",
+                foreground='orange'
+            )
+        new_target = "Absorbance" if current == "reflectance" else "Reflectance"
+        self.contam_convert_btn.config(text=f"Convert to {new_target}")
+        # Re-plot to update y-axis label
+        if hasattr(self, '_contam_group_spectra_canvas'):
+            self._contam_plot_group_spectra(preprocess=False)
+
+    # ── Feature 1: Group spectra plot ────────────────────────────────────
+
+    def _contam_auto_populate_spectra_plot(self) -> None:
+        """Auto-populate group spectra plot when both clean + ≥1 group exist."""
+        if self.contam_clean_data is not None and len(self.contam_groups) > 0:
+            self._contam_plot_group_spectra(preprocess=False)
+
+    def _contam_plot_group_spectra(self, preprocess: bool = True) -> None:
+        """Plot mean + IQR bands for each group (clean + contaminants)."""
+        if self.contam_clean_data is None or self.contam_wavelengths is None:
+            return
+        if not hasattr(self, 'contam_group_spectra_plot_frame'):
+            return
+
+        import numpy as np
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        wavelengths = self.contam_wavelengths
+
+        # Preprocess or use raw
+        if preprocess:
+            clean = self._contam_preprocess_data(self.contam_clean_data)
+        else:
+            clean = self.contam_clean_data
+
+        # Hide placeholder
+        if hasattr(self, 'contam_group_spectra_plot_label'):
+            self.contam_group_spectra_plot_label.pack_forget()
+
+        # Clear existing canvas
+        if hasattr(self, '_contam_group_spectra_canvas'):
+            self._contam_group_spectra_canvas.get_tk_widget().destroy()
+
+        fig = Figure(figsize=(10, 5), dpi=100)
+        ax = fig.add_subplot(111)
+
+        # Plot clean group in blue
+        mean_c = np.mean(clean, axis=0)
+        q25_c = np.percentile(clean, 25, axis=0)
+        q75_c = np.percentile(clean, 75, axis=0)
+        ax.fill_between(wavelengths, q25_c, q75_c, alpha=0.15, color='#2196F3')
+        ax.plot(wavelengths, mean_c, color='#2196F3', linewidth=1.5, label='Clean')
+
+        # Plot each contaminant group
+        contam_colors = ['#FF5722', '#4CAF50', '#9C27B0', '#FF9800', '#795548']
+        for idx, (label, group_data) in enumerate(self.contam_groups.items()):
+            color = contam_colors[idx % len(contam_colors)]
+            if preprocess:
+                g = self._contam_preprocess_data(group_data)
+            else:
+                g = group_data
+            mean_g = np.mean(g, axis=0)
+            q25_g = np.percentile(g, 25, axis=0)
+            q75_g = np.percentile(g, 75, axis=0)
+            ax.fill_between(wavelengths, q25_g, q75_g, alpha=0.15, color=color)
+            ax.plot(wavelengths, mean_g, color=color, linewidth=1.5, label=label)
+
+        dtype = self.contam_current_data_type.get()
+        ax.set_xlabel('Wavelength (nm)')
+        ax.set_ylabel(dtype.capitalize())
+        preproc_label = ""
+        if preprocess:
+            p = self.contam_preprocessing.get()
+            preproc_label = f" ({p})" if p != 'None (Raw)' else ""
+        ax.set_title(f'Group Spectra: Mean + IQR{preproc_label}')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        self._contam_group_spectra_canvas = FigureCanvasTkAgg(fig, master=self.contam_group_spectra_plot_frame)
+        self._contam_group_spectra_canvas.draw()
+        self._contam_group_spectra_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        self._add_plot_export_button(self.contam_group_spectra_plot_frame, fig, "contam_group_spectra")
+
+    # ── Feature 2: Spectra with exclusion regions on 13C ─────────────────
+
+    def _contam_plot_spectra_with_exclusions(self, results: dict) -> None:
+        """Plot preprocessed group spectra with detected exclusion regions overlaid."""
+        if self.contam_clean_data is None or self.contam_wavelengths is None:
+            return
+        if not hasattr(self, 'contam_spectra_exclusion_plot_frame'):
+            return
+
+        import numpy as np
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        exclusion_regions = results.get('exclusion_regions', [])
+        wavelengths = self.contam_wavelengths
+
+        # Preprocess data
+        clean = self._contam_preprocess_data(self.contam_clean_data)
+
+        # Hide placeholder
+        if hasattr(self, 'contam_spectra_exclusion_plot_label'):
+            self.contam_spectra_exclusion_plot_label.pack_forget()
+
+        # Clear existing canvas
+        if hasattr(self, '_contam_spectra_exclusion_canvas'):
+            self._contam_spectra_exclusion_canvas.get_tk_widget().destroy()
+
+        fig = Figure(figsize=(10, 5), dpi=100)
+        ax = fig.add_subplot(111)
+
+        # Plot clean group
+        mean_c = np.mean(clean, axis=0)
+        q25_c = np.percentile(clean, 25, axis=0)
+        q75_c = np.percentile(clean, 75, axis=0)
+        ax.fill_between(wavelengths, q25_c, q75_c, alpha=0.15, color='#2196F3')
+        ax.plot(wavelengths, mean_c, color='#2196F3', linewidth=1.5, label='Clean')
+
+        # Plot contaminant groups
+        contam_colors = ['#FF5722', '#4CAF50', '#9C27B0', '#FF9800', '#795548']
+        for idx, (label, group_data) in enumerate(self.contam_groups.items()):
+            color = contam_colors[idx % len(contam_colors)]
+            g = self._contam_preprocess_data(group_data)
+            mean_g = np.mean(g, axis=0)
+            q25_g = np.percentile(g, 25, axis=0)
+            q75_g = np.percentile(g, 75, axis=0)
+            ax.fill_between(wavelengths, q25_g, q75_g, alpha=0.15, color=color)
+            ax.plot(wavelengths, mean_g, color=color, linewidth=1.5, label=label)
+
+        # Overlay exclusion regions
+        for region in exclusion_regions:
+            ax.axvspan(region[0], region[1], alpha=0.2, color='red', zorder=0)
+        if exclusion_regions:
+            ax.axvspan(0, 0, alpha=0.2, color='red', label='Excluded regions')
+
+        dtype = self.contam_current_data_type.get()
+        ax.set_xlabel('Wavelength (nm)')
+        ax.set_ylabel(dtype.capitalize())
+        preproc = self.contam_preprocessing.get()
+        preproc_label = f" ({preproc})" if preproc != 'None (Raw)' else ""
+        ax.set_title(f'Spectra with Exclusion Regions{preproc_label}')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        self._contam_spectra_exclusion_canvas = FigureCanvasTkAgg(fig, master=self.contam_spectra_exclusion_plot_frame)
+        self._contam_spectra_exclusion_canvas.draw()
+        self._contam_spectra_exclusion_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        self._add_plot_export_button(self.contam_spectra_exclusion_plot_frame, fig, "contam_spectra_exclusions")
+
+    # ── Feature 3: Combined file upload ──────────────────────────────────
+
+    def _contam_load_combined_file(self) -> None:
+        """Load a combined CSV/Excel file containing all groups."""
+        filepath = filedialog.askopenfilename(
+            title="Select Combined File (All Groups in One File)",
+            filetypes=[
+                ("All Supported", "*.csv *.xlsx *.xls"),
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("All files", "*.*")
+            ]
+        )
+        if not filepath:
+            return
+
+        try:
+            from spectral_predict.io import identify_wavelength_columns
+            if filepath.endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(filepath)
+            else:
+                df = pd.read_csv(filepath)
+
+            wl_cols = identify_wavelength_columns(df)
+            if len(wl_cols) < 10:
+                messagebox.showerror("Error",
+                    f"Only {len(wl_cols)} wavelength columns found. "
+                    "Need at least 10 for spectral data.")
+                return
+
+            self._contam_combined_df = df
+            self._contam_combined_wl_cols = wl_cols
+            self.contam_combined_file_path.set(filepath)
+
+            # Populate Group Column combobox with non-wavelength columns
+            non_wl_cols = [c for c in df.columns if c not in wl_cols]
+            self._contam_combined_group_combo['values'] = non_wl_cols
+            if non_wl_cols:
+                self._contam_combined_group_combo.set(non_wl_cols[0])
+                self._contam_on_group_col_selected(None)
+
+            self._contam_combined_status.config(
+                text=f"Loaded: {len(df)} rows, {len(wl_cols)} wavelength columns, "
+                     f"{len(non_wl_cols)} metadata columns",
+                foreground='green'
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load combined file:\n{e}")
+
+    def _contam_on_group_col_selected(self, event) -> None:
+        """Update clean value dropdown when group column is selected."""
+        if self._contam_combined_df is None:
+            return
+        col = self.contam_combined_group_col.get()
+        if not col:
+            return
+        unique_vals = sorted(
+            [str(v) for v in self._contam_combined_df[col].dropna().unique()]
+        )
+        self._contam_combined_clean_combo['values'] = unique_vals
+        if unique_vals:
+            self._contam_combined_clean_combo.set(unique_vals[0])
+        self._contam_combined_status.config(
+            text=f"Column '{col}': {len(unique_vals)} unique groups found",
+            foreground=self.colors['text']
+        )
+
+    def _contam_process_combined_file(self) -> None:
+        """Process combined file: split by group column into clean + contaminant groups."""
+        if self._contam_combined_df is None:
+            messagebox.showerror("Error", "No combined file loaded. Click Browse first.")
+            return
+
+        group_col = self.contam_combined_group_col.get()
+        clean_value = self.contam_combined_clean_value.get()
+
+        if not group_col or not clean_value:
+            messagebox.showerror("Error", "Please select both a group column and clean value.")
+            return
+
+        df = self._contam_combined_df
+        wl_cols = self._contam_combined_wl_cols
+
+        try:
+            wavelengths = np.array([float(str(c).strip().strip('"').strip("'")) for c in wl_cols])
+
+            # Split by group column
+            clean_mask = df[group_col].astype(str) == clean_value
+            clean_rows = df.loc[clean_mask, wl_cols].values.astype(float)
+
+            if len(clean_rows) == 0:
+                messagebox.showerror("Error", f"No rows found for clean value '{clean_value}'")
+                return
+
+            # Store clean data
+            self.contam_clean_data = clean_rows
+            self.contam_wavelengths = wavelengths
+            self.contam_clean_sample_names = list(df.loc[clean_mask].index.astype(str))
+
+            # Clear existing groups
+            self.contam_groups.clear()
+            self.contam_group_paths.clear()
+            self.contam_groups_listbox.delete(0, tk.END)
+
+            # Create contaminant groups
+            other_values = [str(v) for v in df[group_col].dropna().unique() if str(v) != clean_value]
+            for val in sorted(other_values):
+                mask = df[group_col].astype(str) == val
+                group_rows = df.loc[mask, wl_cols].values.astype(float)
+                if len(group_rows) > 0:
+                    self.contam_groups[val] = group_rows
+                    self.contam_group_paths[val] = self.contam_combined_file_path.get()
+                    display_text = f"{val}: {len(group_rows)} spectra, {len(wavelengths)} wavelengths"
+                    self.contam_groups_listbox.insert(tk.END, display_text)
+
+            # Update clean info
+            n_samples = len(clean_rows)
+            info_text = (f"Loaded {n_samples} clean spectra, "
+                        f"{len(wavelengths)} wavelengths "
+                        f"({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)")
+            self.contam_clean_info_label.config(text=info_text, foreground=self.colors['text'])
+            self.contam_clean_path.set(f"Combined: {self.contam_combined_file_path.get()}")
+
+            # Detect data type (Feature 5)
+            self._contam_detect_data_type()
+
+            # Update summary and alignment
+            self._contam_update_summary()
+
+            # Auto-populate spectra plot (Feature 1)
+            self._contam_auto_populate_spectra_plot()
+
+            self._contam_combined_status.config(
+                text=f"Processed: {n_samples} clean + {len(self.contam_groups)} contaminant groups",
+                foreground='green'
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to process combined file:\n{e}")
 
     def _contam_compute_clean_regions(self, exclusion_regions: list) -> str:
         """Compute clean (non-excluded) wavelength regions as a formatted string.
