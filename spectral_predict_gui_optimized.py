@@ -2295,11 +2295,6 @@ class SpectralPredictApp:
         # Active filter state
         self.results_filtered_df = None  # Filtered view (None = no filter active)
         self._filter_after_id = None     # Debounce timer
-        self._shift_key_held = False     # Track Shift key for multi-sort
-        root.bind_all('<KeyPress-Shift_L>', lambda e: setattr(self, '_shift_key_held', True))
-        root.bind_all('<KeyPress-Shift_R>', lambda e: setattr(self, '_shift_key_held', True))
-        root.bind_all('<KeyRelease-Shift_L>', lambda e: setattr(self, '_shift_key_held', False))
-        root.bind_all('<KeyRelease-Shift_R>', lambda e: setattr(self, '_shift_key_held', False))
         self._clearing_filters = False   # Guard flag to suppress trace cascades
 
         # Filter control variables (initialized here, UI created dynamically)
@@ -2512,6 +2507,8 @@ class SpectralPredictApp:
         self.contam_threshold = tk.DoubleVar(value=0.5)
         self.contam_n_components = tk.IntVar(value=2)
         self.contam_aggregation = tk.StringVar(value='max')
+        self.contam_preprocessing = tk.StringVar(value='1st Derivative')
+        self.contam_deriv_window = tk.IntVar(value=15)
 
         # GUI variables
         self.spectral_data_path = tk.StringVar()  # Unified path for spectral data
@@ -23243,7 +23240,7 @@ For detailed documentation, see the User Guide.
                 "User Guide Not Found", f"Could not find User Guide at:\n{guide_path}"
             )
 
-    def _sort_results_by_column(self, col):
+    def _sort_results_by_column(self, col, shift_held: bool = False):
         """Sort results table by the specified column (supports multi-level via Shift+Click)."""
         if self.results_df is None or len(self.results_df) == 0:
             return
@@ -23254,7 +23251,7 @@ For detailed documentation, see the User Guide.
             'ROC_AUC', 'F1', 'F1cv', 'ROC_AUCcv', 'RPD', 'RER',
         }
 
-        if self._shift_key_held and self.results_sort_keys:
+        if shift_held and self.results_sort_keys:
             # Shift+Click: add/toggle secondary sort level
             existing_idx = None
             for i, (sort_col, asc) in enumerate(self.results_sort_keys):
@@ -23523,8 +23520,7 @@ For detailed documentation, see the User Guide.
                     break
 
             # Bind click event to sort by this column
-            self.results_tree.heading(col, text=header_text,
-                                     command=lambda c=col: self._sort_results_by_column(c))
+            self.results_tree.heading(col, text=header_text)
 
         # Update sort hint label
         if hasattr(self, 'sort_hint_label'):
@@ -23633,12 +23629,23 @@ For detailed documentation, see the User Guide.
                 self.region_legend_frame.pack_forget()
 
     def _on_result_click(self, event):
-        """Handle single-click on results table to toggle checkbox selection."""
-        if self.results_df is None or 'Select' not in self.results_df.columns:
+        """Handle single-click on results table for heading sort and checkbox toggling."""
+        region = self.results_tree.identify('region', event.x, event.y)
+
+        # --- Heading click: column sort with Shift detection ---
+        if region == 'heading':
+            col_id = self.results_tree.identify_column(event.x)
+            if col_id and col_id != '#0':
+                col_index = int(col_id.replace('#', '')) - 1
+                columns = self.results_tree['columns']
+                if 0 <= col_index < len(columns):
+                    shift_held = bool(event.state & 0x1)
+                    self._sort_results_by_column(columns[col_index], shift_held=shift_held)
             return
 
-        # Identify which column was clicked
-        region = self.results_tree.identify('region', event.x, event.y)
+        # --- Cell click: checkbox toggling ---
+        if self.results_df is None or 'Select' not in self.results_df.columns:
+            return
         if region != 'cell':
             return
 
@@ -45900,6 +45907,10 @@ External Validation Performance (n={n_val}):
                   command=self._contam_export_difference_spectra,
                   style='Modern.TButton').pack(side=tk.LEFT)
 
+        ttk.Button(export_frame, text="Apply Clean Regions to Analysis",
+                  command=lambda: self._contam_apply_clean_regions(source='difference'),
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=(10, 0))
+
     def _create_tab13c_automated_detection(self):
         """Subtab 13C: Automated Region Detection - Detect contaminant-influenced regions."""
         tab13c = ttk.Frame(self.contam_notebook, style='TFrame')
@@ -45994,6 +46005,47 @@ External Validation Performance (n={n_val}):
         for agg in agg_methods:
             ttk.Radiobutton(agg_frame, text=agg, variable=self.contam_aggregation,
                           value=agg, style='TRadiobutton').pack(side=tk.LEFT, padx=5)
+
+        # Preprocessing
+        preproc_frame = ttk.Frame(params_frame, style='TFrame')
+        preproc_frame.pack(fill='x', pady=(5, 5))
+
+        ttk.Label(preproc_frame, text="Preprocessing:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        preproc_options = [
+            'None (Raw)', 'SNV', '1st Derivative', '2nd Derivative',
+            'SNV + 1st Derivative', 'SNV + 2nd Derivative'
+        ]
+        preproc_combo = ttk.Combobox(
+            preproc_frame, textvariable=self.contam_preprocessing,
+            values=preproc_options, state='readonly', width=22
+        )
+        preproc_combo.pack(side=tk.LEFT)
+        preproc_combo.bind('<<ComboboxSelected>>', lambda e: self._contam_update_deriv_window_visibility())
+
+        # Derivative window spinbox (hidden when not using derivative)
+        self.contam_deriv_window_frame = ttk.Frame(params_frame, style='TFrame')
+        self.contam_deriv_window_frame.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(self.contam_deriv_window_frame, text="Derivative Window Size:", style='TLabel').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Spinbox(
+            self.contam_deriv_window_frame, from_=5, to=35, increment=2,
+            textvariable=self.contam_deriv_window, width=10
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            self.contam_deriv_window_frame,
+            text="(odd, larger = smoother)",
+            style='Small.TLabel', foreground='gray'
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Helper text
+        preproc_help_frame = ttk.Frame(params_frame, style='TFrame')
+        preproc_help_frame.pack(fill='x', pady=(0, 5))
+        ttk.Label(
+            preproc_help_frame,
+            text="Derivatives reveal narrow peaks hidden in raw spectra",
+            style='Small.TLabel', foreground='gray'
+        ).pack(anchor=tk.W)
+
         row += 1
 
         # Section 3: Run Analysis
@@ -46053,6 +46105,10 @@ External Validation Performance (n={n_val}):
         ttk.Button(export_frame, text="💾 Export Analysis Results",
                   command=self._contam_export_detection_results,
                   style='Modern.TButton').pack(side=tk.LEFT)
+
+        ttk.Button(export_frame, text="Apply Clean Regions to Analysis",
+                  command=lambda: self._contam_apply_clean_regions(source='automated'),
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=(10, 0))
 
     def _create_tab13d_apply_validate(self):
         """Subtab 13D: Apply & Validate - Apply corrections and validate results."""
@@ -46676,6 +46732,38 @@ External Validation Performance (n={n_val}):
         desc = descriptions.get(method, "")
         self.contam_method_desc_label.config(text=desc)
 
+    def _contam_update_deriv_window_visibility(self):
+        """Show/hide derivative window spinbox based on preprocessing selection."""
+        preproc = self.contam_preprocessing.get()
+        if 'Derivative' in preproc:
+            self.contam_deriv_window_frame.pack(fill='x', pady=(0, 5))
+        else:
+            self.contam_deriv_window_frame.pack_forget()
+
+    def _contam_preprocess_data(self, X: np.ndarray) -> np.ndarray:
+        """Apply selected preprocessing to contaminant data."""
+        from spectral_predict.preprocess import SavgolDerivative, SNV
+
+        preproc = self.contam_preprocessing.get()
+        if preproc == 'None (Raw)':
+            return X
+
+        result = X.copy()
+        window = self.contam_deriv_window.get()
+        # Ensure window is odd
+        if window % 2 == 0:
+            window += 1
+
+        if preproc in ('SNV', 'SNV + 1st Derivative', 'SNV + 2nd Derivative'):
+            result = SNV().fit_transform(result)
+
+        if '1st Derivative' in preproc:
+            result = SavgolDerivative(deriv=1, window=window).fit_transform(result)
+        elif '2nd Derivative' in preproc:
+            result = SavgolDerivative(deriv=2, window=window).fit_transform(result)
+
+        return result
+
     def _contam_run_automated_detection(self):
         """Run automated contaminant region detection."""
         if self.contam_clean_data is None:
@@ -46690,23 +46778,28 @@ External Validation Performance (n={n_val}):
         n_components = self.contam_n_components.get()
         threshold = self.contam_threshold.get()
         aggregation = self.contam_aggregation.get()
+        preproc = self.contam_preprocessing.get()
 
         try:
+            preproc_desc = f" on {preproc}" if preproc != 'None (Raw)' else ""
             self.contam_detection_status_label.config(
-                text=f"Running {method} analysis...",
+                text=f"Running {method} analysis{preproc_desc}...",
                 foreground='blue'
             )
             self.root.update()
+
+            # Apply preprocessing
+            clean_data = self._contam_preprocess_data(self.contam_clean_data)
 
             # Run analysis based on method
             if len(self.contam_groups) == 1:
                 # Single contaminant group
                 contam_label = list(self.contam_groups.keys())[0]
-                contam_data = self.contam_groups[contam_label]
+                contam_data = self._contam_preprocess_data(self.contam_groups[contam_label])
 
                 if method == 'Estimated EPO':
                     results = analyze_contaminant_influence(
-                        self.contam_clean_data,
+                        clean_data,
                         contam_data,
                         wavelengths=self.contam_wavelengths,
                         method='estimated_epo',
@@ -46715,7 +46808,7 @@ External Validation Performance (n={n_val}):
                     )
                 elif method == 'OPLS-DA':
                     results = analyze_contaminant_influence(
-                        self.contam_clean_data,
+                        clean_data,
                         contam_data,
                         wavelengths=self.contam_wavelengths,
                         method='opls_da',
@@ -46724,7 +46817,7 @@ External Validation Performance (n={n_val}):
                     )
                 elif method == 'GLSW':
                     results = analyze_contaminant_influence(
-                        self.contam_clean_data,
+                        clean_data,
                         contam_data,
                         wavelengths=self.contam_wavelengths,
                         method='glsw',
@@ -46735,10 +46828,14 @@ External Validation Performance (n={n_val}):
                     return
 
             else:
-                # Multiple contaminant groups
+                # Multiple contaminant groups - preprocess each group
+                preprocessed_groups = {
+                    label: self._contam_preprocess_data(data)
+                    for label, data in self.contam_groups.items()
+                }
                 results = analyze_multiple_contaminants(
-                    self.contam_clean_data,
-                    self.contam_groups,
+                    clean_data,
+                    preprocessed_groups,
                     wavelengths=self.contam_wavelengths,
                     method=method.lower().replace(' ', '_').replace('-', '_'),
                     n_components=n_components,
@@ -46751,16 +46848,17 @@ External Validation Performance (n={n_val}):
 
             # Display results
             self.contam_detection_status_label.config(
-                text=f"✓ Analysis complete using {method}",
+                text=f"✓ Analysis complete using {method}{preproc_desc}",
                 foreground='green'
             )
 
             # Update regions display
             self._contam_display_exclusion_regions(results)
 
+            preproc_line = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else ""
             messagebox.showinfo("Success",
                 f"Automated detection complete!\n"
-                f"Method: {method}\n"
+                f"Method: {method}{preproc_line}\n"
                 f"Found {len(results.get('exclusion_regions', []))} regions to exclude.\n\n"
                 f"(Influence plot would appear in production)")
 
@@ -46804,6 +46902,133 @@ External Validation Performance (n={n_val}):
         self.contam_regions_text.delete('1.0', tk.END)
         self.contam_regions_text.insert('1.0', text)
         self.contam_regions_text.config(state='disabled')
+
+    def _contam_compute_clean_regions(self, exclusion_regions: list) -> str:
+        """Compute clean (non-excluded) wavelength regions as a formatted string.
+
+        Args:
+            exclusion_regions: List of tuples where first two elements are (start, end).
+                Handles 2-tuples (start, end) and 3-tuples (start, end, extra_info).
+
+        Returns:
+            Formatted string like "350.0-1234.5, 1456.7-1890.2" compatible with
+            _parse_wavelength_regions().
+        """
+        if not exclusion_regions or self.contam_wavelengths is None:
+            return ""
+
+        # Extract and normalize regions to (min, max) pairs
+        normalized = []
+        for region in exclusion_regions:
+            a, b = float(region[0]), float(region[1])
+            normalized.append((min(a, b), max(a, b)))
+
+        # Sort by start and merge overlapping/adjacent regions
+        normalized.sort(key=lambda r: r[0])
+        merged = [normalized[0]]
+        for start, end in normalized[1:]:
+            prev_start, prev_end = merged[-1]
+            if start <= prev_end:
+                merged[-1] = (prev_start, max(prev_end, end))
+            else:
+                merged.append((start, end))
+
+        # Compute complement against full wavelength range
+        wl_min = float(min(self.contam_wavelengths))
+        wl_max = float(max(self.contam_wavelengths))
+
+        clean_regions = []
+        cursor = wl_min
+
+        for exc_start, exc_end in merged:
+            if cursor < exc_start:
+                clean_regions.append((cursor, exc_start))
+            cursor = max(cursor, exc_end)
+
+        if cursor < wl_max:
+            clean_regions.append((cursor, wl_max))
+
+        if not clean_regions:
+            return ""
+
+        return ", ".join(f"{s:.1f}-{e:.1f}" for s, e in clean_regions)
+
+    def _contam_apply_clean_regions(self, source: str = 'difference') -> None:
+        """Apply clean (non-contaminated) wavelength regions to Basic Settings.
+
+        Args:
+            source: 'difference' to use 13B peak regions, 'automated' to use 13C exclusion regions.
+        """
+        # Validate wavelength data exists
+        if self.contam_wavelengths is None:
+            messagebox.showerror("Error", "No wavelength data available. Run contaminant analysis first.")
+            return
+
+        # Gather exclusion regions based on source
+        exclusion_regions = []
+
+        if source == 'difference':
+            if not hasattr(self, 'contam_analyzers') or not self.contam_analyzers:
+                messagebox.showerror("Error", "No difference analysis results available.\nRun difference analysis in the Peak Regions tab first.")
+                return
+
+            threshold_pct = self.contam_peak_threshold.get() / 100.0
+            for label, analyzer in self.contam_analyzers.items():
+                try:
+                    regions = analyzer.identify_peak_regions(
+                        self.contam_wavelengths,
+                        threshold=threshold_pct,
+                        min_width=3
+                    )
+                    if regions:
+                        exclusion_regions.extend(regions)
+                except Exception:
+                    pass
+
+        elif source == 'automated':
+            if self.contam_results is None:
+                messagebox.showerror("Error", "No automated detection results available.\nRun automated detection in the Exclusion Regions tab first.")
+                return
+            exclusion_regions = self.contam_results.get('exclusion_regions', [])
+
+        if not exclusion_regions:
+            messagebox.showwarning("No Regions", "No exclusion regions found with current settings.\nTry lowering the detection threshold.")
+            return
+
+        # Compute clean regions string
+        clean_text = self._contam_compute_clean_regions(exclusion_regions)
+
+        if not clean_text:
+            messagebox.showwarning("No Clean Regions",
+                "All wavelengths fall within exclusion regions.\nTry raising the detection threshold.")
+            return
+
+        # Apply to Basic Settings custom regions field
+        self.analysis_wl_custom.set(clean_text)
+
+        # Copy to clipboard
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(clean_text)
+        except Exception:
+            pass
+
+        # Calculate statistics for user feedback
+        total_wl = len(self.contam_wavelengths)
+        wl_array = self.contam_wavelengths
+        clean_count = 0
+        for region in exclusion_regions:
+            a, b = float(region[0]), float(region[1])
+            lo, hi = min(a, b), max(a, b)
+            clean_count += int(((wl_array >= lo) & (wl_array <= hi)).sum())
+        retained = total_wl - clean_count
+        pct = (retained / total_wl) * 100 if total_wl > 0 else 0
+
+        messagebox.showinfo("Clean Regions Applied",
+            f"Applied clean regions to Basic Settings > Custom Regions.\n\n"
+            f"Retained wavelengths: {retained}/{total_wl} ({pct:.1f}%)\n"
+            f"Excluded wavelengths: {clean_count}/{total_wl} ({100 - pct:.1f}%)\n\n"
+            f"Also copied to clipboard.")
 
     def _contam_export_detection_results(self):
         """Export automated detection results."""
