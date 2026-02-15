@@ -23508,6 +23508,7 @@ For detailed documentation, see the User Guide.
 
         # Always update column headings (for multi-sort indicators and click bindings)
         superscripts = {1: '\u00b9', 2: '\u00b2', 3: '\u00b3'}
+        sorted_col_names = {sc for sc, _ in self.results_sort_keys}
         for col in columns:
             header_text = col
             for i, (sort_col, asc) in enumerate(self.results_sort_keys):
@@ -23519,10 +23520,15 @@ For detailed documentation, see the User Guide.
                         header_text = f"{col} {arrow}"
                     break
 
-            # Bind click event to sort by this column
             self.results_tree.heading(col, text=header_text)
 
-        # Update sort hint label
+            # Widen sorted columns so arrow/superscript isn't clipped
+            if is_sorted and col in sorted_col_names:
+                cur_width = self.results_tree.column(col, 'width')
+                if cur_width < 200:  # don't widen already-wide columns
+                    self.results_tree.column(col, width=cur_width + 22)
+
+        # Update sort hint label — prominent blue bar when sorting, subtle hint otherwise
         if hasattr(self, 'sort_hint_label'):
             if self.results_sort_keys:
                 parts = []
@@ -23531,11 +23537,17 @@ For detailed documentation, see the User Guide.
                     parts.append(f"{sort_col} {arrow}")
                 sort_desc = " > ".join(parts)
                 self.sort_hint_label.config(
-                    text=f"Sort: {sort_desc}  |  Tip: Shift+Click for multi-level sorting"
+                    text=f"  Sorted by: {sort_desc}    (Shift+Click to add sort levels)",
+                    font=('Segoe UI', 9, 'bold'),
+                    foreground='#ffffff',
+                    background='#4a7abc',
                 )
             else:
                 self.sort_hint_label.config(
-                    text="Tip: Shift+Click column headers for multi-level sorting"
+                    text="Tip: Shift+Click column headers for multi-level sorting",
+                    font=('Segoe UI', 8, 'italic'),
+                    foreground='#888888',
+                    background='',
                 )
 
         # Columns that must display as integers (no decimal places)
@@ -45949,6 +45961,22 @@ External Validation Performance (n={n_val}):
         self.contam_peaks_text.pack(fill='both', expand=True)
         row += 1
 
+        # Clean Spectra Overview plot area
+        self._create_section_header(content_frame, "Clean Spectra Overview", row=row, columnspan=2)
+        row += 1
+
+        self.contam_clean_overview_plot_frame = ttk.Frame(
+            content_frame, style='TFrame', relief=tk.SOLID, borderwidth=1, padding=10)
+        self.contam_clean_overview_plot_frame.grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+
+        self.contam_clean_overview_plot_label = ttk.Label(
+            self.contam_clean_overview_plot_frame,
+            text="Run analysis to view clean spectra with exclusion regions",
+            style='TLabel', justify=tk.CENTER)
+        self.contam_clean_overview_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
+        row += 1
+
         # Export button
         export_frame = ttk.Frame(content_frame, style='TFrame')
         export_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
@@ -46719,6 +46747,7 @@ External Validation Performance (n={n_val}):
         peaks_text.append("=" * 60)
 
         # Use analyzer's identify_peak_regions method for each group
+        all_peak_regions = []
         for label, analyzer in self.contam_analyzers.items():
             peaks_text.append(f"\n{label}:")
             try:
@@ -46728,6 +46757,7 @@ External Validation Performance (n={n_val}):
                     min_width=3
                 )
                 if regions:
+                    all_peak_regions.extend(regions)
                     for i, (start_wl, end_wl, peak_inf) in enumerate(regions, 1):
                         peaks_text.append(f"  Region {i}: {start_wl:.1f} - {end_wl:.1f} nm (peak influence: {peak_inf:.3f})")
                 else:
@@ -46735,10 +46765,74 @@ External Validation Performance (n={n_val}):
             except Exception as e:
                 peaks_text.append(f"  Error: {str(e)}")
 
+        # Append clean (retained) wavelength regions
+        if all_peak_regions:
+            clean_text = self._contam_compute_clean_regions(all_peak_regions)
+            if clean_text:
+                peaks_text.append("")
+                peaks_text.append("=" * 60)
+                peaks_text.append("Clean (Retained) Wavelength Regions:")
+                peaks_text.append(f"  {clean_text}")
+
         self.contam_peaks_text.config(state='normal')
         self.contam_peaks_text.delete('1.0', tk.END)
         self.contam_peaks_text.insert('1.0', '\n'.join(peaks_text))
         self.contam_peaks_text.config(state='disabled')
+
+        # Update clean spectra overview plot
+        self._contam_plot_clean_spectra_overview(all_peak_regions)
+
+    def _contam_plot_clean_spectra_overview(self, all_peak_regions: list) -> None:
+        """Plot clean spectra median with IQR and exclusion region overlay."""
+        if not hasattr(self, 'contam_clean_overview_plot_frame'):
+            return
+        if self.contam_clean_data is None or self.contam_wavelengths is None:
+            return
+
+        import numpy as np
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        data = self.contam_clean_data
+        wavelengths = self.contam_wavelengths
+
+        median = np.median(data, axis=0)
+        q25 = np.percentile(data, 25, axis=0)
+        q75 = np.percentile(data, 75, axis=0)
+
+        # Hide placeholder
+        self.contam_clean_overview_plot_label.pack_forget()
+
+        # Clear existing canvas
+        if hasattr(self, '_contam_clean_overview_canvas'):
+            self._contam_clean_overview_canvas.get_tk_widget().destroy()
+
+        fig = Figure(figsize=(10, 4), dpi=100)
+        ax = fig.add_subplot(111)
+
+        # IQR band
+        ax.fill_between(wavelengths, q25, q75, alpha=0.2, color='#2196F3', label='IQR (25th\u201375th)')
+        # Median line
+        ax.plot(wavelengths, median, color='#2196F3', linewidth=1.5, label='Median')
+
+        # Shade exclusion regions
+        for region in all_peak_regions:
+            ax.axvspan(region[0], region[1], alpha=0.2, color='red', zorder=0)
+        # Single legend entry for exclusion regions
+        if all_peak_regions:
+            ax.axvspan(0, 0, alpha=0.2, color='red', label='Excluded regions')
+
+        ax.set_xlabel('Wavelength (nm)')
+        ax.set_ylabel('Intensity')
+        ax.set_title('Clean Spectra Overview with Exclusion Regions')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        self._contam_clean_overview_canvas = FigureCanvasTkAgg(
+            fig, master=self.contam_clean_overview_plot_frame)
+        self._contam_clean_overview_canvas.draw()
+        self._contam_clean_overview_canvas.get_tk_widget().pack(fill='both', expand=True)
 
     def _contam_export_difference_spectra(self):
         """Export difference spectra to file."""
@@ -46960,6 +47054,13 @@ External Validation Performance (n={n_val}):
                 )
                 pct = (excluded_wl / total_wl) * 100
                 text_lines.append(f"Wavelengths to exclude: {excluded_wl}/{total_wl} ({pct:.1f}%)")
+
+            # Append clean (retained) wavelength regions
+            clean_text = self._contam_compute_clean_regions(regions)
+            if clean_text:
+                text_lines.append("")
+                text_lines.append("Clean (Retained) Wavelength Regions:")
+                text_lines.append(f"  {clean_text}")
 
             text = '\n'.join(text_lines)
 
