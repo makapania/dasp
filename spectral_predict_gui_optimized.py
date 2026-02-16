@@ -2559,6 +2559,7 @@ class SpectralPredictApp:
         self.gap_penalty = tk.IntVar(value=0)            # Penalty for calibration-CV gap
         self.use_rmsep_gap = tk.BooleanVar(value=False)  # Use RMSEP/val_Accuracy for gap calc
         self._rerank_after_id = None  # For debounced reranking
+        self._populating_results = False  # Guard against rerank during table population
 
         self.max_n_components = tk.IntVar(value=10)
         self.max_iter = tk.IntVar(value=100)  # OPTIMIZED: Reduced from 500 to 100 (Phase A)
@@ -14247,6 +14248,8 @@ class SpectralPredictApp:
                                command=export_plot, style='Modern.TButton')
         export_btn.pack(side='right')
 
+        return button_frame
+
     def _on_tier_changed(self, *args):
         """Update model checkboxes based on selected tier."""
         tier = self.model_tier.get()
@@ -24451,6 +24454,14 @@ For detailed documentation, see the User Guide.
             self.results_status.config(text="No results to display")
             return
 
+        self._populating_results = True
+        try:
+            self._populate_results_table_inner(results_df, is_sorted)
+        finally:
+            self._populating_results = False
+
+    def _populate_results_table_inner(self, results_df, is_sorted=False):
+        """Inner implementation of results table population."""
         # Store original results if this is the first population (not a sort)
         if not is_sorted:
             self.results_df = results_df
@@ -24565,7 +24576,7 @@ For detailed documentation, see the User Guide.
                         self.use_rmsep_gap_checkbox.config(text="Use validation gap (Val Acc vs CV Acc)")
                     else:
                         self.use_rmsep_gap_checkbox.config(text="Use validation gap (RMSEP vs RMSEcv)")
-                if not has_validation:
+                if not has_validation and self.use_rmsep_gap.get():
                     self.use_rmsep_gap.set(False)
 
             # Create active filter controls with new data's unique values
@@ -25585,6 +25596,11 @@ For detailed documentation, see the User Guide.
 
     def _rerank_results_debounced(self, *args):
         """Debounced wrapper — delays rerank 400ms so rapid changes don't freeze UI."""
+        if self._populating_results:
+            if self._rerank_after_id:
+                self.root.after_cancel(self._rerank_after_id)
+                self._rerank_after_id = None
+            return
         if self._rerank_after_id:
             self.root.after_cancel(self._rerank_after_id)
         self._rerank_after_id = self.root.after(400, self._rerank_results)
@@ -47022,6 +47038,16 @@ External Validation Performance (n={n_val}):
             style='TLabel', foreground='gray'
         )
         self.contam_alignment_label.pack(anchor=tk.W)
+        row += 1
+
+        # Section 5: Reset All
+        ttk.Separator(content_frame, orient='horizontal').grid(
+            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(15, 10))
+        row += 1
+
+        ttk.Button(content_frame, text="🗑 Reset All Contamination Data",
+                   command=self._contam_reset_all, style='Modern.TButton').grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
 
     def _create_tab13b_difference_analysis(self):
         """Subtab 13B: Difference Analysis - Exploratory difference spectrum analysis."""
@@ -47565,6 +47591,141 @@ External Validation Performance (n={n_val}):
     # ========================================================================
     # Tab 13 Helper Methods - Contaminant Analysis Callbacks
     # ========================================================================
+
+    def _contam_reset_all(self) -> None:
+        """Reset all contamination analysis data, state, and UI to initial defaults."""
+        if not messagebox.askyesno(
+            "Reset All",
+            "Clear all loaded data, groups, and results?\n\n"
+            "This cannot be undone.",
+            icon='warning'
+        ):
+            return
+
+        # 1. Clear core data
+        self.contam_clean_data = None
+        self.contam_wavelengths = None
+        self.contam_groups.clear()
+        self.contam_group_paths.clear()
+        self.contam_results = None
+        self._contam_combined_df = None
+        self._contam_combined_wl_cols = None
+
+        # 2. Clear data type state
+        self.contam_original_data_type.set("reflectance")
+        self.contam_current_data_type.set("reflectance")
+        self.contam_type_confidence = 0.0
+        self.contam_type_detection_method = ""
+        self.contam_data_value_scale = 1.0
+        self.contam_data_converted = False
+
+        # 3. Clear runtime state (created during analysis)
+        for attr in (
+            'contam_diff_results', 'contam_analyzers',
+            'contam_clean_sample_names',
+            'contam_corrected_X',
+            'contam_epo_transformer', 'contam_glsw_transformer', 'contam_opls_transformer',
+            '_remaining_wavelength_mask',
+        ):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+        # 4. Reset StringVars
+        self.contam_clean_path.set("")
+        self.contam_combined_file_path.set("")
+        self.contam_combined_group_col.set("")
+        self.contam_combined_clean_value.set("")
+
+        # 5. Reset settings to defaults
+        self.contam_preprocessing.set('1st Derivative')
+        self.contam_method.set('Estimated EPO')
+        self.contam_threshold.set(0.15)
+        self.contam_n_components.set(2)
+        self.contam_aggregation.set('max')
+        self.contam_deriv_window.set(15)
+        self.contam_peak_threshold.set(10.0)
+        self.contam_correction_method.set('Exclude Regions')
+        self.contam_apply_source.set('Contaminant Groups')
+
+        # 6. Clear UI widgets on 13A
+        self.contam_groups_listbox.delete(0, tk.END)
+        self.contam_clean_info_label.config(text="No clean data loaded", foreground='gray')
+        self.contam_summary_text.config(state='normal')
+        self.contam_summary_text.delete('1.0', tk.END)
+        self.contam_summary_text.insert('1.0', 'Load data and add groups to see summary...')
+        self.contam_summary_text.config(state='disabled')
+        self.contam_alignment_label.config(
+            text="Load data to check wavelength alignment", foreground='gray')
+        self._contam_combined_status.config(text="")
+        self._contam_combined_group_combo.set("")
+        self._contam_combined_group_combo['values'] = []
+        self._contam_combined_clean_combo.set("")
+        self._contam_combined_clean_combo['values'] = []
+
+        # 7. Clear UI widgets on 13B
+        self.contam_dtype_status_label.config(
+            text="Load data on 13A to detect data type", foreground='gray')
+        self.contam_convert_btn.config(text="Convert to Absorbance")
+        self.contam_peaks_text.config(state='normal')
+        self.contam_peaks_text.delete('1.0', tk.END)
+        self.contam_peaks_text.config(state='disabled')
+
+        # 8. Clear UI widgets on 13C
+        self.contam_detection_status_label.config(
+            text="Configure parameters and click 'Run' to start analysis", foreground='gray')
+        self.contam_regions_text.config(state='normal')
+        self.contam_regions_text.delete('1.0', tk.END)
+        self.contam_regions_text.config(state='disabled')
+
+        # 9. Clear UI widgets on 13D
+        self.contam_apply_status_label.config(
+            text="No correction applied yet", foreground='gray')
+        self.contam_export_status_label.config(
+            text="Export status will appear here", foreground='gray')
+
+        # 10. Destroy all plot areas and restore placeholders
+        plot_areas = [
+            # (canvas_attr, toolbar_frame_attr, export_frame_attr, placeholder_label_attr)
+            ('_contam_group_spectra_canvas', '_contam_group_spectra_toolbar_frame',
+             '_contam_group_spectra_export_frame', 'contam_group_spectra_plot_label'),
+            ('contam_diff_canvas', '_contam_diff_toolbar_frame',
+             None, 'contam_diff_plot_label'),
+            ('_contam_clean_overview_canvas', '_contam_clean_overview_toolbar_frame',
+             None, 'contam_clean_overview_plot_label'),
+            ('_contam_influence_canvas', '_contam_influence_toolbar_frame',
+             None, 'contam_influence_plot_label'),
+            ('_contam_spectra_exclusion_canvas', '_contam_spectra_exclusion_toolbar_frame',
+             '_contam_spectra_exclusion_export_frame', 'contam_spectra_exclusion_plot_label'),
+        ]
+
+        for canvas_attr, toolbar_attr, export_attr, label_attr in plot_areas:
+            # Destroy canvas
+            canvas = getattr(self, canvas_attr, None)
+            if canvas is not None:
+                canvas.get_tk_widget().destroy()
+                delattr(self, canvas_attr)
+            # Destroy toolbar frame
+            toolbar_frame = getattr(self, toolbar_attr, None)
+            if toolbar_frame is not None:
+                toolbar_frame.destroy()
+                delattr(self, toolbar_attr)
+            # Destroy export frame
+            if export_attr is not None:
+                export_frame = getattr(self, export_attr, None)
+                if export_frame is not None:
+                    export_frame.destroy()
+                    delattr(self, export_attr)
+            # Re-pack placeholder label
+            label = getattr(self, label_attr, None)
+            if label is not None:
+                label.pack(expand=True, fill=tk.BOTH, pady=30)
+
+        # Restore 13D comparison placeholder
+        if hasattr(self, 'contam_comparison_plot_label'):
+            self.contam_comparison_plot_label.pack(expand=True, fill=tk.BOTH, pady=30)
+
+        # 11. Refresh UI state
+        self._contam_update_deriv_window_visibility()
 
     def _contam_load_spectra_from_path(self, path: str) -> tuple:
         """
@@ -48677,7 +48838,11 @@ External Validation Performance (n={n_val}):
         self._contam_group_click_ref = self._contam_create_wavelength_click_handler(
             fig, ax, self._contam_group_spectra_canvas, wavelengths, toolbar)
 
-        self._add_plot_export_button(self.contam_group_spectra_plot_frame, fig, "contam_group_spectra")
+        old = getattr(self, '_contam_group_spectra_export_frame', None)
+        if old is not None:
+            old.destroy()
+        self._contam_group_spectra_export_frame = self._add_plot_export_button(
+            self.contam_group_spectra_plot_frame, fig, "contam_group_spectra")
 
     # ── Feature 2: Spectra with exclusion regions on 13C ─────────────────
 
@@ -48761,7 +48926,11 @@ External Validation Performance (n={n_val}):
             fig, ax, self._contam_spectra_exclusion_canvas, wavelengths, toolbar,
             extra_info_fn=extra_exclusion_info)
 
-        self._add_plot_export_button(self.contam_spectra_exclusion_plot_frame, fig, "contam_spectra_exclusions")
+        old = getattr(self, '_contam_spectra_exclusion_export_frame', None)
+        if old is not None:
+            old.destroy()
+        self._contam_spectra_exclusion_export_frame = self._add_plot_export_button(
+            self.contam_spectra_exclusion_plot_frame, fig, "contam_spectra_exclusions")
 
     # ── Feature 3: Combined file upload ──────────────────────────────────
 
