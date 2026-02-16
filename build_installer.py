@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 # Configuration
-VERSION = "0.1.0"
+VERSION = "0.4.0"
 APP_NAME = "SpectralPredict"
 PROJECT_ROOT = Path(__file__).parent
 DIST_DIR = PROJECT_ROOT / "dist"
@@ -64,16 +64,12 @@ def create_icon_windows() -> bool:
         if img.mode != 'RGBA':
             img = img.convert('RGBA')
 
-        sizes = [16, 32, 48, 64, 128, 256]
-        icons = [img.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
-
-        icons[0].save(
-            ico_path,
-            format='ICO',
-            sizes=[(s, s) for s in sizes],
-            append_images=icons[1:],
-        )
-        print(f"Created: {ico_path}")
+        sizes = [(s, s) for s in [16, 32, 48, 64, 128, 256]]
+        # Save from the largest resolution and let Pillow create sub-sizes
+        img_256 = img.resize((256, 256), Image.Resampling.LANCZOS)
+        img_256.save(ico_path, format='ICO', sizes=sizes)
+        ico_size = ico_path.stat().st_size
+        print(f"Created: {ico_path} ({ico_size:,} bytes)")
         return True
     except Exception as e:
         print(f"ERROR creating icon: {e}")
@@ -173,6 +169,26 @@ def create_icon() -> bool:
 # PyInstaller build
 # ============================================================================
 
+def _find_build_python() -> str:
+    """Find the .venv311 Python interpreter for building.
+
+    Always uses .venv311 which has PyInstaller and all dependencies.
+    Fails if the venv is missing or broken.
+    """
+    if IS_WINDOWS:
+        venv_python = PROJECT_ROOT / ".venv311" / "Scripts" / "python.exe"
+    else:
+        venv_python = PROJECT_ROOT / ".venv311" / "bin" / "python"
+
+    if not venv_python.exists():
+        raise FileNotFoundError(
+            f".venv311 not found at {venv_python.parent.parent}\n"
+            "Create it with: python3.11 -m venv .venv311 && .venv311/Scripts/pip install -r requirements.txt"
+        )
+
+    return str(venv_python)
+
+
 def run_pyinstaller() -> bool:
     """Run PyInstaller with the platform-appropriate spec file."""
     print_step("Step 2: Running PyInstaller")
@@ -191,8 +207,18 @@ def run_pyinstaller() -> bool:
         print(f"ERROR: Main script not found: {main_script}")
         return False
 
+    # Clean slate: nuke dist/ and build/ to prevent stale/corrupt artifacts
+    build_dir = PROJECT_ROOT / "build"
+    for d in (DIST_DIR, build_dir):
+        if d.exists():
+            print(f"Removing {d} ...")
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
+    print("Clean build directories ready.")
+
+    python_exe = _find_build_python()
     cmd = [
-        sys.executable, "-m", "PyInstaller",
+        python_exe, "-m", "PyInstaller",
         "--clean",
         "--noconfirm",
         str(spec_file),
@@ -225,15 +251,39 @@ def run_pyinstaller() -> bool:
         return False
     else:
         exe_path = DIST_DIR / APP_NAME / f"{APP_NAME}.exe"
-        if exe_path.exists():
-            print(f"Created: {exe_path}")
-            return True
-        print(f"ERROR: Expected output not found: {exe_path}")
-        if (DIST_DIR / APP_NAME).exists():
-            print(f"Contents of {DIST_DIR / APP_NAME}:")
-            for item in sorted((DIST_DIR / APP_NAME).iterdir())[:20]:
-                print(f"  {item.name}")
-        return False
+        if not exe_path.exists():
+            print(f"ERROR: Expected output not found: {exe_path}")
+            if (DIST_DIR / APP_NAME).exists():
+                print(f"Contents of {DIST_DIR / APP_NAME}:")
+                for item in sorted((DIST_DIR / APP_NAME).iterdir())[:20]:
+                    print(f"  {item.name}")
+            return False
+
+        print(f"Created: {exe_path}")
+
+        # Post-build verification: check critical files exist
+        critical_files = [
+            exe_path,
+            DIST_DIR / APP_NAME / "_internal" / "python311.dll",
+            DIST_DIR / APP_NAME / "_internal" / "python3.dll",
+        ]
+        all_ok = True
+        print("\nPost-build verification:")
+        for f in critical_files:
+            if f.exists():
+                size_mb = f.stat().st_size / (1024 * 1024)
+                print(f"  PASS  {f.relative_to(DIST_DIR)}  ({size_mb:.1f} MB)")
+            else:
+                print(f"  FAIL  {f.relative_to(DIST_DIR)}  — MISSING")
+                all_ok = False
+
+        if not all_ok:
+            print("\nERROR: Post-build verification FAILED — critical files missing.")
+            print("The built exe will likely crash on launch.")
+            return False
+
+        print("\nAll critical files verified.")
+        return True
 
 
 # ============================================================================
