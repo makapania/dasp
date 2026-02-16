@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectral-predict"
-version = "0.1.0"
+version = "0.4.0"
 description = "Automated spectral analysis software for preprocessing, modeling, and ranking spectroscopy data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -69,7 +69,7 @@ spectral-predict = "spectral_predict.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["spectral_predict*"]
+include = ["spectral_predict"]
 
 [tool.black]
 line-length = 100

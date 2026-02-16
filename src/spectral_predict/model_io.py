@@ -45,7 +45,7 @@ from typing import Dict, Any, Optional, Union
 from .resource_paths import is_frozen
 
 
-__version__ = '1.0.0'
+__version__ = '0.4.0'
 
 
 def _ensure_pipeline_fitted(pipeline):

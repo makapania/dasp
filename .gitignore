@@ -62,3 +62,10 @@ profile.stats
 
 # CatBoost training artifacts
 catboost_info/
+
+# Claude Code session artifacts
+tmpclaude-*/
+nul
+
+# One-off outputs
+*.stats

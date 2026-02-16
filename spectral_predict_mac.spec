@@ -352,8 +352,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SpectralPredict',
         'CFBundleDisplayName': 'Spectral Predict',
-        'CFBundleShortVersionString': '0.1.0',
-        'CFBundleVersion': '0.1.0',
+        'CFBundleShortVersionString': '0.4.0',
+        'CFBundleVersion': '0.4.0',
         'CFBundlePackageType': 'APPL',
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,

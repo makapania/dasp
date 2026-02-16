@@ -1768,7 +1768,7 @@ def analyze_contaminant_influence(
 
     # EPO analysis
     if method in ['epo', 'all']:
-        epo = EstimatedEPO(n_components=n_components)
+        epo = EstimatedEPO(n_components=n_components, random_state=42)
         epo.fit_groups(X_contaminated, X_uncontaminated)
 
         results['epo'] = {
@@ -1914,11 +1914,13 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
         self,
         n_epo_components: int = 2,
         estimation_method: str = 'pca_diff',
-        aggregation: str = 'max'
+        aggregation: str = 'max',
+        random_state: int = 42
     ):
         self.n_epo_components = n_epo_components
         self.estimation_method = estimation_method
         self.aggregation = aggregation
+        self.random_state = random_state
 
     def fit(
         self,
@@ -1979,7 +1981,8 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
             # Run EPO-based analysis
             epo = EstimatedEPO(
                 n_components=self.n_epo_components,
-                estimation_method=self.estimation_method
+                estimation_method=self.estimation_method,
+                random_state=self.random_state
             )
             epo.fit_groups(X_contaminated, X_uncontaminated)
             self.epo_transformers_[label] = epo
@@ -2715,7 +2718,7 @@ def analyze_multiple_contaminants(
         }
 
     # Combined analysis (supports aggregation parameter)
-    analyzer = MultiContaminantAnalyzer(n_epo_components=n_components, aggregation=aggregation)
+    analyzer = MultiContaminantAnalyzer(n_epo_components=n_components, aggregation=aggregation, random_state=42)
     analyzer.fit(X_uncontaminated, contaminant_groups)
 
     results['combined_influence'] = analyzer.get_combined_influence()
