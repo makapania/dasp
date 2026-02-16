@@ -2591,6 +2591,13 @@ class SpectralPredictApp:
         self._explore_plot_state = {}  # {frame_key: state_dict} for explore plot info bars
         self._highlight_timers = {}  # {sample_idx: after_id} for re-inclusion flash timers
 
+        # Peak Calculator state
+        self._peak_calc_dialog = None           # PeakCalculatorDialog instance or None
+        self._peak_calc_source_frame_key = None # frame_key that owns the click handler
+        self._peak_calc_source_tab = None       # source tab name (e.g. "raw", "als")
+        self._peak_calc_cid = None              # mpl_connect callback id
+        self._peak_marker_lines = []            # vertical marker artists on the source plot
+
         # Plot coloring variables
         self.pca_color_var = tk.StringVar(value='Y Value')
         self.regression_pred_color_var = tk.StringVar(value='Y Value')
@@ -6604,6 +6611,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="raw",
         )
 
     def _generate_explore_derivative_plots(self):
@@ -6637,6 +6645,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="deriv1",
         )
 
         # 2nd Derivative
@@ -6654,6 +6663,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="deriv2",
         )
 
     def _add_deriv_window_controls(self, frame):
@@ -6805,6 +6815,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="rubberband",
         )
 
     def _generate_explore_polybl_plot(self):
@@ -6845,6 +6856,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="polybl",
         )
 
     def _refresh_polybl_plot(self):
@@ -6910,6 +6922,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="als",
         )
 
     def _refresh_als_plot(self):
@@ -6964,6 +6977,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="airpls",
         )
 
     def _refresh_airpls_plot(self):
@@ -7463,6 +7477,7 @@ class SpectralPredictApp:
             color_map=color_map,
             legend_entries=legend_entries,
             color_label=color_label,
+            source_tab="custom",
         )
 
     def _refresh_custom_plot(self):
@@ -7803,7 +7818,7 @@ class SpectralPredictApp:
 
     def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color,
                                       color_map=None, legend_entries=None,
-                                      color_label=None):
+                                      color_label=None, source_tab=None):
         """Create an interactive spectral plot in a given frame.
 
         Args:
@@ -7918,14 +7933,38 @@ class SpectralPredictApp:
         # Initially hidden; shown when exclusions exist
         self._update_explore_excl_count_label(excl_count_label, restore_all_btn)
 
+        # Peak Calculator button (right-aligned in info bar)
+        if source_tab is not None:
+            peak_calc_btn = ttk.Button(
+                info_frame, text="Peak Calculator",
+                style='Modern.TButton',
+                command=lambda st=source_tab, fk=frame_key: self._open_peak_calculator(st, fk),
+            )
+            peak_calc_btn.pack(side='right', padx=(10, 5))
+
         # Store state for this frame
         self._explore_plot_state[frame_key] = {
             'fig': fig, 'canvas': canvas, 'ax': ax, 'frame': frame,
+            'toolbar': toolbar,
             'info_label': info_label, 'toggle_btn': toggle_btn,
             'excl_count_label': excl_count_label,
             'restore_all_btn': restore_all_btn,
             'selected_sample': None, 'alpha': alpha,
+            'source_tab': source_tab,
         }
+
+        # Auto-reconnect peak calculator click handler after plot regeneration
+        if (self._peak_calc_dialog is not None
+                and source_tab is not None
+                and self._peak_calc_source_tab == source_tab):
+            # Old frame_key/canvas is gone — update to the new one
+            self._peak_calc_source_frame_key = frame_key
+            self._peak_calc_cid = canvas.mpl_connect(
+                'button_press_event',
+                lambda event, fk=frame_key: self._on_peak_calc_plot_click(event, fk),
+            )
+            # Redraw markers on the new axes
+            self._update_peak_markers(self._peak_calc_dialog)
 
     def _on_explore_spectrum_pick(self, event, frame_key):
         """Handle click on a spectrum in an Explore plot — show annotation and info bar."""
@@ -7933,6 +7972,12 @@ class SpectralPredictApp:
             return
         state = self._explore_plot_state.get(frame_key)
         if state is None:
+            return
+
+        # Skip spectrum selection when peak calculator owns this plot
+        if (self._peak_calc_dialog is not None
+                and frame_key == self._peak_calc_source_frame_key
+                and not self._set_assign_mode.get()):
             return
 
         gid = event.artist.get_gid()
@@ -8123,6 +8168,775 @@ class SpectralPredictApp:
         self._update_exclusion_status()
         self._update_tab3_exclusion_status()
         print("> All spectrum exclusions restored")
+
+    # ========== PEAK CALCULATOR METHODS ==========
+
+    def _open_peak_calculator(self, source_tab: str, frame_key: int):
+        """Open the Peak Calculator dialog for the given explore tab."""
+        # If dialog already open, just bring it to front
+        if self._peak_calc_dialog is not None:
+            try:
+                self._peak_calc_dialog.lift()
+                self._peak_calc_dialog.focus_force()
+                return
+            except tk.TclError:
+                # Dialog was destroyed externally
+                self._close_peak_calculator()
+
+        state = self._explore_plot_state.get(frame_key)
+        if state is None:
+            return
+
+        self._peak_calc_source_frame_key = frame_key
+        self._peak_calc_source_tab = source_tab
+
+        # Connect button_press_event for plot click interception
+        cid = state['canvas'].mpl_connect(
+            'button_press_event',
+            lambda event, fk=frame_key: self._on_peak_calc_plot_click(event, fk),
+        )
+        self._peak_calc_cid = cid
+
+        # Build dialog
+        self._peak_calc_dialog = self._build_peak_calculator_dialog(source_tab, frame_key)
+
+    def _build_peak_calculator_dialog(self, source_tab: str, frame_key: int):
+        """Build and return the PeakCalculatorDialog Toplevel."""
+        from spectral_predict.peak_calculator import (
+            BUILT_IN_PRESETS, PeakDefinition, PeakPreset,
+            load_user_presets, save_user_presets, calculate_all_samples,
+        )
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Peak Calculator")
+        dialog.geometry("520x720")
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.resizable(True, True)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_peak_calculator)
+
+        # --- Internal state on the dialog ---
+        dialog._user_presets = load_user_presets()
+        dialog._all_presets = list(BUILT_IN_PRESETS) + dialog._user_presets
+        dialog._active_field = "A"  # which peak field receives next click
+        dialog._peak_c_visible = False
+
+        # --- Scrollable content ---
+        outer = ttk.Frame(dialog)
+        outer.pack(fill='both', expand=True)
+
+        canvas_w = tk.Canvas(outer, bg='#f0f0f0', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient='vertical', command=canvas_w.yview)
+        scroll_frame = ttk.Frame(canvas_w)
+
+        scroll_frame.bind(
+            '<Configure>',
+            lambda e: canvas_w.configure(scrollregion=canvas_w.bbox('all')),
+        )
+        canvas_w.create_window((0, 0), window=scroll_frame, anchor='nw')
+        canvas_w.configure(yscrollcommand=scrollbar.set)
+        canvas_w.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # Enable mousewheel scrolling
+        def _on_mousewheel(event):
+            canvas_w.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas_w.bind_all('<MouseWheel>', _on_mousewheel)
+        dialog.bind('<Destroy>', lambda e: canvas_w.unbind_all('<MouseWheel>'))
+
+        content = scroll_frame
+        pad_x = 15
+
+        # ---- SECTION: Preset selection ----
+        preset_frame = ttk.LabelFrame(content, text="Presets", padding=8)
+        preset_frame.pack(fill='x', padx=pad_x, pady=(10, 5))
+
+        row0 = ttk.Frame(preset_frame)
+        row0.pack(fill='x', pady=(0, 4))
+        ttk.Label(row0, text="Pack:").pack(side='left', padx=(0, 5))
+
+        categories = sorted({p.category for p in dialog._all_presets})
+        categories = ["All"] + categories
+        dialog._pack_var = tk.StringVar(value="All")
+        pack_combo = ttk.Combobox(
+            row0, textvariable=dialog._pack_var, values=categories,
+            state='readonly', width=18,
+        )
+        pack_combo.pack(side='left', padx=(0, 10))
+
+        row1 = ttk.Frame(preset_frame)
+        row1.pack(fill='x')
+        ttk.Label(row1, text="Preset:").pack(side='left', padx=(0, 5))
+
+        dialog._preset_var = tk.StringVar(value="")
+        dialog._preset_combo = ttk.Combobox(
+            row1, textvariable=dialog._preset_var,
+            state='readonly', width=24,
+        )
+        dialog._preset_combo.pack(side='left', padx=(0, 8))
+
+        save_btn = ttk.Button(row1, text="Save As...", style='Modern.TButton',
+                              command=lambda: self._peak_calc_save_preset(dialog))
+        save_btn.pack(side='left', padx=(0, 4))
+        dialog._delete_btn = ttk.Button(
+            row1, text="Delete", style='Modern.TButton',
+            command=lambda: self._peak_calc_delete_preset(dialog),
+        )
+        dialog._delete_btn.pack(side='left')
+
+        def _filter_presets(*_args, auto_select: bool = True):
+            pack = dialog._pack_var.get()
+            if pack == "All":
+                filtered = dialog._all_presets
+            else:
+                filtered = [p for p in dialog._all_presets if p.category == pack]
+            dialog._filtered_presets = filtered
+            names = [p.name for p in filtered]
+            dialog._preset_combo['values'] = names
+            if names and auto_select:
+                dialog._preset_combo.current(0)
+                _load_preset()
+            else:
+                dialog._preset_var.set("")
+
+        def _load_preset(*_args):
+            name = dialog._preset_var.get()
+            presets = getattr(dialog, '_filtered_presets', dialog._all_presets)
+            match = [p for p in presets if p.name == name]
+            if not match:
+                return
+            p = match[0]
+
+            # Convert preset units if needed
+            current_unit = self.current_x_unit.get() if hasattr(self, 'current_x_unit') else "nm"
+            def _maybe_convert(wn):
+                if p.x_unit != current_unit and wn > 0:
+                    return 1e7 / wn
+                return wn
+
+            dialog._peak_a_wn.set(f"{_maybe_convert(p.peak_a.wavenumber):.1f}")
+            dialog._peak_a_label.set(p.peak_a.label)
+            dialog._peak_a_mode.set(p.peak_a.mode)
+            dialog._peak_a_hw.set(str(p.peak_a.half_width))
+            dialog._op1_var.set(p.operator1)
+
+            dialog._peak_b_wn.set(f"{_maybe_convert(p.peak_b.wavenumber):.1f}")
+            dialog._peak_b_label.set(p.peak_b.label)
+            dialog._peak_b_mode.set(p.peak_b.mode)
+            dialog._peak_b_hw.set(str(p.peak_b.half_width))
+
+            if p.peak_c is not None:
+                dialog._peak_c_visible = True
+                dialog._peak_c_wn.set(f"{_maybe_convert(p.peak_c.wavenumber):.1f}")
+                dialog._peak_c_label.set(p.peak_c.label)
+                dialog._peak_c_mode.set(p.peak_c.mode)
+                dialog._peak_c_hw.set(str(p.peak_c.half_width))
+                dialog._op2_var.set(p.operator2)
+                dialog._grouping_var.set(p.grouping)
+                dialog._peak_c_frame.pack(fill='x', pady=(5, 0))
+                dialog._grouping_frame.pack(fill='x', pady=(2, 0))
+            else:
+                dialog._peak_c_visible = False
+                dialog._peak_c_frame.pack_forget()
+                dialog._grouping_frame.pack_forget()
+
+            # Enable delete only for user presets
+            is_user = p.category == "User"
+            dialog._delete_btn['state'] = 'normal' if is_user else 'disabled'
+
+            # Update description
+            dialog._desc_label.config(text=p.description or "")
+
+            self._update_peak_markers(dialog)
+
+        pack_combo.bind('<<ComboboxSelected>>', _filter_presets)
+        dialog._preset_combo.bind('<<ComboboxSelected>>', _load_preset)
+
+        # Description label
+        dialog._desc_label = ttk.Label(preset_frame, text="", wraplength=450,
+                                       style='Caption.TLabel')
+        dialog._desc_label.pack(fill='x', pady=(4, 0))
+
+        # ---- SECTION: Expression builder ----
+        expr_frame = ttk.LabelFrame(content, text="Expression Builder", padding=8)
+        expr_frame.pack(fill='x', padx=pad_x, pady=5)
+
+        # Click instruction
+        dialog._click_hint = ttk.Label(
+            expr_frame,
+            text="Click on the plot to set peak positions. Active field is highlighted.",
+            style='Caption.TLabel', foreground='#555',
+        )
+        dialog._click_hint.pack(fill='x', pady=(0, 6))
+
+        # Tab warning (hidden by default)
+        dialog._tab_warning = ttk.Label(
+            expr_frame, text="", foreground='#CC8800', wraplength=450,
+        )
+
+        # --- Peak A ---
+        peak_a_frame = ttk.Frame(expr_frame)
+        peak_a_frame.pack(fill='x', pady=(0, 4))
+
+        dialog._peak_a_btn = tk.Button(
+            peak_a_frame, text="Peak A", width=7, bg='#FFCCCC',
+            relief='solid', bd=2,
+            command=lambda: self._peak_calc_set_active(dialog, "A"),
+        )
+        dialog._peak_a_btn.pack(side='left', padx=(0, 5))
+
+        dialog._peak_a_wn = tk.StringVar(value="0.0")
+        peak_a_entry = ttk.Entry(peak_a_frame, textvariable=dialog._peak_a_wn, width=10)
+        peak_a_entry.pack(side='left', padx=(0, 5))
+        peak_a_entry.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
+
+        dialog._peak_a_label = tk.StringVar(value="")
+        ttk.Entry(peak_a_frame, textvariable=dialog._peak_a_label, width=12).pack(side='left', padx=(0, 5))
+
+        dialog._peak_a_mode = tk.StringVar(value="point")
+        ttk.Radiobutton(peak_a_frame, text="Pt", variable=dialog._peak_a_mode,
+                        value="point", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
+        ttk.Radiobutton(peak_a_frame, text="Range", variable=dialog._peak_a_mode,
+                        value="range", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
+
+        dialog._peak_a_hw = tk.StringVar(value="10")
+        ttk.Label(peak_a_frame, text="HW:").pack(side='left')
+        hw_a = ttk.Entry(peak_a_frame, textvariable=dialog._peak_a_hw, width=5)
+        hw_a.pack(side='left')
+        hw_a.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
+
+        # --- Operator 1 ---
+        op1_frame = ttk.Frame(expr_frame)
+        op1_frame.pack(fill='x', pady=2)
+        dialog._op1_var = tk.StringVar(value="/")
+        op_display = {"/" : "\u00f7", "*": "\u00d7", "+": "+", "-": "\u2212"}
+        for op_val, op_sym in op_display.items():
+            ttk.Radiobutton(op1_frame, text=op_sym, variable=dialog._op1_var,
+                            value=op_val).pack(side='left', padx=4)
+
+        # --- Peak B ---
+        peak_b_frame = ttk.Frame(expr_frame)
+        peak_b_frame.pack(fill='x', pady=(0, 4))
+
+        dialog._peak_b_btn = tk.Button(
+            peak_b_frame, text="Peak B", width=7, bg='#CCFFCC',
+            relief='solid', bd=1,
+            command=lambda: self._peak_calc_set_active(dialog, "B"),
+        )
+        dialog._peak_b_btn.pack(side='left', padx=(0, 5))
+
+        dialog._peak_b_wn = tk.StringVar(value="0.0")
+        peak_b_entry = ttk.Entry(peak_b_frame, textvariable=dialog._peak_b_wn, width=10)
+        peak_b_entry.pack(side='left', padx=(0, 5))
+        peak_b_entry.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
+
+        dialog._peak_b_label = tk.StringVar(value="")
+        ttk.Entry(peak_b_frame, textvariable=dialog._peak_b_label, width=12).pack(side='left', padx=(0, 5))
+
+        dialog._peak_b_mode = tk.StringVar(value="point")
+        ttk.Radiobutton(peak_b_frame, text="Pt", variable=dialog._peak_b_mode,
+                        value="point", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
+        ttk.Radiobutton(peak_b_frame, text="Range", variable=dialog._peak_b_mode,
+                        value="range", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
+
+        dialog._peak_b_hw = tk.StringVar(value="10")
+        ttk.Label(peak_b_frame, text="HW:").pack(side='left')
+        hw_b = ttk.Entry(peak_b_frame, textvariable=dialog._peak_b_hw, width=5)
+        hw_b.pack(side='left')
+        hw_b.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
+
+        # --- Add Peak C toggle ---
+        add_c_frame = ttk.Frame(expr_frame)
+        add_c_frame.pack(fill='x', pady=2)
+        dialog._add_c_btn = ttk.Button(
+            add_c_frame, text="+ Add Peak C", style='Modern.TButton',
+            command=lambda: self._peak_calc_toggle_c(dialog),
+        )
+        dialog._add_c_btn.pack(side='left')
+
+        # --- Peak C (initially hidden) ---
+        dialog._peak_c_frame = ttk.Frame(expr_frame)
+        # Operator 2 row
+        op2_row = ttk.Frame(dialog._peak_c_frame)
+        op2_row.pack(fill='x', pady=2)
+        dialog._op2_var = tk.StringVar(value="/")
+        for op_val, op_sym in op_display.items():
+            ttk.Radiobutton(op2_row, text=op_sym, variable=dialog._op2_var,
+                            value=op_val).pack(side='left', padx=4)
+
+        peak_c_row = ttk.Frame(dialog._peak_c_frame)
+        peak_c_row.pack(fill='x', pady=(0, 4))
+
+        dialog._peak_c_btn = tk.Button(
+            peak_c_row, text="Peak C", width=7, bg='#FFE0CC',
+            relief='solid', bd=1,
+            command=lambda: self._peak_calc_set_active(dialog, "C"),
+        )
+        dialog._peak_c_btn.pack(side='left', padx=(0, 5))
+
+        dialog._peak_c_wn = tk.StringVar(value="0.0")
+        peak_c_entry = ttk.Entry(peak_c_row, textvariable=dialog._peak_c_wn, width=10)
+        peak_c_entry.pack(side='left', padx=(0, 5))
+        peak_c_entry.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
+
+        dialog._peak_c_label = tk.StringVar(value="")
+        ttk.Entry(peak_c_row, textvariable=dialog._peak_c_label, width=12).pack(side='left', padx=(0, 5))
+
+        dialog._peak_c_mode = tk.StringVar(value="point")
+        ttk.Radiobutton(peak_c_row, text="Pt", variable=dialog._peak_c_mode,
+                        value="point", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
+        ttk.Radiobutton(peak_c_row, text="Range", variable=dialog._peak_c_mode,
+                        value="range", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
+
+        dialog._peak_c_hw = tk.StringVar(value="10")
+        ttk.Label(peak_c_row, text="HW:").pack(side='left')
+        hw_c = ttk.Entry(peak_c_row, textvariable=dialog._peak_c_hw, width=5)
+        hw_c.pack(side='left')
+        hw_c.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
+
+        # Grouping row (initially hidden)
+        dialog._grouping_frame = ttk.Frame(expr_frame)
+        ttk.Label(dialog._grouping_frame, text="Grouping:").pack(side='left', padx=(0, 5))
+        dialog._grouping_var = tk.StringVar(value="left")
+        ttk.Radiobutton(dialog._grouping_frame, text="(A op B) op C",
+                        variable=dialog._grouping_var, value="left").pack(side='left', padx=4)
+        ttk.Radiobutton(dialog._grouping_frame, text="A op (B op C)",
+                        variable=dialog._grouping_var, value="right").pack(side='left', padx=4)
+
+        # ---- SECTION: Calculate ----
+        calc_frame = ttk.Frame(content)
+        calc_frame.pack(fill='x', padx=pad_x, pady=5)
+
+        ttk.Label(calc_frame, text="Scope:").pack(side='left', padx=(0, 5))
+        scope_options = ["Active Only", "All Spectra"]
+        if self.sample_set_names:
+            scope_options += self.sample_set_names
+        dialog._scope_var = tk.StringVar(value="Active Only")
+        dialog._scope_combo = ttk.Combobox(calc_frame, textvariable=dialog._scope_var,
+                                            values=scope_options, state='readonly', width=18)
+        dialog._scope_combo.pack(side='left', padx=(0, 15))
+
+        dialog._calc_btn = ttk.Button(
+            calc_frame, text="Calculate All Samples",
+            style='Modern.TButton',
+            command=lambda: self._peak_calc_run(dialog),
+        )
+        dialog._calc_btn.pack(side='left')
+
+        # ---- SECTION: Results ----
+        results_frame = ttk.LabelFrame(content, text="Results", padding=8)
+        results_frame.pack(fill='x', padx=pad_x, pady=5)
+
+        dialog._stats_label = ttk.Label(results_frame, text="No results yet.",
+                                        wraplength=480)
+        dialog._stats_label.pack(fill='x', pady=(0, 5))
+
+        # Histogram canvas placeholder
+        dialog._hist_frame = ttk.Frame(results_frame)
+        dialog._hist_frame.pack(fill='x')
+        dialog._results_df = None
+
+        # ---- SECTION: Export ----
+        export_frame = ttk.Frame(content)
+        export_frame.pack(fill='x', padx=pad_x, pady=(5, 10))
+
+        ttk.Button(export_frame, text="Export CSV", style='Modern.TButton',
+                   command=lambda: self._peak_calc_export(dialog)).pack(side='left', padx=(0, 8))
+        ttk.Button(export_frame, text="Copy Stats", style='Modern.TButton',
+                   command=lambda: self._peak_calc_copy_stats(dialog)).pack(side='left')
+
+        # Initialize presets (populate dropdown but don't auto-select)
+        dialog._filtered_presets = dialog._all_presets
+        _filter_presets(auto_select=False)
+
+        # Set active field highlight
+        self._peak_calc_set_active(dialog, "A")
+
+        dialog.update()
+        dialog.deiconify()
+        dialog.lift()
+        dialog.focus_force()
+
+        return dialog
+
+    def _peak_calc_set_active(self, dialog, field: str):
+        """Set the active peak field (A, B, or C) for click-to-fill."""
+        dialog._active_field = field
+        # Update button borders to show active
+        for name, btn, bg in [
+            ("A", dialog._peak_a_btn, '#FFCCCC'),
+            ("B", dialog._peak_b_btn, '#CCFFCC'),
+            ("C", dialog._peak_c_btn, '#FFE0CC'),
+        ]:
+            if name == field:
+                btn.config(relief='solid', bd=3, bg=bg)
+            else:
+                btn.config(relief='solid', bd=1, bg=bg)
+
+    def _peak_calc_toggle_c(self, dialog):
+        """Toggle visibility of Peak C fields."""
+        dialog._peak_c_visible = not dialog._peak_c_visible
+        if dialog._peak_c_visible:
+            dialog._peak_c_frame.pack(fill='x', pady=(5, 0),
+                                      in_=dialog._peak_c_frame.master)
+            dialog._grouping_frame.pack(fill='x', pady=(2, 0),
+                                        in_=dialog._grouping_frame.master)
+            dialog._add_c_btn.config(text="- Remove Peak C")
+            self._peak_calc_set_active(dialog, "C")
+        else:
+            dialog._peak_c_frame.pack_forget()
+            dialog._grouping_frame.pack_forget()
+            dialog._add_c_btn.config(text="+ Add Peak C")
+        self._update_peak_markers(dialog)
+
+    def _on_peak_calc_plot_click(self, event, frame_key):
+        """Handle a raw button_press_event on the explore plot for peak picking."""
+        if self._peak_calc_dialog is None:
+            return
+        if frame_key != self._peak_calc_source_frame_key:
+            return
+
+        # Skip if zoom/pan mode is active
+        state = self._explore_plot_state.get(frame_key)
+        if state and state.get('toolbar') and state['toolbar'].mode:
+            return
+
+        # Skip if sample-set assign mode is active
+        if hasattr(self, '_set_assign_mode') and self._set_assign_mode.get():
+            return
+
+        if event.inaxes is None or event.xdata is None:
+            return
+
+        x_val = event.xdata
+        dialog = self._peak_calc_dialog
+        field = dialog._active_field
+
+        if field == "A":
+            dialog._peak_a_wn.set(f"{x_val:.1f}")
+            # Auto-advance to B
+            self._peak_calc_set_active(dialog, "B")
+        elif field == "B":
+            dialog._peak_b_wn.set(f"{x_val:.1f}")
+            if dialog._peak_c_visible:
+                self._peak_calc_set_active(dialog, "C")
+            else:
+                self._peak_calc_set_active(dialog, "A")
+        elif field == "C" and dialog._peak_c_visible:
+            dialog._peak_c_wn.set(f"{x_val:.1f}")
+            self._peak_calc_set_active(dialog, "A")
+
+        self._update_peak_markers(dialog)
+
+    def _update_peak_markers(self, dialog):
+        """Draw/update vertical marker lines on the source plot."""
+        self._remove_peak_markers()
+        state = self._explore_plot_state.get(self._peak_calc_source_frame_key)
+        if state is None:
+            return
+        ax = state['ax']
+
+        markers_config = [
+            (dialog._peak_a_wn, dialog._peak_a_mode, dialog._peak_a_hw, 'red', 'A'),
+            (dialog._peak_b_wn, dialog._peak_b_mode, dialog._peak_b_hw, 'green', 'B'),
+        ]
+        if dialog._peak_c_visible:
+            markers_config.append(
+                (dialog._peak_c_wn, dialog._peak_c_mode, dialog._peak_c_hw, 'orange', 'C'),
+            )
+
+        for wn_var, mode_var, hw_var, color, label in markers_config:
+            try:
+                wn = float(wn_var.get())
+            except (ValueError, tk.TclError):
+                continue
+            if wn <= 0:
+                continue
+
+            line = ax.axvline(x=wn, color=color, linestyle='--', linewidth=1.2,
+                              alpha=0.8, label=f"Peak {label}")
+            self._peak_marker_lines.append(line)
+
+            if mode_var.get() == "range":
+                try:
+                    hw = float(hw_var.get())
+                except (ValueError, tk.TclError):
+                    hw = 10
+                span = ax.axvspan(wn - hw, wn + hw, alpha=0.08, color=color)
+                self._peak_marker_lines.append(span)
+
+        state['canvas'].draw_idle()
+
+    def _remove_peak_markers(self):
+        """Remove all peak marker lines/spans from the source plot."""
+        for artist in self._peak_marker_lines:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._peak_marker_lines.clear()
+        # Redraw if state still valid
+        state = self._explore_plot_state.get(self._peak_calc_source_frame_key)
+        if state is not None:
+            try:
+                state['canvas'].draw_idle()
+            except Exception:
+                pass
+
+    def _close_peak_calculator(self):
+        """Clean up peak calculator state and destroy dialog."""
+        if self._peak_calc_cid is not None:
+            state = self._explore_plot_state.get(self._peak_calc_source_frame_key)
+            if state is not None:
+                try:
+                    state['canvas'].mpl_disconnect(self._peak_calc_cid)
+                except Exception:
+                    pass
+        self._remove_peak_markers()
+        if self._peak_calc_dialog is not None:
+            try:
+                self._peak_calc_dialog.destroy()
+            except tk.TclError:
+                pass
+        self._peak_calc_dialog = None
+        self._peak_calc_source_frame_key = None
+        self._peak_calc_source_tab = None
+        self._peak_calc_cid = None
+
+    def _get_peak_calc_data(self, source_tab: str, scope: str = "Active Only"):
+        """Return (wavelengths, data_matrix, sample_names) for the given source tab.
+
+        Computes on all spectra first (important for baseline methods), then
+        filters rows by scope mask.
+
+        Returns:
+            tuple of (np.ndarray, np.ndarray, list[str]) — wavelengths, data, sample names
+        """
+        wavelengths = self.X.columns.values.astype(float)
+
+        if source_tab == "raw":
+            data = self._apply_transformation(self.X.values)
+        elif source_tab == "deriv1":
+            from spectral_predict.preprocess import SavgolDerivative
+            window = self.explore_deriv_window.get()
+            data = SavgolDerivative(deriv=1, window=window).transform(self.X.values)
+        elif source_tab == "deriv2":
+            from spectral_predict.preprocess import SavgolDerivative
+            window = self.explore_deriv_window.get()
+            data = SavgolDerivative(deriv=2, window=window).transform(self.X.values)
+        elif source_tab in ("rubberband", "polybl", "als", "airpls"):
+            data = self._compute_corrected_spectra(source_tab)
+        elif source_tab == "custom":
+            data = self._compute_corrected_spectra("custom")
+        else:
+            data = self.X.values
+
+        # Build scope mask
+        if scope == "All Spectra":
+            mask = np.ones(len(self.X), dtype=bool)
+        elif scope == "Active Only":
+            mask = ~self.X.index.isin(self.excluded_spectra)
+        else:  # set name
+            if self.sample_sets is not None:
+                mask = (self.sample_sets == scope).values
+                mask &= ~self.X.index.isin(self.excluded_spectra)
+            else:
+                mask = np.ones(len(self.X), dtype=bool)
+
+        return wavelengths, data[mask], list(self.X.index[mask])
+
+    def _peak_calc_build_preset(self, dialog):
+        """Build a PeakPreset from current dialog field values."""
+        from spectral_predict.peak_calculator import PeakDefinition, PeakPreset
+
+        def _float_safe(var, default=0.0):
+            try:
+                return float(var.get())
+            except (ValueError, tk.TclError):
+                return default
+
+        peak_a = PeakDefinition(
+            wavenumber=_float_safe(dialog._peak_a_wn),
+            mode=dialog._peak_a_mode.get(),
+            half_width=_float_safe(dialog._peak_a_hw, 10),
+            label=dialog._peak_a_label.get(),
+        )
+        peak_b = PeakDefinition(
+            wavenumber=_float_safe(dialog._peak_b_wn),
+            mode=dialog._peak_b_mode.get(),
+            half_width=_float_safe(dialog._peak_b_hw, 10),
+            label=dialog._peak_b_label.get(),
+        )
+        peak_c = None
+        if dialog._peak_c_visible:
+            peak_c = PeakDefinition(
+                wavenumber=_float_safe(dialog._peak_c_wn),
+                mode=dialog._peak_c_mode.get(),
+                half_width=_float_safe(dialog._peak_c_hw, 10),
+                label=dialog._peak_c_label.get(),
+            )
+
+        return PeakPreset(
+            name="(current)",
+            peak_a=peak_a,
+            peak_b=peak_b,
+            operator1=dialog._op1_var.get(),
+            peak_c=peak_c,
+            operator2=dialog._op2_var.get() if peak_c else "/",
+            grouping=dialog._grouping_var.get() if peak_c else "left",
+            x_unit=self.current_x_unit.get() if hasattr(self, 'current_x_unit') else "nm",
+        )
+
+    def _peak_calc_run(self, dialog):
+        """Calculate peak ratios for all samples and display results."""
+        from spectral_predict.peak_calculator import calculate_all_samples
+
+        if self.X is None:
+            messagebox.showwarning("No Data", "Load spectral data first.")
+            return
+
+        preset = self._peak_calc_build_preset(dialog)
+        scope = dialog._scope_var.get()
+        wavelengths, data, sample_names = self._get_peak_calc_data(
+            self._peak_calc_source_tab, scope
+        )
+
+        if len(sample_names) == 0:
+            messagebox.showwarning("No Spectra", f"No spectra match scope '{scope}'.")
+            return
+
+        df = calculate_all_samples(wavelengths, data, preset, sample_names)
+        dialog._results_df = df
+
+        # Compute stats
+        values = df["Value"].values
+        valid = values[~np.isnan(values)]
+        n_nan = int(np.sum(np.isnan(values)))
+
+        if len(valid) > 0:
+            stats_text = (
+                f"Mean: {np.mean(valid):.4f}   SD: {np.std(valid, ddof=1):.4f}   "
+                f"Min: {np.min(valid):.4f}   Max: {np.max(valid):.4f}   "
+                f"N: {len(valid)}"
+            )
+            if n_nan > 0:
+                stats_text += f"   NaN: {n_nan}"
+        else:
+            stats_text = f"All values are NaN (N={len(values)})"
+
+        dialog._stats_text = stats_text
+        dialog._stats_label.config(text=stats_text)
+
+        # Draw histogram
+        for w in dialog._hist_frame.winfo_children():
+            w.destroy()
+
+        if len(valid) > 0:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            fig = Figure(figsize=(4.5, 2.5), dpi=90)
+            ax = fig.add_subplot(111)
+            n_bins = min(30, max(5, len(valid) // 3))
+            ax.hist(valid, bins=n_bins, color='steelblue', edgecolor='white', alpha=0.85)
+            ax.set_xlabel("Value", fontsize=9)
+            ax.set_ylabel("Count", fontsize=9)
+            ax.set_title("Distribution", fontsize=10, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            hist_canvas = FigureCanvasTkAgg(fig, master=dialog._hist_frame)
+            hist_canvas.draw()
+            hist_canvas.get_tk_widget().pack(fill='x')
+
+    def _peak_calc_export(self, dialog):
+        """Export peak calculation results to CSV."""
+        df = getattr(dialog, '_results_df', None)
+        if df is None:
+            messagebox.showinfo("No Results", "Run calculation first.")
+            return
+        filepath = filedialog.asksaveasfilename(
+            parent=dialog,
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="peak_ratios.csv",
+            title="Export Peak Ratios",
+        )
+        if filepath:
+            try:
+                df.to_csv(filepath, index=False)
+                messagebox.showinfo("Exported", f"Saved to {filepath}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export:\n{e}")
+
+    def _peak_calc_copy_stats(self, dialog):
+        """Copy stats summary to clipboard."""
+        text = getattr(dialog, '_stats_text', None)
+        if not text:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+
+    def _peak_calc_save_preset(self, dialog):
+        """Save current expression as a user preset."""
+        from spectral_predict.peak_calculator import save_user_presets
+
+        name = simpledialog.askstring("Save Preset", "Preset name:", parent=dialog)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+
+        preset = self._peak_calc_build_preset(dialog)
+        preset.name = name
+        preset.category = "User"
+
+        # Replace if same name exists
+        dialog._user_presets = [p for p in dialog._user_presets if p.name != name]
+        dialog._user_presets.append(preset)
+        save_user_presets(dialog._user_presets)
+
+        # Refresh all_presets list
+        from spectral_predict.peak_calculator import BUILT_IN_PRESETS
+        dialog._all_presets = list(BUILT_IN_PRESETS) + dialog._user_presets
+
+        # Refresh combobox
+        pack = dialog._pack_var.get()
+        if pack == "All":
+            filtered = dialog._all_presets
+        else:
+            filtered = [p for p in dialog._all_presets if p.category == pack]
+        dialog._filtered_presets = filtered
+        dialog._preset_combo['values'] = [p.name for p in filtered]
+        dialog._preset_var.set(name)
+        dialog._delete_btn['state'] = 'normal'
+
+    def _peak_calc_delete_preset(self, dialog):
+        """Delete the selected user preset."""
+        from spectral_predict.peak_calculator import BUILT_IN_PRESETS, save_user_presets
+
+        name = dialog._preset_var.get()
+        if not name:
+            return
+        # Only delete user presets
+        builtin_names = {p.name for p in BUILT_IN_PRESETS}
+        if name in builtin_names:
+            messagebox.showinfo("Info", "Cannot delete built-in presets.")
+            return
+        dialog._user_presets = [p for p in dialog._user_presets if p.name != name]
+        save_user_presets(dialog._user_presets)
+
+        dialog._all_presets = list(BUILT_IN_PRESETS) + dialog._user_presets
+
+        pack = dialog._pack_var.get()
+        if pack == "All":
+            filtered = dialog._all_presets
+        else:
+            filtered = [p for p in dialog._all_presets if p.category == pack]
+        dialog._filtered_presets = filtered
+        names = [p.name for p in filtered]
+        dialog._preset_combo['values'] = names
+        if names:
+            dialog._preset_combo.current(0)
+        else:
+            dialog._preset_var.set("")
 
     # ========== SAMPLE SETS METHODS ==========
 
