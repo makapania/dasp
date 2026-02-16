@@ -1,1 +1,0 @@
-"""Spectral Predict test suite."""
