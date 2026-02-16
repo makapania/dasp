@@ -2574,6 +2574,13 @@ class SpectralPredictApp:
         self.data_value_scale = 1.0  # 1.0 for unit reflectance, 100.0 for % reflectance
         self.source_data_type = None  # Original data type from file metadata (e.g., transmittance)
 
+        # X-axis unit tracking (nm vs cm⁻¹)
+        self.original_x_unit = tk.StringVar(value="nm")   # Detected from file
+        self.current_x_unit = tk.StringVar(value="nm")    # Current display unit
+        self.x_unit_confidence = 0.0                       # Detection confidence score
+        self.x_unit_detection_method = ""                  # Method used for detection
+        self.x_unit_has_been_converted = False             # Track if unit conversion occurred
+
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
         self._exclusion_markers = {}  # Dict mapping specimen_label → Line2D artist for red X markers
@@ -5801,14 +5808,16 @@ class SpectralPredictApp:
         self.task_type_detection_label.pack(side=tk.LEFT, padx=10)
         cfg_row += 1
 
-        # Wavelength Range
-        ttk.Label(config_frame, text="Wavelength Range:").grid(row=cfg_row, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 5))
+        # Wavelength/Wavenumber Range
+        self.wl_range_label = ttk.Label(config_frame, text="Wavelength Range:")
+        self.wl_range_label.grid(row=cfg_row, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 5))
         wl_subframe = ttk.Frame(config_frame)
         wl_subframe.grid(row=cfg_row, column=1, columnspan=3, sticky=tk.W, pady=(15, 5))
         ttk.Entry(wl_subframe, textvariable=self.wavelength_min, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Label(wl_subframe, text="to").pack(side=tk.LEFT, padx=5)
         ttk.Entry(wl_subframe, textvariable=self.wavelength_max, width=12).pack(side=tk.LEFT, padx=2)
-        ttk.Label(wl_subframe, text="nm (auto-fills)", style='Caption.TLabel').pack(side=tk.LEFT, padx=10)
+        self.wl_unit_hint_label = ttk.Label(wl_subframe, text="nm (auto-fills)", style='Caption.TLabel')
+        self.wl_unit_hint_label.pack(side=tk.LEFT, padx=10)
         self.update_wl_button = ttk.Button(wl_subframe, text="Update Plots", command=self._update_wavelengths,
                                           style='Modern.TButton', state='disabled')
         self.update_wl_button.pack(side=tk.LEFT, padx=5)
@@ -5853,6 +5862,36 @@ class SpectralPredictApp:
                                                    variable=self.use_absorbance,
                                                    command=self._toggle_absorbance,
                                                    state='disabled')
+        cfg_row += 1
+
+        # X-Axis Unit
+        ttk.Label(config_frame, text="X-Axis Unit:").grid(row=cfg_row, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 5))
+        x_unit_subframe = ttk.Frame(config_frame)
+        x_unit_subframe.grid(row=cfg_row, column=1, columnspan=3, sticky=tk.W, pady=(15, 5))
+
+        self.x_unit_status_label = ttk.Label(x_unit_subframe, text="No data loaded",
+                                             style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.x_unit_status_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.nm_radio = ttk.Radiobutton(x_unit_subframe, text="nm",
+                       variable=self.current_x_unit,
+                       value="nm",
+                       command=self._on_x_unit_override,
+                       state='disabled')
+        self.nm_radio.pack(side=tk.LEFT, padx=5)
+
+        self.cm1_radio = ttk.Radiobutton(x_unit_subframe, text="cm⁻¹",
+                       variable=self.current_x_unit,
+                       value="cm-1",
+                       command=self._on_x_unit_override,
+                       state='disabled')
+        self.cm1_radio.pack(side=tk.LEFT, padx=5)
+
+        self.convert_x_unit_button = ttk.Button(x_unit_subframe, text="Convert to cm⁻¹",
+                                                command=self._convert_x_unit_and_replot,
+                                                style='Modern.TButton',
+                                                state='disabled')
+        self.convert_x_unit_button.pack(side=tk.LEFT, padx=10)
         cfg_row += 1
 
         # Spectrum Selection
@@ -6269,7 +6308,7 @@ class SpectralPredictApp:
             ax3.scatter(wavelengths[highlight_mask], loading_x[highlight_mask],
                         c='red', s=15, zorder=5, label='Top 5%')
             ax3.legend(fontsize=7)
-        ax3.set_xlabel("Wavelength", fontsize=9)
+        ax3.set_xlabel(self._get_x_axis_name(), fontsize=9)
         ax3.set_ylabel("Loading", fontsize=9)
         ax3.set_title(f"PC{pc_x} Loadings", fontsize=10)
 
@@ -6283,7 +6322,7 @@ class SpectralPredictApp:
             ax4.scatter(wavelengths[highlight_mask_y], loading_y[highlight_mask_y],
                         c='red', s=15, zorder=5, label='Top 5%')
             ax4.legend(fontsize=7)
-        ax4.set_xlabel("Wavelength", fontsize=9)
+        ax4.set_xlabel(self._get_x_axis_name(), fontsize=9)
         ax4.set_ylabel("Loading", fontsize=9)
         ax4.set_title(f"PC{pc_y} Loadings", fontsize=10)
 
@@ -7556,7 +7595,7 @@ class SpectralPredictApp:
         self._mbl_ax_top.legend(fontsize=8)
 
         # Bottom: placeholder
-        self._mbl_ax_bot.set_xlabel('Wavelength (nm)', fontsize=10)
+        self._mbl_ax_bot.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
         self._mbl_ax_bot.set_ylabel('Corrected', fontsize=10)
         self._mbl_ax_bot.set_title('Corrected Spectrum', fontsize=10)
         self._mbl_ax_bot.grid(True, alpha=0.3)
@@ -7638,7 +7677,7 @@ class SpectralPredictApp:
 
         self._mbl_ax_top.legend(fontsize=8)
 
-        self._mbl_ax_bot.set_xlabel('Wavelength (nm)', fontsize=10)
+        self._mbl_ax_bot.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
         self._mbl_ax_bot.set_ylabel('Corrected', fontsize=10)
         self._mbl_ax_bot.set_title('Corrected Spectrum', fontsize=10)
         self._mbl_ax_bot.grid(True, alpha=0.3)
@@ -7820,7 +7859,7 @@ class SpectralPredictApp:
             line.set_gid(str(self.X.index[i]))
             line.set_picker(5)
 
-        ax.set_xlabel('Wavelength (nm)', fontsize=12)
+        ax.set_xlabel(self._get_spectral_xlabel(), fontsize=12)
         ax.set_ylabel(ylabel, fontsize=12)
         ax.set_title(f'{title} (n={n_samples})', fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3)
@@ -8378,7 +8417,7 @@ class SpectralPredictApp:
         ax1.fill_between(wavelengths, 0, importances,
                         where=importances < 0, alpha=0.3, color='#e74c3c')
         ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-        ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+        ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
         ax1.set_ylabel(results['metric_name'], fontsize=10)
         ax1.set_title(f"Predictor Screening: {results['method'].upper()}",
                      fontsize=12, fontweight='bold')
@@ -8395,7 +8434,7 @@ class SpectralPredictApp:
 
         ax2.plot(wavelengths, abs_importances, color='#9b59b6', linewidth=1.5)
         ax2.fill_between(wavelengths, 0, abs_importances, alpha=0.3, color='#9b59b6')
-        ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+        ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
         ax2.set_ylabel(f"|{results['metric_name']}|", fontsize=10)
         ax2.set_title("Absolute Importance", fontsize=11)
         ax2.grid(True, alpha=0.3)
@@ -8437,7 +8476,7 @@ class SpectralPredictApp:
         for i, wl in enumerate(top_wls, 1):
             importance_val = results['importances'][wl] if isinstance(results['importances'], pd.Series) else 0
             sign = "+" if importance_val >= 0 else ""
-            text = f"{i:3d}. {wl:.1f} nm -> {sign}{importance_val:.4f}"
+            text = f"{i:3d}. {wl:.1f} {self._get_x_unit_short()} -> {sign}{importance_val:.4f}"
             wl_listbox.insert(tk.END, text)
 
         # Add interpretation
@@ -14917,6 +14956,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
                 self.combined_metadata = metadata
 
                 # Store original unfiltered data
@@ -14945,6 +14985,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -14979,6 +15020,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15017,6 +15059,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15051,6 +15094,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15087,6 +15131,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15123,6 +15168,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15159,6 +15205,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15195,6 +15242,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15231,6 +15279,7 @@ class SpectralPredictApp:
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -15370,6 +15419,10 @@ class SpectralPredictApp:
 
             # Update data type detection UI
             self._update_data_type_status_ui()
+
+            # Update x-axis unit detection UI
+            self._update_x_unit_status_ui()
+            self._update_x_unit_labels()
 
             self.tab1_status.config(text=f"> Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths")
             # Enable interactive controls
@@ -15548,18 +15601,20 @@ class SpectralPredictApp:
         wl_min = self.wavelength_min.get().strip()
         wl_max = self.wavelength_max.get().strip()
 
-        # Round wavelength columns to integers for consistency
-        # (all_vars/top_vars store integers; spectrometer resolution is always >=1nm)
+        # Round x-axis columns to integers for consistency
+        # (all_vars/top_vars store integers; typical spectral resolution >=1 unit)
         rounded_cols = self.X_original.columns.astype(float).round().astype(int)
 
-        # Guard: if rounding causes duplicate columns, the data has sub-nm spacing
+        # Guard: if rounding causes duplicate columns, the data has sub-unit spacing
         if len(set(rounded_cols)) < len(rounded_cols):
             n_dupes = len(rounded_cols) - len(set(rounded_cols))
+            axis_name = self._get_x_axis_name().lower()
+            unit_short = self._get_x_unit_short()
             messagebox.showerror(
-                "Sub-nanometer Wavelengths",
-                f"This dataset has {n_dupes} wavelengths that collapse when rounded "
+                f"Sub-integer {self._get_x_axis_name()}s",
+                f"This dataset has {n_dupes} {axis_name}s that collapse when rounded "
                 f"to integers (e.g., 350.1 and 350.2 both become 350).\n\n"
-                f"Sub-nanometer resolution data is not currently supported."
+                f"Sub-integer resolution {axis_name} data ({unit_short}) is not currently supported."
             )
             return
 
@@ -15796,6 +15851,113 @@ class SpectralPredictApp:
         self._generate_plots()
         self._generate_explore_plots()
 
+    def _on_x_unit_override(self):
+        """Handle manual x-unit radio button selection (relabel only, no data conversion)."""
+        if self.X is None:
+            return
+        new_unit = self.current_x_unit.get()
+        if new_unit != self.original_x_unit.get() and self.x_unit_confidence >= 80:
+            response = messagebox.askyesno(
+                "Override X-Unit Detection",
+                f"The x-axis unit was detected as "
+                f"{'cm⁻¹' if self.original_x_unit.get() == 'cm-1' else self.original_x_unit.get()} "
+                f"with {self.x_unit_confidence:.0f}% confidence.\n\n"
+                f"Overriding to {'cm⁻¹' if new_unit == 'cm-1' else new_unit} will change labels "
+                f"but NOT convert the data values.\n\nContinue?"
+            )
+            if not response:
+                self.current_x_unit.set(self.original_x_unit.get())
+                return
+
+        # Update labels and plots without converting data
+        self._update_x_unit_labels()
+        self._update_x_unit_status_ui()
+        self._generate_plots()
+        self._generate_explore_plots()
+
+    def _convert_x_unit_and_replot(self):
+        """Convert x-axis between nm and cm⁻¹ and regenerate plots.
+
+        This converts column headers (wavelength values) using 1e7/x,
+        re-sorts columns (since the conversion inverts order),
+        swaps wavelength filter min/max, and updates all plots.
+        """
+        if self.X is None or self.X_original is None:
+            messagebox.showwarning("No Data", "Please load data first.")
+            return
+
+        from spectral_predict.io import convert_x_axis
+
+        current_unit = self.current_x_unit.get()
+        target_unit = 'cm-1' if current_unit == 'nm' else 'nm'
+
+        try:
+            # Convert X_original columns
+            old_cols_orig = self.X_original.columns.astype(float).values
+            new_cols_orig = convert_x_axis(old_cols_orig, current_unit, target_unit)
+            self.X_original.columns = new_cols_orig
+            # Re-sort (conversion inverts order)
+            self.X_original = self.X_original[sorted(self.X_original.columns)]
+
+            # Convert X columns
+            old_cols = self.X.columns.astype(float).values
+            new_cols = convert_x_axis(old_cols, current_unit, target_unit)
+            self.X.columns = new_cols
+            self.X = self.X[sorted(self.X.columns)]
+
+            # Convert validation set if present
+            if hasattr(self, 'validation_X') and self.validation_X is not None and len(self.validation_X) > 0:
+                try:
+                    old_val_cols = self.validation_X.columns.astype(float).values
+                    new_val_cols = convert_x_axis(old_val_cols, current_unit, target_unit)
+                    self.validation_X.columns = new_val_cols
+                    self.validation_X = self.validation_X[sorted(self.validation_X.columns)]
+                except Exception as e:
+                    print(f"WARNING: Could not convert validation_X columns: {e}")
+
+            # Swap and convert wavelength filter values
+            old_min_str = self.wavelength_min.get().strip()
+            old_max_str = self.wavelength_max.get().strip()
+            if old_min_str and old_max_str:
+                try:
+                    old_min = float(old_min_str)
+                    old_max = float(old_max_str)
+                    # nm ↔ cm⁻¹ inverts: new_min = 1e7/old_max, new_max = 1e7/old_min
+                    new_min = 1e7 / old_max
+                    new_max = 1e7 / old_min
+                    self.wavelength_min.set(str(int(round(new_min))))
+                    self.wavelength_max.set(str(int(round(new_max))))
+                except (ValueError, ZeroDivisionError):
+                    pass
+
+            # Update state
+            self.current_x_unit.set(target_unit)
+            self.x_unit_has_been_converted = True
+
+            # Update UI
+            self._update_x_unit_labels()
+            self._update_x_unit_status_ui()
+
+            # Update status label to show conversion
+            unit_display = "cm⁻¹" if target_unit == 'cm-1' else "nm"
+            from_display = "cm⁻¹" if current_unit == 'cm-1' else "nm"
+            self.x_unit_status_label.config(
+                text=f"> Converted to {unit_display} (from {from_display})",
+                foreground=self.colors['accent']
+            )
+
+            # Regenerate plots
+            self._generate_plots()
+            self._generate_explore_plots()
+            self._populate_data_viewer()
+
+            print(f"Converted x-axis from {from_display} to {unit_display}")
+
+        except Exception as e:
+            messagebox.showerror("Conversion Error", f"Failed to convert x-axis units:\n{e}")
+            import traceback
+            traceback.print_exc()
+
     def _convert_and_replot(self):
         """
         Convert spectral data between reflectance and absorbance and regenerate plots.
@@ -15894,6 +16056,108 @@ class SpectralPredictApp:
         self.data_value_scale = metadata.get('value_scale', 1.0)
         self.source_data_type = metadata.get('source_data_type', None)
         self.data_has_been_converted = False
+
+    def _apply_x_unit_metadata(self, metadata):
+        """Apply detected x-axis unit metadata from file load."""
+        x_unit = metadata.get('x_unit', 'nm')
+        self.original_x_unit.set(x_unit)
+        self.current_x_unit.set(x_unit)
+        self.x_unit_confidence = metadata.get('x_unit_confidence', 50.0)
+        self.x_unit_detection_method = metadata.get('x_unit_detection_method', 'default')
+        self.x_unit_has_been_converted = False
+
+    def _get_spectral_xlabel(self) -> str:
+        """Return the x-axis label for spectral plots based on current x-unit."""
+        unit = self.current_x_unit.get()
+        if unit == 'cm-1':
+            return "Wavenumber (cm⁻¹)"
+        return "Wavelength (nm)"
+
+    def _get_x_unit_short(self) -> str:
+        """Return short x-unit string for compact labels and tooltips."""
+        unit = self.current_x_unit.get()
+        if unit == 'cm-1':
+            return "cm⁻¹"
+        return "nm"
+
+    def _get_x_axis_name(self) -> str:
+        """Return 'Wavelength' or 'Wavenumber' based on current x-unit."""
+        unit = self.current_x_unit.get()
+        if unit == 'cm-1':
+            return "Wavenumber"
+        return "Wavelength"
+
+    def _update_x_unit_status_ui(self):
+        """Update the x-axis unit status label and UI controls after data loading."""
+        if not hasattr(self, 'x_unit_status_label'):
+            return
+
+        if self.X is None:
+            self.x_unit_status_label.config(text="No data loaded", foreground=self.colors['text_light'])
+            if hasattr(self, 'convert_x_unit_button'):
+                self.convert_x_unit_button.config(state='disabled')
+            return
+
+        # Get detected unit and confidence
+        x_unit = self.original_x_unit.get()
+        confidence = self.x_unit_confidence
+        method = self.x_unit_detection_method
+
+        # Format confidence level
+        if confidence >= 80:
+            conf_str = "High"
+            color = self.colors['success']
+        elif confidence >= 60:
+            conf_str = "Medium"
+            color = self.colors['success']
+        else:
+            conf_str = "Low"
+            color = self.colors['warning']
+
+        # Format unit display
+        unit_display = "cm⁻¹" if x_unit == 'cm-1' else x_unit
+
+        # Update status label
+        status_text = f"Detected: {unit_display} ({conf_str} confidence: {confidence:.0f}%)"
+        if method and method != 'default':
+            status_text += f" [{method}]"
+        if confidence < 60:
+            status_text += " [!]"
+
+        self.x_unit_status_label.config(text=status_text, foreground=color)
+
+        # Update radio buttons
+        if hasattr(self, 'nm_radio'):
+            self.nm_radio.config(state='normal')
+            self.cm1_radio.config(state='normal')
+
+        # Update convert button text
+        if hasattr(self, 'convert_x_unit_button'):
+            current = self.current_x_unit.get()
+            target = "cm⁻¹" if current == 'nm' else "nm"
+            self.convert_x_unit_button.config(text=f"Convert to {target}", state='normal')
+
+    def _update_x_unit_labels(self):
+        """Update all dynamic label widgets that reference x-axis units."""
+        unit_short = self._get_x_unit_short()
+        axis_name = self._get_x_axis_name()
+
+        # Import tab labels
+        if hasattr(self, 'wl_range_label'):
+            self.wl_range_label.config(text=f"{axis_name} Range:")
+        if hasattr(self, 'wl_unit_hint_label'):
+            self.wl_unit_hint_label.config(text=f"{unit_short} (auto-fills)")
+        if hasattr(self, 'wl_min_label'):
+            self.wl_min_label.config(text=f"Min {axis_name} ({unit_short}):")
+        if hasattr(self, 'wl_max_label'):
+            self.wl_max_label.config(text=f"Max {axis_name} ({unit_short}):")
+
+        # Data sources tree heading
+        if hasattr(self, 'data_sources_tree'):
+            try:
+                self.data_sources_tree.heading('Range', text=f'Range ({unit_short})')
+            except Exception:
+                pass
 
     def _update_data_type_status_ui(self):
         """
@@ -17139,7 +17403,7 @@ class SpectralPredictApp:
             line.set_gid(str(self.X.index[i]))
             line.set_picker(5)  # Enable picking with 5-point tolerance
 
-        ax.set_xlabel('Wavelength (nm)', fontsize=12)
+        ax.set_xlabel(self._get_spectral_xlabel(), fontsize=12)
         ax.set_ylabel(ylabel, fontsize=12)
         ax.set_title(f'{title} (n={n_samples})', fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3)
@@ -18463,7 +18727,7 @@ class SpectralPredictApp:
         # Plot 2: Absolute importance
         ax2.plot(wavelengths, abs_importances, 'purple', linewidth=0.8, alpha=0.8)
         ax2.fill_between(wavelengths, 0, abs_importances, alpha=0.3, color='purple')
-        ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+        ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
         ax2.set_ylabel(f'|{metric_name}|', fontsize=10)
         ax2.set_title(f'Absolute {metric_name}', fontsize=11, fontweight='bold')
 
@@ -23056,7 +23320,7 @@ class SpectralPredictApp:
                 # Add top wavelengths if available
                 if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
                     top_vars = best_model['top_vars'].split(',')[:5]  # First 5
-                    model_text += f"\nTop λ: {', '.join(top_vars)} nm"
+                    model_text += f"\nTop λ: {', '.join(top_vars)} {self._get_x_unit_short()}"
             else:
                 # Classification - show CV metrics
                 model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
@@ -23070,7 +23334,7 @@ class SpectralPredictApp:
                 # Add top wavelengths if available
                 if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
                     top_vars = best_model['top_vars'].split(',')[:5]  # First 5
-                    model_text += f"\nTop λ: {', '.join(top_vars)} nm"
+                    model_text += f"\nTop λ: {', '.join(top_vars)} {self._get_x_unit_short()}"
 
             self.root.after(0, lambda text=model_text: self.best_model_info.config(text=text))
 
@@ -28054,7 +28318,7 @@ F1 Score:  {f1:.4f}
             for i, (wl, imp) in enumerate(zip(wavelengths, importances)):
                 markerline.set_gid(str(i))
 
-            ax1.set_xlabel('Wavelength (nm)', color=self.colors['text'])
+            ax1.set_xlabel(self._get_spectral_xlabel(), color=self.colors['text'])
             ax1.set_ylabel(importance_label, color='#1f77b4')
             ax1.tick_params(axis='y', labelcolor='#1f77b4')
             ax1.tick_params(axis='x', colors=self.colors['text'])
@@ -28197,7 +28461,7 @@ F1 Score:  {f1:.4f}
 
         # Update heading with sort indicator and toggle for next click
         indicator = ' ▼' if reverse else ' ▲'
-        col_names = {'wavelength': 'Wavelength (nm)', 'importance': 'Importance', 'residual_corr': 'Residual Corr'}
+        col_names = {'wavelength': self._get_spectral_xlabel(), 'importance': 'Importance', 'residual_corr': 'Residual Corr'}
 
         # Clear indicators from all sortable columns
         for col, name in col_names.items():
@@ -31648,6 +31912,7 @@ External Validation Performance (n={n_val}):
                 'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
                 'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
                 'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance)
+                'x_unit': self.current_x_unit.get(),  # Store x-axis unit (nm/cm-1)
                 # Validation set metadata
                 'validation_set_enabled': self.validation_enabled.get(),
                 'validation_indices': list(self.validation_indices) if self.validation_indices else [],
@@ -32567,7 +32832,7 @@ External Validation Performance (n={n_val}):
             # Plot
             ax.fill_between(available_wl, 0, indicators, alpha=0.3, color='blue', label='Selected')
             ax.plot(available_wl, indicators, 'b-', linewidth=0.5)
-            ax.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax.set_ylabel('Selected', fontsize=10)
             ax.set_title(f'Wavelength Selection: {len(selected_wl)}/{len(available_wl)} wavelengths', fontsize=12)
             ax.set_ylim(-0.1, 1.1)
@@ -33044,6 +33309,19 @@ External Validation Performance (n={n_val}):
                         model_dict['filepath'] = filepath
                         model_dict['filename'] = Path(filepath).name
                         model_dict['is_ensemble'] = False
+
+                    # Check x-unit compatibility
+                    model_x_unit = model_dict.get('metadata', {}).get('x_unit', 'nm')
+                    current_unit = self.current_x_unit.get()
+                    if model_x_unit != current_unit and self.X is not None:
+                        unit_display = "cm⁻¹" if model_x_unit == "cm-1" else model_x_unit
+                        curr_display = "cm⁻¹" if current_unit == "cm-1" else current_unit
+                        messagebox.showwarning(
+                            "X-Unit Mismatch",
+                            f"Model '{Path(filepath).name}' was trained with {unit_display} data, "
+                            f"but current data uses {curr_display}.\n\n"
+                            f"Convert your data to {unit_display} in the Import tab before predicting."
+                        )
 
                     # Add to loaded models list
                     self.loaded_models.append(model_dict)
@@ -36832,7 +37110,7 @@ External Validation Performance (n={n_val}):
         ax1.plot(wl, primary_mean, 'b-', linewidth=2, label='Mean')
         ax1.fill_between(wl, primary_mean - primary_std, primary_mean + primary_std,
                         alpha=0.3, color='b', label='±1 Std')
-        ax1.set_xlabel('Wavelength (nm)', fontsize=11)
+        ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=11)
         ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
         ax1.set_title(f'Primary: {primary_id}\n({X_primary.shape[0]} spectra)', fontsize=12, fontweight='bold')
         ax1.legend(loc='best')
@@ -36842,7 +37120,7 @@ External Validation Performance (n={n_val}):
         ax2.plot(wl, satellite_mean, 'r-', linewidth=2, label='Mean')
         ax2.fill_between(wl, satellite_mean - satellite_std, satellite_mean + satellite_std,
                         alpha=0.3, color='r', label='±1 Std')
-        ax2.set_xlabel('Wavelength (nm)', fontsize=11)
+        ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=11)
         ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
         ax2.set_title(f'Satellite: {satellite_id}\n({X_satellite.shape[0]} spectra)', fontsize=12, fontweight='bold')
         ax2.legend(loc='best')
@@ -36865,7 +37143,7 @@ External Validation Performance (n={n_val}):
         ax.plot(wl, primary_mean, 'b-', linewidth=2, label=f'Primary ({primary_id})')
         ax.plot(wl, satellite_mean, 'r-', linewidth=2, label=f'Satellite ({satellite_id})')
 
-        ax.set_xlabel('Wavelength (nm)', fontsize=11)
+        ax.set_xlabel(self._get_spectral_xlabel(), fontsize=11)
         ax.set_ylabel(self._get_spectral_ylabel(), fontsize=11)
         ax.set_title('Primary vs. Satellite Spectra Overlay (First 10 Samples + Means)', fontsize=12, fontweight='bold')
         ax.legend(loc='best')
@@ -36954,7 +37232,7 @@ External Validation Performance (n={n_val}):
                                primary_mean - primary_std,
                                primary_mean + primary_std,
                                alpha=0.3, color='b', label='±1 Std')
-                ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
                 ax1.set_ylabel(ylabel, fontsize=10)
                 ax1.set_title(f'Primary {title_suffix}', fontsize=11, fontweight='bold')
                 ax1.legend(fontsize=8)
@@ -36969,7 +37247,7 @@ External Validation Performance (n={n_val}):
                                satellite_mean - satellite_std,
                                satellite_mean + satellite_std,
                                alpha=0.3, color='r', label='±1 Std')
-                ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
                 ax2.set_ylabel(ylabel, fontsize=10)
                 ax2.set_title(f'Satellite Before {title_suffix}', fontsize=11, fontweight='bold')
                 ax2.legend(fontsize=8)
@@ -36984,7 +37262,7 @@ External Validation Performance (n={n_val}):
                                trans_mean - trans_std,
                                trans_mean + trans_std,
                                alpha=0.3, color='g', label='±1 Std')
-                ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax3.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
                 ax3.set_ylabel(ylabel, fontsize=10)
                 ax3.set_title(f'Satellite After {title_suffix}', fontsize=11, fontweight='bold')
                 ax3.legend(fontsize=8)
@@ -37119,7 +37397,7 @@ External Validation Performance (n={n_val}):
                 mean_spectrum = np.mean(X, axis=0)
                 ax1.plot(wl, mean_spectrum, linewidth=2, label=inst_id, color=colors[idx])
 
-            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax1.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax1.set_title('Before Equalization\n(Different Wavelength Grids)',
                          fontsize=11, fontweight='bold')
@@ -37132,7 +37410,7 @@ External Validation Performance (n={n_val}):
                 mean_spectrum = np.mean(X_eq, axis=0)
                 ax2.plot(common_grid, mean_spectrum, linewidth=2, label=inst_id, color=colors[idx])
 
-            ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax2.set_ylabel(self._get_spectral_ylabel(), fontsize=10)
             ax2.set_title('After Equalization\n(Common Wavelength Grid)',
                          fontsize=11, fontweight='bold')
@@ -37180,7 +37458,7 @@ External Validation Performance (n={n_val}):
 
             ax.set_yticks(y_pos)
             ax.set_yticklabels(labels, fontsize=10)
-            ax.set_xlabel('Wavelength (nm)', fontsize=11)
+            ax.set_xlabel(self._get_spectral_xlabel(), fontsize=11)
             ax.set_title('Wavelength Range Comparison', fontsize=12, fontweight='bold')
             ax.grid(True, alpha=0.3, axis='x')
 
@@ -37931,7 +38209,7 @@ External Validation Performance (n={n_val}):
             ax1.plot(wl_m, primary_mean, 'b-', linewidth=2, label='Mean')
             ax1.fill_between(wl_m, primary_mean - primary_std, primary_mean + primary_std,
                            alpha=0.3, color='b', label='±1 Std')
-            ax1.set_xlabel('Wavelength (nm)', fontsize=11)
+            ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=11)
             ax1.set_ylabel('Intensity', fontsize=11)
             ax1.set_title(f'Primary Spectra\n({X_m.shape[0]} samples)', fontsize=12, fontweight='bold')
             ax1.legend(loc='best')
@@ -37943,7 +38221,7 @@ External Validation Performance (n={n_val}):
             ax2.plot(wl_s, satellite_mean, 'r-', linewidth=2, label='Mean')
             ax2.fill_between(wl_s, satellite_mean - satellite_std, satellite_mean + satellite_std,
                            alpha=0.3, color='r', label='±1 Std')
-            ax2.set_xlabel('Wavelength (nm)', fontsize=11)
+            ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=11)
             ax2.set_ylabel('Intensity', fontsize=11)
             ax2.set_title(f'Satellite Spectra\n({X_s.shape[0]} samples)', fontsize=12, fontweight='bold')
             ax2.legend(loc='best')
@@ -39691,7 +39969,7 @@ External Validation Performance (n={n_val}):
         wavelengths = self.new_satellite_data_predict[0]
         ax2.plot(wavelengths, mean_satellite, label='Satellite (Before)', color='red', alpha=0.7)
         ax2.plot(wavelengths, mean_transferred, label='Transferred (After)', color='blue', alpha=0.7)
-        ax2.set_xlabel('Wavelength (nm)', color=self.colors['text'])
+        ax2.set_xlabel(self._get_spectral_xlabel(), color=self.colors['text'])
         ax2.set_ylabel('Intensity', color=self.colors['text'])
         ax2.set_title('Mean Spectra: Before vs After Transfer', color=self.colors['text'])
         ax2.legend(facecolor=self.colors['panel'], edgecolor=self.colors['text'], labelcolor=self.colors['text'])
@@ -40293,6 +40571,8 @@ External Validation Performance (n={n_val}):
             self._generate_plots()
             self._generate_explore_plots()
             self._update_data_type_status_ui()
+            self._update_x_unit_status_ui()
+            self._update_x_unit_labels()
             self._update_dm_data_type_label()
             self._populate_data_viewer()
 
@@ -40398,7 +40678,7 @@ External Validation Performance (n={n_val}):
             for i in indices:
                 ax.plot(wavelengths, X[i, :], alpha=alpha, linewidth=1.0)
 
-            ax.set_xlabel('Wavelength (nm)')
+            ax.set_xlabel(self._get_spectral_xlabel())
             ax.set_ylabel(self.ct_export_data_type.get().capitalize())
             ax.set_title(f'Loaded Spectra ({n_samples} samples)')
             ax.grid(True, alpha=0.3)
@@ -40694,7 +40974,7 @@ External Validation Performance (n={n_val}):
                                before_mean - before_std,
                                before_mean + before_std,
                                alpha=0.3, color='r', label='±1 Std')
-                ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
                 ax1.set_ylabel(ylabel, fontsize=10)
                 ax1.set_title(f'Before Transfer {title_suffix}', fontsize=11, fontweight='bold')
                 ax1.legend(fontsize=8)
@@ -40709,7 +40989,7 @@ External Validation Performance (n={n_val}):
                                after_mean - after_std,
                                after_mean + after_std,
                                alpha=0.3, color='g', label='±1 Std')
-                ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+                ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
                 ax2.set_ylabel(ylabel, fontsize=10)
                 ax2.set_title(f'After Transfer {title_suffix}', fontsize=11, fontweight='bold')
                 ax2.legend(fontsize=8)
@@ -44996,7 +45276,7 @@ External Validation Performance (n={n_val}):
         if HAS_MATPLOTLIB:
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.plot(entry.wavelengths, entry.spectrum, 'b-', linewidth=0.8)
-            ax.set_xlabel('Wavelength')
+            ax.set_xlabel(self._get_x_axis_name())
             ax.set_ylabel('Intensity')
             ax.set_title(f"Spectrum: {sample_id}")
             ax.grid(True, alpha=0.3)
@@ -45212,7 +45492,7 @@ External Validation Performance (n={n_val}):
             fig, ax = plt.subplots(figsize=(10, 5))
             ax.plot(wavelengths, query, 'b-', linewidth=0.8, label=f'Query: {sample_id}')
             ax.plot(wavelengths, result_spectrum, 'r-', linewidth=0.8, label=f'Match: {result_id}')
-            ax.set_xlabel('Wavelength')
+            ax.set_xlabel(self._get_x_axis_name())
             ax.set_ylabel('Intensity')
             ax.set_title(f"Comparison: {sample_id} vs {result_id}")
             ax.legend()
@@ -46883,7 +47163,7 @@ External Validation Performance (n={n_val}):
                         ax.plot(diff_spectrum, label=label, color=color, linewidth=1.5)
 
                 ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-                ax.set_xlabel('Wavelength (nm)' if self.contam_wavelengths is not None else 'Index')
+                ax.set_xlabel(self._get_spectral_xlabel() if self.contam_wavelengths is not None else 'Index')
                 ax.set_ylabel('Difference (Contaminated - Clean)')
                 preproc_label = f" ({preproc})" if preproc != 'None (Raw)' else ""
                 ax.set_title(f'Difference Spectra: Contaminant Influence{preproc_label}')
@@ -47019,7 +47299,7 @@ External Validation Performance (n={n_val}):
         if all_peak_regions:
             ax.axvspan(0, 0, alpha=0.2, color='red', label='Excluded regions')
 
-        ax.set_xlabel('Wavelength (nm)')
+        ax.set_xlabel(self._get_spectral_xlabel())
         ax.set_ylabel('Intensity')
         ax.set_title('Clean Spectra Overview with Exclusion Regions')
         ax.legend(loc='upper right')
@@ -47314,7 +47594,7 @@ External Validation Performance (n={n_val}):
         for region in regions:
             ax.axvspan(region[0], region[1], alpha=0.2, color='red')
 
-        ax.set_xlabel('Wavelength (nm)')
+        ax.set_xlabel(self._get_spectral_xlabel())
         ax.set_ylabel('Normalized Influence (0\u20131)')
         ax.set_title('Contaminant Influence by Wavelength')
         ax.set_ylim(0, max(1.05, float(np.max(combined)) * 1.1) if len(combined) > 0 else 1.05)
@@ -47562,7 +47842,7 @@ External Validation Performance (n={n_val}):
             ax.plot(wavelengths, mean_g, color=color, linewidth=1.5, label=label)
 
         dtype = self.contam_current_data_type.get()
-        ax.set_xlabel('Wavelength (nm)')
+        ax.set_xlabel(self._get_spectral_xlabel())
         ax.set_ylabel(dtype.capitalize())
         preproc_label = ""
         if preprocess:
@@ -47640,7 +47920,7 @@ External Validation Performance (n={n_val}):
             ax.axvspan(0, 0, alpha=0.2, color='red', label='Excluded regions')
 
         dtype = self.contam_current_data_type.get()
-        ax.set_xlabel('Wavelength (nm)')
+        ax.set_xlabel(self._get_spectral_xlabel())
         ax.set_ylabel(dtype.capitalize())
         preproc = self.contam_preprocessing.get()
         preproc_label = f" ({preproc})" if preproc != 'None (Raw)' else ""
@@ -48178,12 +48458,12 @@ External Validation Performance (n={n_val}):
 
         axes[0].plot(wavelengths_before, mean_before, 'b-', label='Before')
         axes[0].set_title('Before Correction')
-        axes[0].set_xlabel('Wavelength')
+        axes[0].set_xlabel(self._get_x_axis_name())
         axes[0].set_ylabel('Intensity')
 
         axes[1].plot(wavelengths_after, mean_after, 'g-', label='After')
         axes[1].set_title(f'After {method}')
-        axes[1].set_xlabel('Wavelength')
+        axes[1].set_xlabel(self._get_x_axis_name())
         axes[1].set_ylabel('Intensity')
 
         plt.suptitle(f'Contaminant Correction: {method}')
@@ -48808,7 +49088,7 @@ External Validation Performance (n={n_val}):
                     label='Original (Mean)', alpha=0.8)
             ax1.plot(wavelengths_corrected, mean_corrected, 'r-', linewidth=1.5,
                     label=f'Corrected (Mean) - {method}', alpha=0.8)
-            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax1.set_ylabel('Intensity', fontsize=10)
             ax1.set_title('Mean Spectra Comparison', fontsize=12, fontweight='bold')
             ax1.legend(loc='best', fontsize=9)
@@ -48852,7 +49132,7 @@ External Validation Performance (n={n_val}):
                             label=f'Corrected (Mean)', alpha=0.8)
                     title = 'Selected: Mean Spectrum'
 
-            ax2.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax2.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax2.set_ylabel('Intensity', fontsize=10)
             ax2.set_title(title, fontsize=12, fontweight='bold')
             ax2.legend(loc='best', fontsize=9)
@@ -48888,7 +49168,7 @@ External Validation Performance (n={n_val}):
                         transform=ax3.transAxes, ha='center', va='center',
                         fontsize=11, bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
 
-            ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax3.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax3.set_ylabel('Intensity Difference', fontsize=10)
             ax3.set_title('Difference Plot (Mean Spectra)', fontsize=12, fontweight='bold')
             ax3.legend(loc='best', fontsize=9)
@@ -49166,7 +49446,7 @@ External Validation Performance (n={n_val}):
             ax3.scatter(wavelengths[important_idx], loadings_pc1[important_idx],
                        color='red', s=30, zorder=5, label=f'Top 5% ({important_idx.sum()} wavelengths)')
 
-            ax3.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax3.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax3.set_ylabel('Loading', fontsize=10)
             ax3.set_title(f'PC1 Loadings ({pca.explained_variance_ratio_[0]*100:.1f}% variance)',
                          fontsize=12, fontweight='bold')
@@ -49186,7 +49466,7 @@ External Validation Performance (n={n_val}):
             ax4.scatter(wavelengths[important_idx], loadings_pc2[important_idx],
                        color='red', s=30, zorder=5, label=f'Top 5% ({important_idx.sum()} wavelengths)')
 
-            ax4.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax4.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax4.set_ylabel('Loading', fontsize=10)
             ax4.set_title(f'PC2 Loadings ({pca.explained_variance_ratio_[1]*100:.1f}% variance)',
                          fontsize=12, fontweight='bold')
@@ -49506,7 +49786,7 @@ External Validation Performance (n={n_val}):
                        color='darkblue', s=40, zorder=5,
                        label=f'Top 10% PCA ({important_idx.sum()} wavelengths)')
 
-            ax1.set_xlabel('Wavelength (nm)', fontsize=10)
+            ax1.set_xlabel(self._get_spectral_xlabel(), fontsize=10)
             ax1.set_ylabel('Normalized Weight', fontsize=10)
             ax1.set_title('Wavelength Importance Profile', fontsize=12, fontweight='bold')
             ax1.legend(loc='best', fontsize=9)
@@ -49623,6 +49903,16 @@ External Validation Performance (n={n_val}):
 
 def main():
     """Main entry point."""
+    # Set AppUserModelID so Windows taskbar shows our icon, not the Python icon
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                'ASP.SpectralPredict.App.1'
+            )
+        except Exception:
+            pass
+
     root = tk.Tk()
 
     # Set window icon (taskbar and title bar)
@@ -49638,9 +49928,9 @@ def main():
         else:
             icon_path = get_resource_path('asp_logo.ico')
             if icon_path.exists():
-                root.iconbitmap(str(icon_path))
-    except Exception:
-        pass  # Fail silently if icon can't be loaded
+                root.iconbitmap(default=str(icon_path))
+    except Exception as e:
+        print(f"Warning: Could not set window icon: {e}")
 
     app = SpectralPredictApp(root)
 

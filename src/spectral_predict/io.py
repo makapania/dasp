@@ -6,6 +6,52 @@ from pathlib import Path
 from typing import Tuple, Optional, Dict, Any, Union
 
 
+def _heuristic_x_unit(columns) -> str:
+    """Guess x-axis unit from column value range.
+
+    NIR/VIS wavelengths are typically 350-2500 nm.
+    FTIR wavenumbers are typically 400-4000 cm⁻¹ (or up to ~15000 cm⁻¹).
+    Overlap zone: 400-2500 could be either, but >4000 is almost certainly nm,
+    and values in 400-4000 with nothing above 4000 is likely cm⁻¹.
+    """
+    vals = np.asarray(columns, dtype=float)
+    vmin, vmax = float(vals.min()), float(vals.max())
+    # Strong nm indicators: max > 4000 (no wavenumber instrument goes that high commonly)
+    if vmax > 5000:
+        return 'nm'
+    # Strong cm-1 indicator: typical mid-IR range
+    if vmin >= 400 and vmax <= 4000:
+        # Could be either — but if spacing is uniform and small, likely cm-1
+        # Default to nm for ambiguous cases (backwards compatible)
+        return 'nm'
+    return 'nm'
+
+
+def convert_x_axis(columns: np.ndarray, from_unit: str, to_unit: str) -> np.ndarray:
+    """Convert x-axis values between nm and cm⁻¹.
+
+    Parameters
+    ----------
+    columns : array-like
+        X-axis values to convert.
+    from_unit : str
+        Source unit ('nm' or 'cm-1').
+    to_unit : str
+        Target unit ('nm' or 'cm-1').
+
+    Returns
+    -------
+    np.ndarray
+        Converted values. Note: nm ↔ cm⁻¹ inverts sort order.
+    """
+    columns = np.asarray(columns, dtype=float)
+    if from_unit == to_unit:
+        return columns
+    if {from_unit, to_unit} == {'nm', 'cm-1'}:
+        return 1e7 / columns
+    raise ValueError(f"Unsupported conversion: {from_unit} -> {to_unit}")
+
+
 def read_csv_spectra(path):
     """
     Read spectral data from CSV file.
@@ -115,7 +161,10 @@ def read_csv_spectra(path):
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return result, metadata
@@ -282,7 +331,10 @@ def read_csv_dir(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return df, metadata
@@ -698,7 +750,10 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': 'nm',
+        'x_unit_confidence': 95.0,
+        'x_unit_detection_method': 'asd_native',
     }
 
     return df, metadata
@@ -891,6 +946,15 @@ def read_spc_dir(spc_dir):
     spectra = {}
     duplicate_stems = []
 
+    # Track SPC xtype/ytype from first successful file
+    spc_xunit_detected = False
+    spc_x_unit_detected = None
+    spc_x_unit_confidence = 50.0
+    spc_x_unit_method = 'default'
+    spc_y_type_detected = None
+    spc_y_type_confidence = 0.0
+    spc_y_type_method = ''
+
     for spc_file in sorted(spc_files):
         stem = spc_file.stem
 
@@ -911,6 +975,36 @@ def read_spc_dir(spc_dir):
                 subfile = spc[0]
                 wavelengths = subfile.xarray
                 intensities = subfile.yarray
+
+                # Read xtype/ytype for x-unit and data type detection
+                if not spc_xunit_detected:
+                    _SPC_XTYPE_MAP = {
+                        'XWAVEN': 'cm-1', 'XNMETR': 'nm', 'XUMETR': 'um',
+                        'XRAMANS': 'cm-1', 'XHERTZ': None, 'XSEC': None,
+                    }
+                    _SPC_YTYPE_MAP = {
+                        'YABSRB': 'absorbance', 'YTRANS': 'transmittance',
+                        'YREFLEC': 'reflectance', 'YEMISN': None,
+                    }
+                    xtype_attr = getattr(spc, 'xtype', None)
+                    ytype_attr = getattr(spc, 'ytype', None)
+                    if xtype_attr is not None:
+                        xtype_str = str(xtype_attr).split('.')[-1].upper()
+                        spc_x_unit = _SPC_XTYPE_MAP.get(xtype_str, None)
+                        if spc_x_unit:
+                            spc_x_unit_detected = spc_x_unit
+                            spc_x_unit_confidence = 95.0
+                            spc_x_unit_method = 'spc_xtype'
+                            print(f"  SPC xtype: {xtype_str} -> x_unit={spc_x_unit}")
+                    if ytype_attr is not None:
+                        ytype_str = str(ytype_attr).split('.')[-1].upper()
+                        spc_y_type = _SPC_YTYPE_MAP.get(ytype_str, None)
+                        if spc_y_type:
+                            spc_y_type_detected = spc_y_type
+                            spc_y_type_confidence = 95.0
+                            spc_y_type_method = 'spc_ytype'
+                            print(f"  SPC ytype: {ytype_str} -> data_type={spc_y_type}")
+                    spc_xunit_detected = True
 
                 # Create a series with wavelength as index
                 spectrum = pd.Series(intensities, index=wavelengths)
@@ -957,11 +1051,30 @@ def read_spc_dir(spc_dir):
     # Detect data type (reflectance vs absorbance)
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
     value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+
+    # Override with SPC ytype metadata if available (higher confidence)
+    if spc_y_type_detected and spc_y_type_detected in ('absorbance', 'reflectance'):
+        data_type = spc_y_type_detected
+        type_confidence = spc_y_type_confidence
+        detection_method = spc_y_type_method
+        value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+    elif spc_y_type_detected == 'transmittance':
+        # Transmittance maps to reflectance-like handling in UI
+        data_type = 'reflectance'
+        type_confidence = spc_y_type_confidence
+        detection_method = f"spc_ytype(transmittance)"
+        value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+
     print(f"Detected data type: {data_type.capitalize()} (confidence: {type_confidence:.1f}%)")
     if type_confidence < 70:
         print(f"  WARNING: Low confidence detection. Method: {detection_method}")
     if data_type == "reflectance" and value_scale != 1.0:
         print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
+
+    # Determine x-unit: use SPC xtype if detected, else heuristic from value range
+    x_unit = spc_x_unit_detected or _heuristic_x_unit(df.columns)
+    x_unit_confidence = spc_x_unit_confidence
+    x_unit_method = spc_x_unit_method
 
     # Compile metadata
     metadata = {
@@ -971,10 +1084,14 @@ def read_spc_dir(spc_dir):
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': x_unit,
+        'x_unit_confidence': x_unit_confidence,
+        'x_unit_detection_method': x_unit_method,
     }
 
-    print(f"Successfully read {len(df)} SPC spectra with {df.shape[1]} wavelengths")
+    print(f"Successfully read {len(df)} SPC spectra with {df.shape[1]} data points")
+    print(f"  X-axis unit: {x_unit} (confidence: {x_unit_confidence:.0f}%)")
 
     return df, metadata
 
@@ -1483,7 +1600,10 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
         'detection_method': detection_method,
         'value_scale': value_scale,
         'duplicates_renamed': n_duplicates_renamed,
-        'duplicate_rename_mapping': duplicate_rename_mapping
+        'duplicate_rename_mapping': duplicate_rename_mapping,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return X, y, metadata_df, metadata
@@ -1657,6 +1777,17 @@ def read_jcamp_dir(jcamp_dir):
     xunits = first_file_meta.get('xunits', 'unknown')
 
     # Compile metadata
+    # Map JCAMP xunits to standard x_unit
+    _JCAMP_XUNIT_MAP = {
+        '1/CM': 'cm-1', 'CM-1': 'cm-1', 'CM^-1': 'cm-1',
+        'NANOMETERS': 'nm', 'NM': 'nm',
+        'MICROMETERS': 'um', 'UM': 'um',
+    }
+    xunits_upper = xunits.upper().strip() if isinstance(xunits, str) else ''
+    x_unit = _JCAMP_XUNIT_MAP.get(xunits_upper, _heuristic_x_unit(df.columns))
+    x_unit_confidence = 90.0 if xunits_upper in _JCAMP_XUNIT_MAP else 50.0
+    x_unit_method = 'jcamp_xunits' if xunits_upper in _JCAMP_XUNIT_MAP else 'default'
+
     metadata = {
         'n_spectra': len(df),
         'wavelength_range': (df.columns.min(), df.columns.max()),
@@ -1666,7 +1797,10 @@ def read_jcamp_dir(jcamp_dir):
         'detection_method': detection_method,
         'value_scale': value_scale,
         'xunits': xunits,
-        'file_metadata': file_metadata  # Store individual file metadata
+        'file_metadata': file_metadata,
+        'x_unit': x_unit,
+        'x_unit_confidence': x_unit_confidence,
+        'x_unit_detection_method': x_unit_method,
     }
 
     return df, metadata
@@ -1823,7 +1957,10 @@ def read_ascii_spectra(path):
         'file_format': path.suffix[1:],  # Remove leading dot
         'data_type': data_type,
         'type_confidence': type_confidence,
-        'detection_method': detection_method
+        'detection_method': detection_method,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return result, metadata
@@ -1917,7 +2054,10 @@ def _read_ascii_dir(directory):
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return df, metadata
@@ -2693,7 +2833,10 @@ def read_excel_spectra(
         'type_confidence': type_confidence,
         'detection_method': detection_method,
         'sheet_name': sheet_name,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return result, metadata
@@ -2962,7 +3105,10 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
         'detection_method': detection_method,
         'value_scale': value_scale,
         'duplicates_renamed': n_duplicates_renamed,
-        'duplicate_rename_mapping': duplicate_rename_mapping
+        'duplicate_rename_mapping': duplicate_rename_mapping,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     print(f"Successfully read {len(X)} spectra with {X.shape[1]} wavelengths from Excel file")
@@ -3055,6 +3201,28 @@ def read_spc_file(
     wavelengths = subfile.xarray
     intensities = subfile.yarray
 
+    # Read xtype/ytype for x-unit and data type detection
+    _SPC_XTYPE_MAP = {
+        'XWAVEN': 'cm-1', 'XNMETR': 'nm', 'XUMETR': 'um',
+        'XRAMANS': 'cm-1', 'XHERTZ': None, 'XSEC': None,
+    }
+    _SPC_YTYPE_MAP = {
+        'YABSRB': 'absorbance', 'YTRANS': 'transmittance',
+        'YREFLEC': 'reflectance', 'YEMISN': None,
+    }
+    x_unit = 'nm'
+    x_unit_confidence = 50.0
+    x_unit_method = 'default'
+    xtype_attr = getattr(spc, 'xtype', None)
+    ytype_attr = getattr(spc, 'ytype', None)
+    if xtype_attr is not None:
+        xtype_str = str(xtype_attr).split('.')[-1].upper()
+        mapped = _SPC_XTYPE_MAP.get(xtype_str)
+        if mapped:
+            x_unit = mapped
+            x_unit_confidence = 95.0
+            x_unit_method = 'spc_xtype'
+
     # Create DataFrame
     df = pd.DataFrame([intensities], columns=wavelengths, index=[path.stem])
     df = df[sorted(df.columns)]
@@ -3063,6 +3231,16 @@ def read_spc_file(
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
     value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
 
+    # Override data type with SPC ytype if available
+    if ytype_attr is not None:
+        ytype_str = str(ytype_attr).split('.')[-1].upper()
+        mapped_y = _SPC_YTYPE_MAP.get(ytype_str)
+        if mapped_y in ('absorbance', 'reflectance'):
+            data_type = mapped_y
+            type_confidence = 95.0
+            detection_method = 'spc_ytype'
+            value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+
     metadata = {
         'n_spectra': 1,
         'wavelength_range': (df.columns.min(), df.columns.max()),
@@ -3070,7 +3248,10 @@ def read_spc_file(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': x_unit,
+        'x_unit_confidence': x_unit_confidence,
+        'x_unit_detection_method': x_unit_method,
     }
 
     return df, metadata
@@ -3120,6 +3301,18 @@ def read_jcamp_file(
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
     value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
 
+    # Map JCAMP xunits to standard x_unit
+    _JCAMP_XUNIT_MAP = {
+        '1/CM': 'cm-1', 'CM-1': 'cm-1', 'CM^-1': 'cm-1',
+        'NANOMETERS': 'nm', 'NM': 'nm',
+        'MICROMETERS': 'um', 'UM': 'um',
+    }
+    raw_xunits = jcamp_data.get('xunits', '')
+    xunits_upper = str(raw_xunits).upper().strip() if raw_xunits else ''
+    x_unit = _JCAMP_XUNIT_MAP.get(xunits_upper, _heuristic_x_unit(df.columns))
+    x_unit_confidence = 90.0 if xunits_upper in _JCAMP_XUNIT_MAP else 50.0
+    x_unit_method = 'jcamp_xunits' if xunits_upper in _JCAMP_XUNIT_MAP else 'default'
+
     metadata = {
         'n_spectra': 1,
         'wavelength_range': (df.columns.min(), df.columns.max()),
@@ -3128,7 +3321,10 @@ def read_jcamp_file(
         'type_confidence': type_confidence,
         'detection_method': detection_method,
         'value_scale': value_scale,
-        'jcamp_header': {k: v for k, v in jcamp_data.items() if k not in ['x', 'y']}
+        'jcamp_header': {k: v for k, v in jcamp_data.items() if k not in ['x', 'y']},
+        'x_unit': x_unit,
+        'x_unit_confidence': x_unit_confidence,
+        'x_unit_detection_method': x_unit_method,
     }
 
     return df, metadata
@@ -3204,7 +3400,10 @@ def read_ascii_spectra(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
-        'value_scale': value_scale
+        'value_scale': value_scale,
+        'x_unit': 'nm',
+        'x_unit_confidence': 50.0,
+        'x_unit_detection_method': 'default',
     }
 
     return df, metadata
@@ -3262,6 +3461,9 @@ def read_opus_file(
         'detection_method': detection_method,
         'source_data_type': source_data_type,
         'value_scale': value_scale,
+        'x_unit': 'cm-1',
+        'x_unit_confidence': 99.0,
+        'x_unit_detection_method': 'opus_native',
         **file_metadata
     }
 
@@ -3302,6 +3504,7 @@ def read_perkinelmer_file(
     # Detect data type if not already provided
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
 
+    # PerkinElmer .sp files are typically wavenumber (cm⁻¹)
     # Merge metadata
     metadata = {
         'n_spectra': 1,
@@ -3310,6 +3513,9 @@ def read_perkinelmer_file(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
+        'x_unit': file_metadata.get('x_unit', 'cm-1'),
+        'x_unit_confidence': file_metadata.get('x_unit_confidence', 80.0),
+        'x_unit_detection_method': file_metadata.get('x_unit_detection_method', 'perkinelmer_default'),
         **file_metadata
     }
 
@@ -3353,6 +3559,7 @@ def read_agilent_file(
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
 
     # Merge metadata
+    # Agilent FTIR files are typically wavenumber (cm⁻¹)
     metadata = {
         'n_spectra': 1,
         'wavelength_range': file_metadata.get('wavenumber_range', (df.columns.min(), df.columns.max())),
@@ -3360,6 +3567,9 @@ def read_agilent_file(
         'data_type': data_type,
         'type_confidence': type_confidence,
         'detection_method': detection_method,
+        'x_unit': file_metadata.get('x_unit', 'cm-1'),
+        'x_unit_confidence': file_metadata.get('x_unit_confidence', 80.0),
+        'x_unit_detection_method': file_metadata.get('x_unit_detection_method', 'agilent_default'),
         **file_metadata
     }
 

@@ -325,6 +325,9 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
         'dominant_data_type': dominant_type,
         'n_failed': len(failed_files),
         'failed_files': failed_files[:10] if failed_files else [],
+        'x_unit': 'cm-1',
+        'x_unit_confidence': 99.0,
+        'x_unit_detection_method': 'opus_native',
     }
 
     print(f"Successfully read {len(df)} OPUS spectra")
