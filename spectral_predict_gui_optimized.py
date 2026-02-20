@@ -2540,6 +2540,8 @@ class SpectralPredictApp:
         # Append mode for loading multiple data sources
         self.append_mode = tk.BooleanVar(value=False)
         self.data_sources = []  # Track loaded data sources: [(path, n_samples), ...]
+        self.source_group_names = []        # Group name per loaded source
+        self.use_custom_group_names = False  # Whether user chose custom names
 
         # Analysis wavelength restriction (further filters for model training only)
         self.enable_analysis_wl_restriction = tk.BooleanVar(value=False)
@@ -9361,6 +9363,10 @@ class SpectralPredictApp:
                                           style='Modern.TButton')
         self.revert_data_btn.pack(side='left', padx=(0, 5))
 
+        ttk.Button(edit_toolbar, text="↺ Undo",
+                   command=self._undo_data_viewer,
+                   style='Modern.TButton').pack(side='left', padx=(0, 5))
+
         ttk.Separator(edit_toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
 
         # Column operations
@@ -9435,6 +9441,7 @@ class SpectralPredictApp:
             ("end_edit_cell", self._on_data_viewer_edit),
             ("end_paste", self._on_data_viewer_edit),
             ("end_delete", self._on_data_viewer_edit),
+            ("end_undo", self._on_data_viewer_edit),
         ])
 
         # Bind right-click for context menu on headers
@@ -16144,19 +16151,64 @@ class SpectralPredictApp:
             source_path = self.spectral_data_path.get() or self.combined_file_path or "Unknown"
 
             if self.append_mode.get() and hasattr(self, '_existing_X') and self._existing_X is not None:
+                # Save group state snapshot for rollback
+                _saved_group_names = list(self.source_group_names)
+                _saved_use_custom = self.use_custom_group_names
+
                 try:
+                    # Prompt for group names
+                    existing_group_name, new_group_name = self._prompt_for_group_names()
+
+                    # Inject _source_group into metadata
+                    existing_meta = self._existing_metadata_df
+                    new_meta = getattr(self, 'combined_metadata_df', None)
+                    is_first_append = len(self.source_group_names) == 1
+
+                    if is_first_append:
+                        # First append: inject group into BOTH existing and new metadata
+                        existing_group_df = self._build_group_metadata(
+                            self._existing_X.index, existing_group_name
+                        )
+                        new_group_df = self._build_group_metadata(
+                            self.X_original.index, new_group_name
+                        )
+
+                        if existing_meta is not None:
+                            existing_meta = existing_meta.copy()
+                            existing_meta['_source_group'] = existing_group_df['_source_group']
+                        else:
+                            existing_meta = existing_group_df
+
+                        if new_meta is not None:
+                            new_meta = new_meta.copy()
+                            new_meta['_source_group'] = new_group_df['_source_group']
+                        else:
+                            new_meta = new_group_df
+                    else:
+                        # Subsequent appends: inject group into new metadata only
+                        new_group_df = self._build_group_metadata(
+                            self.X_original.index, new_group_name
+                        )
+
+                        if new_meta is not None:
+                            new_meta = new_meta.copy()
+                            new_meta['_source_group'] = new_group_df['_source_group']
+                        else:
+                            new_meta = new_group_df
+
                     # Merge with existing data (including ref and metadata)
                     self.X_original, self.y, self.ref, merged_metadata = self._merge_spectral_data(
                         self._existing_X, self._existing_y,
                         self.X_original, self.y,
                         self._existing_ref, self.ref,
-                        self._existing_metadata_df, getattr(self, 'combined_metadata_df', None)
+                        existing_meta, new_meta
                     )
-                    # Update combined_metadata_df if it exists
+                    # Update combined_metadata_df
                     if merged_metadata is not None:
                         self.combined_metadata_df = merged_metadata
 
                     # Update data sources tracking
+                    self.source_group_names.append(new_group_name)
                     self.data_sources.append((source_path, new_n_samples))
                     self._update_data_sources_display()
                     print(f"> Appended {new_n_samples} samples from: {source_path}")
@@ -16164,16 +16216,20 @@ class SpectralPredictApp:
                     import traceback
                     traceback.print_exc()
                     messagebox.showerror("Append Error", f"Failed to merge data:\n{str(e)}")
-                    # Restore previous data
+                    # Restore previous data and group state
                     self.X_original = self._existing_X
                     self.y = self._existing_y
                     self.ref = self._existing_ref
                     if self._existing_metadata_df is not None:
                         self.combined_metadata_df = self._existing_metadata_df
+                    self.source_group_names = _saved_group_names
+                    self.use_custom_group_names = _saved_use_custom
                     return
             else:
-                # First load or replace mode - reset data sources
+                # First load or replace mode - reset data sources and group state
                 self.data_sources = [(source_path, new_n_samples)]
+                self.source_group_names = [""]  # Placeholder, not yet named
+                self.use_custom_group_names = False
                 self._update_data_sources_display()
 
             # Clean up temporary storage
@@ -19625,6 +19681,80 @@ class SpectralPredictApp:
 
     # ========== DATA SOURCE MANAGEMENT METHODS ==========
 
+    def _prompt_for_group_names(self) -> tuple[str, str]:
+        """Prompt the user for group names when appending datasets.
+
+        On 2nd load (first append): ask whether to use custom names.
+        On 3rd+ load: prompt for new name only (or auto-number).
+
+        Returns
+        -------
+        tuple[str, str]
+            (existing_group_name, new_group_name) — existing_group_name is
+            only meaningful on the first append (empty string otherwise).
+        """
+        group_count = len(self.source_group_names)
+
+        if group_count == 1:
+            # First append — ask if user wants custom names
+            answer = messagebox.askyesno(
+                "Name Data Groups",
+                "Would you like to name the data groups?\n\n"
+                "This adds a '_source_group' column so you can identify\n"
+                "which samples came from which file.\n\n"
+                "Yes = enter custom names\n"
+                "No  = auto-number (1, 2, 3, ...)"
+            )
+            if answer:
+                self.use_custom_group_names = True
+                existing_name = simpledialog.askstring(
+                    "Name Group 1",
+                    "Enter a name for the first (existing) dataset:"
+                )
+                if not existing_name:
+                    existing_name = "Group 1"
+                new_name = simpledialog.askstring(
+                    "Name Group 2",
+                    "Enter a name for the new dataset being appended:"
+                )
+                if not new_name:
+                    new_name = "Group 2"
+                return (existing_name, new_name)
+            else:
+                self.use_custom_group_names = False
+                return ("1", "2")
+        else:
+            # 3rd+ append
+            next_num = group_count + 1
+            if self.use_custom_group_names:
+                new_name = simpledialog.askstring(
+                    f"Name Group {next_num}",
+                    "Enter a name for the new dataset being appended:"
+                )
+                if not new_name:
+                    new_name = f"Group {next_num}"
+                return ("", new_name)
+            else:
+                return ("", str(next_num))
+
+    def _build_group_metadata(self, index: 'pd.Index', group_name: str) -> 'pd.DataFrame':
+        """Create a single-column DataFrame with _source_group for given indices.
+
+        Parameters
+        ----------
+        index : pd.Index
+            Sample indices to label.
+        group_name : str
+            The group label to assign.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with '_source_group' column.
+        """
+        import pandas as pd
+        return pd.DataFrame({'_source_group': group_name}, index=index)
+
     def _merge_spectral_data(self, X_existing, y_existing, X_new, y_new,
                              ref_existing=None, ref_new=None,
                              metadata_existing=None, metadata_new=None):
@@ -19846,6 +19976,8 @@ class SpectralPredictApp:
             self.ref = None
             self.combined_metadata_df = None
             self.data_sources = []
+            self.source_group_names = []
+            self.use_custom_group_names = False
             self._update_data_sources_display()
             self.tab1_status.config(text="Data cleared. Ready to load new data.")
 
@@ -27062,6 +27194,11 @@ For detailed documentation, see the User Guide.
         self.data_viewer_modified = False
         self.revert_data_btn.config(state='disabled')
         self.data_viewer_status.config(text="> Reverted to original data")
+
+    def _undo_data_viewer(self):
+        """Undo the last cell edit in the data viewer."""
+        self.data_viewer_sheet.undo()
+        self._apply_data_viewer_edits()
 
     def _add_data_viewer_column(self):
         """Add a new metadata column to the data viewer."""
