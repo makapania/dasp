@@ -28,17 +28,16 @@ try:
         get_optimized_preproc_config,
         PREPROC_TYPES,
         WINDOW_SIZES,
-        BASELINE_METHODS,
-        BASELINE_LAMBDAS,
-        SMOOTHING_OPTIONS,
-        SMOOTHING_WINDOWS,
+        DERIVATIVE_WINDOW_RANGES,
         N_GENES,
     )
-    HAS_CATBOOST = True
+    HAS_GA_PREPROCESSING = True
 except (ImportError, ModuleNotFoundError):
-    HAS_CATBOOST = False
+    HAS_GA_PREPROCESSING = False
 
-pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
+pytestmark = pytest.mark.skipif(
+    not HAS_GA_PREPROCESSING, reason="ga_preprocessing imports failed"
+)
 
 
 # =============================================================================
@@ -65,10 +64,6 @@ class TestChromosomeEncoding:
 
         assert 0 <= chrom[0] < len(PREPROC_TYPES), "Invalid preproc type index"
         assert 0 <= chrom[1] < len(WINDOW_SIZES), "Invalid window index"
-        assert 0 <= chrom[2] < len(BASELINE_METHODS), "Invalid baseline method"
-        assert 0 <= chrom[3] < len(BASELINE_LAMBDAS), "Invalid baseline lambda"
-        assert 0 <= chrom[4] < len(SMOOTHING_OPTIONS), "Invalid smoothing option"
-        assert 0 <= chrom[5] < len(SMOOTHING_WINDOWS), "Invalid smoothing window"
 
     def test_encode_decode_roundtrip(self):
         """Encoding and decoding should preserve chromosome information."""
@@ -87,13 +82,13 @@ class TestChromosomeEncoding:
 
     def test_valid_preprocessing_decoded(self):
         """Decoded preprocessing should produce valid transformations."""
-        # Test specific configurations
+        # Test specific configurations (2-gene encoding: [preproc_type, window])
         test_configs = [
-            np.array([0, 0, 0, 0, 0, 0], dtype=np.int32),  # raw, no processing
-            np.array([1, 0, 0, 0, 0, 0], dtype=np.int32),  # snv only
-            np.array([2, 1, 0, 0, 0, 0], dtype=np.int32),  # deriv1 with window
-            np.array([0, 0, 1, 0, 0, 0], dtype=np.int32),  # raw + baseline
-            np.array([0, 0, 0, 0, 1, 0], dtype=np.int32),  # raw + smoothing
+            np.array([0, 0], dtype=np.int32),   # raw
+            np.array([1, 0], dtype=np.int32),   # snv
+            np.array([2, 2], dtype=np.int32),   # deriv1 with window=9
+            np.array([3, 3], dtype=np.int32),   # deriv2 with window=11
+            np.array([6, 4], dtype=np.int32),   # snv_deriv1 with window=13
         ]
 
         X_test = np.random.randn(10, 50)
@@ -157,8 +152,8 @@ class TestFitnessEvaluation:
         y = y.values
 
         # Create chromosome that might cause issues
-        # (depends on implementation, but should not crash)
-        chrom = np.array([9, 0, 3, 7, 1, 8], dtype=np.int32)  # deriv4 + airpls + smoothing
+        # deriv4_snv (index 13) with smallest window (index 0 = 5)
+        chrom = np.array([13, 0], dtype=np.int32)
 
         fitness = evaluate_fitness(chrom, X, y, cv_folds=3, n_components=5)
 
@@ -295,14 +290,21 @@ class TestGeneticOperators:
 
         original = random_chromosome(rng)
 
-        # High mutation rate to ensure changes
-        mutated = mutate(original, mutation_rate=0.5, rng=rng)
+        # Use 100% mutation rate to guarantee all genes are re-randomized.
+        # With only 2 genes, lower rates have a significant chance of no change
+        # (both from the rate check and from re-drawing the same value).
+        mutated = mutate(original, mutation_rate=1.0, rng=rng)
 
         assert mutated.shape == original.shape, "Mutation should preserve shape"
 
-        # With 50% mutation rate, should have some changes
-        changes = np.sum(mutated != original)
-        assert changes > 0, "Mutation should change at least one gene"
+        # Run multiple trials to confirm mutation can produce changes
+        any_changed = False
+        for _ in range(20):
+            m = mutate(original, mutation_rate=1.0, rng=rng)
+            if not np.array_equal(m, original):
+                any_changed = True
+                break
+        assert any_changed, "Mutation should eventually change at least one gene"
 
     def test_mutation_respects_ranges(self):
         """Mutated genes should stay in valid ranges."""
@@ -313,10 +315,6 @@ class TestGeneticOperators:
 
         assert 0 <= mutated[0] < len(PREPROC_TYPES)
         assert 0 <= mutated[1] < len(WINDOW_SIZES)
-        assert 0 <= mutated[2] < len(BASELINE_METHODS)
-        assert 0 <= mutated[3] < len(BASELINE_LAMBDAS)
-        assert 0 <= mutated[4] < len(SMOOTHING_OPTIONS)
-        assert 0 <= mutated[5] < len(SMOOTHING_WINDOWS)
 
 
 # =============================================================================
@@ -359,8 +357,9 @@ class TestGAPreprocessingOptimization:
         assert isinstance(result["best_name"], str)
         assert result["best_transform"] is None or callable(result["best_transform"])
 
-        # Check history
-        assert len(result["history"]) == 6, "History should have 6 entries (gen 0-5)"
+        # Check history (gen 0 + up to n_generations entries, may be shorter with early stopping)
+        assert len(result["history"]) >= 1, "History should have at least 1 entry"
+        assert len(result["history"]) <= 6, "History should have at most 6 entries (gen 0-5)"
 
     def test_fitness_improves(self, synthetic_spectra_small):
         """Later generations should have better or equal fitness."""
@@ -434,10 +433,6 @@ class TestGAPreprocessingOptimization:
         genes = result["best_genes"]
         assert 0 <= genes[0] < len(PREPROC_TYPES)
         assert 0 <= genes[1] < len(WINDOW_SIZES)
-        assert 0 <= genes[2] < len(BASELINE_METHODS)
-        assert 0 <= genes[3] < len(BASELINE_LAMBDAS)
-        assert 0 <= genes[4] < len(SMOOTHING_OPTIONS)
-        assert 0 <= genes[5] < len(SMOOTHING_WINDOWS)
 
     def test_reproducibility_with_seed(self, synthetic_spectra_small):
         """GA should be reproducible with same random seed."""
