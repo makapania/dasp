@@ -13698,6 +13698,15 @@ class SpectralPredictApp:
         self.combined_data_file.set("")
         self.combined_file_path = None
 
+        # Clear reference file from any previous directory - will be re-detected below
+        self.reference_file.set("")
+        self.spectral_file_column.set("")
+        self.id_column.set("")
+        self.target_column.set("")
+        self.spectral_file_combo['values'] = []
+        self.id_combo['values'] = []
+        self.target_combo['values'] = []
+
         # Auto-detect file type
         # Priority: ASD > CSV > SPC
 
