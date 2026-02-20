@@ -9,15 +9,19 @@ This script tests:
 For scientific research, these properties are CRITICAL.
 """
 
+import sys
+
 import numpy as np
 import pandas as pd
-import sys
-from pathlib import Path
+import pytest
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+try:
+    from spectral_predict.search import run_search
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
 
-from spectral_predict.search import run_search
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
 
 
 def create_synthetic_data(n_samples=100, n_features=50, random_seed=42):

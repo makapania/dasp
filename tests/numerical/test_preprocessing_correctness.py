@@ -479,14 +479,15 @@ class TestInputValidation:
             savgol.fit_transform(X_input)
 
     def test_savgol_window_too_large(self, derivatives_gold_standard: dict):
-        """Verify error when window > number of features."""
+        """Verify auto-adjustment when window > number of features."""
         X_input = derivatives_gold_standard["input"]
 
-        # Window larger than number of features
+        # Window larger than number of features now auto-adjusts instead of raising
         savgol = SavgolDerivative(deriv=1, window=200, polyorder=2)
 
-        with pytest.raises(ValueError, match="Window length .* must be <= number of features"):
-            savgol.fit_transform(X_input)
+        # Should auto-adjust the window and produce valid output
+        result = savgol.fit_transform(X_input)
+        assert result.shape == X_input.shape, "Auto-adjusted window should preserve shape"
 
     def test_smooth_window_too_small(self, derivatives_gold_standard: dict):
         """Verify error when smoothing window < polyorder + 2."""

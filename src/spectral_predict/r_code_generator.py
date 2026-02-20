@@ -118,6 +118,10 @@ cat("Running Python export via reticulate...\\n")
 py_run_string(py_code)
 '''
 
+    def _get_required_packages(self) -> list[str]:
+        """Return list of required R packages for the reticulate wrapper."""
+        return ['reticulate', 'base64enc']
+
     def generate_script(self) -> str:
         """Generate the R wrapper script."""
         return self._render_python_wrapper()

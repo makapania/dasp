@@ -80,15 +80,16 @@ def test_read_spc_dir_with_existing_function(tmp_path):
         spc_path = spc_dir / f"sample_{i:03d}.spc"
         create_mock_spc_file(spc_path, [], [])
 
-    # Try to read - will fail if pyspectra not installed
+    # Try to read - will fail if spc-io not installed
     try:
-        result = read_spc_dir(spc_dir)
-        # If successful, pyspectra is installed
+        result, metadata = read_spc_dir(spc_dir)
+        # If successful, spc-io is installed
         assert isinstance(result, pd.DataFrame)
+        assert isinstance(metadata, dict)
     except (ImportError, ValueError) as e:
-        # Expected if pyspectra not installed or files are invalid
-        if "pyspectra" in str(e):
-            pytest.skip("pyspectra not installed")
+        # Expected if spc-io not installed or files are invalid
+        if "spc-io" in str(e) or "pyspectra" in str(e):
+            pytest.skip("spc-io not installed")
         elif "Failed to read SPC files" in str(e):
             # Mock files aren't valid SPC files
             pass

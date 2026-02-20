@@ -8,8 +8,8 @@ import unittest
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the GUI module
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to path for spectral_predict_gui_optimized (lives at repo root)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from spectral_predict_gui_optimized import SpectralPredictApp
 

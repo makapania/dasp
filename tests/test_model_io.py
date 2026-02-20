@@ -19,10 +19,6 @@ import json
 import joblib
 from pathlib import Path
 
-import sys
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
 from spectral_predict.model_io import (
     save_model,
     load_model,
@@ -730,7 +726,7 @@ class TestErrorHandling:
                 columns=[f'col_{i}' for i in range(50)]
             )
 
-            with pytest.raises(ValueError, match="must be numeric wavelengths"):
+            with pytest.raises(ValueError, match="no numeric wavelength columns"):
                 predict_with_model(model_dict, X_bad)
 
         finally:
@@ -1104,7 +1100,7 @@ class TestWavelengthSelection:
 
         required_wl = [1500.0, 1501.0, 1502.0, 1503.0, 1504.0]
 
-        with pytest.raises(ValueError, match="must be numeric wavelengths"):
+        with pytest.raises(ValueError, match="no numeric wavelength columns"):
             _select_wavelengths_from_dataframe(df, required_wl)
 
     def test_select_wavelengths_not_found_in_range(self):

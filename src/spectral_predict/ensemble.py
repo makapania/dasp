@@ -1905,7 +1905,11 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
             # Use cross-validation to get realistic metrics
             if n_cv_folds >= 2:
                 kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                cv_predictions = np.full(len(y_train), np.nan, dtype=object)
+                # Initialize with same dtype as y_train to avoid "unknown targets" error
+                # Use the most common class as fill value (will be overwritten by all folds)
+                y_train_arr = np.asarray(y_train)
+                cv_predictions = np.empty(len(y_train), dtype=y_train_arr.dtype)
+                cv_filled = np.zeros(len(y_train), dtype=bool)
 
                 for train_idx, val_idx in kf.split(X_train):
                     # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
@@ -1933,6 +1937,16 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                     else:
                         # Fallback: use main ensemble for this fold
                         cv_predictions[val_idx] = ensemble.predict(X_cv_val)
+                    cv_filled[val_idx] = True
+
+                # Safety check: fill any unfilled indices with main ensemble predictions
+                if not np.all(cv_filled):
+                    unfilled = ~cv_filled
+                    if hasattr(X_train, 'iloc'):
+                        X_unfilled = X_train.iloc[unfilled]
+                    else:
+                        X_unfilled = X_train[unfilled]
+                    cv_predictions[unfilled] = ensemble.predict(X_unfilled)
 
                 # Calculate CV metrics
                 accuracy = accuracy_score(y_train, cv_predictions)

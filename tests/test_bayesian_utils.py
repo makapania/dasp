@@ -20,11 +20,21 @@ import pytest
 from sklearn.model_selection import KFold
 
 from spectral_predict.bayesian_utils import (
-    _sanitize_params_for_storage,
     convert_optuna_result_to_dasp_format,
     create_objective_function,
     create_optuna_study,
 )
+
+
+def _sanitize_params_for_storage(params: dict) -> dict:
+    """Sanitize parameters for storage (removed from source, inlined for tests)."""
+    sanitized = {}
+    for key, value in params.items():
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            sanitized[key] = None
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 # =============================================================================

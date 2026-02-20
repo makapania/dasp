@@ -69,7 +69,7 @@ def test_read_asd_dir_multiple_files(tmp_path):
                 f.write(f"{wl:.2f} {ref:.6f}\n")
 
     # Read directory
-    df = read_asd_dir(tmp_path, reader_mode="auto")
+    df, metadata = read_asd_dir(tmp_path, reader_mode="auto")
 
     assert df.shape == (3, 2001)
     assert list(df.index) == ["sample_000", "sample_001", "sample_002"]
@@ -99,7 +99,7 @@ def test_read_asd_dir_mixed_sig_asd(tmp_path):
             f.write(f"{wl:.2f} {ref:.6f}\n")
 
     # Read directory
-    df = read_asd_dir(tmp_path)
+    df, metadata = read_asd_dir(tmp_path)
 
     assert df.shape[0] == 3  # 3 samples
     assert "sample_0" in df.index

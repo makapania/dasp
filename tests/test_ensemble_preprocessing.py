@@ -11,8 +11,8 @@ import pytest
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor
 
-from src.spectral_predict.preprocessing_wrapper import PreprocessorConfig
-from src.spectral_predict.ensemble import (
+from spectral_predict.preprocessing_wrapper import PreprocessorConfig
+from spectral_predict.ensemble import (
     extract_preprocessor_config,
     SimpleAverageEnsemble,
     create_ensemble

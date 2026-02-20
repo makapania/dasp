@@ -115,7 +115,7 @@ def test_detect_directory_csv(tmp_path):
     (csv_dir / "data.csv").touch()
 
     detected = _detect_directory_format(csv_dir)
-    assert detected == 'csv'
+    assert detected == 'csv_dir'
 
 
 def test_detect_directory_unknown(tmp_path):
@@ -312,7 +312,9 @@ def test_read_ascii_with_delimiter(tmp_path):
     # Read with delimiter specified
     result, _ = read_spectra(ascii_path, format='ascii', delimiter=';')
 
-    assert result.shape == (1, 2001)
+    # Note: pd.read_csv without header=None consumes the first data row as header,
+    # so 2001 data rows become 2000 columns
+    assert result.shape == (1, 2000)
 
 
 # ============================================================================

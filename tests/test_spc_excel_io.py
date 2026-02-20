@@ -10,16 +10,11 @@ Usage:
     python test_spc_excel_io.py
 """
 
-import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import tempfile
 import shutil
-
-# Add src to path
-src_path = Path(__file__).parent / "src"
-sys.path.insert(0, str(src_path))
 
 from spectral_predict.io import (
     read_excel_spectra,

@@ -5,13 +5,6 @@ are properly integrated and can be loaded from Results Tab into Model Developmen
 This test verifies the fixes for the catastrophic R² failures.
 """
 
-import sys
-from pathlib import Path
-
-# Add src to path
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
 import numpy as np
 from spectral_predict.model_registry import (
     get_supported_models,
@@ -183,8 +176,9 @@ def test_hyperparameter_grids():
     # Get grids for new models
     grids = get_model_grids(
         task_type='regression',
+        n_features=20,
         enabled_models=new_models,
-        tier='fast'  # Use fast tier for testing
+        tier='quick'  # Use quick tier for testing
     )
 
     for model_name in new_models:

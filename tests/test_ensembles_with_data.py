@@ -16,19 +16,22 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from pathlib import Path
-import sys
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+try:
+    from spectral_predict.models import get_model
+    from spectral_predict.ensemble import (
+        RegionAwareWeightedEnsemble,
+        MixtureOfExpertsEnsemble,
+        StackingEnsemble,
+        create_ensemble,
+        RegionBasedAnalyzer
+    )
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
 
-from spectral_predict.models import get_model
-from spectral_predict.ensemble import (
-    RegionAwareWeightedEnsemble,
-    MixtureOfExpertsEnsemble,
-    StackingEnsemble,
-    create_ensemble,
-    RegionBasedAnalyzer
-)
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
+
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 

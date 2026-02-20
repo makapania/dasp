@@ -15,19 +15,25 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spectral_predict.nsga2_search import (
-    MODEL_TYPES,
-    PREPROC_TYPES,
-    WINDOW_SIZES,
-    _build_model,
-    _compute_solution_r2,
-    _get_preprocessing_transform,
-    convert_nsga2_to_v1_format,
-    decode_solution,
-    find_knee_point,
-    pareto_to_dataframe,
-    run_nsga2_search,
-)
+try:
+    from spectral_predict.nsga2_search import (
+        MODEL_TYPES,
+        PREPROC_TYPES,
+        WINDOW_SIZES,
+        _build_model,
+        _compute_solution_r2,
+        _get_preprocessing_transform,
+        convert_nsga2_to_v1_format,
+        decode_solution,
+        find_knee_point,
+        pareto_to_dataframe,
+        run_nsga2_search,
+    )
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
+
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
 
 
 # =============================================================================
@@ -119,6 +125,7 @@ class TestNSGA2Search:
             random_state=42,
             verbose=0,
             models=["PLS", "Ridge"],
+            selection_bias=2.0,  # Use knee point selection (bias=0 picks min-error, which gives knee_idx=-1)
         )
 
         knee_idx = result["knee_idx"]
@@ -559,6 +566,7 @@ class TestResultConversion:
             random_state=42,
             verbose=0,
             models=["PLS", "Ridge"],
+            selection_bias=2.0,  # Use knee point selection for Is_Knee marking
         )
 
         df = convert_nsga2_to_v1_format(
@@ -579,7 +587,7 @@ class TestResultConversion:
         required_cols = [
             "Task",
             "Model",
-            "Preprocessing",
+            "Preprocess",
             "RMSE",
             "n_vars",
             "SubsetTag",
@@ -605,6 +613,7 @@ class TestResultConversion:
             random_state=42,
             verbose=0,
             models=["PLS"],
+            selection_bias=2.0,  # Use knee point selection for Is_Knee marking
         )
 
         df = pareto_to_dataframe(

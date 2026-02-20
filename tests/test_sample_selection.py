@@ -193,7 +193,7 @@ class TestDUPLEX:
         X = np.random.randn(10, 5)
 
         with pytest.raises(ValueError, match="Invalid split"):
-            duplex(X, cal_ratio=0.99)  # Would give 0 validation samples
+            duplex(X, cal_ratio=1.0)  # Would give 0 validation samples (n_cal=10, n_val=0)
 
 
 class TestSPXY:

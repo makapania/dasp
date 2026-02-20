@@ -15,10 +15,6 @@ import pandas as pd
 import tempfile
 import shutil
 
-# Add src to path
-src_path = Path(__file__).parent / "src"
-sys.path.insert(0, str(src_path))
-
 from spectral_predict.io import (
     read_jcamp_file,
     read_jcamp_dir,
@@ -66,14 +62,14 @@ def test_jcamp_write_read():
     # Create DataFrame
     df = pd.DataFrame(spectra_dict, index=wavelengths).T
 
-    print(f"✓ Created synthetic data: {df.shape[0]} spectra with {df.shape[1]} wavelengths")
+    print(f"Created synthetic data: {df.shape[0]} spectra with {df.shape[1]} wavelengths")
     print(f"  Wavelength range: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm")
 
     # Write to JCAMP files
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
-        print(f"\n✓ Writing JCAMP-DX files to: {tmpdir_path}")
+        print(f"\nWriting JCAMP-DX files to: {tmpdir_path}")
 
         created_files = write_jcamp(
             df,
@@ -83,46 +79,36 @@ def test_jcamp_write_read():
             yunits="REFLECTANCE"
         )
 
-        print(f"✓ Wrote {len(created_files)} JCAMP files")
+        print(f"Wrote {len(created_files)} JCAMP files")
+        assert len(created_files) == n_spectra
 
-        # Read back individual file
-        print(f"\n✓ Reading individual JCAMP file: {created_files[0].name}")
-        spectrum, metadata = read_jcamp_file(created_files[0])
+        # Read back individual file (requires jcamp package)
+        try:
+            print(f"\nReading individual JCAMP file: {created_files[0].name}")
+            spectrum, metadata = read_jcamp_file(created_files[0])
 
-        print(f"  Metadata keys: {list(metadata.keys())}")
-        print(f"  X-axis units: {metadata['xunits']}")
-        print(f"  Y-axis units: {metadata['yunits']}")
-        print(f"  Number of points: {len(spectrum)}")
+            print(f"  Metadata keys: {list(metadata.keys())}")
+            print(f"  Number of points: {spectrum.shape[1] if hasattr(spectrum, 'shape') else len(spectrum)}")
 
-        # Verify data integrity
-        original_spectrum = df.iloc[0].values
-        read_spectrum = spectrum.values
+            # Read entire directory
+            print(f"\nReading entire JCAMP directory")
+            df_read, dir_metadata = read_jcamp_dir(tmpdir_path)
 
-        # Allow for small floating point differences
-        max_diff = np.max(np.abs(original_spectrum - read_spectrum))
-        print(f"  Max difference from original: {max_diff:.2e}")
+            print(f"  Loaded {df_read.shape[0]} spectra with {df_read.shape[1]} wavelengths")
 
-        if max_diff < 1e-5:
-            print("  ✓ Data integrity verified!")
-        else:
-            print("  ⚠ WARNING: Significant difference detected")
+            # Verify all spectra match
+            assert df_read.shape == df.shape, (
+                f"Shape mismatch - expected {df.shape}, got {df_read.shape}"
+            )
+            print("  Shape matches original!")
 
-        # Read entire directory
-        print(f"\n✓ Reading entire JCAMP directory")
-        df_read, dir_metadata = read_jcamp_dir(tmpdir_path)
+        except (ImportError, ValueError) as e:
+            if "jcamp" in str(e).lower():
+                import pytest
+                pytest.skip("jcamp package not installed")
+            raise
 
-        print(f"  Loaded {df_read.shape[0]} spectra with {df_read.shape[1]} wavelengths")
-        print(f"  Data type detected: {dir_metadata['data_type']} (confidence: {dir_metadata['type_confidence']:.1f}%)")
-        print(f"  X-axis units: {dir_metadata['xunits']}")
-
-        # Verify all spectra match
-        if df_read.shape == df.shape:
-            print("  ✓ Shape matches original!")
-        else:
-            print(f"  ⚠ WARNING: Shape mismatch - expected {df.shape}, got {df_read.shape}")
-
-    print("\n✓ TEST 1 PASSED")
-    return True
+    print("\nTEST 1 PASSED")
 
 
 def test_ascii_formats():
@@ -226,7 +212,7 @@ def test_jcamp_metadata_preservation():
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
-        print(f"✓ Writing JCAMP with custom metadata:")
+        print(f"Writing JCAMP with custom metadata:")
         print(f"  {custom_metadata}")
 
         created_files = write_jcamp(
@@ -237,26 +223,26 @@ def test_jcamp_metadata_preservation():
             metadata=custom_metadata
         )
 
-        # Read back and check metadata
-        spectrum_read, metadata_read = read_jcamp_file(created_files[0])
+        assert len(created_files) == 1
 
-        print(f"\n✓ Read back metadata:")
-        for key in custom_metadata.keys():
-            if key in metadata_read:
-                print(f"  {key}: {metadata_read[key]}")
-            else:
-                print(f"  ⚠ {key}: NOT FOUND")
+        # Read back and check metadata (requires jcamp package)
+        try:
+            spectrum_read, metadata_read = read_jcamp_file(created_files[0])
 
-        # Check standard metadata
-        print(f"\n✓ Standard JCAMP metadata:")
-        print(f"  xunits: {metadata_read['xunits']}")
-        print(f"  yunits: {metadata_read['yunits']}")
-        print(f"  npoints: {metadata_read['npoints']}")
-        print(f"  firstx: {metadata_read['firstx']}")
-        print(f"  lastx: {metadata_read['lastx']}")
+            print(f"\nRead back metadata:")
+            for key in custom_metadata.keys():
+                if key in metadata_read:
+                    print(f"  {key}: {metadata_read[key]}")
+                else:
+                    print(f"  {key}: NOT FOUND")
 
-    print("\n✓ TEST 3 PASSED")
-    return True
+        except (ImportError, ValueError) as e:
+            if "jcamp" in str(e).lower():
+                import pytest
+                pytest.skip("jcamp package not installed")
+            raise
+
+    print("\nTEST 3 PASSED")
 
 
 def test_edge_cases():

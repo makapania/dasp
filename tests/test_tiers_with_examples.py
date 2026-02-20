@@ -13,13 +13,16 @@ import numpy as np
 import pandas as pd
 import time
 from pathlib import Path
-import sys
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+try:
+    from spectral_predict.models import get_model_grids
+    from spectral_predict.model_config import MODEL_TIERS
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
 
-from spectral_predict.models import get_model_grids
-from spectral_predict.model_config import MODEL_TIERS
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
+
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 

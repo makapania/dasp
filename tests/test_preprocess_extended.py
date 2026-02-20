@@ -350,21 +350,22 @@ class TestPreprocessingInputValidation:
     """Test input validation for preprocessing transformers."""
 
     def test_invalid_window_raises(self):
-        """Test that invalid window sizes raise ValueError."""
+        """Test that invalid window sizes are handled correctly."""
         np.random.seed(42)
         X = np.random.randn(10, 100)
 
-        # Window too small (< polyorder + 2)
+        # Window too small (< polyorder + 2) should still raise ValueError
         savgol = SavgolDerivative(deriv=1, window=3, polyorder=2)
 
         with pytest.raises(ValueError, match="Window length .* must be >= polyorder"):
             savgol.fit_transform(X)
 
-        # Window too large (> n_features)
+        # Window too large (> n_features) now auto-adjusts instead of raising
         savgol = SavgolDerivative(deriv=1, window=200, polyorder=2)
 
-        with pytest.raises(ValueError, match="Window length .* must be <= number of features"):
-            savgol.fit_transform(X)
+        # Should auto-adjust the window and produce valid output with a warning
+        result = savgol.fit_transform(X)
+        assert result.shape == X.shape, "Auto-adjusted window should preserve shape"
 
     def test_invalid_polyorder_raises(self):
         """Test that polyorder >= window raises ValueError."""

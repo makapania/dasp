@@ -9,7 +9,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from spectral_predict.search import _apply_edge_mask
+try:
+    from spectral_predict.search import _apply_edge_mask
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
+
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
 
 
 class TestEdgeMasking:

@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from src.spectral_predict.outlier_detection import (
+from spectral_predict.outlier_detection import (
     check_y_data_consistency,
     compute_mahalanobis_distance,
     compute_q_residuals,

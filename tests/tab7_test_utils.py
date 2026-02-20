@@ -12,11 +12,6 @@ import numpy as np
 import pandas as pd
 import time
 from pathlib import Path
-import sys
-
-# Add src to path
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
 
 from spectral_predict.search import run_search
 from spectral_predict.model_io import save_model, load_model
@@ -149,19 +144,23 @@ def run_minimal_analysis(X, y, models=None, preprocessing=None, n_folds=3, verbo
         models = ['PLS', 'Ridge']
 
     if preprocessing is None:
-        preprocessing = ['raw', 'sg1']
+        preprocessing = {'raw': True, 'sg1': True}
 
-    # Run analysis
-    results = run_search(
+    # Convert list to dict if needed
+    if isinstance(preprocessing, list):
+        preprocessing = {p: True for p in preprocessing}
+
+    # Run analysis (run_search returns (df_ranked, label_encoder) tuple)
+    results, _ = run_search(
         X=X,
         y=y,
         task_type='regression',
-        models=models,
+        models_to_test=models,
         preprocessing_methods=preprocessing,
-        n_folds=n_folds,
-        subset_methods=['full'],  # No subsets for speed
+        folds=n_folds,
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
         max_n_components=5,
-        verbose=verbose
     )
 
     return results
@@ -189,17 +188,17 @@ def run_analysis_with_subsets(X, y, subset_sizes=[50], n_folds=3, verbose=False)
     results : pd.DataFrame
         Analysis results with subset models
     """
-    results = run_search(
+    results, _ = run_search(
         X=X,
         y=y,
         task_type='regression',
-        models=['PLS', 'Ridge'],
-        preprocessing_methods=['raw', 'sg1'],
-        n_folds=n_folds,
-        subset_methods=['top', 'forward'],
-        subset_sizes=subset_sizes,
+        models_to_test=['PLS', 'Ridge'],
+        preprocessing_methods={'raw': True, 'sg1': True},
+        folds=n_folds,
+        enable_variable_subsets=True,
+        enable_region_subsets=False,
+        variable_counts=subset_sizes,
         max_n_components=5,
-        verbose=verbose
     )
 
     return results

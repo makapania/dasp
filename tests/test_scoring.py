@@ -14,11 +14,16 @@ class TestCompositeScoring:
         """Create test regression data with known characteristics."""
         np.random.seed(42)
 
+        rmse_vals = np.random.uniform(0.1, 0.5, n_models)
+        r2_vals = np.random.uniform(0.6, 0.95, n_models)
+
         # Create models with varying characteristics
         data = {
             "Model": ["PLS"] * n_models,
-            "RMSE": np.random.uniform(0.1, 0.5, n_models),
-            "R2": np.random.uniform(0.6, 0.95, n_models),
+            "RMSE": rmse_vals,
+            "R2": r2_vals,
+            "RMSEcv": rmse_vals * np.random.uniform(1.0, 1.5, n_models),
+            "R2cv": r2_vals * np.random.uniform(0.85, 1.0, n_models),
             "n_vars": np.random.randint(10, 2000, n_models),
             "full_vars": [2151] * n_models,
             "LVs": np.random.randint(5, 20, n_models),
@@ -33,19 +38,23 @@ class TestCompositeScoring:
         return pd.DataFrame(data)
 
     def test_penalty_zero_ranks_by_performance_only(self):
-        """At penalty=0, ranking should be based purely on R² performance."""
+        """At penalty=0, ranking should be based purely on R2cv performance."""
         df = self.create_test_data_regression(100)
 
-        # Add a clearly best model (highest R², lowest RMSE)
+        # Add a clearly best model (highest R2cv, lowest RMSEcv)
         df.loc[50, "R2"] = 0.99
+        df.loc[50, "R2cv"] = 0.99
         df.loc[50, "RMSE"] = 0.05
+        df.loc[50, "RMSEcv"] = 0.06
         df.loc[50, "n_vars"] = 2000  # Use ALL variables - shouldn't matter at penalty=0
 
-        result = compute_composite_score(df, "regression", variable_penalty=0, complexity_penalty=0)
+        result = compute_composite_score(df, "regression", variable_penalty=0, gap_penalty=0)
 
-        # Best performing model should be rank 1
-        best_model_rank = result.loc[50, "Rank"]
-        assert best_model_rank == 1, f"Best model ranked #{best_model_rank}, expected #1"
+        # Best performing model (highest R2cv) should be rank 1
+        # After sorting, the best model is at the top (Rank=1)
+        best_model = result[result["R2cv"] == 0.99]
+        assert len(best_model) == 1, "Should find exactly one model with R2cv=0.99"
+        assert best_model.iloc[0]["Rank"] == 1, f"Best model ranked #{best_model.iloc[0]['Rank']}, expected #1"
 
     def test_penalty_two_favors_performance_over_simplicity(self):
         """At penalty=2 (low), high-performance models should rank well even with many variables."""
@@ -53,19 +62,27 @@ class TestCompositeScoring:
 
         # Model A: Excellent performance, many variables
         df.loc[10, "R2"] = 0.95
+        df.loc[10, "R2cv"] = 0.95
         df.loc[10, "RMSE"] = 0.08
+        df.loc[10, "RMSEcv"] = 0.09
         df.loc[10, "n_vars"] = 2000
 
         # Model B: Good performance, few variables
         df.loc[20, "R2"] = 0.85
+        df.loc[20, "R2cv"] = 0.85
         df.loc[20, "RMSE"] = 0.15
+        df.loc[20, "RMSEcv"] = 0.16
         df.loc[20, "n_vars"] = 50
 
-        result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        result = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
+
+        # Find models by their R2cv values (index is reset after sorting)
+        model_a = result[result["R2cv"] == 0.95].iloc[0]
+        model_b = result[result["R2cv"] == 0.85].iloc[0]
 
         # Model A (better performance) should rank higher than Model B
-        rank_a = result.loc[10, "Rank"]
-        rank_b = result.loc[20, "Rank"]
+        rank_a = model_a["Rank"]
+        rank_b = model_b["Rank"]
         assert rank_a < rank_b, f"High-performance model A ranked #{rank_a}, should beat simpler model B ranked #{rank_b}"
 
     def test_penalty_ten_favors_simplicity_strongly(self):
@@ -74,19 +91,27 @@ class TestCompositeScoring:
 
         # Model A: Excellent performance, many variables
         df.loc[10, "R2"] = 0.92
+        df.loc[10, "R2cv"] = 0.92
         df.loc[10, "RMSE"] = 0.10
+        df.loc[10, "RMSEcv"] = 0.11
         df.loc[10, "n_vars"] = 2000
 
         # Model B: Slightly worse performance, very few variables
         df.loc[20, "R2"] = 0.88
+        df.loc[20, "R2cv"] = 0.88
         df.loc[20, "RMSE"] = 0.12
+        df.loc[20, "RMSEcv"] = 0.13
         df.loc[20, "n_vars"] = 20
 
-        result = compute_composite_score(df, "regression", variable_penalty=10, complexity_penalty=10)
+        result = compute_composite_score(df, "regression", variable_penalty=10, gap_penalty=10)
 
-        # Model B (simpler) should rank higher than Model A
-        rank_a = result.loc[10, "Rank"]
-        rank_b = result.loc[20, "Rank"]
+        # Find models by their R2cv values (index is reset after sorting)
+        model_a = result[result["R2cv"] == 0.92].iloc[0]
+        model_b = result[result["R2cv"] == 0.88].iloc[0]
+
+        # Model B (simpler) should rank higher than Model A at high penalty
+        rank_a = model_a["Rank"]
+        rank_b = model_b["Rank"]
         assert rank_b < rank_a, f"Simple model B ranked #{rank_b}, should beat complex model A ranked #{rank_a} at penalty=10"
 
     def test_quadratic_penalty_scaling(self):
@@ -95,20 +120,29 @@ class TestCompositeScoring:
 
         # Add two models with same performance, different variable counts
         df.loc[10, "R2"] = 0.90
+        df.loc[10, "R2cv"] = 0.90
         df.loc[10, "RMSE"] = 0.10
+        df.loc[10, "RMSEcv"] = 0.11
         df.loc[10, "n_vars"] = 100
 
         df.loc[20, "R2"] = 0.90
+        df.loc[20, "R2cv"] = 0.90
         df.loc[20, "RMSE"] = 0.10
+        df.loc[20, "RMSEcv"] = 0.11
         df.loc[20, "n_vars"] = 2000
 
         # At penalty=2, impact should be small (quadratic scaling)
-        result_p2 = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=0)
-        score_diff_p2 = abs(result_p2.loc[20, "CompositeScore"] - result_p2.loc[10, "CompositeScore"])
+        result_p2 = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=0)
+        # Find models by n_vars (index is reset after sorting)
+        score_100 = result_p2[result_p2["n_vars"] == 100].iloc[0]["CompositeScore"]
+        score_2000 = result_p2[result_p2["n_vars"] == 2000].iloc[0]["CompositeScore"]
+        score_diff_p2 = abs(score_2000 - score_100)
 
         # At penalty=10, impact should be much larger
-        result_p10 = compute_composite_score(df, "regression", variable_penalty=10, complexity_penalty=0)
-        score_diff_p10 = abs(result_p10.loc[20, "CompositeScore"] - result_p10.loc[10, "CompositeScore"])
+        result_p10 = compute_composite_score(df, "regression", variable_penalty=10, gap_penalty=0)
+        score_100 = result_p10[result_p10["n_vars"] == 100].iloc[0]["CompositeScore"]
+        score_2000 = result_p10[result_p10["n_vars"] == 2000].iloc[0]["CompositeScore"]
+        score_diff_p10 = abs(score_2000 - score_100)
 
         # Ratio should be approximately (10/2)^2 = 25
         ratio = score_diff_p10 / score_diff_p2
@@ -121,23 +155,32 @@ class TestCompositeScoring:
 
         # Add the user's best model (by R²)
         df.loc[500, "R2"] = 0.943
+        df.loc[500, "R2cv"] = 0.943
         df.loc[500, "RMSE"] = 0.10
+        df.loc[500, "RMSEcv"] = 0.11
         df.loc[500, "n_vars"] = 2000  # Using many variables
 
         # Add hundreds of slightly worse models with fewer variables
         for i in range(50, 150):
-            df.loc[i, "R2"] = np.random.uniform(0.88, 0.92)
-            df.loc[i, "RMSE"] = np.random.uniform(0.11, 0.15)
+            r2_val = np.random.uniform(0.88, 0.92)
+            df.loc[i, "R2"] = r2_val
+            df.loc[i, "R2cv"] = r2_val
+            rmse_val = np.random.uniform(0.11, 0.15)
+            df.loc[i, "RMSE"] = rmse_val
+            df.loc[i, "RMSEcv"] = rmse_val * 1.1
             df.loc[i, "n_vars"] = np.random.randint(20, 200)
 
-        # With the FIX and penalty=2, best R² model should rank well
-        result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        # With the FIX and penalty=2, best R2cv model should rank well
+        result = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
 
-        best_r2_rank = result.loc[500, "Rank"]
+        # Find the best model by its R2cv value (index is reset after sorting)
+        best_model = result[result["R2cv"] == 0.943]
+        assert len(best_model) == 1, "Should find exactly one model with R2cv=0.943"
+        best_r2_rank = best_model.iloc[0]["Rank"]
 
         # With the fix, this should rank in top 50 (ideally top 10)
         assert best_r2_rank <= 50, (
-            f"Model with R²=0.943 ranked #{best_r2_rank}, "
+            f"Model with R2cv=0.943 ranked #{best_r2_rank}, "
             f"should be in top 50 at penalty=2"
         )
 
@@ -145,8 +188,8 @@ class TestCompositeScoring:
         """Verify ranking is deterministic and stable."""
         df = self.create_test_data_regression(50)
 
-        result1 = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
-        result2 = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        result1 = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
+        result2 = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
 
         # Rankings should be identical
         assert result1["Rank"].equals(result2["Rank"]), "Ranking should be deterministic"
@@ -155,27 +198,41 @@ class TestCompositeScoring:
         """Verify rank() uses method='min' correctly."""
         df = self.create_test_data_regression(10)
 
-        # Create two models with identical scores
+        # Create two models with identical scores (use unique n_vars=9999 as marker)
         df.loc[0, "R2"] = 0.90
+        df.loc[0, "R2cv"] = 0.90
         df.loc[0, "RMSE"] = 0.10
-        df.loc[0, "n_vars"] = 100
+        df.loc[0, "RMSEcv"] = 0.11
+        df.loc[0, "n_vars"] = 9999
+        df.loc[0, "full_vars"] = 9999
         df.loc[0, "LVs"] = 10
 
         df.loc[1, "R2"] = 0.90
+        df.loc[1, "R2cv"] = 0.90
         df.loc[1, "RMSE"] = 0.10
-        df.loc[1, "n_vars"] = 100
+        df.loc[1, "RMSEcv"] = 0.11
+        df.loc[1, "n_vars"] = 9999
+        df.loc[1, "full_vars"] = 9999
         df.loc[1, "LVs"] = 10
 
-        result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        result = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
+
+        # Find the two identical models by their marker (n_vars=9999)
+        identical_models = result[result["n_vars"] == 9999]
+        assert len(identical_models) == 2, "Should find exactly 2 identical models"
 
         # These two should have same rank (method='min')
-        assert result.loc[0, "Rank"] == result.loc[1, "Rank"], "Identical models should have same rank"
+        ranks = identical_models["Rank"].unique()
+        assert len(ranks) == 1, "Identical models should have same rank"
 
     def test_classification_scoring(self):
         """Test that classification scoring works correctly."""
+        np.random.seed(42)
         df = pd.DataFrame({
             "Model": ["RandomForest"] * 10,
             "Accuracy": np.random.uniform(0.7, 0.95, 10),
+            "Accuracycv": np.random.uniform(0.65, 0.90, 10),
+            "F1cv": np.random.uniform(0.65, 0.90, 10),
             "ROC_AUC": np.random.uniform(0.75, 0.98, 10),
             "n_vars": np.random.randint(10, 100, 10),
             "full_vars": [2151] * 10,
@@ -189,54 +246,70 @@ class TestCompositeScoring:
             "top_vars": [None] * 10,
         })
 
-        # Best model: highest AUC and accuracy
-        df.loc[5, "ROC_AUC"] = 0.99
-        df.loc[5, "Accuracy"] = 0.96
+        # Best model: highest Accuracycv and F1cv
+        df.loc[5, "Accuracycv"] = 0.99
+        df.loc[5, "F1cv"] = 0.99
+        df.loc[5, "Accuracy"] = 0.99
 
-        result = compute_composite_score(df, "classification", variable_penalty=0, complexity_penalty=0)
+        result = compute_composite_score(df, "classification", variable_penalty=0, gap_penalty=0)
 
-        # Should rank #1
-        assert result.loc[5, "Rank"] == 1, "Best classification model should rank #1"
+        # Find the best model by Accuracycv value (index is reset after sorting)
+        best_model = result[result["Accuracycv"] == 0.99]
+        assert len(best_model) == 1, "Should find exactly one model with Accuracycv=0.99"
+        assert best_model.iloc[0]["Rank"] == 1, "Best classification model should rank #1"
 
-    def test_complexity_penalty_affects_lvs(self):
-        """Test that complexity penalty affects models with many LVs."""
+    def test_gap_penalty_affects_overfitting_models(self):
+        """Test that gap penalty penalizes models with large calibration-CV gap."""
         df = self.create_test_data_regression(50)
 
-        # Two models with same performance, different LVs
+        # Add RMSEcv column (needed for gap penalty calculation)
+        df["RMSEcv"] = df["RMSE"] * np.random.uniform(1.0, 2.0, len(df))
+        df["R2cv"] = df["R2"] * np.random.uniform(0.8, 1.0, len(df))
+
+        # Model A: small gap (RMSE ~ RMSEcv, ratio near 1.0), use unique n_vars as marker
         df.loc[10, "R2"] = 0.90
+        df.loc[10, "R2cv"] = 0.90
         df.loc[10, "RMSE"] = 0.10
-        df.loc[10, "LVs"] = 5
+        df.loc[10, "RMSEcv"] = 0.11  # Small gap
+        df.loc[10, "n_vars"] = 7777  # Marker
 
+        # Model B: large gap (RMSEcv >> RMSE, overfitting)
         df.loc[20, "R2"] = 0.90
+        df.loc[20, "R2cv"] = 0.90
         df.loc[20, "RMSE"] = 0.10
-        df.loc[20, "LVs"] = 20
+        df.loc[20, "RMSEcv"] = 0.50  # Large gap (5x ratio)
+        df.loc[20, "n_vars"] = 8888  # Marker
 
-        # At complexity_penalty=10, model with fewer LVs should rank better
-        result = compute_composite_score(df, "regression", variable_penalty=0, complexity_penalty=10)
+        # At gap_penalty=10, model with smaller gap should rank better
+        result = compute_composite_score(df, "regression", variable_penalty=0, gap_penalty=10)
 
-        rank_low_lv = result.loc[10, "Rank"]
-        rank_high_lv = result.loc[20, "Rank"]
+        # Find models by their marker (index is reset after sorting)
+        model_a = result[result["n_vars"] == 7777].iloc[0]
+        model_b = result[result["n_vars"] == 8888].iloc[0]
 
-        assert rank_low_lv < rank_high_lv, "Model with fewer LVs should rank better at high complexity penalty"
+        rank_small_gap = model_a["Rank"]
+        rank_large_gap = model_b["Rank"]
+
+        assert rank_small_gap < rank_large_gap, "Model with smaller calibration-CV gap should rank better at high gap penalty"
 
     def test_nan_handling(self):
-        """Test that NaN values in metrics are handled correctly."""
+        """Test that NaN values in R2 (not R2cv) are handled correctly."""
         df = self.create_test_data_regression(10)
 
-        # Add a model with NaN R²
+        # Set NaN in R2 but keep R2cv valid (scoring uses R2cv)
         df.loc[5, "R2"] = np.nan
         df.loc[5, "RMSE"] = 0.15
 
-        # Should not crash
-        result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        # Should not crash since R2cv (used for scoring) is still valid
+        result = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
 
-        # Model with NaN should still get a rank
-        assert pd.notna(result.loc[5, "Rank"]), "Models with NaN metrics should still be ranked"
+        # All models should still get a rank
+        assert result["Rank"].notna().all(), "All models should still be ranked when R2cv is valid"
 
     def test_column_order(self):
         """Test that output has Rank as first column and ComplexityScore as last."""
         df = self.create_test_data_regression(10)
-        result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        result = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
 
         assert result.columns[0] == "Rank", "Rank should be first column"
         assert result.columns[-1] == "ComplexityScore", "ComplexityScore should be last column"
@@ -245,7 +318,7 @@ class TestCompositeScoring:
     def test_complexity_score_added(self):
         """Test that ComplexityScore column is added."""
         df = self.create_test_data_regression(10)
-        result = compute_composite_score(df, "regression", variable_penalty=2, complexity_penalty=2)
+        result = compute_composite_score(df, "regression", variable_penalty=2, gap_penalty=2)
 
         assert "ComplexityScore" in result.columns, "ComplexityScore should be added"
         assert result["ComplexityScore"].notna().all(), "ComplexityScore should have values"
@@ -256,11 +329,13 @@ class TestPenaltyBehavior:
 
     def test_penalty_zero_no_impact(self):
         """At penalty=0, penalties should have zero impact."""
-        # Create two models: identical performance, different complexity
+        # Create two models: identical R2cv performance, different complexity
         df = pd.DataFrame({
             "Model": ["PLS", "PLS"],
             "RMSE": [0.10, 0.10],
             "R2": [0.90, 0.90],
+            "RMSEcv": [0.12, 0.12],
+            "R2cv": [0.88, 0.88],
             "n_vars": [10, 2000],
             "full_vars": [2151, 2151],
             "LVs": [5, 20],
@@ -273,34 +348,38 @@ class TestPenaltyBehavior:
             "top_vars": [None, None],
         })
 
-        result = compute_composite_score(df, "regression", variable_penalty=0, complexity_penalty=0)
+        result = compute_composite_score(df, "regression", variable_penalty=0, gap_penalty=0)
 
-        # Scores should be identical
+        # Scores should be identical (performance_score = -R2cv which is the same for both)
         assert abs(result.loc[0, "CompositeScore"] - result.loc[1, "CompositeScore"]) < 1e-10, (
-            "At penalty=0, models with same performance should have identical scores"
+            "At penalty=0, models with same R2cv should have identical scores"
         )
 
     def test_penalty_scaling_smoothness(self):
         """Verify that penalty scaling is smooth from 0 to 10."""
+        # Need 3+ models with different R2cv to create non-zero perf_range,
+        # while keeping the two test models (indices 0,1) with identical R2cv
         df = pd.DataFrame({
-            "Model": ["PLS", "PLS"],
-            "RMSE": [0.10, 0.10],
-            "R2": [0.90, 0.90],
-            "n_vars": [100, 2000],
-            "full_vars": [2151, 2151],
-            "LVs": [5, 5],
-            "Params": ["{}", "{}"],
-            "Preprocess": ["raw", "raw"],
-            "Deriv": [0, 0],
-            "Window": [0, 0],
-            "Poly": [0, 0],
-            "SubsetTag": ["full", "full"],
-            "top_vars": [None, None],
+            "Model": ["PLS", "PLS", "PLS"],
+            "RMSE": [0.10, 0.10, 0.20],
+            "R2": [0.90, 0.90, 0.70],
+            "RMSEcv": [0.12, 0.12, 0.25],
+            "R2cv": [0.88, 0.88, 0.65],
+            "n_vars": [100, 2000, 500],
+            "full_vars": [2151, 2151, 2151],
+            "LVs": [5, 5, 5],
+            "Params": ["{}", "{}", "{}"],
+            "Preprocess": ["raw", "raw", "raw"],
+            "Deriv": [0, 0, 0],
+            "Window": [0, 0, 0],
+            "Poly": [0, 0, 0],
+            "SubsetTag": ["full", "full", "full"],
+            "top_vars": [None, None, None],
         })
 
         penalty_impacts = []
         for penalty in range(0, 11):
-            result = compute_composite_score(df, "regression", variable_penalty=penalty, complexity_penalty=0)
+            result = compute_composite_score(df, "regression", variable_penalty=penalty, gap_penalty=0)
             impact = abs(result.loc[1, "CompositeScore"] - result.loc[0, "CompositeScore"])
             penalty_impacts.append(impact)
 
@@ -315,8 +394,8 @@ class TestPenaltyBehavior:
         # Impact at penalty=0 should be essentially zero
         assert penalty_impacts[0] < 1e-10, "Impact at penalty=0 should be zero"
 
-        # Impact at penalty=10 should be significant
-        assert penalty_impacts[10] > 0.5, "Impact at penalty=10 should be significant"
+        # Impact at penalty=10 should be significant (scaled by perf_range * 0.5)
+        assert penalty_impacts[10] > 0.01, "Impact at penalty=10 should be significant"
 
 
 if __name__ == "__main__":

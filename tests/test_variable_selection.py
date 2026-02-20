@@ -15,12 +15,6 @@ Test Coverage:
 import pytest
 import numpy as np
 import pandas as pd
-from pathlib import Path
-import sys
-
-# Add src to path
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
 
 from spectral_predict.variable_selection import (
     ipls_selection,

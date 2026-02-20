@@ -9,13 +9,14 @@ import pandas as pd
 import pytest
 from sklearn.model_selection import KFold
 
-import sys
-from pathlib import Path
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
+try:
+    from spectral_predict.search import _run_single_config
+    from spectral_predict.scoring import create_results_dataframe, add_result
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
 
-from spectral_predict.search import _run_single_config
-from spectral_predict.scoring import create_results_dataframe, add_result
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
 
 
 class TestVariableCountFix:
@@ -112,8 +113,8 @@ class TestVariableCountFix:
 
         assert len(top_wavelengths) <= 30, f"Expected at most 30 wavelengths in top_vars, got {len(top_wavelengths)}"
 
-    def test_full_model_all_vars_is_na(self):
-        """Test that full spectrum models have all_vars set to N/A."""
+    def test_full_model_all_vars_contains_all_wavelengths(self):
+        """Test that full spectrum models have all_vars with all wavelengths."""
         # Create model instance
         from sklearn.cross_decomposition import PLSRegression
         model = PLSRegression(n_components=5, scale=False)
@@ -134,9 +135,14 @@ class TestVariableCountFix:
             top_n_vars=30
         )
 
-        # Check that all_vars is N/A for full models
+        # Check that all_vars contains all wavelengths for full spectrum models
         assert 'all_vars' in result, "Result should contain 'all_vars' field"
-        assert result['all_vars'] == 'N/A', "all_vars should be N/A for full spectrum models"
+        all_vars_str = result['all_vars']
+        assert all_vars_str != 'N/A', "all_vars should contain wavelengths for full spectrum models"
+        all_wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+        assert len(all_wavelengths) == len(self.wavelengths), (
+            f"Expected {len(self.wavelengths)} wavelengths in all_vars, got {len(all_wavelengths)}"
+        )
 
     def test_results_dataframe_has_all_vars_column(self):
         """Test that results dataframe includes all_vars column."""

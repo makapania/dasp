@@ -1,81 +1,78 @@
 """
-Test to demonstrate the ranking bug.
+Test to verify ranking behavior with CompositeScore.
 
-The issue: pandas .rank() with default ascending=True assigns:
-- LOWER ranks to LOWER values
-- HIGHER ranks to HIGHER values
-
-But our CompositeScore is designed with "lower is better".
-So a model with CompositeScore=-2.0 (BEST) should get Rank=1,
-but actually gets a low rank number because -2.0 is a low value.
-
-Expected: Best model (lowest CompositeScore) → Rank 1
-Actual: Best model (lowest CompositeScore) → Rank 1 ✓ (works correctly!)
-
-Wait... let me verify this more carefully.
+Validates that pandas .rank() with default ascending=True correctly assigns
+Rank 1 to the lowest CompositeScore (since lower is better).
 """
 
 import pandas as pd
 import numpy as np
+import pytest
 
-# Simulate 4 models with different R² values and CompositeScores
-data = {
-    'Model': ['ModelA', 'ModelB', 'ModelC', 'ModelD'],
-    'R2': [0.95, 0.85, 0.75, 0.65],  # ModelA is best (highest R²)
-    'RMSE': [0.10, 0.20, 0.30, 0.40],  # ModelA is best (lowest RMSE)
-}
 
-df = pd.DataFrame(data)
+class TestRankingBehavior:
+    """Test ranking behavior for CompositeScore (lower is better)."""
 
-# Compute z-scores (like in scoring.py)
-z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
-z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
+    def test_best_model_gets_rank_1(self):
+        """Verify that the model with lowest CompositeScore gets Rank 1."""
+        data = {
+            'Model': ['ModelA', 'ModelB', 'ModelC', 'ModelD'],
+            'R2': [0.95, 0.85, 0.75, 0.65],
+            'RMSE': [0.10, 0.20, 0.30, 0.40],
+        }
+        df = pd.DataFrame(data)
 
-# Performance score (lower is better)
-# For best model (ModelA): z_rmse is very negative (good), z_r2 is very positive (good)
-# So: performance_score = 0.5 * (negative) - 0.5 * (positive) = very negative
-df["performance_score"] = 0.5 * z_rmse - 0.5 * z_r2
-df["CompositeScore"] = df["performance_score"]
+        # Compute z-scores
+        z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
+        z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
 
-print("=" * 80)
-print("RANKING BUG TEST")
-print("=" * 80)
-print("\nModel Performance (ModelA is BEST):")
-print(df[['Model', 'R2', 'RMSE', 'CompositeScore']])
+        # Performance score (lower is better)
+        df["CompositeScore"] = 0.5 * z_rmse - 0.5 * z_r2
 
-print("\n" + "=" * 80)
-print("TESTING PANDAS .rank() BEHAVIOR")
-print("=" * 80)
+        # Default ascending=True assigns Rank 1 to lowest value
+        df["Rank"] = df["CompositeScore"].rank(method="min")
 
-# Test 1: Default behavior (ascending=True)
-df["Rank_default"] = df["CompositeScore"].rank(method="min")
-print("\n1. With ascending=True (DEFAULT):")
-print(df[['Model', 'CompositeScore', 'Rank_default']])
-print("\nInterpretation: Lower CompositeScore → LOWER rank number")
-print("Expected for 'lower is better': ModelA (best) should be Rank 1")
-print(f"Result: ModelA is Rank {df.loc[df['Model']=='ModelA', 'Rank_default'].values[0]}")
-if df.loc[df['Model']=='ModelA', 'Rank_default'].values[0] == 1:
-    print("✓ CORRECT: Best model gets Rank 1")
-else:
-    print("✗ BUG: Best model does NOT get Rank 1")
+        best_model_rank = df.loc[df['Model'] == 'ModelA', 'Rank'].values[0]
+        assert best_model_rank == 1, (
+            f"Best model (ModelA) should have Rank 1, got Rank {best_model_rank}"
+        )
 
-# Test 2: With ascending=False
-df["Rank_desc"] = df["CompositeScore"].rank(method="min", ascending=False)
-print("\n2. With ascending=False:")
-print(df[['Model', 'CompositeScore', 'Rank_desc']])
-print("\nInterpretation: Lower CompositeScore → HIGHER rank number")
-print(f"Result: ModelA is Rank {df.loc[df['Model']=='ModelA', 'Rank_desc'].values[0]}")
-if df.loc[df['Model']=='ModelA', 'Rank_desc'].values[0] == 1:
-    print("✓ CORRECT: Best model gets Rank 1")
-else:
-    print("✗ BUG: Best model does NOT get Rank 1")
+    def test_ascending_false_gives_wrong_ranking(self):
+        """Verify that ascending=False would give WRONG ranking for lower-is-better."""
+        data = {
+            'Model': ['ModelA', 'ModelB', 'ModelC', 'ModelD'],
+            'R2': [0.95, 0.85, 0.75, 0.65],
+            'RMSE': [0.10, 0.20, 0.30, 0.40],
+        }
+        df = pd.DataFrame(data)
 
-print("\n" + "=" * 80)
-print("CONCLUSION")
-print("=" * 80)
-print("\nFor 'lower is better' scores:")
-print("- ascending=True (default) assigns Rank 1 to LOWEST value ✓ CORRECT")
-print("- ascending=False assigns Rank 1 to HIGHEST value ✗ WRONG")
-print("\nCurrent code uses: df['Rank'] = df['CompositeScore'].rank(method='min')")
-print("This is CORRECT for 'lower is better' scoring.")
-print("\nIf ranking is broken, the bug is elsewhere!")
+        z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
+        z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
+        df["CompositeScore"] = 0.5 * z_rmse - 0.5 * z_r2
+
+        # ascending=False assigns Rank 1 to HIGHEST value (wrong for lower-is-better)
+        df["Rank_desc"] = df["CompositeScore"].rank(method="min", ascending=False)
+
+        best_model_rank = df.loc[df['Model'] == 'ModelA', 'Rank_desc'].values[0]
+        assert best_model_rank != 1, (
+            "ascending=False should NOT give Rank 1 to the best model"
+        )
+
+    def test_ranking_preserves_order(self):
+        """Verify that ranking preserves the ordering of CompositeScore."""
+        data = {
+            'Model': ['ModelA', 'ModelB', 'ModelC', 'ModelD'],
+            'R2': [0.95, 0.85, 0.75, 0.65],
+            'RMSE': [0.10, 0.20, 0.30, 0.40],
+        }
+        df = pd.DataFrame(data)
+
+        z_rmse = (df["RMSE"] - df["RMSE"].mean()) / df["RMSE"].std()
+        z_r2 = (df["R2"] - df["R2"].mean()) / df["R2"].std()
+        df["CompositeScore"] = 0.5 * z_rmse - 0.5 * z_r2
+
+        df["Rank"] = df["CompositeScore"].rank(method="min")
+
+        # Ranks should follow the ordering: A < B < C < D
+        ranks = df.set_index('Model')['Rank']
+        assert ranks['ModelA'] < ranks['ModelB'] < ranks['ModelC'] < ranks['ModelD']

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.spectral_predict.imbalance import (
+from spectral_predict.imbalance import (
     ClassificationResampler,
     RegressionResampler,
     RegressionSampleWeighter,

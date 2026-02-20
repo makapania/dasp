@@ -27,7 +27,7 @@ def test_read_csv_wide(tmp_path):
     df.to_csv(csv_path, index=False)
 
     # Read it back
-    result = read_csv_spectra(csv_path)
+    result, metadata = read_csv_spectra(csv_path)
 
     assert result.shape == (5, 2001)
     assert list(result.index) == ["S1", "S2", "S3", "S4", "S5"]
@@ -51,7 +51,7 @@ def test_read_csv_long(tmp_path):
     df.to_csv(csv_path, index=False)
 
     # Read it back
-    result = read_csv_spectra(csv_path)
+    result, metadata = read_csv_spectra(csv_path)
 
     assert result.shape == (1, 2001)  # Single row
     assert result.index[0] == "spectrum_single"  # Uses filename as ID

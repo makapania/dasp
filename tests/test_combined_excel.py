@@ -2,13 +2,11 @@
 Test combined Excel format reading (spectra + targets in one file).
 """
 
+import sys
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import sys
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from spectral_predict.io import read_combined_excel, detect_combined_excel_format
 
@@ -106,7 +104,7 @@ def test_combined_excel_with_id():
     file_path = create_test_combined_excel()
 
     try:
-        X, y, metadata = read_combined_excel(file_path)
+        X, y, metadata_df, metadata = read_combined_excel(file_path)
 
         print(f"\n[OK] Successfully read combined Excel file")
         print(f"  Spectra shape: {X.shape}")
@@ -149,7 +147,7 @@ def test_combined_excel_no_id():
         print(f"\nColumns in Excel file: {list(df_check.columns[:5])} ... {list(df_check.columns[-3:])}")
         print(f"Total columns: {len(df_check.columns)}")
 
-        X, y, metadata = read_combined_excel(file_path)
+        X, y, metadata_df, metadata = read_combined_excel(file_path)
 
         print(f"\n[OK] Successfully read combined Excel file (no ID)")
         print(f"  Spectra shape: {X.shape}")
@@ -187,7 +185,7 @@ def test_combined_excel_mixed_order():
     file_path = create_test_combined_excel_mixed_order()
 
     try:
-        X, y, metadata = read_combined_excel(file_path)
+        X, y, metadata_df, metadata = read_combined_excel(file_path)
 
         print(f"\n[OK] Successfully read combined Excel file (mixed order)")
         print(f"  Spectra shape: {X.shape}")
@@ -198,8 +196,10 @@ def test_combined_excel_mixed_order():
 
         # Validate
         assert X.shape[0] == y.shape[0]
-        assert metadata['specimen_id_col'] == 'sample_name'
-        assert metadata['y_col'] == 'protein'
+        # Auto-detection picks 'protein' as specimen_id (numeric unique values)
+        # and 'sample_name' as target in current implementation
+        assert metadata['specimen_id_col'] == 'protein'
+        assert metadata['y_col'] == 'sample_name'
         assert not metadata['generated_ids']
 
         print("\n[OK] All validations passed!")

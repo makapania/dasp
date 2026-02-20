@@ -14,31 +14,31 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pathlib import Path
-import sys
 
-# Add src to path
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
+try:
+    from spectral_predict.ga_preprocessing import (
+        random_chromosome,
+        chromosome_to_transform,
+        get_config_description,
+        evaluate_fitness,
+        tournament_selection,
+        crossover,
+        mutate,
+        optimize_preprocessing,
+        get_optimized_preproc_config,
+        PREPROC_TYPES,
+        WINDOW_SIZES,
+        BASELINE_METHODS,
+        BASELINE_LAMBDAS,
+        SMOOTHING_OPTIONS,
+        SMOOTHING_WINDOWS,
+        N_GENES,
+    )
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
 
-from spectral_predict.ga_preprocessing import (
-    random_chromosome,
-    chromosome_to_transform,
-    get_config_description,
-    evaluate_fitness,
-    tournament_selection,
-    crossover,
-    mutate,
-    optimize_preprocessing,
-    get_optimized_preproc_config,
-    PREPROC_TYPES,
-    WINDOW_SIZES,
-    BASELINE_METHODS,
-    BASELINE_LAMBDAS,
-    SMOOTHING_OPTIONS,
-    SMOOTHING_WINDOWS,
-    N_GENES,
-)
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
 
 
 # =============================================================================

@@ -13,14 +13,14 @@ from pathlib import Path
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor
 
-from src.spectral_predict.ensemble import (
+from spectral_predict.ensemble import (
     SimpleAverageEnsemble,
     RegionAwareWeightedEnsemble,
     create_ensemble,
     extract_preprocessor_config
 )
-from src.spectral_predict.preprocessing_wrapper import PreprocessorConfig
-from src.spectral_predict.model_io import save_ensemble, load_ensemble
+from spectral_predict.preprocessing_wrapper import PreprocessorConfig
+from spectral_predict.model_io import save_ensemble, load_ensemble
 
 
 class TestEnsembleSaveLoad:

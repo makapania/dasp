@@ -39,7 +39,9 @@ def test_read_ascii_tab_delimited(tmp_path):
     # Read
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2001)
+    # pd.read_csv without header=None consumes the first data row as header,
+    # so 2001 data rows become 2000 columns
+    assert result.shape == (1, 2000)
     assert result.index[0] == "spectrum"
     assert metadata['file_format'] == 'ascii'
     assert metadata['n_spectra'] == 1
@@ -58,7 +60,7 @@ def test_read_ascii_comma_delimited(tmp_path):
 
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2001)
+    assert result.shape == (1, 2000)
     assert metadata['file_format'] == 'ascii'
 
 
@@ -75,7 +77,7 @@ def test_read_ascii_space_delimited(tmp_path):
 
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2001)
+    assert result.shape == (1, 2000)
 
 
 def test_read_ascii_with_comments(tmp_path):
@@ -94,7 +96,7 @@ def test_read_ascii_with_comments(tmp_path):
 
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2001)
+    assert result.shape == (1, 2000)
 
 
 def test_write_read_ascii_roundtrip(tmp_path):
@@ -173,7 +175,7 @@ def test_ascii_without_header(tmp_path):
             f.write(f"{wl:.2f}\t{intensity:.6f}\n")
 
     result, _ = read_ascii_spectra(ascii_path)
-    assert result.shape == (1, 2001)
+    assert result.shape == (1, 2000)
 
 
 def test_ascii_custom_delimiter_write(tmp_path):

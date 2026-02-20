@@ -25,16 +25,16 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Lasso, Ridge
 from sklearn.model_selection import cross_val_score
 
-# Add src to path for imports
-import sys
+try:
+    from spectral_predict.calibration_transfer import estimate_ds, apply_ds, estimate_pds, apply_pds
+    from spectral_predict.model_io import load_model, predict_with_model, save_model
+    from spectral_predict.preprocess import build_preprocessing_pipeline
+    from spectral_predict.search import run_search
+    HAS_CATBOOST = True
+except (ImportError, ModuleNotFoundError):
+    HAS_CATBOOST = False
 
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
-from spectral_predict.calibration_transfer import estimate_ds, apply_ds, estimate_pds, apply_pds
-from spectral_predict.model_io import load_model, predict_with_model, save_model
-from spectral_predict.preprocess import build_preprocessing_pipeline
-from spectral_predict.search import run_search
+pytestmark = pytest.mark.skipif(not HAS_CATBOOST, reason="catboost not installed")
 
 
 @pytest.mark.integration
@@ -67,11 +67,11 @@ class TestBasicAnalysisWorkflow:
         # Verify results exist
         assert len(results_df) > 0, "Should produce results"
 
-        # Verify results are ranked (best R² first)
-        r2_values = results_df["R2"].values
+        # Verify results are ranked (best CompositeScore first, lower is better)
+        rank_values = results_df["Rank"].values
         assert all(
-            r2_values[i] >= r2_values[i + 1] for i in range(len(r2_values) - 1)
-        ), "Results should be sorted by R² descending"
+            rank_values[i] <= rank_values[i + 1] for i in range(len(rank_values) - 1)
+        ), "Results should be sorted by Rank ascending"
 
         # Verify best model has valid metrics
         best = results_df.iloc[0]

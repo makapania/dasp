@@ -14,13 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pathlib import Path
-import sys
-
-# Add src to path
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
 # Check if LightGBM is available
 try:
     import lightgbm
@@ -581,12 +574,17 @@ class TestEdgeCases:
         assert importances.shape == (20,)
 
     def test_missing_lightgbm_error(self):
-        """Should raise ImportError if LightGBM not installed."""
-        # This test is tricky - we know LightGBM IS installed
-        # But we can check that the function checks for it
-        from spectral_predict.ga_lightgbm import HAS_LIGHTGBM as MODULE_HAS_LIGHTGBM
+        """Verify that LightGBM is available and the module imported successfully."""
+        # The ga_lightgbm module imports lightgbm directly at the top level.
+        # If lightgbm is not installed, the module import fails entirely
+        # (handled by the pytestmark skip at the top of this test file).
+        # If we reach here, LightGBM is available.
+        import spectral_predict.ga_lightgbm as ga_lgbm
 
-        assert MODULE_HAS_LIGHTGBM is True, "LightGBM should be available for tests"
+        # Verify key functions are accessible (module imported successfully)
+        assert hasattr(ga_lgbm, 'ga_lightgbm_selection'), "ga_lightgbm_selection should be available"
+        assert hasattr(ga_lgbm, 'LGBMRegressor') or hasattr(ga_lgbm, '_fitness_function_lgbm'), \
+            "LightGBM-dependent functions should be available"
 
 
 # =============================================================================
