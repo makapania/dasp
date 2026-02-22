@@ -468,7 +468,7 @@ def _normalize_filename_for_matching(filename):
     return filename
 
 
-def align_xy(X, ref, id_column, target, return_alignment_info=False):
+def align_xy(X, ref, id_column, target, return_alignment_info=False, drop_na_y=True):
     """
     Align spectral data with reference target variable.
 
@@ -489,6 +489,9 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
         Target variable name
     return_alignment_info : bool, optional
         If True, also return a dict with detailed alignment info
+    drop_na_y : bool, optional
+        If True (default), drop rows with NaN target values.
+        Set to False during import to preserve all rows.
 
     Returns
     -------
@@ -516,9 +519,6 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
 
     # Try exact match first
     common_ids = X.index.intersection(ref.index)
-
-    print(f"DEBUG: Initial alignment - X has {len(X)} samples, ref has {len(ref)} samples")
-    print(f"DEBUG: Found {len(common_ids)} common IDs (exact match)")
 
     # If no exact matches, try normalized matching
     if len(common_ids) == 0:
@@ -582,23 +582,11 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
                 f"Warning: {len(ref) - len(common_ids)} samples from reference have no spectral data"
             )
 
-        print(f"DEBUG: common_ids has {len(common_ids)} elements")
-        print(f"DEBUG: common_ids type: {type(common_ids)}")
-        print(f"DEBUG: First 5 common_ids: {list(common_ids[:5]) if len(common_ids) > 0 else []}")
-
-        # Check for duplicates in indices
-        if len(X.index) != len(X.index.unique()):
-            print(f"WARNING: X has duplicate indices! Total: {len(X.index)}, Unique: {len(X.index.unique())}")
-        if len(ref.index) != len(ref.index.unique()):
-            print(f"WARNING: ref has duplicate indices! Total: {len(ref.index)}, Unique: {len(ref.index.unique())}")
-
         X_aligned = X.loc[common_ids]
         y = ref.loc[common_ids, target]
 
         # Track matched SPECTRAL IDs (for exact matching, these are just common_ids)
         matched_spectral_ids = list(common_ids)
-
-        print(f"DEBUG: After subsetting - X_aligned: {len(X_aligned)}, y: {len(y)}")
 
     # Track truly unmatched samples BEFORE NaN filtering
     # (so NaN-dropped samples aren't counted as "unmatched")
@@ -607,22 +595,20 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False):
     # Also track the matched reference IDs for accurate unmatched_reference reporting
     matched_ref_ids = list(X_aligned.index)
 
-    # Drop any NaN targets
-    valid_mask = ~y.isna()
-    print(f"DEBUG: Before NaN filtering - X_aligned: {len(X_aligned)}, y: {len(y)}")
+    # Drop any NaN targets (only when drop_na_y is True)
     n_nan_dropped = 0
-    if not valid_mask.all():
-        n_nan_dropped = (~valid_mask).sum()
-        print(f"Warning: Dropping {n_nan_dropped} samples with missing target values")
-        X_aligned = X_aligned[valid_mask]
-        y = y[valid_mask]
-        print(f"DEBUG: After NaN filtering - X_aligned: {len(X_aligned)}, y: {len(y)}")
+    if drop_na_y:
+        valid_mask = ~y.isna()
+        if not valid_mask.all():
+            n_nan_dropped = (~valid_mask).sum()
+            print(f"Warning: Dropping {n_nan_dropped} samples with missing target values")
+            X_aligned = X_aligned[valid_mask]
+            y = y[valid_mask]
 
-    if len(y) == 0:
-        raise ValueError("No valid samples after alignment and NaN removal")
+    if len(X_aligned) == 0:
+        raise ValueError("No valid samples after alignment")
 
     # SAFETY CHECK: Ensure perfect alignment before returning
-    print(f"DEBUG: Final check before return - X_aligned: {len(X_aligned)}, y: {len(y)}")
     if len(X_aligned) != len(y):
         raise ValueError(
             f"Alignment error: X has {len(X_aligned)} samples but y has {len(y)} samples. "

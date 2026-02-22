@@ -15250,7 +15250,8 @@ class SpectralPredictApp:
                     X, ref_df,
                     id_column,
                     target_column,
-                    return_alignment_info=True
+                    return_alignment_info=True,
+                    drop_na_y=False
                 )
 
                 # Validate alignment
@@ -15917,12 +15918,14 @@ class SpectralPredictApp:
                     X_aligned, y_aligned, metadata_df, metadata = read_combined_excel(
                         self.combined_file_path,
                         y_col=y_col_arg,
-                        sheet_name=self.combined_sheet_name
+                        sheet_name=self.combined_sheet_name,
+                        drop_na_y=False
                     )
                 else:
                     X_aligned, y_aligned, metadata_df, metadata = read_combined_csv(
                         self.combined_file_path,
-                        y_col=y_col_arg
+                        y_col=y_col_arg,
+                        drop_na_y=False
                     )
 
                 # Store data type detection results
@@ -15967,7 +15970,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16002,7 +16006,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16041,7 +16046,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16076,7 +16082,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16113,7 +16120,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16150,7 +16158,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16187,7 +16196,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16224,7 +16234,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
@@ -16261,7 +16272,8 @@ class SpectralPredictApp:
                         X, ref,
                         self.spectral_file_column.get(),
                         self.target_column.get(),
-                        return_alignment_info=True
+                        return_alignment_info=True,
+                        drop_na_y=False
                     )
 
                     # Show alignment report to user
