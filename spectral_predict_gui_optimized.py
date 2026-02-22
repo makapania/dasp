@@ -31602,6 +31602,23 @@ F1 Score:  {f1:.4f}
             else:
                 X_source = self.X_original
 
+            # Apply active group filter first (match main search at line 23401)
+            total_samples = len(X_source)
+            if self.active_indices is not None:
+                ag_mask = X_source.index.isin(self.active_indices)
+                n_active = ag_mask.sum()
+                if n_active < n_folds:
+                    raise ValueError(
+                        f"Only {n_active} sample(s) in the active group; "
+                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                    )
+                X_source = X_source[ag_mask]
+                y_source = self.y[ag_mask]
+                print(f"DEBUG: Active group filter: {n_active} samples "
+                      f"({total_samples - n_active} filtered out)")
+            else:
+                y_source = self.y
+
             # Align sample selection with the main analysis (respect excluded spectra)
             # Use DataFrame index labels (not positional indices) for exclusion
             if self.excluded_spectra:
@@ -31616,10 +31633,10 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: Applying {n_excluded} excluded spectra for refinement "
                       f"({n_remaining} samples remain).")
                 X_base_df = X_source[mask]
-                y_series = self.y[mask]
+                y_series = y_source[mask]
             else:
                 X_base_df = X_source
-                y_series = self.y
+                y_series = y_source
 
             # Filter out validation set (if enabled) - CRITICAL FIX
             # This ensures Model Development uses the same data split as the main search
@@ -31643,6 +31660,19 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: Calibration: {n_cal} samples | Validation: {n_val} samples")
                 print(f"DEBUG: This matches the data split used in the main search (Results tab)")
 
+            # Drop rows where y is NaN (safety net, matches search.py)
+            nan_mask = y_series.isna()
+            if nan_mask.any():
+                n_dropped = int(nan_mask.sum())
+                print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values.")
+                X_base_df = X_base_df[~nan_mask]
+                y_series = y_series[~nan_mask]
+                if len(y_series) < n_folds:
+                    raise ValueError(
+                        f"Only {len(y_series)} samples remain after dropping NaN targets; "
+                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                    )
+
             # Add comprehensive diagnostic output for debugging R² discrepancies
             print(f"\n{'='*80}")
             print(f"MODEL DEVELOPMENT - DATASET STATE DIAGNOSTIC")
@@ -31651,7 +31681,8 @@ F1 Score:  {f1:.4f}
             print(f"  CV Folds: {n_folds}")
             print(f"  Random State: 42 (fixed)")
             print(f"\nData Filtering:")
-            print(f"  Total samples in dataset: {len(X_source)}")
+            print(f"  Total samples in dataset: {total_samples}")
+            print(f"  Active group filter: {len(X_source) if self.active_indices is not None else 'None (all samples)'}")
             print(f"  Excluded samples: {len(self.excluded_spectra) if self.excluded_spectra else 0}")
             print(f"  Validation enabled: {self.validation_enabled.get()}")
             print(f"  Validation samples: {len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0}")
