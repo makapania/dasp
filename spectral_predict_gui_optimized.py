@@ -30660,10 +30660,18 @@ F1 Score:  {f1:.4f}
             ax.axvline(x=optimal_val, color='red', linestyle=':', linewidth=2,
                       label=f'Optimal: {optimal_val:.4g}')
 
-        # Labels and styling
-        ax.set_xlabel(data['param_name'], fontsize=11)
+        # Labels and styling - use human-readable descriptions for parameter names
+        param_labels = {
+            'n_estimators': 'Number of Trees (n_estimators)',
+            'iterations': 'Number of Iterations',
+            'n_components': 'Number of Latent Variables (n_components)',
+            'alpha': 'Regularization Strength (alpha)',
+            'C': 'Regularization Parameter (C)',
+        }
+        param_name = data['param_name']
+        ax.set_xlabel(param_labels.get(param_name, param_name), fontsize=11)
         ax.set_ylabel(data['metric_name'], fontsize=11)
-        ax.set_title('Model Complexity Analysis - Validation Curve', fontsize=12, fontweight='bold')
+        ax.set_title(f'Model Complexity Analysis ({param_name})', fontsize=12, fontweight='bold')
         ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
 
@@ -30671,6 +30679,11 @@ F1 Score:  {f1:.4f}
         min_cv = np.nanmin(cv_scores)
         min_train = np.nanmin(train_scores)
         annotation = f"Min CV {data['metric_name']}: {min_cv:.4f}\nMin Train {data['metric_name']}: {min_train:.4f}"
+
+        # For tree/boosting models, clarify this is not about number of spectral variables
+        if param_name in ('n_estimators', 'iterations'):
+            annotation += "\n\nNote: This chart shows boosting rounds,\nnot the number of spectral variables."
+
         ax.text(0.02, 0.98, annotation, transform=ax.transAxes, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8), fontsize=9)
 
