@@ -284,12 +284,18 @@ def read_csv_dir(
             df_single, _ = read_csv_spectra(csv_file)
             # read_csv_spectra returns a DataFrame; use first row
             if len(df_single) == 1:
-                spectra[stem] = df_single.iloc[0]
+                series = df_single.iloc[0]
+                series.index = series.index.round(0).astype(int)
+                series = series[~series.index.duplicated(keep='first')]
+                spectra[stem] = series
             else:
                 # Multi-row CSV in a directory - use all rows with prefixed IDs
                 for idx in df_single.index:
                     key = f"{stem}_{idx}" if len(df_single) > 1 else stem
-                    spectra[key] = df_single.loc[idx]
+                    series = df_single.loc[idx]
+                    series.index = series.index.round(0).astype(int)
+                    series = series[~series.index.duplicated(keep='first')]
+                    spectra[key] = series
         except Exception as e:
             print(f"Warning: Could not read {csv_file.name}: {e}")
             skipped.append(csv_file.name)
