@@ -1290,6 +1290,15 @@ def run_unified_bayesian(
     X = np.asarray(X)
     y = np.asarray(y)
     wavelengths = np.asarray(wavelengths)
+
+    # Drop rows where y is NaN (safety net for data with empty rows)
+    nan_mask = np.isnan(y) if np.issubdtype(y.dtype, np.floating) else np.array([False] * len(y))
+    if nan_mask.any():
+        n_dropped = int(nan_mask.sum())
+        print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values before optimization.")
+        X = X[~nan_mask]
+        y = y[~nan_mask]
+
     n_samples, n_features = X.shape
 
     # Label-encode y for classification (string labels -> integers)

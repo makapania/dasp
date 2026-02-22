@@ -698,10 +698,7 @@ def _quick_evaluate(
             return -scores.mean()  # Return positive RMSE (lower is better)
 
     except Exception:
-        # Fall back to PLS
-        from sklearn.cross_decomposition import PLSRegression
-        from sklearn.model_selection import cross_val_score
-
+        # Fall back to PLS (module-level imports already available)
         n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
         n_components = max(2, n_components)
 

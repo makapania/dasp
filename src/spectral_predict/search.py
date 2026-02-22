@@ -887,6 +887,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
     n_jobs_default = 1 if is_frozen else -1
 
+    # Drop rows where y is NaN (safety net for data with empty rows)
+    nan_mask = y.isna()
+    if nan_mask.any():
+        n_dropped = int(nan_mask.sum())
+        print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values before analysis.")
+        X = X[~nan_mask]
+        y = y[~nan_mask]
+
     X_np = X.values
     y_np = y.values
     wavelengths = X.columns.values
@@ -2985,6 +2993,14 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     # Validate n_trials - must be provided by caller (GUI controls this)
     if n_trials is None:
         raise ValueError("n_trials must be specified (GUI default is 100)")
+
+    # Drop rows where y is NaN (safety net for data with empty rows)
+    nan_mask = y.isna()
+    if nan_mask.any():
+        n_dropped = int(nan_mask.sum())
+        print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values before Bayesian optimization.")
+        X = X[~nan_mask]
+        y = y[~nan_mask]
 
     # Prepare data
     X_np = X.values

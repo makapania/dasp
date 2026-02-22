@@ -2608,6 +2608,18 @@ class SpectralPredictApp:
         self.pred_results_color_var = tk.StringVar(value='Y Value')
         self.residual_color_var = tk.StringVar(value='Y Value')
 
+        # Fit line overlay variables
+        self.fit_line_method = tk.StringVar(value='Linear')
+        self.fit_line_method_pred = tk.StringVar(value='Linear')
+
+        # Bias/slope correction variables
+        self.bias_correction_data = None  # Stores computed correction dict
+        self.nonlinear_correction_data = None  # Stores nonlinear correction dict
+        self.apply_bias_correction = tk.BooleanVar(value=False)
+        self.save_correction_with_model = tk.BooleanVar(value=True)
+        self.use_nonlinear_correction = tk.BooleanVar(value=False)
+        self.nonlinear_correction_method = tk.StringVar(value='Polynomial (2)')
+
         # Explore tab coloring variables
         self.explore_color_var = tk.StringVar(value='None')
         self.explore_n_groups = tk.IntVar(value=4)
@@ -13399,6 +13411,85 @@ class SpectralPredictApp:
         self.refine_plot_frame = ttk.Frame(plot_frame)
         self.refine_plot_frame.pack(fill='both', expand=True)
 
+        # === Bias/Slope Correction (regression only) ===
+        self.bias_correction_frame = ttk.LabelFrame(content_frame,
+            text="Prediction Correction (ASTM E1655)", padding="15")
+        self.bias_correction_frame.grid(row=row, column=0, columnspan=2,
+            sticky=(tk.W, tk.E), pady=10)
+        row += 1
+
+        # Header row
+        bc_header = ttk.Frame(self.bias_correction_frame)
+        bc_header.pack(fill='x', pady=(0, 5))
+
+        ttk.Label(bc_header, text="Linear correction: Y_corrected = bias + slope × Ŷ",
+                  style='TLabel', font=('Segoe UI', 9, 'italic')).pack(side='left')
+
+        # Metrics display
+        self.bc_metrics_frame = ttk.Frame(self.bias_correction_frame)
+        self.bc_metrics_frame.pack(fill='x', pady=5)
+
+        self.bc_metrics_text = tk.Text(self.bc_metrics_frame, height=4, width=70,
+                                       font=('Consolas', 9),
+                                       bg=self.colors['panel'], fg=self.colors['text'],
+                                       wrap=tk.WORD, relief='flat', borderwidth=0)
+        self.bc_metrics_text.pack(fill='x')
+        self.bc_metrics_text.insert('1.0', "Run a model to see correction metrics.")
+        self.bc_metrics_text.config(state='disabled')
+
+        # Controls row
+        bc_controls = ttk.Frame(self.bias_correction_frame)
+        bc_controls.pack(fill='x', pady=(5, 0))
+
+        ttk.Checkbutton(bc_controls, text="Apply correction to predictions",
+                        variable=self.apply_bias_correction,
+                        command=self._on_bias_correction_toggled).pack(side='left', padx=5)
+        ttk.Checkbutton(bc_controls, text="Save correction with model",
+                        variable=self.save_correction_with_model).pack(side='left', padx=15)
+
+        # Warning label
+        self.bc_warning_label = ttk.Label(self.bias_correction_frame,
+            text="⚠ Corrected metrics are from training CV data and may be optimistic. Validate on independent test set.",
+            style='TLabel', font=('Segoe UI', 8, 'italic'), foreground='#cc6600')
+        self.bc_warning_label.pack(fill='x', pady=(5, 0))
+
+        # Advanced nonlinear section (collapsed by default)
+        self.bc_advanced_frame = ttk.LabelFrame(self.bias_correction_frame,
+            text="Advanced: Nonlinear Correction", padding="10")
+        # Not packed by default — shown via toggle
+
+        bc_adv_toggle = ttk.Frame(self.bias_correction_frame)
+        bc_adv_toggle.pack(fill='x', pady=(5, 0))
+
+        self.bc_show_advanced = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bc_adv_toggle, text="Show advanced options",
+                        variable=self.bc_show_advanced,
+                        command=self._toggle_bc_advanced).pack(side='left', padx=5)
+
+        # Build advanced content (hidden initially)
+        adv_row = ttk.Frame(self.bc_advanced_frame)
+        adv_row.pack(fill='x', pady=5)
+
+        ttk.Label(adv_row, text="Method:", style='TLabel').pack(side='left', padx=5)
+        nl_options = ['Polynomial (2)', 'Polynomial (3)', 'Polynomial (4)', 'Spline']
+        ttk.Combobox(adv_row, textvariable=self.nonlinear_correction_method,
+                     values=nl_options, width=15, state='readonly').pack(side='left', padx=5)
+        ttk.Button(adv_row, text="Compute",
+                   command=self._compute_nonlinear_correction).pack(side='left', padx=10)
+        ttk.Checkbutton(adv_row, text="Use nonlinear instead of linear",
+                        variable=self.use_nonlinear_correction).pack(side='left', padx=10)
+
+        self.bc_nonlinear_text = tk.Text(self.bc_advanced_frame, height=3, width=70,
+                                         font=('Consolas', 9),
+                                         bg=self.colors['panel'], fg=self.colors['text'],
+                                         wrap=tk.WORD, relief='flat', borderwidth=0)
+        self.bc_nonlinear_text.pack(fill='x', pady=5)
+        self.bc_nonlinear_text.insert('1.0', "Click 'Compute' to see nonlinear correction metrics.")
+        self.bc_nonlinear_text.config(state='disabled')
+
+        # Initially hide the entire correction frame (shown only for regression after model runs)
+        self.bias_correction_frame.grid_remove()
+
         # === Model Complexity Analysis ===
         ttk.Label(content_frame, text="Model Complexity Analysis", style='Heading.TLabel').grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(25, 15))
@@ -14463,9 +14554,15 @@ class SpectralPredictApp:
         nan_mask = self.y.isna()
         if nan_mask.any():
             n_dropped = int(nan_mask.sum())
+            n_remaining = int((~nan_mask).sum())
             self.X = self.X[~nan_mask]
             self.X_original = self.X_original[~nan_mask] if self.X_original is not None else None
             self.y = self.y[~nan_mask]
+            messagebox.showwarning(
+                "Missing Target Values",
+                f"{n_dropped} sample(s) had missing target values and were excluded.\n\n"
+                f"{n_remaining} sample(s) remaining for analysis."
+            )
 
         # Keep validation targets in sync with current target column
         if self.validation_X is not None or self.validation_y is not None:
@@ -28864,6 +28961,16 @@ Performance (Classification):
         self.regression_pred_color_combo.pack(side='left', padx=5)
         self.regression_pred_color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_regression_predictions())
 
+        ttk.Label(control_frame, text="Fit Line:", style='TLabel').pack(side='left', padx=(15, 5))
+        fit_options = ['None', 'Linear', 'Polynomial (2)', 'Polynomial (3)', 'Polynomial (4)', 'Smooth']
+        self.regression_fit_combo = ttk.Combobox(control_frame,
+                                   textvariable=self.fit_line_method,
+                                   values=fit_options,
+                                   width=15,
+                                   state='readonly')
+        self.regression_fit_combo.pack(side='left', padx=5)
+        self.regression_fit_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_regression_predictions())
+
         # Create plot frame
         plot_frame = ttk.Frame(self.refine_plot_frame)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -28981,6 +29088,21 @@ Performance (Classification):
         max_val = max(y_true.max(), y_pred.max())
         ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='1:1 Line')
 
+        # Fit line overlay
+        fit_method = self.fit_line_method.get()
+        fit_eq_str = ''
+        if fit_method != 'None':
+            try:
+                from spectral_predict.fit_overlay import compute_fit_line
+                x_fit, y_fit, eq_str, r2_fit = compute_fit_line(
+                    y_true, y_pred, method=fit_method, direction='prediction'
+                )
+                if x_fit is not None:
+                    ax.plot(x_fit, y_fit, 'b-', lw=2, label=f'Fit: {eq_str}')
+                    fit_eq_str = f'\nFit: {eq_str}\nFit R² = {r2_fit:.4f}'
+            except Exception as e:
+                print(f"Fit line error: {e}")
+
         # Calculate statistics
         from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
         r2 = r2_score(y_true, y_pred)
@@ -28988,7 +29110,7 @@ Performance (Classification):
         mae = mean_absolute_error(y_true, y_pred)
 
         # Add statistics text box
-        stats_text = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}\nn = {len(y_true)}'
+        stats_text = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}\nn = {len(y_true)}{fit_eq_str}'
         ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
                 fontsize=10, family='monospace')
@@ -29065,6 +29187,110 @@ Performance (Classification):
 
         # Add export button
         self._add_plot_export_button(self.refine_plot_frame, fig, "cv_predictions")
+
+    def _update_bias_correction_ui(self):
+        """Compute and display bias/slope correction after CV completes."""
+        task_type = (self.refined_config.get('task_type', 'regression')
+                     if hasattr(self, 'refined_config') and self.refined_config else 'regression')
+
+        if task_type != 'regression':
+            self.bias_correction_frame.grid_remove()
+            return
+
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            self.bias_correction_frame.grid_remove()
+            return
+
+        # Show the correction frame
+        self.bias_correction_frame.grid()
+
+        try:
+            from spectral_predict.bias_correction import compute_bias_slope
+
+            self.bias_correction_data = compute_bias_slope(
+                self.refined_y_true, self.refined_y_pred
+            )
+
+            bc = self.bias_correction_data
+            orig = bc['metrics_original']
+            corr = bc['metrics_corrected']
+
+            metrics_str = (
+                f"Bias = {bc['bias']:.6f}    Slope = {bc['slope']:.6f}\n"
+                f"\n"
+                f"{'Metric':<8} {'Original':>10} {'Corrected':>10} {'Change':>10}\n"
+                f"{'R²':<8} {orig['R2']:>10.4f} {corr['R2']:>10.4f} {corr['R2'] - orig['R2']:>+10.4f}\n"
+                f"{'RMSE':<8} {orig['RMSE']:>10.4f} {corr['RMSE']:>10.4f} {corr['RMSE'] - orig['RMSE']:>+10.4f}\n"
+                f"{'MAE':<8} {orig['MAE']:>10.4f} {corr['MAE']:>10.4f} {corr['MAE'] - orig['MAE']:>+10.4f}"
+            )
+
+            self.bc_metrics_text.config(state='normal')
+            self.bc_metrics_text.delete('1.0', tk.END)
+            self.bc_metrics_text.insert('1.0', metrics_str)
+            self.bc_metrics_text.config(state='disabled')
+
+        except Exception as e:
+            print(f"Bias correction computation error: {e}")
+            self.bias_correction_data = None
+
+    def _on_bias_correction_toggled(self):
+        """Re-plot when bias correction checkbox changes."""
+        if hasattr(self, 'refined_y_true') and hasattr(self, 'refined_y_pred'):
+            self._plot_regression_predictions()
+
+    def _toggle_bc_advanced(self):
+        """Show/hide advanced nonlinear correction options."""
+        if self.bc_show_advanced.get():
+            self.bc_advanced_frame.pack(fill='x', pady=(5, 0))
+        else:
+            self.bc_advanced_frame.pack_forget()
+
+    def _compute_nonlinear_correction(self):
+        """Compute nonlinear correction and update display."""
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            return
+
+        try:
+            from spectral_predict.bias_correction import compute_nonlinear_correction
+
+            method_str = self.nonlinear_correction_method.get()
+            if 'Spline' in method_str:
+                method = 'spline'
+                degree = 3
+            else:
+                method = 'polynomial'
+                # Extract degree from "Polynomial (N)"
+                degree = int(method_str.split('(')[1].rstrip(')').strip())
+
+            self.nonlinear_correction_data = compute_nonlinear_correction(
+                self.refined_y_true, self.refined_y_pred,
+                method=method, degree=degree
+            )
+
+            nl = self.nonlinear_correction_data
+            orig = nl['metrics_original']
+            corr = nl['metrics_corrected']
+
+            # Also show linear for comparison
+            lin_corr = self.bias_correction_data['metrics_corrected'] if self.bias_correction_data else orig
+
+            metrics_str = (
+                f"{'Metric':<8} {'Original':>10} {'Linear':>10} {'Nonlinear':>10}\n"
+                f"{'R²':<8} {orig['R2']:>10.4f} {lin_corr['R2']:>10.4f} {corr['R2']:>10.4f}\n"
+                f"{'RMSE':<8} {orig['RMSE']:>10.4f} {lin_corr['RMSE']:>10.4f} {corr['RMSE']:>10.4f}\n"
+                f"{'MAE':<8} {orig['MAE']:>10.4f} {lin_corr['MAE']:>10.4f} {corr['MAE']:>10.4f}"
+            )
+
+            self.bc_nonlinear_text.config(state='normal')
+            self.bc_nonlinear_text.delete('1.0', tk.END)
+            self.bc_nonlinear_text.insert('1.0', metrics_str)
+            self.bc_nonlinear_text.config(state='disabled')
+
+        except Exception as e:
+            self.bc_nonlinear_text.config(state='normal')
+            self.bc_nonlinear_text.delete('1.0', tk.END)
+            self.bc_nonlinear_text.insert('1.0', f"Error: {e}")
+            self.bc_nonlinear_text.config(state='disabled')
 
     def _plot_classification_predictions(self):
         """Plot confusion matrix for classification."""
@@ -32848,6 +33074,8 @@ External Validation Performance (n={n_val}):
                 self.learning_curve_data = None  # Clear previous data
             # Plot the predictions
             self._plot_refined_predictions()
+            # Update bias/slope correction UI
+            self._update_bias_correction_ui()
             # Plot complexity curve (validation curve)
             self._plot_complexity_curve()
             # Plot wavelength importance analysis
@@ -33021,6 +33249,15 @@ External Validation Performance (n={n_val}):
             else:
                 print("DEBUG: No X_train available - model will not have applicability domain data")
 
+            # Determine bias correction to save
+            bias_correction_to_save = None
+            if (self.save_correction_with_model.get() and
+                    self.apply_bias_correction.get()):
+                if self.use_nonlinear_correction.get() and self.nonlinear_correction_data:
+                    bias_correction_to_save = self.nonlinear_correction_data
+                elif self.bias_correction_data:
+                    bias_correction_to_save = self.bias_correction_data
+
             save_model(
                 model=self.refined_model,
                 preprocessor=self.refined_preprocessor,
@@ -33030,7 +33267,8 @@ External Validation Performance (n={n_val}):
                 cv_residuals=cv_residuals,
                 cv_predictions=cv_predictions,
                 cv_actuals=cv_actuals,
-                X_train=X_train
+                X_train=X_train,
+                bias_correction=bias_correction_to_save,
             )
 
             # Model saved successfully - update status
@@ -35477,6 +35715,16 @@ External Validation Performance (n={n_val}):
         self.pred_results_color_combo.pack(side='left', padx=5)
         self.pred_results_color_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_prediction_results())
 
+        ttk.Label(control_frame, text="Fit Line:", style='TLabel').pack(side='left', padx=(15, 5))
+        fit_options = ['None', 'Linear', 'Polynomial (2)', 'Polynomial (3)', 'Polynomial (4)', 'Smooth']
+        self.pred_results_fit_combo = ttk.Combobox(control_frame,
+                                   textvariable=self.fit_line_method_pred,
+                                   values=fit_options,
+                                   width=15,
+                                   state='readonly')
+        self.pred_results_fit_combo.pack(side='left', padx=5)
+        self.pred_results_fit_combo.bind('<<ComboboxSelected>>', lambda e: self._plot_prediction_results())
+
         # Create plot frame
         plot_container = ttk.Frame(self.prediction_plots_frame)
         plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -35588,6 +35836,21 @@ External Validation Performance (n={n_val}):
             max_val = max(y_true.max(), y_pred.max())
             ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='1:1 Line')
 
+            # Fit line overlay
+            fit_method_pred = self.fit_line_method_pred.get()
+            fit_eq_str = ''
+            if fit_method_pred != 'None':
+                try:
+                    from spectral_predict.fit_overlay import compute_fit_line
+                    x_fit, y_fit, eq_str, r2_fit = compute_fit_line(
+                        y_true, y_pred, method=fit_method_pred, direction='prediction'
+                    )
+                    if x_fit is not None:
+                        ax.plot(x_fit, y_fit, 'b-', lw=2, label=f'Fit')
+                        fit_eq_str = f'\nFit R² = {r2_fit:.4f}'
+                except Exception as e:
+                    print(f"Fit line error: {e}")
+
             # Calculate statistics
             from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
             r2 = r2_score(y_true, y_pred)
@@ -35595,7 +35858,7 @@ External Validation Performance (n={n_val}):
             mae = mean_absolute_error(y_true, y_pred)
 
             # Add statistics text box
-            stats_text = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}'
+            stats_text = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}\nMAE = {mae:.4f}{fit_eq_str}'
             ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
                     fontsize=9, family='monospace')
