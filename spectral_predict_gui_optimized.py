@@ -32252,6 +32252,11 @@ F1 Score:  {f1:.4f}
                         model.set_params(**ui_params)
                         print(f"DEBUG: Successfully applied {len(ui_params)} UI hyperparameters to {model_name} model")
 
+                        # Update n_components for later PLS validation check
+                        if model_name in ('PLS', 'PLS-DA') and 'n_components' in ui_params:
+                            n_components = ui_params['n_components']
+                            print(f"DEBUG: Updated n_components to {n_components} from UI override")
+
                         # Final parameter verification
                         final_params = model.get_params()
                         print(f"\n{'='*80}")
