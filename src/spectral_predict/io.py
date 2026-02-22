@@ -1610,80 +1610,6 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
     return X, y, metadata_df, metadata
 
 
-def read_jcamp_file(path):
-    """
-    Read a single JCAMP-DX file (.jdx, .dx).
-
-    JCAMP-DX is a text-based spectral data format with embedded metadata.
-
-    Parameters
-    ----------
-    path : str or Path
-        Path to JCAMP-DX file
-
-    Returns
-    -------
-    tuple
-        (spectrum, metadata) where:
-        - spectrum: pd.Series - Spectrum with wavelengths as index
-        - metadata: dict - Header metadata from JCAMP file
-    """
-    try:
-        import jcamp
-    except ImportError:
-        raise ValueError(
-            "JCAMP-DX file support requires the jcamp library.\n"
-            "Install it with: pip install jcamp"
-        )
-
-    path = Path(path)
-
-    # Read JCAMP file
-    try:
-        jcamp_dict = jcamp.jcamp_reader(str(path))
-    except Exception as e:
-        raise ValueError(f"Failed to read JCAMP file {path.name}: {e}")
-
-    # Extract spectral data
-    x = jcamp_dict.get('x', None)
-    y = jcamp_dict.get('y', None)
-
-    if x is None or y is None:
-        raise ValueError(f"No spectral data found in JCAMP file: {path.name}")
-
-    # Convert to pandas Series
-    spectrum = pd.Series(y, index=x)
-
-    # Sort by wavelength/wavenumber
-    spectrum = spectrum.sort_index()
-
-    # Remove duplicates (keep first)
-    spectrum = spectrum[~spectrum.index.duplicated(keep='first')]
-
-    # Extract metadata
-    metadata = {
-        'title': jcamp_dict.get('title', path.stem),
-        'xunits': jcamp_dict.get('xunits', 'unknown'),
-        'yunits': jcamp_dict.get('yunits', 'unknown'),
-        'npoints': jcamp_dict.get('npoints', len(x)),
-        'firstx': jcamp_dict.get('firstx', None),
-        'lastx': jcamp_dict.get('lastx', None),
-        'xfactor': jcamp_dict.get('xfactor', 1.0),
-        'yfactor': jcamp_dict.get('yfactor', 1.0),
-        'longdate': jcamp_dict.get('longdate', None),
-        'file_format': 'jcamp-dx',
-        'filename': path.name
-    }
-
-    # Add any other fields from JCAMP header
-    for key, value in jcamp_dict.items():
-        if key not in ['x', 'y', 'title', 'xunits', 'yunits', 'npoints',
-                       'firstx', 'lastx', 'xfactor', 'yfactor', 'longdate',
-                       'children', 'filename']:
-            metadata[key] = value
-
-    return spectrum, metadata
-
 
 def read_jcamp_dir(jcamp_dir):
     """
@@ -1711,8 +1637,11 @@ def read_jcamp_dir(jcamp_dir):
     if not jcamp_dir.is_dir():
         raise ValueError(f"Not a directory: {jcamp_dir}")
 
-    # Find JCAMP files
-    jcamp_files = list(jcamp_dir.glob("*.jdx")) + list(jcamp_dir.glob("*.dx")) + list(jcamp_dir.glob("*.JDX")) + list(jcamp_dir.glob("*.DX"))
+    # Find JCAMP files (use set to deduplicate on case-insensitive filesystems)
+    jcamp_files = sorted(set(
+        list(jcamp_dir.glob("*.jdx")) + list(jcamp_dir.glob("*.dx"))
+        + list(jcamp_dir.glob("*.JDX")) + list(jcamp_dir.glob("*.DX"))
+    ))
 
     if len(jcamp_files) == 0:
         raise ValueError(f"No .jdx or .dx files found in {jcamp_dir}")
@@ -1733,8 +1662,13 @@ def read_jcamp_dir(jcamp_dir):
             print(f"⚠️ WARNING: Duplicate filename '{stem}' - later file will overwrite earlier one")
 
         try:
-            spectrum, metadata = read_jcamp_file(jcamp_file)
-            spectra[stem] = spectrum
+            file_df, metadata = read_jcamp_file(jcamp_file)
+            series = file_df.iloc[0]
+            # Round wavenumbers to integers to avoid float grid mismatches
+            # across files (consistent with read_spc_dir and _apply_wavelength_filter)
+            series.index = series.index.round(0).astype(int)
+            series = series[~series.index.duplicated(keep='first')]
+            spectra[stem] = series
             file_metadata[stem] = metadata
         except Exception as e:
             print(f"Warning: Could not read {jcamp_file.name}: {e}")
@@ -1773,21 +1707,15 @@ def read_jcamp_dir(jcamp_dir):
     if data_type == "reflectance" and value_scale != 1.0:
         print("  INFO: Detected percent reflectance (0-100). Conversions will scale to 0-1.")
 
-    # Get x-axis units from first file
+    # Get x-axis units from first file's already-resolved metadata
     first_file_meta = next(iter(file_metadata.values()))
-    xunits = first_file_meta.get('xunits', 'unknown')
+    x_unit = first_file_meta.get('x_unit', _heuristic_x_unit(df.columns))
+    x_unit_confidence = first_file_meta.get('x_unit_confidence', 50.0)
+    x_unit_method = first_file_meta.get('x_unit_detection_method', 'default')
 
-    # Compile metadata
-    # Map JCAMP xunits to standard x_unit
-    _JCAMP_XUNIT_MAP = {
-        '1/CM': 'cm-1', 'CM-1': 'cm-1', 'CM^-1': 'cm-1',
-        'NANOMETERS': 'nm', 'NM': 'nm',
-        'MICROMETERS': 'um', 'UM': 'um',
-    }
-    xunits_upper = xunits.upper().strip() if isinstance(xunits, str) else ''
-    x_unit = _JCAMP_XUNIT_MAP.get(xunits_upper, _heuristic_x_unit(df.columns))
-    x_unit_confidence = 90.0 if xunits_upper in _JCAMP_XUNIT_MAP else 50.0
-    x_unit_method = 'jcamp_xunits' if xunits_upper in _JCAMP_XUNIT_MAP else 'default'
+    # Get raw xunits from jcamp_header for metadata passthrough
+    jcamp_header = first_file_meta.get('jcamp_header', {})
+    xunits = jcamp_header.get('xunits', 'unknown')
 
     metadata = {
         'n_spectra': len(df),
@@ -1870,9 +1798,11 @@ def write_jcamp(df, output_dir, title_prefix="spectrum", xunits="1/CM", yunits="
                     lines.append(f"##{key.upper()}={value}")
 
         # Write data in XY pairs format (simpler than compressed formats)
+        # Note: Use decimal format, not scientific notation, because jcamp_parse
+        # misinterprets the 'e' in scientific notation as a JCAMP DIF digit.
         lines.append("##XYDATA=(X++(Y..Y))")
         for i in range(len(x)):
-            lines.append(f"{x[i]:.6f} {y[i]:.6e}")
+            lines.append(f"{x[i]:.6f} {y[i]:.8f}")
 
         lines.append("##END=")
 
@@ -1981,13 +1911,12 @@ def _read_ascii_dir(directory):
     tuple
         (df, metadata) - Combined spectra and metadata
     """
-    # Find ASCII files
-    ascii_files = (list(directory.glob("*.dpt")) +
-                   list(directory.glob("*.dat")) +
-                   list(directory.glob("*.asc")) +
-                   list(directory.glob("*.DPT")) +
-                   list(directory.glob("*.DAT")) +
-                   list(directory.glob("*.ASC")))
+    # Find ASCII files (use set to deduplicate on case-insensitive filesystems)
+    ascii_files = sorted(set(
+        list(directory.glob("*.dpt")) + list(directory.glob("*.dat"))
+        + list(directory.glob("*.asc")) + list(directory.glob("*.DPT"))
+        + list(directory.glob("*.DAT")) + list(directory.glob("*.ASC"))
+    ))
 
     if len(ascii_files) == 0:
         raise ValueError(f"No .dpt, .dat, or .asc files found in {directory}")
@@ -3288,7 +3217,7 @@ def read_jcamp_file(
     path = Path(path)
 
     # Read JCAMP file
-    jcamp_data = jcamp.jcamp_read(str(path))
+    jcamp_data = jcamp.jcamp_readfile(str(path))
 
     # Extract x and y data
     wavelengths = jcamp_data['x']
