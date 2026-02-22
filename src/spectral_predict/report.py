@@ -1,5 +1,6 @@
 """Report generation functions."""
 
+import re
 from pathlib import Path
 import pandas as pd
 
@@ -25,7 +26,8 @@ def write_markdown_report(target, df_ranked, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    report_path = out_dir / f"{target}.md"
+    safe_target = re.sub(r'[\\/:*?"<>|]', '_', target)
+    report_path = out_dir / f"{safe_target}.md"
 
     # Handle empty results
     if len(df_ranked) == 0:

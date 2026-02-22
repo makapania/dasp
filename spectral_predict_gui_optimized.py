@@ -25,6 +25,7 @@ if __name__ == "__main__":
 import sys
 import os
 import ast
+import re
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -14458,6 +14459,14 @@ class SpectralPredictApp:
         # Align Y with X index
         self.y = new_y.reindex(self.X.index)
 
+        # Remove samples where y is NaN after reindex (mismatched indices or empty rows)
+        nan_mask = self.y.isna()
+        if nan_mask.any():
+            n_dropped = int(nan_mask.sum())
+            self.X = self.X[~nan_mask]
+            self.X_original = self.X_original[~nan_mask] if self.X_original is not None else None
+            self.y = self.y[~nan_mask]
+
         # Keep validation targets in sync with current target column
         if self.validation_X is not None or self.validation_y is not None:
             try:
@@ -24117,7 +24126,8 @@ class SpectralPredictApp:
             output_dir = Path(self.output_dir.get())
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            results_path = output_dir / f"results_{self.target_column.get()}_{timestamp}.csv"
+            safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
+            results_path = output_dir / f"results_{safe_target}_{timestamp}.csv"
             results_df.to_csv(results_path, index=False)
 
             # Generate report
