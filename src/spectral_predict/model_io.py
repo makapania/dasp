@@ -54,8 +54,17 @@ def _ensure_pipeline_fitted(pipeline):
 
     This is a workaround for sklearn's check_is_fitted() behaving differently
     in PyInstaller bundles. Only called when is_frozen() is True.
+
+    Also handles TransformedTargetRegressor wrapping a Pipeline.
     """
     from sklearn.pipeline import Pipeline
+    from sklearn.compose import TransformedTargetRegressor
+
+    # If model is a TransformedTargetRegressor, patch its inner regressor
+    if isinstance(pipeline, TransformedTargetRegressor):
+        if hasattr(pipeline, 'regressor_'):
+            _ensure_pipeline_fitted(pipeline.regressor_)
+        return
 
     if not isinstance(pipeline, Pipeline):
         return
@@ -83,7 +92,8 @@ def save_model(
     cv_residuals: Optional[np.ndarray] = None,
     cv_predictions: Optional[np.ndarray] = None,
     cv_actuals: Optional[np.ndarray] = None,
-    X_train: Optional[np.ndarray] = None
+    X_train: Optional[np.ndarray] = None,
+    bias_correction: Optional[Dict[str, Any]] = None
 ) -> None:
     """
     Save a trained model with all metadata to a .dasp file.
@@ -282,6 +292,19 @@ def save_model(
         else:
             metadata_complete['has_applicability_domain'] = False
 
+        # Save bias correction if provided
+        bias_correction_path = tmppath / 'bias_correction.json'
+        if bias_correction is not None:
+            with open(bias_correction_path, 'w', encoding='utf-8') as f:
+                json.dump(bias_correction, f, indent=2)
+            metadata_complete['has_bias_correction'] = True
+        else:
+            metadata_complete['has_bias_correction'] = False
+
+        # Re-write metadata (may have been updated with has_bias_correction etc.)
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata_complete, f, indent=2, default=_json_serializer)
+
         # Create ZIP archive
         with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(metadata_path, 'metadata.json')
@@ -296,6 +319,8 @@ def save_model(
                 zf.write(ad_data_path, 'applicability_domain.npz')
             if (tmppath / 'pca_model.pkl').exists():
                 zf.write(tmppath / 'pca_model.pkl', 'pca_model.pkl')
+            if bias_correction_path.exists():
+                zf.write(bias_correction_path, 'bias_correction.json')
 
 
 def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -402,6 +427,13 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if pca_model_path.exists():
             pca_model = joblib.load(pca_model_path)
 
+        # Load bias correction if present
+        bias_correction = None
+        bias_correction_path = tmppath / 'bias_correction.json'
+        if bias_correction_path.exists():
+            with open(bias_correction_path, 'r', encoding='utf-8') as f:
+                bias_correction = json.load(f)
+
     return {
         'model': model,
         'preprocessor': preprocessor,
@@ -409,7 +441,8 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'metadata': metadata,
         'cv_data': cv_data,
         'ad_data': ad_data,
-        'pca_model': pca_model
+        'pca_model': pca_model,
+        'bias_correction': bias_correction,
     }
 
 
@@ -577,6 +610,13 @@ def predict_with_model(
         else:
             # Numeric predictions that need decoding
             predictions = label_encoder.inverse_transform(predictions.astype(int))
+
+    # NOTE: Bias correction is applied after model.predict(), which returns
+    # original-scale values even when TransformedTargetRegressor is used.
+    bias_correction = model_dict.get('bias_correction')
+    if bias_correction is not None:
+        from .bias_correction import apply_correction
+        predictions = apply_correction(predictions, bias_correction)
 
     return predictions
 

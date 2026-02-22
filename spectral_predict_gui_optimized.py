@@ -12934,6 +12934,18 @@ class SpectralPredictApp:
         self.refine_window_custom.trace_add('write', self._on_window_custom_change)
         self.refine_window.trace_add('write', self._on_window_preset_change)
 
+        # Y-Transform (regression only)
+        ttk.Label(preprocess_frame, text="Y-Transform (target variable):", style='Subheading.TLabel').grid(row=5, column=0, sticky=tk.W, pady=(10, 5))
+        self.refine_y_transform = tk.StringVar(value='None')
+        y_transform_frame = ttk.Frame(preprocess_frame)
+        y_transform_frame.grid(row=6, column=0, sticky=tk.W, pady=5)
+        y_transform_combo = ttk.Combobox(y_transform_frame, textvariable=self.refine_y_transform, width=15, state='readonly')
+        y_transform_combo['values'] = ['None', 'Log', 'Log1p', 'Sqrt', 'Box-Cox', 'Yeo-Johnson']
+        y_transform_combo.pack(side='left', padx=5)
+        ttk.Label(y_transform_frame,
+                  text="Transform target before training. Predictions auto inverse-transformed.",
+                  style='Caption.TLabel').pack(side='left', padx=10)
+
         # === Model Selection ===
         model_frame = ttk.LabelFrame(content_frame, text="Model Selection", padding="20")
         model_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
@@ -32402,6 +32414,42 @@ F1 Score:  {f1:.4f}
             print(f"y range: [{y_array.min():.2f}, {y_array.max():.2f}]")
             print(f"{'='*80}\n")
 
+            # Y-Transform: wrap pipeline with TransformedTargetRegressor if requested
+            y_transform = getattr(self, 'refine_y_transform', tk.StringVar(value='None')).get()
+            y_transform_active = (y_transform != 'None' and task_type == 'regression')
+            if y_transform_active:
+                from spectral_predict.y_transform import YTransformWrapper
+
+                # Validate y compatibility
+                validation_error = YTransformWrapper.validate(y_array, y_transform)
+                if validation_error:
+                    self.root.after(0, lambda msg=validation_error: self._update_refined_results(
+                        f"Y-Transform Error\n\n{msg}", is_error=True))
+                    return
+
+                # Check if early stopping will be used — if so, skip TTR wrapping here
+                # and handle y-transform manually in the CV loop to preserve early stopping
+                _es_rounds = None
+                if self.selected_model_config is not None:
+                    _es_val = self.selected_model_config.get('early_stopping_rounds')
+                    if _es_val is not None and not pd.isna(_es_val):
+                        try:
+                            _es_rounds = int(_es_val)
+                        except (TypeError, ValueError):
+                            pass
+
+                _final = pipe.steps[-1][1]
+                _needs_es = (_es_rounds is not None and _es_rounds > 0 and
+                             is_boosting_model(_final))
+
+                if _needs_es:
+                    # Do NOT wrap with TTR — y-transform handled manually in CV loop
+                    print(f"DEBUG: Y-transform '{y_transform}' will be applied manually (early stopping compatible)")
+                else:
+                    # Safe to wrap the whole pipeline
+                    pipe = YTransformWrapper.wrap(pipe, y_transform)
+                    print(f"DEBUG: Y-transform '{y_transform}' wrapping entire pipeline")
+
             # Use early stopping for boosted models when loaded from Results
             early_stopping_rounds = None
             if self.selected_model_config is not None:
@@ -32438,49 +32486,75 @@ F1 Score:  {f1:.4f}
                 y_train, y_test = y_array[train_idx], y_array[test_idx]
 
                 # Fit pipeline (preprocessing + model) and predict
-                if use_early_stopping:
-                    X_train_transformed = X_train.copy()
-                    X_test_transformed = X_test.copy()
-                    y_train_fold = y_train
+                try:
+                    if use_early_stopping:
+                        X_train_transformed = X_train.copy()
+                        X_test_transformed = X_test.copy()
+                        y_train_fold = y_train
 
-                    if hasattr(pipe_fold, 'steps'):
-                        for step_name, step in pipe_fold.steps[:-1]:
-                            if hasattr(step, 'fit_resample'):
-                                X_train_transformed, y_train_fold = step.fit_resample(
-                                    X_train_transformed, y_train_fold
-                                )
+                        if hasattr(pipe_fold, 'steps'):
+                            for step_name, step in pipe_fold.steps[:-1]:
+                                if hasattr(step, 'fit_resample'):
+                                    X_train_transformed, y_train_fold = step.fit_resample(
+                                        X_train_transformed, y_train_fold
+                                    )
+                                else:
+                                    step.fit(X_train_transformed, y_train_fold)
+                                    if hasattr(step, 'transform'):
+                                        X_train_transformed = step.transform(X_train_transformed)
+                                        X_test_transformed = step.transform(X_test_transformed)
+
+                            final_model_fold = pipe_fold.steps[-1][1]
+
+                            # Y-transform for early stopping: manually transform y
+                            _y_transformer = None
+                            if y_transform_active:
+                                from spectral_predict.y_transform import YTransformWrapper
+                                _y_transformer = YTransformWrapper._get_transformer(y_transform)
+                                y_train_fold = _y_transformer.fit_transform(
+                                    y_train_fold.reshape(-1, 1)).ravel()
+                                y_test_es = _y_transformer.transform(
+                                    y_test.reshape(-1, 1)).ravel()
                             else:
-                                step.fit(X_train_transformed, y_train_fold)
-                                if hasattr(step, 'transform'):
-                                    X_train_transformed = step.transform(X_train_transformed)
-                                    X_test_transformed = step.transform(X_test_transformed)
+                                y_test_es = y_test
 
-                        final_model_fold = pipe_fold.steps[-1][1]
-                        _fit_with_early_stopping(
-                            final_model_fold,
-                            X_train_transformed, y_train_fold,
-                            X_test_transformed, y_test,
-                            early_stopping_rounds
-                        )
-                        y_pred = final_model_fold.predict(X_test_transformed)
+                            _fit_with_early_stopping(
+                                final_model_fold,
+                                X_train_transformed, y_train_fold,
+                                X_test_transformed, y_test_es,
+                                early_stopping_rounds
+                            )
+                            y_pred = final_model_fold.predict(X_test_transformed)
 
-                        if hasattr(final_model_fold, 'predict_proba'):
-                            y_proba = final_model_fold.predict_proba(X_test_transformed)
-                            all_y_proba.append(y_proba)
+                            # Inverse-transform predictions if y-transform active
+                            if _y_transformer is not None:
+                                y_pred = _y_transformer.inverse_transform(
+                                    y_pred.reshape(-1, 1)).ravel()
+
+                            if hasattr(final_model_fold, 'predict_proba'):
+                                y_proba = final_model_fold.predict_proba(X_test_transformed)
+                                all_y_proba.append(y_proba)
+                        else:
+                            _fit_with_early_stopping(
+                                pipe_fold,
+                                X_train, y_train,
+                                X_test, y_test,
+                                early_stopping_rounds
+                            )
+                            y_pred = pipe_fold.predict(X_test)
+                            if hasattr(pipe_fold, 'predict_proba'):
+                                y_proba = pipe_fold.predict_proba(X_test)
+                                all_y_proba.append(y_proba)
                     else:
-                        _fit_with_early_stopping(
-                            pipe_fold,
-                            X_train, y_train,
-                            X_test, y_test,
-                            early_stopping_rounds
-                        )
+                        pipe_fold.fit(X_train, y_train)
                         y_pred = pipe_fold.predict(X_test)
-                        if hasattr(pipe_fold, 'predict_proba'):
-                            y_proba = pipe_fold.predict_proba(X_test)
-                            all_y_proba.append(y_proba)
-                else:
-                    pipe_fold.fit(X_train, y_train)
-                    y_pred = pipe_fold.predict(X_test)
+                except ValueError as e:
+                    if y_transform_active and any(kw in str(e).lower() for kw in ('log', 'positive', 'negative', 'sqrt', 'domain')):
+                        raise ValueError(
+                            f"Y-transform '{y_transform}' failed in fold {fold_idx + 1}: {e}. "
+                            "Try 'Log1p' or 'Yeo-Johnson' instead."
+                        ) from e
+                    raise
 
                 # Store predictions for plotting
                 all_y_true.extend(y_test)
@@ -32868,8 +32942,28 @@ External Validation Performance (n={n_val}):
             results_text = results_text_part1 + cal_text + val_text + results_text_part2
 
             # Extract model and preprocessor from pipeline for saving
-            # For PLS-DA, save the entire pipeline (PLS + LogisticRegression)
-            if model_name == "PLS-DA" and task_type == "classification":
+            # When Y-transform wraps the whole pipeline as TransformedTargetRegressor,
+            # save it as-is — it handles transform/inverse internally
+            from sklearn.compose import TransformedTargetRegressor as _TTR
+            if isinstance(final_pipe, _TTR):
+                # TTR wraps the pipeline — extract inner pipeline for preprocessor,
+                # but save the full TTR as the model
+                inner_pipe = final_pipe.regressor_
+                if hasattr(inner_pipe, 'named_steps'):
+                    pipe_steps = list(inner_pipe.named_steps.keys())
+                    if len(pipe_steps) > 1:
+                        # Build preprocessor from inner pipeline steps (excluding model)
+                        inner_steps = list(inner_pipe.steps)
+                        final_preprocessor = Pipeline(inner_steps[:-1])
+                        # Don't refit — already fitted via TTR
+                        print(f"DEBUG: Extracted preprocessor from TTR inner pipeline: {[n for n, _ in inner_steps[:-1]]}")
+                    else:
+                        final_preprocessor = None
+                else:
+                    final_preprocessor = None
+                final_model = final_pipe
+                print(f"DEBUG: Saving TransformedTargetRegressor as model (Y-transform active)")
+            elif model_name == "PLS-DA" and task_type == "classification":
                 # Save entire PLS-DA pipeline (both PLS and LogisticRegression)
                 final_model = final_pipe
             elif use_full_spectrum_preprocessing and model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
@@ -32890,7 +32984,10 @@ External Validation Performance (n={n_val}):
                 final_model = final_pipe
 
             # Build preprocessor from pipeline steps (excluding the model)
-            if use_full_spectrum_preprocessing:
+            # Skip if already extracted from TTR above
+            if isinstance(final_pipe, _TTR):
+                pass  # final_preprocessor already set in TTR block above
+            elif use_full_spectrum_preprocessing:
                 # For derivative + subset: preprocessor was already fitted on full spectrum
                 # We need to save that preprocessor, not create a new one
                 # prep_pipeline is None for raw preprocessing (no transformation needed)
@@ -33152,6 +33249,8 @@ External Validation Performance (n={n_val}):
                 # Imbalance handling
                 'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
                 'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+                # Y-transform
+                'y_transform': self.refine_y_transform.get() if hasattr(self, 'refine_y_transform') else 'None',
             }
 
             # Add coupled optimization params if present
