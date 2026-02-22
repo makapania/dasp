@@ -2587,6 +2587,8 @@ class SpectralPredictApp:
 
         # Spectrum exclusion tracking
         self.excluded_spectra = set()  # Set of indices of excluded spectra
+        self.active_group_filter = None    # dict: {column, condition, value, value2} or None
+        self.active_indices = None         # set of active sample indices, or None (= all active)
         self._exclusion_markers = {}  # Dict mapping specimen_label → Line2D artist for red X markers
 
         # Interactive plot annotation tracking
@@ -8752,6 +8754,8 @@ class SpectralPredictApp:
             mask = np.ones(len(self.X), dtype=bool)
         elif scope == "Active Only":
             mask = ~self.X.index.isin(self.excluded_spectra)
+            if self.active_indices is not None:
+                mask &= self.X.index.isin(self.active_indices)
         else:  # set name
             if self.sample_sets is not None:
                 mask = (self.sample_sets == scope).values
@@ -9358,6 +9362,22 @@ class SpectralPredictApp:
         ttk.Checkbutton(control_frame, text="Show excluded samples",
                        variable=self.show_excluded_data_viewer,
                        command=self._populate_data_viewer).pack(side='left', padx=(0, 10))
+
+        # Active group controls
+        ttk.Separator(control_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+
+        ttk.Button(control_frame, text="Set Active Group...",
+                   command=self._show_active_group_dialog,
+                   style='Modern.TButton').pack(side='left', padx=(5, 2))
+
+        self.clear_group_btn = ttk.Button(control_frame, text="Clear Group",
+                                          command=self._clear_active_group,
+                                          state='disabled',
+                                          style='Modern.TButton')
+        self.clear_group_btn.pack(side='left', padx=(2, 5))
+
+        self.active_group_label = ttk.Label(control_frame, text="", foreground="#1A5276")
+        self.active_group_label.pack(side='left', padx=(5, 10))
 
         # Right side controls
         ttk.Button(control_frame, text="📥 Export CSV",
@@ -17336,12 +17356,14 @@ class SpectralPredictApp:
             messagebox.showerror("Save Error", f"Failed to save:\n{str(e)}")
 
     def _reset_exclusions(self):
-        """Reset all spectrum exclusions."""
+        """Reset all spectrum exclusions and active group."""
         # Cancel any pending highlight timers
         for timer_id in self._highlight_timers.values():
             self.root.after_cancel(timer_id)
         self._highlight_timers.clear()
         self.excluded_spectra.clear()
+        self.active_group_filter = None
+        self.active_indices = None
         self._update_exclusion_status()
         self._update_tab3_exclusion_status()  # Also update Tab 3 status
         # Regenerate plots to restore all spectra
@@ -17652,9 +17674,15 @@ class SpectralPredictApp:
             return
 
         try:
-            # Get current data (after exclusions)
-            X_available = self.X[~self.X.index.isin(self.excluded_spectra)]
-            y_available = self.y[~self.y.index.isin(self.excluded_spectra)]
+            # Get current data (after active group + exclusions)
+            if self.active_indices is not None:
+                X_available = self.X[self.X.index.isin(self.active_indices)]
+                y_available = self.y[self.y.index.isin(self.active_indices)]
+            else:
+                X_available = self.X
+                y_available = self.y
+            X_available = X_available[~X_available.index.isin(self.excluded_spectra)]
+            y_available = y_available[~y_available.index.isin(self.excluded_spectra)]
 
             if len(X_available) < 10:
                 messagebox.showwarning("Insufficient Data",
@@ -17850,8 +17878,12 @@ class SpectralPredictApp:
                                      "Please select more rows.")
                 return
 
-            # Get available samples (non-excluded)
-            X_available = self.X[~self.X.index.isin(self.excluded_spectra)]
+            # Get available samples (active group + non-excluded)
+            if self.active_indices is not None:
+                X_available = self.X[self.X.index.isin(self.active_indices)]
+            else:
+                X_available = self.X
+            X_available = X_available[~X_available.index.isin(self.excluded_spectra)]
 
             # Check percentage
             pct_of_data = len(selected_indices) / len(X_available) * 100
@@ -23354,20 +23386,30 @@ class SpectralPredictApp:
             self._log_progress(f"{'='*70}\n")
 
             # Run search
+            # Apply active group filter first
+            if self.active_indices is not None:
+                ag_mask = self.X.index.isin(self.active_indices)
+                X_filtered = self.X[ag_mask]
+                y_filtered = self.y[ag_mask]
+                n_inactive = len(self.X) - len(X_filtered)
+                self.root.after(0, lambda n=n_inactive: self.progress_text.insert(tk.END,
+                    f"\n[i] Active group: {len(X_filtered)} samples ({n} filtered out)\n"))
+                self.root.after(0, lambda: self.progress_text.see(tk.END))
+            else:
+                X_filtered = self.X
+                y_filtered = self.y
+
             # Filter out excluded spectra
             if self.excluded_spectra:
-                # Use DataFrame index labels for filtering (not positional indices)
-                mask = ~self.X.index.isin(self.excluded_spectra)
-                X_filtered = self.X[mask]
-                y_filtered = self.y[mask]
+                mask = ~X_filtered.index.isin(self.excluded_spectra)
+                X_filtered = X_filtered[mask]
+                y_filtered = y_filtered[mask]
 
                 # Update progress with exclusion info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
                     f"\n[i] Excluding {len(self.excluded_spectra)} user-selected spectra from analysis...\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
-            else:
-                X_filtered = self.X
-                y_filtered = self.y
+
 
             # Filter out validation set (if enabled)
             if self.validation_enabled.get() and self.validation_indices:
@@ -27030,12 +27072,12 @@ For detailed documentation, see the User Guide.
             for row_idx in range(len(formatted_data)):
                 self.data_viewer_sheet[row_idx].bg = None
 
-            # Highlight excluded samples in pink
-            if show_excluded and len(excluded_indices) > 0:
-                # Find row indices of excluded samples in the display dataframe
-                for display_row_idx, original_idx in enumerate(display_df.index):
-                    if original_idx in excluded_indices:
-                        self.data_viewer_sheet[display_row_idx].bg = "#FFE0E0"
+            # Highlight rows: grey for inactive group, pink for excluded
+            for display_row_idx, original_idx in enumerate(display_df.index):
+                if self.active_indices is not None and original_idx not in self.active_indices:
+                    self.data_viewer_sheet[display_row_idx].bg = "#F0F0F0"
+                elif original_idx in self.excluded_spectra:
+                    self.data_viewer_sheet[display_row_idx].bg = "#FFE0E0"
 
             # Update status
             n_total_samples = len(self.X)
@@ -27043,16 +27085,21 @@ For detailed documentation, see the User Guide.
             n_displayed = len(display_df)
             n_excluded = len(self.excluded_spectra)
 
+            status_parts = [f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths"]
+            if self.active_indices is not None:
+                n_active = len(self.active_indices)
+                status_parts.append(f"{n_active} in active group (grey = inactive)")
             if n_excluded > 0 and not show_excluded:
-                status_text = f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths | {n_excluded} excluded samples hidden"
+                status_parts.append(f"{n_excluded} excluded samples hidden")
             elif n_excluded > 0 and show_excluded:
-                status_text = f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths | {n_excluded} excluded samples shown in pink"
-            else:
-                status_text = f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths"
+                status_parts.append(f"{n_excluded} excluded in pink")
 
-            self.data_viewer_status.config(text=status_text)
+            self.data_viewer_status.config(text=" | ".join(status_parts))
             self.data_viewer_info.config(
                 text=f"Total dataset: {n_total_samples} samples × {n_total_wavelengths} wavelengths | Scroll to navigate")
+
+            # Update active group UI elements
+            self._update_active_group_ui()
 
             # Snapshot state for revert (only on fresh load, not on revert itself)
             if not getattr(self, '_populating_from_revert', False):
@@ -27283,6 +27330,8 @@ For detailed documentation, see the User Guide.
             'excluded_spectra': self.excluded_spectra.copy(),
             'sample_sets': self.sample_sets.copy() if self.sample_sets is not None else None,
             'sample_set_names': list(self.sample_set_names),
+            'active_group_filter': self.active_group_filter.copy() if self.active_group_filter else None,
+            'active_indices': self.active_indices.copy() if self.active_indices is not None else None,
         }
 
     def _revert_data_viewer(self):
@@ -27302,6 +27351,12 @@ For detailed documentation, see the User Guide.
         self.excluded_spectra = state['excluded_spectra'].copy()
         self.sample_sets = state['sample_sets'].copy() if state['sample_sets'] is not None else None
         self.sample_set_names = list(state['sample_set_names'])
+        self.active_group_filter = state.get('active_group_filter')
+        if self.active_group_filter:
+            self.active_group_filter = self.active_group_filter.copy()
+        self.active_indices = state.get('active_indices')
+        if self.active_indices is not None:
+            self.active_indices = self.active_indices.copy()
         self._update_set_combo()
 
         # Refresh display (skip re-snapshotting)
@@ -27313,6 +27368,7 @@ For detailed documentation, see the User Guide.
         self.data_viewer_modified = False
         self.revert_data_btn.config(state='disabled')
         self.data_viewer_status.config(text="> Reverted to original data")
+        self._update_active_group_ui()
 
     def _undo_data_viewer(self):
         """Undo the last cell edit in the data viewer."""
@@ -27557,7 +27613,11 @@ For detailed documentation, see the User Guide.
                     # Update status label
                     if hasattr(self, 'validation_status_label'):
                         if len(self.validation_indices) >= 3:
-                            X_available = self.X[~self.X.index.isin(self.excluded_spectra)]
+                            if self.active_indices is not None:
+                                X_available = self.X[self.X.index.isin(self.active_indices)]
+                            else:
+                                X_available = self.X
+                            X_available = X_available[~X_available.index.isin(self.excluded_spectra)]
                             pct = len(self.validation_indices) / len(X_available) * 100 if len(X_available) > 0 else 0
                             n_cal = len(X_available) - len(self.validation_indices)
                             self.validation_status_label.config(
@@ -27634,6 +27694,278 @@ For detailed documentation, see the User Guide.
 
         self._populate_data_viewer()
         self.data_viewer_status.config(text=f"> Included {len(indices_to_remove)} sample(s)")
+
+    # ========== ACTIVE GROUP METHODS ==========
+
+    def _get_active_group_columns(self) -> list[str]:
+        """Return list of columns available for active group filtering (Target + metadata)."""
+        columns = []
+        # Target column
+        if self.y is not None:
+            target_name = self.target_column.get() if self.target_column.get() else "Target"
+            columns.append(target_name)
+        # Metadata columns from combined format
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+            columns.extend(list(self.combined_metadata_df.columns))
+        # Metadata columns from separate reference file
+        elif self.ref is not None:
+            target_name = self.target_column.get() if self.target_column.get() else "Target"
+            columns.extend([c for c in self.ref.columns if c != target_name])
+        return columns
+
+    def _get_column_series(self, col_name: str) -> pd.Series | None:
+        """Return a pandas Series for the named column, aligned to self.X index."""
+        target_name = self.target_column.get() if self.target_column.get() else "Target"
+        if col_name == target_name and self.y is not None:
+            return self.y
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+            if col_name in self.combined_metadata_df.columns:
+                return self.combined_metadata_df[col_name]
+        if self.ref is not None and col_name in self.ref.columns:
+            return self.ref[col_name]
+        return None
+
+    def _compute_active_group_matches(self, col: str, cond: str, val: str, val2: str) -> set:
+        """Return set of sample indices matching the given condition."""
+        series = self._get_column_series(col)
+        if series is None:
+            return set()
+
+        if cond == "has value":
+            mask = series.notna()
+            if series.dtype == object:
+                mask = mask & (series.astype(str).str.strip() != '')
+            return set(series.index[mask])
+
+        if cond == "contains":
+            mask = series.astype(str).str.contains(str(val), case=False, na=False)
+            return set(series.index[mask])
+
+        # Try numeric comparison
+        numeric = pd.to_numeric(series, errors='coerce')
+        try:
+            val_num = float(val) if val else None
+        except (ValueError, TypeError):
+            val_num = None
+
+        if cond in ("==", "!=") and val_num is None:
+            # String equality
+            str_series = series.astype(str)
+            if cond == "==":
+                mask = str_series == str(val)
+            else:
+                mask = str_series != str(val)
+            return set(series.index[mask])
+
+        if val_num is None:
+            return set()
+
+        if cond == "==":
+            mask = numeric == val_num
+        elif cond == "!=":
+            mask = numeric != val_num
+        elif cond == ">":
+            mask = numeric > val_num
+        elif cond == "<":
+            mask = numeric < val_num
+        elif cond == ">=":
+            mask = numeric >= val_num
+        elif cond == "<=":
+            mask = numeric <= val_num
+        elif cond == "between":
+            try:
+                val2_num = float(val2) if val2 else None
+            except (ValueError, TypeError):
+                val2_num = None
+            if val2_num is None:
+                return set()
+            lo, hi = min(val_num, val2_num), max(val_num, val2_num)
+            mask = (numeric >= lo) & (numeric <= hi)
+        else:
+            return set()
+
+        return set(series.index[mask.fillna(False)])
+
+    def _apply_active_group(self, col: str, cond: str, val: str, val2: str):
+        """Set active_indices and active_group_filter, refresh UI."""
+        # Safety check: warn if validation set exists
+        if self.validation_indices:
+            if not messagebox.askyesno(
+                "Validation Set Warning",
+                "Setting an active group will reset the current validation set.\n\nContinue?"
+            ):
+                return False
+            self._reset_validation_set()
+
+        self.active_indices = self._compute_active_group_matches(col, cond, val, val2)
+        self.active_group_filter = {
+            'column': col, 'condition': cond, 'value': val, 'value2': val2
+        }
+        self._update_active_group_ui()
+        self._populate_data_viewer()
+        return True
+
+    def _clear_active_group(self):
+        """Clear the active group filter."""
+        if self.active_group_filter is None:
+            return
+        # Safety check: warn if validation set exists
+        if self.validation_indices:
+            if not messagebox.askyesno(
+                "Validation Set Warning",
+                "Clearing the active group will reset the current validation set.\n\nContinue?"
+            ):
+                return
+            self._reset_validation_set()
+
+        self.active_group_filter = None
+        self.active_indices = None
+        self._update_active_group_ui()
+        self._populate_data_viewer()
+
+    def _update_active_group_ui(self):
+        """Update the active group status label and button states."""
+        if self.active_group_filter is not None and self.active_indices is not None:
+            n_active = len(self.active_indices)
+            n_total = len(self.X) if self.X is not None else 0
+            cond_str = self._format_active_group_condition(self.active_group_filter)
+            self.active_group_label.config(
+                text=f"Active Group: {n_active} of {n_total} ({cond_str})"
+            )
+            self.clear_group_btn.config(state='normal')
+        else:
+            self.active_group_label.config(text="")
+            self.clear_group_btn.config(state='disabled')
+
+    def _format_active_group_condition(self, filter_def: dict) -> str:
+        """Return a human-readable string for the filter condition."""
+        col = filter_def['column']
+        cond = filter_def['condition']
+        val = filter_def.get('value', '')
+        val2 = filter_def.get('value2', '')
+        if cond == "has value":
+            return f"{col} has value"
+        elif cond == "between":
+            return f"{col} between {val} and {val2}"
+        elif cond == "contains":
+            return f"{col} contains '{val}'"
+        else:
+            return f"{col} {cond} {val}"
+
+    def _show_active_group_dialog(self):
+        """Show dialog for setting the active group filter."""
+        if self.X is None:
+            messagebox.showwarning("No Data", "Please load data first.")
+            return
+
+        columns = self._get_active_group_columns()
+        if not columns:
+            messagebox.showwarning("No Columns",
+                "No target or metadata columns available for filtering.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Set Active Group")
+        dialog.geometry("420x300")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        main_frame = ttk.Frame(dialog, padding=15)
+        main_frame.pack(fill='both', expand=True)
+
+        ttk.Label(main_frame, text="Define which samples are active for analysis:",
+                  wraplength=380).pack(anchor='w', pady=(0, 10))
+
+        # Column selection
+        col_frame = ttk.Frame(main_frame)
+        col_frame.pack(fill='x', pady=3)
+        ttk.Label(col_frame, text="Column:", width=10).pack(side='left')
+        col_var = tk.StringVar(value=columns[0])
+        col_combo = ttk.Combobox(col_frame, textvariable=col_var,
+                                  values=columns, state='readonly', width=25)
+        col_combo.pack(side='left', padx=(5, 0))
+
+        # Condition selection
+        cond_frame = ttk.Frame(main_frame)
+        cond_frame.pack(fill='x', pady=3)
+        ttk.Label(cond_frame, text="Condition:", width=10).pack(side='left')
+        conditions = ["has value", "==", "!=", ">", "<", ">=", "<=", "between", "contains"]
+        cond_var = tk.StringVar(value="has value")
+        cond_combo = ttk.Combobox(cond_frame, textvariable=cond_var,
+                                   values=conditions, state='readonly', width=25)
+        cond_combo.pack(side='left', padx=(5, 0))
+
+        # Value entry
+        val_frame = ttk.Frame(main_frame)
+        val_frame.pack(fill='x', pady=3)
+        val_label = ttk.Label(val_frame, text="Value:", width=10)
+        val_label.pack(side='left')
+        val_var = tk.StringVar()
+        val_entry = ttk.Entry(val_frame, textvariable=val_var, width=27)
+        val_entry.pack(side='left', padx=(5, 0))
+
+        # Value 2 entry (for "between")
+        val2_frame = ttk.Frame(main_frame)
+        val2_frame.pack(fill='x', pady=3)
+        val2_label = ttk.Label(val2_frame, text="Value 2:", width=10)
+        val2_label.pack(side='left')
+        val2_var = tk.StringVar()
+        val2_entry = ttk.Entry(val2_frame, textvariable=val2_var, width=27)
+        val2_entry.pack(side='left', padx=(5, 0))
+
+        # Preview label
+        preview_label = ttk.Label(main_frame, text="", foreground="#1A5276")
+        preview_label.pack(fill='x', pady=(10, 5))
+
+        def _update_visibility(*_args):
+            cond = cond_var.get()
+            if cond == "has value":
+                val_frame.pack_forget()
+                val2_frame.pack_forget()
+            elif cond == "between":
+                val_frame.pack(fill='x', pady=3, after=cond_frame)
+                val2_frame.pack(fill='x', pady=3, after=val_frame)
+            else:
+                val_frame.pack(fill='x', pady=3, after=cond_frame)
+                val2_frame.pack_forget()
+            preview_label.config(text="")
+
+        cond_var.trace_add('write', _update_visibility)
+        # Initial visibility
+        _update_visibility()
+
+        def _preview():
+            matches = self._compute_active_group_matches(
+                col_var.get(), cond_var.get(), val_var.get(), val2_var.get()
+            )
+            n_total = len(self.X) if self.X is not None else 0
+            preview_label.config(text=f"Matches: {len(matches)} of {n_total} samples")
+
+        def _apply():
+            matches = self._compute_active_group_matches(
+                col_var.get(), cond_var.get(), val_var.get(), val2_var.get()
+            )
+            if len(matches) == 0:
+                messagebox.showwarning("No Matches",
+                    "No samples match this condition.", parent=dialog)
+                return
+            result = self._apply_active_group(
+                col_var.get(), cond_var.get(), val_var.get(), val2_var.get()
+            )
+            if result is not False:
+                dialog.destroy()
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x', pady=(10, 0))
+
+        ttk.Button(btn_frame, text="Preview", command=_preview,
+                   style='Modern.TButton').pack(side='left', padx=(0, 5))
+        ttk.Button(btn_frame, text="Apply", command=_apply,
+                   style='Modern.TButton').pack(side='left', padx=(0, 5))
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy,
+                   style='Modern.TButton').pack(side='right')
 
     # ========== END DATA VIEWER EDITING METHODS ==========
 
