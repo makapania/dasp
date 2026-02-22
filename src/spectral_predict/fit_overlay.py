@@ -1,6 +1,6 @@
 """Fit line overlay computation for pred-vs-actual plots.
 
-Supports linear, polynomial, and smooth (spline) fits with edge case guards.
+Supports linear, polynomial, and smooth (kernel regression) fits with edge case guards.
 """
 
 from __future__ import annotations
@@ -83,26 +83,31 @@ def compute_fit_line(
     else:
         degree = poly_degree
 
-    # --- Smooth (spline) path ---
+    # --- Smooth (Gaussian kernel regression) path ---
     if degree is None:
         if n < 4:
-            return None, None, "Insufficient data for spline (n < 4)", float("nan")
+            return None, None, "Insufficient data for smooth (n < 4)", float("nan")
         try:
-            from scipy.interpolate import UnivariateSpline
-
             order = np.argsort(x)
             xs, ys = x[order], y[order]
-            # s=None lets scipy choose; fallback on error
-            spline = UnivariateSpline(xs, ys, s=None, k=3)
+
+            # Gaussian kernel regression (Nadaraya-Watson estimator)
             x_fit = np.linspace(xs.min(), xs.max(), n_points)
-            y_fit = spline(x_fit)
-            y_hat = spline(xs)
-            ss_res = np.sum((ys - y_hat) ** 2)
-            ss_tot = np.sum((ys - ys.mean()) ** 2)
+            bandwidth = (xs.max() - xs.min()) * 0.15  # 15% of data range
+
+            diff = xs[np.newaxis, :] - x_fit[:, np.newaxis]  # (n_points, n)
+            weights = np.exp(-0.5 * (diff / bandwidth) ** 2)
+            y_fit = (weights @ ys) / weights.sum(axis=1)
+
+            # R² using numpy interpolation back to original x positions
+            y_hat = np.interp(x, x_fit, y_fit)
+            ss_res = np.sum((y - y_hat) ** 2)
+            ss_tot = np.sum((y - y.mean()) ** 2)
             r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-            return x_fit, y_fit, "Smooth spline", r2
+
+            return x_fit, y_fit, "Smooth", r2
         except Exception as e:
-            return None, None, f"Spline error: {e}", float("nan")
+            return None, None, f"Smooth error: {e}", float("nan")
 
     # --- Polynomial / linear path ---
     if n < degree + 1:
