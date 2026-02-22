@@ -13718,8 +13718,8 @@ class SpectralPredictApp:
         # Priority: ASD > CSV > SPC
 
         # Check for ASD files (case insensitive, includes .sig format)
-        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
-                     list(path.glob("*.sig")) + list(path.glob("*.SIG")))
+        asd_files = sorted(set(list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
+                     list(path.glob("*.sig")) + list(path.glob("*.SIG"))))
         if asd_files:
             self.detected_type = "asd"
             self.detection_status.config(
@@ -13787,7 +13787,7 @@ class SpectralPredictApp:
             return
 
         # Check for SPC files (GRAMS/Thermo Galactic) - case insensitive
-        spc_files = sorted(list(path.glob("*.spc")) + list(path.glob("*.SPC")))
+        spc_files = sorted(set(list(path.glob("*.spc")) + list(path.glob("*.SPC"))))
         if spc_files:
             self.detected_type = "spc"
             self.detection_status.config(
@@ -13810,7 +13810,7 @@ class SpectralPredictApp:
             return
 
         # Check for JCAMP-DX files (.jdx, .dx)
-        jcamp_files = sorted(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX")))
+        jcamp_files = sorted(set(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX"))))
         if jcamp_files:
             self.detected_type = "jcamp"
             self.detection_status.config(
@@ -13831,8 +13831,8 @@ class SpectralPredictApp:
             return
 
         # Check for ASCII variant files (.dpt, .dat, .asc)
-        ascii_files = sorted(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
-                       list(path.glob("*.DPT")) + list(path.glob("*.DAT")) + list(path.glob("*.ASC")))
+        ascii_files = sorted(set(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
+                       list(path.glob("*.DPT")) + list(path.glob("*.DAT")) + list(path.glob("*.ASC"))))
         if ascii_files:
             self.detected_type = "ascii"
             self.detection_status.config(
@@ -13876,7 +13876,7 @@ class SpectralPredictApp:
             return
 
         # Check for PerkinElmer files (.sp)
-        sp_files = sorted(list(path.glob("*.sp")) + list(path.glob("*.SP")))
+        sp_files = sorted(set(list(path.glob("*.sp")) + list(path.glob("*.SP"))))
         if sp_files:
             self.detected_type = "perkinelmer"
             self.detection_status.config(
@@ -26884,7 +26884,7 @@ For detailed documentation, see the User Guide.
                     target_val = None
 
                 # Spectral values (format to 5 decimals)
-                spectral_vals = [f"{val:.5f}" for val in display_df.loc[idx].values]
+                spectral_vals = ['' if pd.isna(val) else f"{val:.5f}" for val in display_df.loc[idx].values]
 
                 if target_val is not None:
                     row_data = ([sample_id] + metadata_vals + set_val
@@ -34536,9 +34536,9 @@ External Validation Performance (n={n_val}):
                 # Try to detect file type
                 asd_files = sorted(list(path.glob("*.asd")))
                 spc_files = sorted(list(path.glob("*.spc")))
-                jcamp_files = sorted(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX")))
-                ascii_files = sorted(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
-                               list(path.glob("*.DPT")) + list(path.glob("*.DAT")) + list(path.glob("*.ASC")))
+                jcamp_files = sorted(set(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX"))))
+                ascii_files = sorted(set(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
+                               list(path.glob("*.DPT")) + list(path.glob("*.DAT")) + list(path.glob("*.ASC"))))
 
                 if asd_files:
                     self.pred_status.config(text="Loading ASD files...")
@@ -38625,15 +38625,15 @@ External Validation Performance (n={n_val}):
 
         asd_files = sorted(dir_path.glob("*.asd"))
         spc_files = sorted(dir_path.glob("*.spc"))
-        jcamp_files = sorted(
+        jcamp_files = sorted(set(
             list(dir_path.glob("*.jdx")) + list(dir_path.glob("*.dx"))
             + list(dir_path.glob("*.JDX")) + list(dir_path.glob("*.DX"))
-        )
-        ascii_files = sorted(
+        ))
+        ascii_files = sorted(set(
             list(dir_path.glob("*.dpt")) + list(dir_path.glob("*.dat"))
             + list(dir_path.glob("*.asc")) + list(dir_path.glob("*.DPT"))
             + list(dir_path.glob("*.DAT")) + list(dir_path.glob("*.ASC"))
-        )
+        ))
         csv_files = sorted(dir_path.glob("*.csv"))
 
         if asd_files:
