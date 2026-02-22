@@ -28009,6 +28009,11 @@ For detailed documentation, see the User Guide.
         # Mirror training: remove excluded first, then validation from remainder
         remaining = all_indices - excluded
         remaining = remaining - validation
+
+        # Apply active group filter (same as training pipeline)
+        if self.active_indices is not None:
+            remaining = remaining & self.active_indices
+
         current_calibration = len(remaining)
 
         current_excluded = len(excluded)
