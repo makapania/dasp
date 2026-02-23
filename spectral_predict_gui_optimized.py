@@ -23776,6 +23776,10 @@ class SpectralPredictApp:
 
                     self._progress_callback(info)
 
+                # Extract baseline/smoothing params for Bayesian optimization
+                bl_method, bl_params = self._get_baseline_params()
+                sm_enabled, sm_win, sm_poly = self._get_smoothing_params()
+
                 for model_name in selected_models:
                     self._log_progress(f"\n  Optimizing {model_name}...")
 
@@ -23797,6 +23801,11 @@ class SpectralPredictApp:
                             region_test_all_individual=self.region_test_all_individual.get(),
                             region_test_pairwise=self.region_test_pairwise.get(),
                             controller=self.search_controller,
+                            baseline_method=bl_method,
+                            baseline_params=bl_params,
+                            smoothing=sm_enabled,
+                            smoothing_window=sm_win,
+                            smoothing_polyorder=sm_poly,
                         )
 
                         if len(results_df_model) > 0:
@@ -27057,10 +27066,13 @@ For detailed documentation, see the User Guide.
 
                 # Target value (if available)
                 if display_y is not None:
-                    if np.issubdtype(display_y.dtype, np.number):
-                        target_val = f"{display_y.loc[idx]:.4f}"
+                    val = display_y.loc[idx]
+                    if pd.isna(val):
+                        target_val = ''
+                    elif pd.api.types.is_numeric_dtype(display_y):
+                        target_val = f"{val:.4f}"
                     else:
-                        target_val = str(display_y.loc[idx])
+                        target_val = str(val)
                 else:
                     target_val = None
 
@@ -29118,10 +29130,18 @@ Performance (Classification):
         preprocess = config.get('Preprocess', 'raw')
         deriv = config.get('Deriv', None)
 
-        # Strip baseline prefix (e.g., "als+snv" → "snv") for GUI preprocess matching
+        # Strip baseline/smoothing prefixes (e.g., "als+sg0+snv" → baseline="als", smoothing=True, core="snv")
         baseline_prefix = None
+        smoothing_detected = False
         if '+' in preprocess:
-            baseline_prefix, preprocess = preprocess.split('+', 1)
+            parts = preprocess.split('+')
+            core = parts[-1]  # Last part is always the core preprocessing
+            for part in parts[:-1]:
+                if part == 'sg0':
+                    smoothing_detected = True
+                else:
+                    baseline_prefix = part
+            preprocess = core
 
         # Convert from search.py naming to GUI naming
         if preprocess == 'deriv' and deriv == 1:
@@ -29191,6 +29211,13 @@ Performance (Classification):
         else:
             self.enable_baseline.set(False)
             self._toggle_baseline_options()
+
+        # Load smoothing settings from prefix if present (e.g., "sg0+snv" had smoothing)
+        if smoothing_detected:
+            self.enable_smoothing.set(True)
+            print(f"> Smoothing loaded from results")
+        else:
+            self.enable_smoothing.set(False)
 
         # Detect and load GA preprocessing if present
         if 'ga_genes' in config and config['ga_genes']:

@@ -57,7 +57,8 @@ from sklearn.metrics import (
 from typing import Dict, List, Optional, Callable, Tuple, Any
 
 # Import existing infrastructure
-from spectral_predict.preprocess import SNV, SavgolDerivative
+from spectral_predict.preprocess import SNV, SavgolDerivative, SavgolSmooth
+from spectral_predict.baseline import BaselineALS, BaselineAirPLS, BaselinePolynomial, BaselineRubberBand
 from spectral_predict.models import build_model, get_feature_importances
 from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
@@ -187,7 +188,31 @@ def _normalize_preprocess_name(name: str) -> str:
     return name  # fallback for unknown names
 
 
-def suggest_preprocessing(trial: Trial, n_features: int) -> Dict[str, Any]:
+def _build_display_preprocess_name(
+    core_name: str,
+    apply_baseline: bool = False,
+    baseline_method: str | None = None,
+    apply_smoothing: bool = False,
+) -> str:
+    """Build display name with baseline/smoothing prefixes matching Grid Search conventions."""
+    name = _normalize_preprocess_name(core_name)
+    if apply_baseline and baseline_method:
+        name = f"{baseline_method}+{name}"
+    if apply_smoothing:
+        if '+' in name:
+            parts = name.split('+', 1)
+            name = f"{parts[0]}+sg0+{parts[1]}"
+        else:
+            name = f"sg0+{name}"
+    return name
+
+
+def suggest_preprocessing(
+    trial: Trial,
+    n_features: int,
+    baseline_method: str | None = None,
+    smoothing: bool = False,
+) -> Dict[str, Any]:
     """Suggest preprocessing configuration.
 
     Parameters
@@ -196,6 +221,10 @@ def suggest_preprocessing(trial: Trial, n_features: int) -> Dict[str, Any]:
         Optuna trial object
     n_features : int
         Number of spectral features (wavelengths)
+    baseline_method : str or None
+        If not None, Optuna will suggest whether to apply this baseline method.
+    smoothing : bool
+        If True, Optuna will suggest whether to apply Savitzky-Golay smoothing.
 
     Returns
     -------
@@ -205,6 +234,8 @@ def suggest_preprocessing(trial: Trial, n_features: int) -> Dict[str, Any]:
         - 'deriv': Derivative order (0-4)
         - 'window': Savitzky-Golay window size
         - 'polyorder': Polynomial order
+        - 'apply_baseline': Whether to apply baseline correction (bool)
+        - 'apply_smoothing': Whether to apply smoothing (bool)
     """
     preprocessing = trial.suggest_categorical('preprocessing', PREPROCESSING_OPTIONS)
 
@@ -214,6 +245,18 @@ def suggest_preprocessing(trial: Trial, n_features: int) -> Dict[str, Any]:
         'window': 0,
         'polyorder': 0
     }
+
+    # Baseline correction toggle (only when user enabled it in the UI)
+    if baseline_method is not None:
+        config['apply_baseline'] = trial.suggest_categorical('apply_baseline', [True, False])
+    else:
+        config['apply_baseline'] = False
+
+    # Smoothing toggle (only when user enabled it in the UI)
+    if smoothing:
+        config['apply_smoothing'] = trial.suggest_categorical('apply_smoothing', [True, False])
+    else:
+        config['apply_smoothing'] = False
 
     if 'deriv' in preprocessing:
         # Extract derivative order
@@ -240,7 +283,14 @@ def suggest_preprocessing(trial: Trial, n_features: int) -> Dict[str, Any]:
     return config
 
 
-def apply_preprocessing(X: np.ndarray, config: Dict[str, Any]) -> np.ndarray:
+def apply_preprocessing(
+    X: np.ndarray,
+    config: Dict[str, Any],
+    baseline_method: str | None = None,
+    baseline_params: dict | None = None,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+) -> np.ndarray:
     """Apply preprocessing to spectral data.
 
     Parameters
@@ -249,12 +299,41 @@ def apply_preprocessing(X: np.ndarray, config: Dict[str, Any]) -> np.ndarray:
         Raw spectral data (n_samples, n_wavelengths)
     config : dict
         Preprocessing configuration from suggest_preprocessing
+    baseline_method : str or None
+        Baseline correction method name (e.g., 'als', 'polynomial')
+    baseline_params : dict or None
+        Parameters for the baseline correction method
+    smoothing_window : int
+        Savitzky-Golay smoothing window length
+    smoothing_polyorder : int
+        Savitzky-Golay smoothing polynomial order
 
     Returns
     -------
     X_processed : np.ndarray
         Preprocessed data
     """
+    # Step 1: Baseline correction (if this trial chose to apply it)
+    if config.get('apply_baseline') and baseline_method is not None:
+        params = baseline_params or {}
+        if baseline_method == 'polynomial':
+            bl = BaselinePolynomial(degree=params.get('degree', 2))
+        elif baseline_method == 'als':
+            bl = BaselineALS(lambda_=params.get('lam', 1e5), p=params.get('p', 0.01))
+        elif baseline_method == 'rubber_band':
+            bl = BaselineRubberBand()
+        elif baseline_method == 'airpls':
+            bl = BaselineAirPLS(lam=params.get('lam', 1e5))
+        else:
+            bl = None
+        if bl is not None:
+            X = bl.fit_transform(X)
+
+    # Step 2: Smoothing (if this trial chose to apply it)
+    if config.get('apply_smoothing'):
+        X = SavgolSmooth(window_length=smoothing_window, polyorder=smoothing_polyorder).fit_transform(X)
+
+    # Step 3: Core preprocessing (SNV / derivatives)
     name = config['name']
 
     if name == 'raw':
@@ -584,6 +663,11 @@ def create_unified_objective(
     early_stopping_rounds: Optional[int] = 40,
     region_test_all_individual: bool = False,
     region_test_pairwise: bool = False,
+    baseline_method: str | None = None,
+    baseline_params: dict | None = None,
+    smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -624,6 +708,16 @@ def create_unified_objective(
         Test all N regions individually (not just top 5)
     region_test_pairwise : bool, default=False
         Test all C(N,2) pairwise region combinations
+    baseline_method : str or None
+        Baseline correction method (e.g., 'als', 'polynomial', 'rubber_band', 'airpls')
+    baseline_params : dict or None
+        Parameters for the baseline correction method
+    smoothing : bool
+        Whether to let Optuna toggle Savitzky-Golay smoothing
+    smoothing_window : int
+        Smoothing window length
+    smoothing_polyorder : int
+        Smoothing polynomial order
 
     Returns
     -------
@@ -665,7 +759,11 @@ def create_unified_objective(
         """Objective function for a single trial."""
         try:
             # 1. Suggest preprocessing
-            preprocess_config = suggest_preprocessing(trial, n_features)
+            preprocess_config = suggest_preprocessing(
+                trial, n_features,
+                baseline_method=baseline_method,
+                smoothing=smoothing,
+            )
 
             # Create cache key from preprocessing config
             cache_key = (
@@ -673,10 +771,18 @@ def create_unified_objective(
                 preprocess_config.get('deriv', 0),
                 preprocess_config.get('window', 0),
                 preprocess_config.get('polyorder', 0),
+                preprocess_config.get('apply_baseline', False),
+                preprocess_config.get('apply_smoothing', False),
             )
 
             # 2. Apply preprocessing
-            X_prep = apply_preprocessing(X_raw, preprocess_config)
+            X_prep = apply_preprocessing(
+                X_raw, preprocess_config,
+                baseline_method=baseline_method,
+                baseline_params=baseline_params,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+            )
             n_features_prep = X_prep.shape[1]
 
             # Validate preprocessing didn't corrupt data
@@ -1050,6 +1156,8 @@ def create_unified_objective(
             trial.set_user_attr('window', preprocess_config.get('window', 0))
             trial.set_user_attr('deriv', preprocess_config.get('deriv', 0))
             trial.set_user_attr('poly', preprocess_config.get('polyorder', 0))
+            trial.set_user_attr('apply_baseline', preprocess_config.get('apply_baseline', False))
+            trial.set_user_attr('apply_smoothing', preprocess_config.get('apply_smoothing', False))
             trial.set_user_attr('subset_type', subset_type)
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
@@ -1219,6 +1327,11 @@ def run_unified_bayesian(
     region_test_all_individual: bool = False,
     region_test_pairwise: bool = False,
     controller=None,  # For pause/resume/stop support
+    baseline_method: str | None = None,
+    baseline_params: dict | None = None,
+    smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1262,6 +1375,17 @@ def run_unified_bayesian(
         Test all N regions individually (not just top 5)
     region_test_pairwise : bool, default=False
         Test all C(N,2) pairwise region combinations
+    baseline_method : str or None
+        Baseline correction method (e.g., 'als', 'polynomial', 'rubber_band', 'airpls').
+        When set, Optuna toggles apply/skip per trial.
+    baseline_params : dict or None
+        Parameters for the baseline correction method
+    smoothing : bool
+        Whether to let Optuna toggle Savitzky-Golay smoothing per trial
+    smoothing_window : int
+        Smoothing window length (used when smoothing=True)
+    smoothing_polyorder : int
+        Smoothing polynomial order (used when smoothing=True)
 
     Returns
     -------
@@ -1349,6 +1473,10 @@ def run_unified_bayesian(
                 print(f"Early stopping: enabled ({early_stopping_rounds} rounds)")
             else:
                 print(f"Early stopping: disabled")
+        if baseline_method:
+            print(f"Baseline correction: {baseline_method} (toggled by Optuna)")
+        if smoothing:
+            print(f"Smoothing: SG window={smoothing_window}, poly={smoothing_polyorder} (toggled by Optuna)")
         print(f"{'='*70}\n")
 
     # Create objective function
@@ -1369,6 +1497,11 @@ def run_unified_bayesian(
         early_stopping_rounds=early_stopping_rounds,
         region_test_all_individual=region_test_all_individual,
         region_test_pairwise=region_test_pairwise,
+        baseline_method=baseline_method,
+        baseline_params=baseline_params,
+        smoothing=smoothing,
+        smoothing_window=smoothing_window,
+        smoothing_polyorder=smoothing_polyorder,
     )
 
     # Create TPE sampler with good defaults
@@ -1416,7 +1549,12 @@ def run_unified_bayesian(
                 best = study.best_trial
                 best_model = {
                     'Model': model_name,
-                    'Preprocess': best.params.get('preprocessing', 'raw'),
+                    'Preprocess': _build_display_preprocess_name(
+                        best.params.get('preprocessing', 'raw'),
+                        apply_baseline=best.user_attrs.get('apply_baseline', False),
+                        baseline_method=baseline_method,
+                        apply_smoothing=best.user_attrs.get('apply_smoothing', False),
+                    ),
                     'n_vars': best.params.get('n_vars', 'N/A'),
                 }
                 if task_type == 'regression':
@@ -1449,6 +1587,8 @@ def run_unified_bayesian(
         study, model_name, task_type, wavelengths, n_features, cv_folds,
         imbalance_method=imbalance_method,
         imbalance_params=imbalance_params,
+        baseline_method=baseline_method,
+        smoothing=smoothing,
     )
 
     if verbose:
@@ -1494,6 +1634,8 @@ def convert_study_to_dataframe(
     cv_folds: int,
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
+    baseline_method: str | None = None,
+    smoothing: bool = False,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -1515,6 +1657,10 @@ def convert_study_to_dataframe(
         Imbalance handling method used
     imbalance_params : dict, optional
         Parameters for the imbalance method
+    baseline_method : str or None
+        Baseline correction method used (for display name prefixes)
+    smoothing : bool
+        Whether smoothing was available as an Optuna toggle
 
     Returns
     -------
@@ -1534,7 +1680,12 @@ def convert_study_to_dataframe(
         row = {
             'Task': task_type,
             'Model': model_name,
-            'Preprocess': _normalize_preprocess_name(trial.user_attrs.get('preprocessing', 'unknown')),
+            'Preprocess': _build_display_preprocess_name(
+                trial.user_attrs.get('preprocessing', 'unknown'),
+                apply_baseline=trial.user_attrs.get('apply_baseline', False),
+                baseline_method=baseline_method,
+                apply_smoothing=trial.user_attrs.get('apply_smoothing', False),
+            ),
             'Deriv': trial.user_attrs.get('deriv', 0),
             'Window': trial.user_attrs.get('window', 0),
             'Poly': trial.user_attrs.get('poly', 0),
