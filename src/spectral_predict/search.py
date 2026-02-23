@@ -300,6 +300,18 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str):
     model = get_model(model_name, task_type=task_type, n_components=n_components,
                       max_n_components=max(n_components, 20))
 
+    # Strip Pipeline prefixes from stored params (e.g., 'model__n_estimators' → 'n_estimators')
+    if model_kwargs:
+        normalized = {}
+        for key, value in model_kwargs.items():
+            if key.startswith('model__'):
+                normalized[key[7:]] = value
+            elif '__' in key:
+                continue  # Skip other Pipeline wrapper params (scaler__, pls__, lr__)
+            else:
+                normalized[key] = value
+        model_kwargs = normalized
+
     # Apply parameters using set_params (same as Model Dev tab)
     if model_kwargs:
         try:
@@ -435,10 +447,30 @@ def compute_validation_metrics_for_top_models(
             # === STEP 1: Get preprocessing config ===
             # Use PreprocessBase (clean pipeline name) if available, fall back to Preprocess
             preprocess_name = row.get('PreprocessBase', row.get('Preprocess', 'raw'))
-            # Strip baseline prefix (e.g., "als+snv" → "snv") as fallback
-            baseline_method = None
-            if '+' in str(preprocess_name):
-                baseline_method, preprocess_name = str(preprocess_name).split('+', 1)
+
+            # Read explicit metadata columns (stored by Bayesian search paths)
+            baseline_method = row.get('baseline_method', None)
+            if isinstance(baseline_method, float) and pd.isna(baseline_method):
+                baseline_method = None
+            smoothing = bool(row.get('smoothing', False))
+            if isinstance(smoothing, float):
+                smoothing = smoothing > 0
+            smoothing_window = int(row.get('smoothing_window', 17)) if not (isinstance(row.get('smoothing_window'), float) and pd.isna(row.get('smoothing_window'))) else 17
+            smoothing_polyorder = int(row.get('smoothing_polyorder', 2)) if not (isinstance(row.get('smoothing_polyorder'), float) and pd.isna(row.get('smoothing_polyorder'))) else 2
+
+            # Fallback: parse display name for old results without explicit columns
+            if baseline_method is None and '+' in str(preprocess_name):
+                parts = str(preprocess_name).split('+')
+                core_parts = []
+                for part in parts:
+                    if part in ('als', 'polynomial', 'rubber_band', 'airpls'):
+                        baseline_method = part
+                    elif part == 'sg0':
+                        smoothing = True
+                    else:
+                        core_parts.append(part)
+                preprocess_name = '_'.join(core_parts) if core_parts else 'raw'
+
             deriv = row.get('Deriv', 0)
             window = row.get('Window', None)
             poly = row.get('Poly', None)
@@ -494,7 +526,8 @@ def compute_validation_metrics_for_top_models(
                 # GA preprocessing: cache by genes hash
                 cache_key = ('ga', tuple(ga_genes))
             else:
-                cache_key = (preprocess_name, deriv, window, poly, baseline_method)
+                cache_key = (preprocess_name, deriv, window, poly, baseline_method,
+                             smoothing, smoothing_window, smoothing_polyorder)
 
             # === STEP 2: Preprocess FULL spectrum (matching search.py and Model Dev) ===
             if cache_key in preprocess_cache:
@@ -512,6 +545,9 @@ def compute_validation_metrics_for_top_models(
                         window=window,
                         polyorder=poly,
                         baseline_method=baseline_method,
+                        smoothing=smoothing,
+                        smoothing_window=smoothing_window,
+                        smoothing_polyorder=smoothing_polyorder,
                     )
 
                     if prep_steps:

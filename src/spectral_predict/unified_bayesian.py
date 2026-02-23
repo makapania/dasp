@@ -1612,6 +1612,8 @@ def run_unified_bayesian(
         imbalance_params=imbalance_params,
         baseline_method=baseline_method,
         smoothing=smoothing,
+        smoothing_window=smoothing_window,
+        smoothing_polyorder=smoothing_polyorder,
     )
 
     if verbose:
@@ -1659,6 +1661,8 @@ def convert_study_to_dataframe(
     imbalance_params: Optional[Dict[str, Any]] = None,
     baseline_method: str | None = None,
     smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -1709,9 +1713,14 @@ def convert_study_to_dataframe(
                 baseline_method=baseline_method,
                 apply_smoothing=trial.user_attrs.get('apply_smoothing', False),
             ),
+            'PreprocessBase': _normalize_preprocess_name(trial.user_attrs.get('preprocessing', 'unknown')),
             'Deriv': trial.user_attrs.get('deriv', 0),
             'Window': trial.user_attrs.get('window', 0),
             'Poly': trial.user_attrs.get('poly', 0),
+            'baseline_method': baseline_method if trial.user_attrs.get('apply_baseline', False) else None,
+            'smoothing': trial.user_attrs.get('apply_smoothing', False),
+            'smoothing_window': smoothing_window,
+            'smoothing_polyorder': smoothing_polyorder,
             'Params': trial.user_attrs.get('model_params', '{}'),
             'n_vars': trial.user_attrs.get('n_vars', n_features),
             'full_vars': trial.user_attrs.get('full_vars_masked', n_features),
