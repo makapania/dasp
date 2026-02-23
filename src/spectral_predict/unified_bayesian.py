@@ -120,7 +120,7 @@ def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
 SUBSET_SIZES = ['full', 10, 20, 50, 100, 250, 500, 1000]
 
 # Variable selection methods
-VAR_METHODS = ['importance', 'cars', 'region']
+VAR_METHODS = ['importance', 'cars', 'region', 'uve']
 
 
 def _needs_resampling_pipeline(imbalance_method: Optional[str], task_type: str) -> bool:
@@ -614,6 +614,19 @@ def compute_importances(
             logging.warning(f"CARS failed: {e}, falling back to importance")
             return compute_importances(X, y, 'importance', model_name, cv_folds, random_state, task_type)
 
+    elif method == 'uve':
+        try:
+            importances = uve_selection(
+                X, y,
+                cutoff_multiplier=1.0,
+                cv_folds=cv_folds,
+                random_state=random_state,
+            )
+            return importances
+        except Exception as e:
+            logging.warning(f"UVE failed: {e}, falling back to importance")
+            return compute_importances(X, y, 'importance', model_name, cv_folds, random_state, task_type)
+
     else:
         # Default: uniform importances (full model)
         return np.ones(n_features)
@@ -668,6 +681,7 @@ def create_unified_objective(
     smoothing: bool = False,
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
+    enable_uve: bool = False,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -718,6 +732,8 @@ def create_unified_objective(
         Smoothing window length
     smoothing_polyorder : int
         Smoothing polynomial order
+    enable_uve : bool, default=False
+        Include UVE (Uninformative Variable Elimination) as a variable selection method
 
     Returns
     -------
@@ -748,6 +764,8 @@ def create_unified_objective(
     # Determine available subset types
     # Regional subsets are computed dynamically on preprocessed data
     available_methods = ['importance', 'cars', 'region']
+    if enable_uve:
+        available_methods.append('uve')
 
     # Guard against None params for imbalance handling
     _imbalance_params = imbalance_params if imbalance_params is not None else {}
@@ -1332,6 +1350,7 @@ def run_unified_bayesian(
     smoothing: bool = False,
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
+    enable_uve: bool = False,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1386,6 +1405,8 @@ def run_unified_bayesian(
         Smoothing window length (used when smoothing=True)
     smoothing_polyorder : int
         Smoothing polynomial order (used when smoothing=True)
+    enable_uve : bool, default=False
+        Include UVE (Uninformative Variable Elimination) as a variable selection method
 
     Returns
     -------
@@ -1466,7 +1487,8 @@ def run_unified_bayesian(
         print(f"CV Folds: {cv_folds}")
         print(f"Samples: {n_samples}, Features: {n_features}")
         print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
-        print(f"Variable methods: importance, CARS, region")
+        methods_str = "importance, CARS, region" + (", UVE" if enable_uve else "")
+        print(f"Variable methods: {methods_str}")
         # Show early stopping status for boosting models
         if model_name in ('XGBoost', 'LightGBM', 'CatBoost'):
             if early_stopping_rounds and early_stopping_rounds > 0:
@@ -1502,6 +1524,7 @@ def run_unified_bayesian(
         smoothing=smoothing,
         smoothing_window=smoothing_window,
         smoothing_polyorder=smoothing_polyorder,
+        enable_uve=enable_uve,
     )
 
     # Create TPE sampler with good defaults

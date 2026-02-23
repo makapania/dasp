@@ -2796,6 +2796,15 @@ class SpectralPredictApp:
         self.baseline_asls_lambda = tk.StringVar(value="1e5")
         self.baseline_asls_p = tk.StringVar(value="0.01")
         self.baseline_airpls_lambda = tk.StringVar(value="1e5")
+
+        # Bayesian-specific options (independent of shared Analysis Config controls)
+        self.bayes_enable_baseline = tk.BooleanVar(value=False)
+        self.bayes_baseline_method = tk.StringVar(value='als')
+        self.bayes_enable_smoothing = tk.BooleanVar(value=False)
+        self.bayes_region_test_all = tk.BooleanVar(value=False)
+        self.bayes_region_test_pairwise = tk.BooleanVar(value=False)
+        self.bayes_enable_uve = tk.BooleanVar(value=True)
+
         # Smoothing
         self.enable_smoothing = tk.BooleanVar(value=False)
         self.smoothing_window = tk.IntVar(value=11)
@@ -10650,12 +10659,41 @@ class SpectralPredictApp:
                                              state="readonly", width=18)
         self.nsga2_mode_combo.grid(row=1, column=3, columnspan=3, sticky=tk.W, pady=(5, 0))
 
+        # === Bayesian Options Panel (shown only when Bayesian is selected) ===
+        self.bayes_options_frame = ttk.LabelFrame(opt_frame, text="Bayesian Options", padding=8)
+        # Row 0: Baseline + Smoothing
+        ttk.Checkbutton(self.bayes_options_frame, text="Baseline Correction",
+                        variable=self.bayes_enable_baseline).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        self.bayes_baseline_combo = ttk.Combobox(
+            self.bayes_options_frame, textvariable=self.bayes_baseline_method,
+            values=['als', 'polynomial', 'rubber_band', 'airpls'],
+            state="readonly", width=12)
+        self.bayes_baseline_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        ttk.Checkbutton(self.bayes_options_frame, text="Smoothing (SG)",
+                        variable=self.bayes_enable_smoothing).grid(row=0, column=2, sticky=tk.W)
+        # Row 1: Region options + UVE
+        ttk.Checkbutton(self.bayes_options_frame, text="Test all regions individually",
+                        variable=self.bayes_region_test_all).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        ttk.Checkbutton(self.bayes_options_frame, text="Test pairwise combinations",
+                        variable=self.bayes_region_test_pairwise).grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
+        # Row 2: UVE
+        ttk.Checkbutton(self.bayes_options_frame, text="UVE Variable Selection",
+                        variable=self.bayes_enable_uve).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        ttk.Label(self.bayes_options_frame, text="(fast ~50-100ms/trial, adds uninformative variable elimination)",
+                  style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, pady=(5, 0))
+
+        # Initially hide if not Bayesian
+        if self.optimization_method.get() == "unified":
+            self.bayes_options_frame.grid(row=3, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(10, 0))
+        # Add trace to show/hide based on optimization method
+        self.optimization_method.trace_add('write', self._on_optimization_method_changed)
+
         # Info label
         info_text = ("💡 Grid Search: Tests all combinations (exhaustive, slower)\n"
                     "   Bayesian Optimization: Joint optimization of preprocessing + model + variables (recommended)\n"
                     "   NSGA-II: Multi-objective Pareto optimization (error + parsimony + complexity)")
         ttk.Label(opt_frame, text=info_text,
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
 
         # Create card for model selection
         models_card_outer, models_card = self._create_card(content_frame, title="Select Models",
@@ -14389,6 +14427,13 @@ class SpectralPredictApp:
         export_btn.pack(side='right')
 
         return button_frame
+
+    def _on_optimization_method_changed(self, *args):
+        """Show/hide Bayesian Options panel based on optimization method."""
+        if self.optimization_method.get() == "unified":
+            self.bayes_options_frame.grid(row=3, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(10, 0))
+        else:
+            self.bayes_options_frame.grid_remove()
 
     def _on_tier_changed(self, *args):
         """Update model checkboxes based on selected tier."""
@@ -20511,6 +20556,34 @@ class SpectralPredictApp:
 
         return True, self.smoothing_window.get(), self.smoothing_polyorder.get()
 
+    def _get_baseline_params_for_method(self, method: str) -> tuple:
+        """Get baseline params for a specific method, reading detail values from shared widgets.
+
+        Unlike _get_baseline_params(), this takes the method as an argument
+        rather than reading self.baseline_method, and always returns params
+        (never checks self.enable_baseline).
+        """
+        params = {}
+        if method == 'polynomial':
+            params['degree'] = self.baseline_poly_degree.get()
+        elif method == 'als':
+            try:
+                params['lam'] = float(self.baseline_asls_lambda.get())
+            except ValueError:
+                params['lam'] = 1e5
+            try:
+                params['p'] = float(self.baseline_asls_p.get())
+            except ValueError:
+                params['p'] = 0.01
+        elif method == 'rubber_band':
+            pass
+        elif method == 'airpls':
+            try:
+                params['lam'] = float(self.baseline_airpls_lambda.get())
+            except ValueError:
+                params['lam'] = 1e5
+        return method, params
+
     # ========== END BASELINE/SMOOTHING METHODS ==========
 
     def _export_preprocessed_csv(self, window_size=None):
@@ -23781,9 +23854,24 @@ class SpectralPredictApp:
 
                     self._progress_callback(info)
 
-                # Extract baseline/smoothing params for Bayesian optimization
-                bl_method, bl_params = self._get_baseline_params()
-                sm_enabled, sm_win, sm_poly = self._get_smoothing_params()
+                # Extract baseline/smoothing params from Bayesian-specific controls
+                if self.bayes_enable_baseline.get():
+                    bl_method, bl_params = self._get_baseline_params_for_method(
+                        self.bayes_baseline_method.get()
+                    )
+                else:
+                    bl_method, bl_params = None, None
+
+                if self.bayes_enable_smoothing.get():
+                    sm_enabled = True
+                    sm_win = self.smoothing_window.get()
+                    sm_poly = self.smoothing_polyorder.get()
+                else:
+                    sm_enabled, sm_win, sm_poly = False, 17, 2
+
+                region_all = self.bayes_region_test_all.get()
+                region_pairwise = self.bayes_region_test_pairwise.get()
+                enable_uve = self.bayes_enable_uve.get()
 
                 for model_name in selected_models:
                     self._log_progress(f"\n  Optimizing {model_name}...")
@@ -23803,14 +23891,15 @@ class SpectralPredictApp:
                             progress_callback=unified_progress_wrapper,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
-                            region_test_all_individual=self.region_test_all_individual.get(),
-                            region_test_pairwise=self.region_test_pairwise.get(),
+                            region_test_all_individual=region_all,
+                            region_test_pairwise=region_pairwise,
                             controller=self.search_controller,
                             baseline_method=bl_method,
                             baseline_params=bl_params,
                             smoothing=sm_enabled,
                             smoothing_window=sm_win,
                             smoothing_polyorder=sm_poly,
+                            enable_uve=enable_uve,
                         )
 
                         if len(results_df_model) > 0:
