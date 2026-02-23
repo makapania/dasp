@@ -6734,7 +6734,7 @@ class SpectralPredictApp:
             ax = fig.add_subplot(111)
 
             # Convert to consistent type for comparison (handle mixed float/str)
-            y_values = self.y.copy()
+            y_values = self.y.dropna().copy()
             if y_values.dtype == 'object':
                 # Convert all to string for consistent comparison
                 y_for_unique = y_values.astype(str)
@@ -6756,7 +6756,7 @@ class SpectralPredictApp:
                 ax.set_xticklabels([str(v) for v in unique_vals], rotation=45, ha='right')
                 ax.set_xlabel('Class', fontsize=12)
                 ax.set_ylabel('Count', fontsize=12)
-                ax.set_title(f'Target Distribution (n={len(self.y)}, {n_unique} classes)',
+                ax.set_title(f'Target Distribution (n={len(y_values)}, {n_unique} classes)',
                             fontsize=14, fontweight='bold')
 
                 # Add count labels on bars
@@ -6765,14 +6765,14 @@ class SpectralPredictApp:
                            str(count), ha='center', va='bottom', fontsize=10)
             else:
                 # Histogram for continuous/regression
-                ax.hist(self.y, bins=30, color='steelblue', edgecolor='white', alpha=0.8)
-                ax.axvline(np.mean(self.y), color='red', linestyle='--', linewidth=2,
-                          label=f'Mean: {np.mean(self.y):.2f}')
-                ax.axvline(np.median(self.y), color='orange', linestyle='--', linewidth=2,
-                          label=f'Median: {np.median(self.y):.2f}')
+                ax.hist(y_values, bins=30, color='steelblue', edgecolor='white', alpha=0.8)
+                ax.axvline(y_values.mean(), color='red', linestyle='--', linewidth=2,
+                          label=f'Mean: {y_values.mean():.2f}')
+                ax.axvline(y_values.median(), color='orange', linestyle='--', linewidth=2,
+                          label=f'Median: {y_values.median():.2f}')
                 ax.set_xlabel('Target Value', fontsize=12)
                 ax.set_ylabel('Frequency', fontsize=12)
-                ax.set_title(f'Target Distribution (n={len(self.y)}, range: {np.min(self.y):.2f} - {np.max(self.y):.2f})',
+                ax.set_title(f'Target Distribution (n={len(y_values)}, range: {y_values.min():.2f} - {y_values.max():.2f})',
                             fontsize=14, fontweight='bold')
                 ax.legend()
 
@@ -14579,21 +14579,18 @@ class SpectralPredictApp:
         else:
             return  # No reference data available
 
-        # Align Y with X index
-        self.y = new_y.reindex(self.X.index)
+        # Align Y with X index (use X_original to preserve all rows)
+        self.y = new_y.reindex(self.X_original.index)
 
-        # Remove samples where y is NaN after reindex (mismatched indices or empty rows)
-        nan_mask = self.y.isna()
-        if nan_mask.any():
-            n_dropped = int(nan_mask.sum())
-            n_remaining = int((~nan_mask).sum())
-            self.X = self.X[~nan_mask]
-            self.X_original = self.X_original[~nan_mask] if self.X_original is not None else None
-            self.y = self.y[~nan_mask]
-            messagebox.showwarning(
+        # Inform user about NaN values but do NOT drop rows — analysis code handles NaN
+        nan_count = int(self.y.isna().sum())
+        if nan_count > 0:
+            n_valid = int(len(self.y) - nan_count)
+            messagebox.showinfo(
                 "Missing Target Values",
-                f"{n_dropped} sample(s) had missing target values and were excluded.\n\n"
-                f"{n_remaining} sample(s) remaining for analysis."
+                f"{nan_count} sample(s) have missing values for target '{new_target}' "
+                f"and will be excluded from analysis.\n\n"
+                f"{n_valid} sample(s) available for modeling."
             )
 
         # Keep validation targets in sync with current target column
@@ -14608,6 +14605,13 @@ class SpectralPredictApp:
 
                 if validation_idx:
                     self.validation_y = self.y.loc[validation_idx]
+                    nan_val = int(self.validation_y.isna().sum())
+                    if nan_val > 0:
+                        messagebox.showwarning(
+                            "Validation Set Warning",
+                            f"{nan_val} validation sample(s) have no value for target '{new_target}'.\n"
+                            "Validation metrics may be affected. Consider recreating the validation set."
+                        )
                     if hasattr(self, 'validation_status_label'):
                         self.validation_status_label.config(
                             text=f"Validation set updated for target '{new_target}' ({len(validation_idx)} samples)"
@@ -19642,12 +19646,16 @@ class SpectralPredictApp:
                 X_filtered = self.X.loc[:, mask]
                 print(f"[i] Wavelength range filter: {wl_min}-{wl_max} nm ({X_filtered.shape[1]} of {self.X.shape[1]} wavelengths)")
 
+            # Drop NaN target values and align X
+            y_clean = self.y.dropna()
+            X_filtered = X_filtered.loc[y_clean.index]
+
             # Determine task type
-            n_unique = len(np.unique(self.y))
-            is_classification = n_unique < 10 and isinstance(self.y.iloc[0], (str, np.str_)) or n_unique <= 10
+            n_unique = len(np.unique(y_clean))
+            is_classification = n_unique < 10 and isinstance(y_clean.iloc[0], (str, np.str_)) or n_unique <= 10
 
             # Check if target is categorical
-            if self.y.dtype == 'object' or n_unique <= 10:
+            if y_clean.dtype == 'object' or n_unique <= 10:
                 is_classification = True
 
             self.screening_status.config(text="Training Random Forest (may take a moment)...")
@@ -19665,7 +19673,7 @@ class SpectralPredictApp:
                 rf = RandomForestRegressor(n_estimators=100, max_depth=10,
                                            n_jobs=n_jobs, random_state=42)
 
-            rf.fit(X_filtered.values, self.y.values)
+            rf.fit(X_filtered.values, y_clean.values)
             importances = pd.Series(rf.feature_importances_, index=X_filtered.columns)
 
             if top_n is None:
