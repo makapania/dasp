@@ -15943,6 +15943,11 @@ class SpectralPredictApp:
                 # Don't mix metadata with reference data - keep them separate
                 self.ref = None  # No separate reference file for combined format
                 self.combined_metadata_df = metadata_df  # Store metadata columns separately
+                # Ensure target column is in combined_metadata_df for target switching
+                if y_aligned is not None and metadata.get('y_col'):
+                    if self.combined_metadata_df is None:
+                        self.combined_metadata_df = pd.DataFrame(index=X_aligned.index)
+                    self.combined_metadata_df[metadata['y_col']] = y_aligned
 
                 # Show success message
                 format_name = "Excel" if self.detected_type == "combined_excel" else "CSV/TXT"
@@ -27053,7 +27058,7 @@ For detailed documentation, see the User Guide.
                         # Format based on type
                         if pd.isna(val):
                             metadata_vals.append('')
-                        elif np.issubdtype(type(val), np.number):
+                        elif isinstance(val, (int, float, np.integer, np.floating)):
                             metadata_vals.append(f"{val:.4f}")
                         else:
                             metadata_vals.append(str(val))
