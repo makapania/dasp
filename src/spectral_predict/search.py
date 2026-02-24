@@ -395,6 +395,21 @@ def compute_validation_metrics_for_top_models(
     pd.DataFrame
         Results with RMSEP, R2pred (or val_Accuracy) columns added
     """
+    # Drop samples with NaN target values (safety net — upstream should filter but may not)
+    train_nan_mask = pd.isna(y_train)
+    if np.any(train_nan_mask):
+        n_dropped = int(np.sum(train_nan_mask))
+        print(f"[Validation] Dropping {n_dropped} training sample(s) with NaN target values")
+        X_train = X_train[~train_nan_mask]
+        y_train = y_train[~train_nan_mask]
+
+    val_nan_mask = pd.isna(y_val)
+    if np.any(val_nan_mask):
+        n_dropped = int(np.sum(val_nan_mask))
+        print(f"[Validation] Dropping {n_dropped} validation sample(s) with NaN target values")
+        X_val = X_val[~val_nan_mask]
+        y_val = y_val[~val_nan_mask]
+
     # Initialize columns
     if task_type == 'regression':
         df_results['RMSEP'] = np.nan
@@ -2896,6 +2911,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         X_val_for_val = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
         y_val_for_val = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
 
+        # Filter NaN from validation targets
+        val_nan = pd.isna(y_val_for_val)
+        if np.any(val_nan):
+            n_val_dropped = int(np.sum(val_nan))
+            print(f"[Validation] Dropping {n_val_dropped} validation sample(s) with NaN target values")
+            X_val_for_val = X_val_for_val[~val_nan]
+            y_val_for_val = y_val_for_val[~val_nan]
+
         # CRITICAL: Use encoded training labels (y_np) for consistency
         # y_np was encoded earlier if label_encoder exists, so model training
         # and validation must use the same encoding
@@ -3511,6 +3534,14 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         X_train_for_val = X.values if hasattr(X, 'values') else X
         X_val_for_val = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
         y_val_for_val = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+
+        # Filter NaN from validation targets
+        val_nan = pd.isna(y_val_for_val)
+        if np.any(val_nan):
+            n_val_dropped = int(np.sum(val_nan))
+            print(f"[Validation] Dropping {n_val_dropped} validation sample(s) with NaN target values")
+            X_val_for_val = X_val_for_val[~val_nan]
+            y_val_for_val = y_val_for_val[~val_nan]
 
         # CRITICAL: Use encoded training labels (y_np) for consistency
         # y_np was encoded earlier if label_encoder exists, so model training

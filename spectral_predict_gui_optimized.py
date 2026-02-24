@@ -23945,12 +23945,31 @@ class SpectralPredictApp:
                             X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
                             y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
 
+                            # Filter NaN target values from training data for validation
+                            train_nan_mask = pd.isna(y_np) if hasattr(y_np, 'dtype') and y_np.dtype == object else np.isnan(y_np)
+                            if np.any(train_nan_mask):
+                                n_dropped = int(np.sum(train_nan_mask))
+                                self._log_progress(f"  Dropping {n_dropped} training sample(s) with NaN target for validation")
+                                X_np_clean = X_np[~train_nan_mask]
+                                y_np_clean = y_np[~train_nan_mask]
+                            else:
+                                X_np_clean = X_np
+                                y_np_clean = y_np
+
+                            # Filter NaN target values from validation data
+                            val_nan_mask = pd.isna(y_val_np) if hasattr(y_val_np, 'dtype') and y_val_np.dtype == object else np.isnan(y_val_np)
+                            if np.any(val_nan_mask):
+                                n_dropped = int(np.sum(val_nan_mask))
+                                self._log_progress(f"  Dropping {n_dropped} validation sample(s) with NaN target")
+                                X_val_np = X_val_np[~val_nan_mask]
+                                y_val_np = y_val_np[~val_nan_mask]
+
                             # For classification, re-create label encoder from training data
                             # (run_unified_bayesian doesn't return it)
-                            y_train_np = y_np
+                            y_train_np = y_np_clean
                             if task_type == 'classification':
                                 # Quick sanity check: validation labels should overlap training labels
-                                train_labels = np.unique(y_np)
+                                train_labels = np.unique(y_np_clean)
                                 val_labels = np.unique(y_val_np)
 
                                 def _norm_label(v):
@@ -23982,8 +24001,8 @@ class SpectralPredictApp:
 
                                 from sklearn.preprocessing import LabelEncoder
                                 temp_encoder = LabelEncoder()
-                                temp_encoder.fit(y_np)
-                                y_train_np = temp_encoder.transform(y_np)
+                                temp_encoder.fit(y_np_clean)
+                                y_train_np = temp_encoder.transform(y_np_clean)
 
                                 try:
                                     y_val_np = temp_encoder.transform(y_val_np)
@@ -24031,7 +24050,7 @@ class SpectralPredictApp:
                             # Compute validation metrics
                             results_df = compute_validation_metrics_for_top_models(
                                 df_results=results_df,
-                                X_train=X_np,
+                                X_train=X_np_clean,
                                 y_train=y_train_np,
                                 X_val=X_val_np,
                                 y_val=y_val_np,
@@ -24150,6 +24169,25 @@ class SpectralPredictApp:
                         X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
                         y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
 
+                        # Filter NaN target values from training data for validation
+                        train_nan_mask = pd.isna(y_np) if hasattr(y_np, 'dtype') and y_np.dtype == object else np.isnan(y_np)
+                        if np.any(train_nan_mask):
+                            n_dropped = int(np.sum(train_nan_mask))
+                            self._log_progress(f"  Dropping {n_dropped} training sample(s) with NaN target for validation")
+                            X_np_clean = X_np[~train_nan_mask]
+                            y_np_clean = y_np[~train_nan_mask]
+                        else:
+                            X_np_clean = X_np
+                            y_np_clean = y_np
+
+                        # Filter NaN target values from validation data
+                        val_nan_mask = pd.isna(y_val_np) if hasattr(y_val_np, 'dtype') and y_val_np.dtype == object else np.isnan(y_val_np)
+                        if np.any(val_nan_mask):
+                            n_dropped = int(np.sum(val_nan_mask))
+                            self._log_progress(f"  Dropping {n_dropped} validation sample(s) with NaN target")
+                            X_val_np = X_val_np[~val_nan_mask]
+                            y_val_np = y_val_np[~val_nan_mask]
+
                         # Handle label encoding for classification
                         if task_type == 'classification' and label_encoder is not None:
                             try:
@@ -24161,8 +24199,8 @@ class SpectralPredictApp:
                         # Compute validation metrics
                         results_df = compute_validation_metrics_for_top_models(
                             df_results=results_df,
-                            X_train=X_np,
-                            y_train=y_np,
+                            X_train=X_np_clean,
+                            y_train=y_np_clean,
                             X_val=X_val_np,
                             y_val=y_val_np,
                             task_type=task_type,
