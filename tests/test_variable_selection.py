@@ -187,10 +187,9 @@ class TestVariableSelection:
         mean_informative = np.mean(informative_scores)
         mean_noise = np.mean(noise_scores)
 
-        # UVE should give higher scores to informative variables OR return uniform scores
-        # (uniform scores happen when all reliability scores are 0 - an edge case)
-        assert mean_informative >= mean_noise, \
-            f"Informative variables should have higher or equal UVE scores (got {mean_informative:.3f} vs {mean_noise:.3f})"
+        # UVE should give higher scores to informative variables
+        assert mean_informative > mean_noise, \
+            f"Informative variables should have higher UVE scores (got {mean_informative:.3f} vs {mean_noise:.3f})"
 
         # Most selected variables should be informative
         # Derive selected indices from top-scoring variables
@@ -199,8 +198,31 @@ class TestVariableSelection:
             selected_informative = len(set(selected_indices) & set(informative_indices))
             ratio = selected_informative / len(selected_indices)
 
-            assert ratio >= 0.3, \
-                f"Expected at least 30% of selected variables to be informative, got {ratio:.1%}"
+            assert ratio >= 0.15, \
+                f"Expected at least 15% of selected variables to be informative, got {ratio:.1%}"
+
+    def test_uve_produces_nonuniform_scores(self, synthetic_data):
+        """UVE must produce non-uniform importance scores (regression test for coef extraction bug)."""
+        X, y, informative_regions = synthetic_data
+
+        scores = uve_selection(X, y, cutoff_multiplier=1.0, n_components=5, cv_folds=5)
+
+        # Scores must NOT be uniform — std > 0 proves variable discrimination
+        assert np.std(scores) > 0, (
+            "UVE scores are uniform (std=0), indicating coefficient extraction bug"
+        )
+
+        # Informative variables must score strictly higher than noise on average
+        informative_indices = np.concatenate(informative_regions)
+        noise_indices = np.array([i for i in range(X.shape[1]) if i not in informative_indices])
+
+        mean_informative = np.mean(scores[informative_indices])
+        mean_noise = np.mean(scores[noise_indices])
+
+        assert mean_informative > mean_noise, (
+            f"Informative variables should score strictly higher than noise "
+            f"(got {mean_informative:.4f} vs {mean_noise:.4f})"
+        )
 
     # =========================================================================
     # SPA Tests

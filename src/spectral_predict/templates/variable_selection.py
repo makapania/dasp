@@ -219,7 +219,7 @@ def uve_selection(X, y, n_variables=None, cutoff_multiplier=1.0, cv_folds=5, ran
     for fold_idx, (train_idx, _) in enumerate(kf.split(X_aug)):
         pls = PLSRegression(n_components=n_components, scale=False)
         pls.fit(X_aug[train_idx], y[train_idx])
-        coef = pls.coef_.ravel() if pls.coef_.ndim == 1 else pls.coef_[:, 0]
+        coef = pls.coef_.ravel()
         coefficients[fold_idx] = coef
 
     # Calculate reliability: mean(|coef|) / std(coef)

@@ -865,7 +865,7 @@ def create_unified_objective(
                     importances = compute_importances(
                         X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
                     )
-                    top_indices = np.argsort(importances)[-n_vars:]
+                    top_indices = np.argsort(importances, kind='stable')[-n_vars:]
                     subset_tag = f"top{n_vars}_importance_fallback"
             else:
                 # Importance-based or CARS-based selection (region_idx is ignored)
@@ -885,7 +885,7 @@ def create_unified_objective(
                     )
 
                     # Select top variables
-                    top_indices = np.argsort(importances)[-n_vars:]
+                    top_indices = np.argsort(importances, kind='stable')[-n_vars:]
                     subset_tag = f"top{n_vars}_{subset_type}"
 
             # 4. Apply subset if selected

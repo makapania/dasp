@@ -130,11 +130,8 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, ra
             pls = PLSRegression(n_components=n_components, scale=False)
             pls.fit(X_train, y_train)
 
-            # Extract coefficients (first column if y is 1D)
-            if pls.coef_.ndim == 2:
-                coefficients[fold_idx] = pls.coef_[:, 0]
-            else:
-                coefficients[fold_idx] = pls.coef_
+            # Extract coefficients
+            coefficients[fold_idx] = pls.coef_.ravel()
 
         except (np.linalg.LinAlgError, ValueError) as e:
             # Handle singular matrices or other PLS fitting errors
@@ -258,10 +255,7 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
             pls = PLSRegression(n_components=n_components, scale=False)
             pls.fit(X_train, y_train)
 
-            if pls.coef_.ndim == 2:
-                coefficients[fold_idx] = pls.coef_[:, 0]
-            else:
-                coefficients[fold_idx] = pls.coef_
+            coefficients[fold_idx] = pls.coef_.ravel()
 
         except (np.linalg.LinAlgError, ValueError) as e:
             print(f"Warning: PLS fitting failed for fold {fold_idx + 1}: {e}")
