@@ -10661,26 +10661,35 @@ class SpectralPredictApp:
 
         # === Bayesian Options Panel (shown only when Bayesian is selected) ===
         self.bayes_options_frame = ttk.LabelFrame(opt_frame, text="Bayesian Options", padding=8)
-        # Row 0: Baseline + Smoothing
+        # Row 0: Info about what's included automatically
+        ttk.Label(self.bayes_options_frame,
+                  text="Automatically optimizes: SNV, derivatives (1st\u20134th), SG window size, "
+                       "variable selection (importance/CARS/region) & model hyperparameters.",
+                  style='Caption.TLabel', foreground=self.colors['accent'],
+                  wraplength=600).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+        # Row 1: Separator label
+        ttk.Label(self.bayes_options_frame, text="Additional options:",
+                  style='Normal.TLabel').grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 3))
+        # Row 2: Baseline + Smoothing
         ttk.Checkbutton(self.bayes_options_frame, text="Baseline Correction",
-                        variable=self.bayes_enable_baseline).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+                        variable=self.bayes_enable_baseline).grid(row=2, column=0, sticky=tk.W, padx=(0, 5))
         self.bayes_baseline_combo = ttk.Combobox(
             self.bayes_options_frame, textvariable=self.bayes_baseline_method,
             values=['als', 'polynomial', 'rubber_band', 'airpls'],
             state="readonly", width=12)
-        self.bayes_baseline_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        self.bayes_baseline_combo.grid(row=2, column=1, sticky=tk.W, padx=(0, 20))
         ttk.Checkbutton(self.bayes_options_frame, text="Smoothing (SG)",
-                        variable=self.bayes_enable_smoothing).grid(row=0, column=2, sticky=tk.W)
-        # Row 1: Region options + UVE
+                        variable=self.bayes_enable_smoothing).grid(row=2, column=2, sticky=tk.W)
+        # Row 3: Region options + UVE
         ttk.Checkbutton(self.bayes_options_frame, text="Test all regions individually",
-                        variable=self.bayes_region_test_all).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+                        variable=self.bayes_region_test_all).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
         ttk.Checkbutton(self.bayes_options_frame, text="Test pairwise combinations",
-                        variable=self.bayes_region_test_pairwise).grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
-        # Row 2: UVE
+                        variable=self.bayes_region_test_pairwise).grid(row=3, column=2, sticky=tk.W, pady=(5, 0))
+        # Row 4: UVE
         ttk.Checkbutton(self.bayes_options_frame, text="UVE Variable Selection",
-                        variable=self.bayes_enable_uve).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+                        variable=self.bayes_enable_uve).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
         ttk.Label(self.bayes_options_frame, text="(fast ~50-100ms/trial, adds uninformative variable elimination)",
-                  style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, pady=(5, 0))
+                  style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, pady=(5, 0))
 
         # Initially hide if not Bayesian
         if self.optimization_method.get() == "unified":
@@ -21687,6 +21696,16 @@ class SpectralPredictApp:
                             # Get validation data as numpy arrays
                             X_val = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
                             y_val = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+
+                            # Filter NaN target values from validation set
+                            val_nan_mask = pd.isna(y_val)
+                            if np.any(val_nan_mask):
+                                n_dropped = int(np.sum(val_nan_mask))
+                                self._log_progress(f"   [Warning] Dropping {n_dropped} validation sample(s) with NaN target values")
+                                X_val = X_val[~val_nan_mask]
+                                y_val = y_val[~val_nan_mask]
+                            if len(y_val) == 0:
+                                raise ValueError("No valid validation samples after dropping NaN targets")
 
                             # Predict on validation set
                             val_predictions = ensemble.predict(X_val)
@@ -33435,6 +33454,18 @@ Calibration Performance (n={len(y_array)}):
 
                     # Prepare validation y
                     val_y = self.validation_y.values
+
+                    # Filter NaN target values from validation set
+                    val_nan_mask = pd.isna(val_y)
+                    if np.any(val_nan_mask):
+                        n_dropped = int(np.sum(val_nan_mask))
+                        print(f"[Refined Model] Dropping {n_dropped} validation sample(s) with NaN target values")
+                        val_X_prepared = val_X_prepared[~val_nan_mask]
+                        val_y = val_y[~val_nan_mask]
+                    if len(val_y) == 0:
+                        print("WARNING: No valid validation samples after dropping NaN targets")
+                        raise ValueError("No valid validation samples")
+
                     if local_label_encoder is not None:
                         # Check for classes not seen during training
                         unseen = set(val_y) - set(local_label_encoder.classes_)
