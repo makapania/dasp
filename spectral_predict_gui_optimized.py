@@ -43746,6 +43746,18 @@ External Validation Performance (n={n_val}):
                                                       style='CardLabel.TLabel')
         self.comparison_conversion_status.pack(side='left')
 
+        # Model expects + match indicator row
+        comp_match_frame = ttk.Frame(self.comparison_data_type_frame)
+        comp_match_frame.pack(fill='x', pady=(5, 0))
+
+        self.comparison_model_expects_label = ttk.Label(
+            comp_match_frame, text="Models expect: --", style='CardLabel.TLabel')
+        self.comparison_model_expects_label.pack(side='left', padx=(0, 10))
+
+        self.comparison_type_match_label = ttk.Label(
+            comp_match_frame, text="", style='CardLabel.TLabel')
+        self.comparison_type_match_label.pack(side='left')
+
         # Hide until data is loaded
         self.comparison_data_type_frame.grid_remove()
 
@@ -43800,6 +43812,11 @@ External Validation Performance (n={n_val}):
             font=('Segoe UI', 9)
         )
         self.domain_banner_label.pack(anchor='w')
+        self.domain_banner_legend = tk.Label(
+            self.domain_banner_frame, text="", bg='#d4edda', fg='#555555',
+            font=('Segoe UI', 8)
+        )
+        self.domain_banner_legend.pack(anchor='w')
         # Initially hidden — pack_forget so it takes no space
         self.domain_banner_frame.pack(fill='x', pady=(0, 5))
         self.domain_banner_frame.pack_forget()
@@ -44278,6 +44295,56 @@ External Validation Performance (n={n_val}):
         # Update conversion button text
         target = "Absorbance" if data_type == "reflectance" else "Reflectance"
         self.comparison_convert_btn.config(text=f"Convert to {target}")
+
+        self._update_comparison_match_indicator()
+
+    def _get_comparison_models_expected_data_type(self) -> tuple:
+        """Inspect loaded comparison models to determine their expected data type.
+
+        Returns
+        -------
+        tuple
+            (consensus_type, display_text) where consensus_type is 'absorbance',
+            'reflectance', or None (mixed/no models).
+        """
+        all_models = []
+        if self.comparison_primary_model:
+            all_models.append(self.comparison_primary_model)
+        all_models.extend(self.comparison_auxiliary_models)
+
+        if not all_models:
+            return (None, "Models expect: --")
+
+        types = set()
+        for m in all_models:
+            dt = m.get('metadata', {}).get('data_type')
+            if dt and dt.lower() in ('absorbance', 'reflectance'):
+                types.add(dt.lower())
+
+        if len(types) == 1:
+            t = types.pop()
+            return (t, f"Models expect: {t.upper()}")
+        elif len(types) > 1:
+            return (None, "Models expect: MIXED")
+        return (None, "Models expect: --")
+
+    def _update_comparison_match_indicator(self):
+        """Update the model-expects label and match/mismatch indicator."""
+        if not hasattr(self, 'comparison_model_expects_label'):
+            return
+        model_type, model_text = self._get_comparison_models_expected_data_type()
+        self.comparison_model_expects_label.config(text=model_text)
+
+        data_type = self.comparison_data_type.get()
+        if data_type and data_type != 'unknown' and model_type:
+            if data_type == model_type:
+                self.comparison_type_match_label.config(
+                    text="✓ Match", foreground=self.colors.get('success', '#28a745'))
+            else:
+                self.comparison_type_match_label.config(
+                    text="⚠ Mismatch", foreground=self.colors.get('warning', '#e67e22'))
+        else:
+            self.comparison_type_match_label.config(text="")
 
     def _on_comparison_data_type_override(self):
         """Handle manual override of data type in Multi-Model tab (no conversion)."""
@@ -44960,22 +45027,10 @@ External Validation Performance (n={n_val}):
                         except Exception as e:
                             print(f"Warning: Failed to apply rule for {aux_model_target}: {e}")
 
-            # Add Domain column based on primary model AD
+            # Store domain status for row coloring (don't add column to results)
+            self._primary_domain_status = None
             if domain_results and primary_col_name in domain_results:
-                ad = domain_results[primary_col_name]
-                status_map = {
-                    'within_domain': 'OK',
-                    'influential': 'Caution (leverage)',
-                    'new_features': 'Caution (novel)',
-                    'outside_domain': 'Outside domain',
-                }
-                domain_status = ad.get('domain_status')
-                if domain_status is not None:
-                    results['Domain'] = [status_map.get(s, 'N/A') for s in domain_status]
-                else:
-                    results['Domain'] = 'N/A'
-            else:
-                results['Domain'] = 'N/A'
+                self._primary_domain_status = domain_results[primary_col_name].get('domain_status')
 
             # Store results
             self.comparison_results = results
@@ -45016,13 +45071,16 @@ External Validation Performance (n={n_val}):
 
         parts = [f"{n_ok} of {n_total} within domain"]
         if n_influential:
-            parts.append(f"{n_influential} influential")
+            parts.append(f"{n_influential} at edge of range")
         if n_novel:
-            parts.append(f"{n_novel} novel features")
+            parts.append(f"{n_novel} unfamiliar spectra")
         if n_outside:
             parts.append(f"{n_outside} outside domain")
 
         text = f"Domain Check (primary model):  {'  |  '.join(parts)}"
+        legend = ("Green = spectrally similar to training data  |  "
+                  "Orange = at edge of training range or unfamiliar spectral patterns  |  "
+                  "Red = outside model domain (both)")
 
         if n_outside > 0:
             bg, fg = '#f8d7da', '#721c24'  # Red
@@ -45033,6 +45091,7 @@ External Validation Performance (n={n_val}):
 
         self.domain_banner_frame.config(bg=bg)
         self.domain_banner_label.config(text=text, bg=bg, fg=fg)
+        self.domain_banner_legend.config(text=legend, bg=bg)
 
         # Re-pack the banner (pack_forget + pack to refresh visibility)
         self.domain_banner_frame.pack_forget()
@@ -45067,8 +45126,6 @@ External Validation Performance (n={n_val}):
                 width = 100
             elif col == 'Flags':
                 width = 200
-            elif col == 'Domain':
-                width = 160
             elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
                  self.comparison_results[col].dtype == 'object':
                 width = 150
@@ -45078,6 +45135,8 @@ External Validation Performance (n={n_val}):
             self.comparison_results_tree.column(col, width=width, anchor='center')
 
         # Insert data
+        domain_status = getattr(self, '_primary_domain_status', None)
+        row_idx = 0
         for idx, row in self.comparison_results.iterrows():
             values = []
             for col in columns:
@@ -45088,7 +45147,7 @@ External Validation Performance (n={n_val}):
                 # Format values based on type
                 if pd.isna(val):
                     values.append("")
-                elif col in ('Sample', 'Flags', 'Domain'):
+                elif col in ('Sample', 'Flags'):
                     values.append(str(val))
                 elif is_classification:
                     # Classification predictions - display as text
@@ -45099,21 +45158,23 @@ External Validation Performance (n={n_val}):
                 else:
                     values.append(str(val))
 
-            # Determine row tag based on domain status and flags
+            # Determine row tag from domain status (by row index)
             tags = ()
-            domain_val = row.get('Domain', 'N/A') if 'Domain' in columns else 'N/A'
-            if domain_val == 'Outside domain':
-                tags = ('domain_outside',)
-            elif domain_val in ('Caution (leverage)', 'Caution (novel)'):
-                tags = ('domain_caution',)
-            elif domain_val == 'OK':
-                tags = ('domain_ok',)
+            if domain_status is not None and row_idx < len(domain_status):
+                ds = domain_status[row_idx]
+                if ds == 'outside_domain':
+                    tags = ('domain_outside',)
+                elif ds in ('influential', 'new_features'):
+                    tags = ('domain_caution',)
+                elif ds == 'within_domain':
+                    tags = ('domain_ok',)
 
             # Flagged tag takes priority (set last so it overrides)
             if 'Flags' in columns and row['Flags']:
                 tags = ('flagged',)
 
             self.comparison_results_tree.insert('', 'end', values=values, tags=tags)
+            row_idx += 1
 
         # Configure tag colors
         self.comparison_results_tree.tag_configure('domain_ok', background='#d4edda', foreground='#155724')
@@ -45165,8 +45226,18 @@ External Validation Performance (n={n_val}):
 
                     self.comparison_results[summary_cols].to_excel(writer, sheet_name='Summary', index=False)
 
-                    # Sheet 2: All Predictions
-                    self.comparison_results.to_excel(writer, sheet_name='All Predictions', index=False)
+                    # Sheet 2: All Predictions (add Domain Status for export)
+                    export_df = self.comparison_results.copy()
+                    domain_status = getattr(self, '_primary_domain_status', None)
+                    if domain_status is not None:
+                        status_map = {
+                            'within_domain': 'Within domain',
+                            'influential': 'At edge of range',
+                            'new_features': 'Unfamiliar spectra',
+                            'outside_domain': 'Outside domain',
+                        }
+                        export_df['Domain Status'] = [status_map.get(s, '') for s in domain_status]
+                    export_df.to_excel(writer, sheet_name='All Predictions', index=False)
 
                     # Sheet 3: Model Metadata
                     metadata_rows = []
@@ -45235,8 +45306,18 @@ External Validation Performance (n={n_val}):
 
                 messagebox.showinfo("Success", f"Results exported to Excel:\n{filepath}")
             else:
-                # CSV export (all predictions only)
-                self.comparison_results.to_csv(filepath, index=False)
+                # CSV export (add Domain Status for export)
+                export_df = self.comparison_results.copy()
+                domain_status = getattr(self, '_primary_domain_status', None)
+                if domain_status is not None:
+                    status_map = {
+                        'within_domain': 'Within domain',
+                        'influential': 'At edge of range',
+                        'new_features': 'Unfamiliar spectra',
+                        'outside_domain': 'Outside domain',
+                    }
+                    export_df['Domain Status'] = [status_map.get(s, '') for s in domain_status]
+                export_df.to_csv(filepath, index=False)
                 messagebox.showinfo("Success", f"Results exported to CSV:\n{filepath}")
 
         except Exception as e:
