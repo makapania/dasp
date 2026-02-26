@@ -2355,6 +2355,8 @@ class SpectralPredictApp:
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
         self.consensus_info = {}  # Store consensus model details for display
+        self.pred_data_value_scale = 1.0  # Reflectance scale (1.0 or 100.0) for prediction data
+        self.pred_data_has_been_converted = False  # Whether prediction data has been converted
 
         # Instrument Lab Tab (Tab 9) variables - REMOVED (functionality moved to Calibration Transfer)
         # self.instrument_profiles = {}  # Dict of instrument_id -> InstrumentProfile
@@ -35010,6 +35012,29 @@ External Validation Performance (n={n_val}):
         self.pred_data_status = ttk.Label(step2_frame, text="No data loaded", style='Caption.TLabel')
         self.pred_data_status.grid(row=5, column=0, columnspan=2, pady=5)
 
+        # Data type conversion row
+        pred_type_frame = ttk.Frame(step2_frame)
+        pred_type_frame.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
+
+        ttk.Label(pred_type_frame, text="Data Type:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
+
+        self.pred_type_status_label = ttk.Label(
+            pred_type_frame, text="--", style='Caption.TLabel')
+        self.pred_type_status_label.pack(side='left', padx=(0, 10))
+
+        self.pred_model_expects_label = ttk.Label(
+            pred_type_frame, text="Model expects: --", style='Caption.TLabel')
+        self.pred_model_expects_label.pack(side='left', padx=(0, 10))
+
+        self.pred_convert_btn = ttk.Button(
+            pred_type_frame, text="Convert", command=self._convert_prediction_data_type,
+            style='Modern.TButton', state='disabled')
+        self.pred_convert_btn.pack(side='left', padx=(0, 10))
+
+        self.pred_type_match_label = ttk.Label(
+            pred_type_frame, text="", style='Caption.TLabel')
+        self.pred_type_match_label.pack(side='left')
+
         # === Step 3: Run Predictions ===
         step3_frame = ttk.LabelFrame(content_frame, text="Step 3: Make Predictions", padding="20")
         step3_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=20, pady=10)
@@ -35355,6 +35380,10 @@ External Validation Performance (n={n_val}):
 
         self.loaded_models_text.config(state='disabled')
 
+        # Update prediction data type UI to reflect model expectations
+        if hasattr(self, 'pred_type_status_label'):
+            self._update_pred_data_type_ui()
+
     def _clear_loaded_models(self):
         """Clear all loaded models and prediction results."""
         if self.loaded_models:
@@ -35449,7 +35478,9 @@ External Validation Performance (n={n_val}):
                 self.pred_data_status.config(
                     text=f"> Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths ({self.prediction_data_type.upper()})"
                 )
-                # Validation set loaded - status updated
+                self.pred_data_value_scale = self.data_value_scale
+                self.pred_data_has_been_converted = False
+                self._update_pred_data_type_ui()
                 return
 
             except Exception as e:
@@ -35534,12 +35565,150 @@ External Validation Performance (n={n_val}):
                 self.pred_data_status.config(
                     text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
                 )
-            # Data loaded - status updated
+            # Infer reflectance scale for prediction data
+            if self.prediction_data_type == 'reflectance':
+                try:
+                    from spectral_predict.io import infer_reflectance_scale
+                    self.pred_data_value_scale = infer_reflectance_scale(self.prediction_data)
+                except Exception:
+                    self.pred_data_value_scale = 1.0
+            else:
+                self.pred_data_value_scale = 1.0
+            self.pred_data_has_been_converted = False
+            self._update_pred_data_type_ui()
 
         except Exception as e:
             messagebox.showerror("Load Error",
                 f"Failed to load data:\n{str(e)}")
             self.pred_data_status.config(text="Load failed")
+
+    def _get_models_expected_data_type(self) -> tuple:
+        """Inspect loaded models to determine their expected data type.
+
+        Returns
+        -------
+        tuple
+            (consensus_type, display_text) where consensus_type is 'absorbance',
+            'reflectance', or None (mixed/no models).
+        """
+        if not self.loaded_models:
+            return (None, "Model expects: --")
+
+        types = set()
+        for model_dict in self.loaded_models:
+            metadata = model_dict.get('metadata', {})
+            dt = metadata.get('data_type')
+            if dt and dt.lower() in ('absorbance', 'reflectance'):
+                types.add(dt.lower())
+
+        if len(types) == 1:
+            t = types.pop()
+            return (t, f"Model expects: {t.upper()}")
+        elif len(types) > 1:
+            return (None, "Models expect: MIXED")
+        else:
+            return (None, "Model expects: --")
+
+    def _update_pred_data_type_ui(self):
+        """Update the prediction data type row widgets."""
+        if not hasattr(self, 'pred_type_status_label'):
+            return
+
+        pred_type = self.prediction_data_type
+        model_type, model_text = self._get_models_expected_data_type()
+
+        # Update prediction data type label
+        if pred_type:
+            self.pred_type_status_label.config(
+                text=f"Prediction data: {pred_type.upper()}",
+                foreground=self.colors.get('text', '#000000'))
+        else:
+            self.pred_type_status_label.config(
+                text="Prediction data: --",
+                foreground=self.colors.get('text_light', '#888888'))
+
+        # Update model expects label
+        self.pred_model_expects_label.config(text=model_text)
+
+        # Determine button state and match indicator
+        if pred_type and model_type:
+            if pred_type == model_type:
+                # Match
+                self.pred_convert_btn.config(state='disabled', text="Convert")
+                self.pred_type_match_label.config(
+                    text="\u2713 Match", foreground=self.colors.get('success', '#28a745'))
+            else:
+                # Mismatch - enable conversion to model's expected type
+                self.pred_convert_btn.config(
+                    state='normal', text=f"Convert to {model_type.capitalize()}")
+                self.pred_type_match_label.config(
+                    text="\u26a0 Mismatch", foreground=self.colors.get('warning', '#e67e22'))
+        elif pred_type and model_type is None and self.loaded_models:
+            # Mixed models - disable convert
+            self.pred_convert_btn.config(state='disabled', text="Convert")
+            self.pred_type_match_label.config(
+                text="\u26a0 Mixed models", foreground=self.colors.get('warning', '#e67e22'))
+        elif pred_type and not self.loaded_models:
+            # No models loaded - allow toggling to opposite type
+            opposite = "absorbance" if pred_type == "reflectance" else "reflectance"
+            self.pred_convert_btn.config(
+                state='normal', text=f"Convert to {opposite.capitalize()}")
+            self.pred_type_match_label.config(text="", foreground=self.colors.get('text', '#000000'))
+        else:
+            # No prediction data
+            self.pred_convert_btn.config(state='disabled', text="Convert")
+            self.pred_type_match_label.config(text="")
+
+    def _convert_prediction_data_type(self):
+        """Convert prediction data between reflectance and absorbance."""
+        if self.prediction_data is None:
+            messagebox.showerror("No Data", "No prediction data loaded to convert.")
+            return
+
+        current_type = self.prediction_data_type
+        if not current_type:
+            messagebox.showerror("Unknown Type",
+                "Cannot convert: prediction data type is unknown.")
+            return
+
+        # Determine target type
+        model_type, _ = self._get_models_expected_data_type()
+        if model_type and model_type != current_type:
+            target_type = model_type
+        else:
+            # Toggle to opposite type
+            target_type = "absorbance" if current_type == "reflectance" else "reflectance"
+
+        # Save shared state that _convert_data_type / sub-methods may mutate
+        saved_scale = self.data_value_scale
+        saved_source = self.source_data_type
+        try:
+            self.data_value_scale = self.pred_data_value_scale
+            self.source_data_type = None  # Disable transmittance formula
+            converted = self._convert_data_type(
+                self.prediction_data.values, current_type, target_type)
+            # Capture any auto-detected scale change before restoring
+            self.pred_data_value_scale = self.data_value_scale
+        finally:
+            self.data_value_scale = saved_scale
+            self.source_data_type = saved_source
+
+        # Update prediction data in place
+        self.prediction_data = pd.DataFrame(
+            converted, index=self.prediction_data.index,
+            columns=self.prediction_data.columns)
+        self.prediction_data_type = target_type
+        self.pred_data_has_been_converted = True
+
+        # Update status label
+        n_samples = len(self.prediction_data)
+        n_wavelengths = len(self.prediction_data.columns)
+        self.pred_data_status.config(
+            text=f"> {n_samples} spectra, {n_wavelengths} wavelengths "
+                 f"(converted to {target_type.upper()})")
+
+        # Update UI row
+        self._update_pred_data_type_ui()
 
     def _run_predictions(self):
         """Apply all loaded models to prediction data."""
@@ -35635,7 +35804,7 @@ External Validation Performance (n={n_val}):
                     if pred_result.get('data_type_warning'):
                         messagebox.showwarning("Data Type Mismatch",
                             pred_result['data_type_warning'] +
-                            "\n\nConsider converting your data before prediction.")
+                            "\n\nUse the 'Convert' button in Step 2 to match your data type, then re-run predictions.")
 
                     # Debug output
                     print(f"DEBUG: Model {filename} - has_applicability_domain: {has_applicability_domain}")
@@ -43265,6 +43434,7 @@ External Validation Performance (n={n_val}):
         self.comparison_auxiliary_models = []
         self.comparison_data = None
         self.comparison_results = None
+        self.comparison_domain_results = {}
         self.comparison_rules = []
 
         # Spectral data type tracking
@@ -43622,6 +43792,17 @@ External Validation Performance (n={n_val}):
         # === STEP 5: Results ===
         step5_frame = ttk.LabelFrame(main_frame, text="Step 5: Comparison Results", padding="20")
         step5_frame.pack(fill='both', expand=True, pady=(0, 15))
+
+        # Domain summary banner (hidden until comparison runs)
+        self.domain_banner_frame = tk.Frame(step5_frame, bg='#d4edda', padx=10, pady=6)
+        self.domain_banner_label = tk.Label(
+            self.domain_banner_frame, text="", bg='#d4edda', fg='#155724',
+            font=('Segoe UI', 9)
+        )
+        self.domain_banner_label.pack(anchor='w')
+        # Initially hidden — pack_forget so it takes no space
+        self.domain_banner_frame.pack(fill='x', pady=(0, 5))
+        self.domain_banner_frame.pack_forget()
 
         # Results table
         table_frame = ttk.Frame(step5_frame)
@@ -44678,8 +44859,16 @@ External Validation Performance (n={n_val}):
             # Use filename instead of target_model_preprocessing
             primary_col_name = f"{primary_filename} {task_indicator}"
 
-            primary_predictions = model_io.predict_with_model(self.comparison_primary_model, comparison_data_transformed)
+            primary_result = model_io.predict_with_uncertainty(
+                self.comparison_primary_model, comparison_data_transformed
+            )
+            primary_predictions = primary_result['predictions']
             results[primary_col_name] = primary_predictions
+
+            # Collect domain results per model
+            domain_results = {}
+            if primary_result.get('has_applicability_domain'):
+                domain_results[primary_col_name] = primary_result['applicability_domain']
 
             # Run auxiliary model predictions
             aux_col_names = []
@@ -44700,9 +44889,18 @@ External Validation Performance (n={n_val}):
                     aux_col_name = f"{original_col_name}_{counter}"
                     counter += 1
 
-                aux_predictions = model_io.predict_with_model(aux_model, comparison_data_transformed)
+                aux_result = model_io.predict_with_uncertainty(
+                    aux_model, comparison_data_transformed
+                )
+                aux_predictions = aux_result['predictions']
                 results[aux_col_name] = aux_predictions
                 aux_col_names.append(aux_col_name)
+
+                if aux_result.get('has_applicability_domain'):
+                    domain_results[aux_col_name] = aux_result['applicability_domain']
+
+            # Store domain results for export
+            self.comparison_domain_results = domain_results
 
             # Apply conditional flagging rules
             if self.comparison_rules:
@@ -44762,11 +44960,31 @@ External Validation Performance (n={n_val}):
                         except Exception as e:
                             print(f"Warning: Failed to apply rule for {aux_model_target}: {e}")
 
+            # Add Domain column based on primary model AD
+            if domain_results and primary_col_name in domain_results:
+                ad = domain_results[primary_col_name]
+                status_map = {
+                    'within_domain': 'OK',
+                    'influential': 'Caution (leverage)',
+                    'new_features': 'Caution (novel)',
+                    'outside_domain': 'Outside domain',
+                }
+                domain_status = ad.get('domain_status')
+                if domain_status is not None:
+                    results['Domain'] = [status_map.get(s, 'N/A') for s in domain_status]
+                else:
+                    results['Domain'] = 'N/A'
+            else:
+                results['Domain'] = 'N/A'
+
             # Store results
             self.comparison_results = results
 
             # Display results in treeview
             self._display_comparison_results()
+
+            # Update domain summary banner
+            self._update_domain_summary_banner(domain_results, primary_col_name)
 
             self.comparison_status.config(
                 text=f"> Comparison complete! {len(results)} samples analyzed.",
@@ -44777,6 +44995,56 @@ External Validation Performance (n={n_val}):
             import traceback
             traceback.print_exc()
             self.comparison_status.config(text="Comparison failed", foreground='red')
+
+    def _update_domain_summary_banner(self, domain_results, primary_col_name):
+        """Update the domain summary banner above the results table."""
+        if not domain_results or primary_col_name not in domain_results:
+            self.domain_banner_frame.pack_forget()
+            return
+
+        ad = domain_results[primary_col_name]
+        domain_status = ad.get('domain_status')
+        if domain_status is None:
+            self.domain_banner_frame.pack_forget()
+            return
+
+        n_total = len(domain_status)
+        n_ok = int(np.sum(domain_status == 'within_domain'))
+        n_influential = int(np.sum(domain_status == 'influential'))
+        n_novel = int(np.sum(domain_status == 'new_features'))
+        n_outside = int(np.sum(domain_status == 'outside_domain'))
+
+        parts = [f"{n_ok} of {n_total} within domain"]
+        if n_influential:
+            parts.append(f"{n_influential} influential")
+        if n_novel:
+            parts.append(f"{n_novel} novel features")
+        if n_outside:
+            parts.append(f"{n_outside} outside domain")
+
+        text = f"Domain Check (primary model):  {'  |  '.join(parts)}"
+
+        if n_outside > 0:
+            bg, fg = '#f8d7da', '#721c24'  # Red
+        elif n_influential > 0 or n_novel > 0:
+            bg, fg = '#fff3cd', '#856404'  # Orange
+        else:
+            bg, fg = '#d4edda', '#155724'  # Green
+
+        self.domain_banner_frame.config(bg=bg)
+        self.domain_banner_label.config(text=text, bg=bg, fg=fg)
+
+        # Re-pack the banner (pack_forget + pack to refresh visibility)
+        self.domain_banner_frame.pack_forget()
+        # Pack before the table_frame (second child of step5_frame)
+        children = self.domain_banner_frame.master.winfo_children()
+        # Find the table_frame (first Frame child after banner)
+        for child in children:
+            if isinstance(child, ttk.Frame):
+                self.domain_banner_frame.pack(fill='x', pady=(0, 5), before=child)
+                break
+        else:
+            self.domain_banner_frame.pack(fill='x', pady=(0, 5))
 
     def _display_comparison_results(self):
         """Display comparison results in the treeview."""
@@ -44799,6 +45067,8 @@ External Validation Performance (n={n_val}):
                 width = 100
             elif col == 'Flags':
                 width = 200
+            elif col == 'Domain':
+                width = 160
             elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
                  self.comparison_results[col].dtype == 'object':
                 width = 150
@@ -44818,7 +45088,7 @@ External Validation Performance (n={n_val}):
                 # Format values based on type
                 if pd.isna(val):
                     values.append("")
-                elif col == 'Sample' or col == 'Flags':
+                elif col in ('Sample', 'Flags', 'Domain'):
                     values.append(str(val))
                 elif is_classification:
                     # Classification predictions - display as text
@@ -44829,14 +45099,26 @@ External Validation Performance (n={n_val}):
                 else:
                     values.append(str(val))
 
-            # Add tag for flagged rows
+            # Determine row tag based on domain status and flags
             tags = ()
+            domain_val = row.get('Domain', 'N/A') if 'Domain' in columns else 'N/A'
+            if domain_val == 'Outside domain':
+                tags = ('domain_outside',)
+            elif domain_val in ('Caution (leverage)', 'Caution (novel)'):
+                tags = ('domain_caution',)
+            elif domain_val == 'OK':
+                tags = ('domain_ok',)
+
+            # Flagged tag takes priority (set last so it overrides)
             if 'Flags' in columns and row['Flags']:
                 tags = ('flagged',)
 
             self.comparison_results_tree.insert('', 'end', values=values, tags=tags)
 
-        # Configure tag colors for flagged rows
+        # Configure tag colors
+        self.comparison_results_tree.tag_configure('domain_ok', background='#d4edda', foreground='#155724')
+        self.comparison_results_tree.tag_configure('domain_caution', background='#fff3cd', foreground='#856404')
+        self.comparison_results_tree.tag_configure('domain_outside', background='#f8d7da', foreground='#721c24')
         self.comparison_results_tree.tag_configure('flagged', background='#FFF3CD', foreground='#856404')
 
     def _export_comparison_results(self):
@@ -44920,6 +45202,36 @@ External Validation Performance (n={n_val}):
                     if self.comparison_rules:
                         rules_df = pd.DataFrame(self.comparison_rules)
                         rules_df.to_excel(writer, sheet_name='Flagging Rules', index=False)
+
+                    # Sheet 5: Domain Applicability detail
+                    domain_results = getattr(self, 'comparison_domain_results', {})
+                    if domain_results:
+                        sample_labels = self.comparison_results['Sample'].tolist()
+                        ad_rows = []
+                        for model_name, ad in domain_results.items():
+                            t2_vals = ad.get('t2_values')
+                            q_vals = ad.get('q_values')
+                            d_status = ad.get('domain_status')
+                            if t2_vals is None or q_vals is None:
+                                continue
+                            t2_thresh = ad.get('t2_threshold', float('nan'))
+                            q_thresh = ad.get('q_threshold', float('nan'))
+                            for i, sample in enumerate(sample_labels):
+                                ad_rows.append({
+                                    'Sample': sample,
+                                    'Model': model_name,
+                                    'Hotelling_T2': float(t2_vals[i]),
+                                    'T2_Threshold': t2_thresh,
+                                    'T2_Flag': bool(t2_vals[i] > t2_thresh),
+                                    'Q_Residual': float(q_vals[i]),
+                                    'Q_Threshold': q_thresh,
+                                    'Q_Flag': bool(q_vals[i] > q_thresh),
+                                    'Status': str(d_status[i]) if d_status is not None else 'N/A',
+                                })
+                        if ad_rows:
+                            pd.DataFrame(ad_rows).to_excel(
+                                writer, sheet_name='Domain Applicability', index=False
+                            )
 
                 messagebox.showinfo("Success", f"Results exported to Excel:\n{filepath}")
             else:

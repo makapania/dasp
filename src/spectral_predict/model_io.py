@@ -866,6 +866,56 @@ def predict_with_uncertainty(
                     'max': float(max_dist)
                 }
 
+            # --- Hotelling T² ---
+            mu = np.mean(training_pca_scores, axis=0)
+            cov_matrix = np.cov(training_pca_scores.T)
+            if training_pca_scores.shape[1] == 1:
+                cov_matrix = np.atleast_2d(cov_matrix)
+            try:
+                inv_cov = np.linalg.inv(cov_matrix)
+            except np.linalg.LinAlgError:
+                cov_matrix += np.eye(cov_matrix.shape[0]) * 1e-6
+                inv_cov = np.linalg.inv(cov_matrix)
+
+            n_train = training_pca_scores.shape[0]
+            n_comp = training_pca_scores.shape[1]
+            from scipy import stats as sp_stats
+            if n_train > n_comp:
+                t2_threshold = (
+                    n_comp * (n_train - 1) / (n_train - n_comp)
+                    * sp_stats.f.ppf(0.95, n_comp, n_train - n_comp)
+                )
+            else:
+                t2_threshold = sp_stats.chi2.ppf(0.95, n_comp)
+
+            diff = X_pred_pca - mu
+            t2_values = np.array([d @ inv_cov @ d for d in diff])
+
+            # --- Q-residuals (SPE) ---
+            train_reconstructed = pca_model.inverse_transform(
+                pca_model.transform(representative_spectra)
+            )
+            train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
+            q_threshold = np.percentile(train_q, 95)
+
+            new_reconstructed = pca_model.inverse_transform(X_pred_pca)
+            q_values = np.sum((X_processed - new_reconstructed) ** 2, axis=1)
+
+            # --- Four-zone classification ---
+            t2_flag = t2_values > t2_threshold
+            q_flag = q_values > q_threshold
+            domain_status = np.empty(len(X_processed), dtype=object)
+            domain_status[(~t2_flag) & (~q_flag)] = 'within_domain'
+            domain_status[(t2_flag) & (~q_flag)] = 'influential'
+            domain_status[(~t2_flag) & (q_flag)] = 'new_features'
+            domain_status[(t2_flag) & (q_flag)] = 'outside_domain'
+
+            applicability_domain['t2_values'] = t2_values
+            applicability_domain['t2_threshold'] = float(t2_threshold)
+            applicability_domain['q_values'] = q_values
+            applicability_domain['q_threshold'] = float(q_threshold)
+            applicability_domain['domain_status'] = domain_status
+
             has_applicability_domain = True
 
     return {
@@ -904,6 +954,7 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
     all_spectral_distances = []
     has_any_ad = False
     aggregated_thresholds = None
+    first_ad_model = None  # For T²/Q computation
 
     # Collect applicability domain info from each base model
     for model_dict in base_model_dicts:
@@ -917,6 +968,8 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
             continue
 
         has_any_ad = True
+        if first_ad_model is None:
+            first_ad_model = model_dict
 
         # Transform to PCA space
         X_pred_pca = pca_model.transform(X_processed)
@@ -972,6 +1025,62 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
             'p95': float(p95),
             'max': float(max_dist)
         }
+
+    # --- Hotelling T² and Q-residuals from first base model with AD ---
+    if first_ad_model is not None:
+        ad_data = first_ad_model['ad_data']
+        pca_model = first_ad_model['pca_model']
+        training_pca_scores = ad_data['training_pca_scores']
+        representative_spectra = ad_data['representative_spectra']
+
+        X_pred_pca = pca_model.transform(X_processed)
+
+        mu = np.mean(training_pca_scores, axis=0)
+        cov_matrix = np.cov(training_pca_scores.T)
+        if training_pca_scores.shape[1] == 1:
+            cov_matrix = np.atleast_2d(cov_matrix)
+        try:
+            inv_cov = np.linalg.inv(cov_matrix)
+        except np.linalg.LinAlgError:
+            cov_matrix += np.eye(cov_matrix.shape[0]) * 1e-6
+            inv_cov = np.linalg.inv(cov_matrix)
+
+        n_train = training_pca_scores.shape[0]
+        n_comp = training_pca_scores.shape[1]
+        from scipy import stats as sp_stats
+        if n_train > n_comp:
+            t2_threshold = (
+                n_comp * (n_train - 1) / (n_train - n_comp)
+                * sp_stats.f.ppf(0.95, n_comp, n_train - n_comp)
+            )
+        else:
+            t2_threshold = sp_stats.chi2.ppf(0.95, n_comp)
+
+        diff = X_pred_pca - mu
+        t2_values = np.array([d @ inv_cov @ d for d in diff])
+
+        train_reconstructed = pca_model.inverse_transform(
+            pca_model.transform(representative_spectra)
+        )
+        train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
+        q_threshold = np.percentile(train_q, 95)
+
+        new_reconstructed = pca_model.inverse_transform(X_pred_pca)
+        q_values = np.sum((X_processed - new_reconstructed) ** 2, axis=1)
+
+        t2_flag = t2_values > t2_threshold
+        q_flag = q_values > q_threshold
+        domain_status = np.empty(len(X_processed), dtype=object)
+        domain_status[(~t2_flag) & (~q_flag)] = 'within_domain'
+        domain_status[(t2_flag) & (~q_flag)] = 'influential'
+        domain_status[(~t2_flag) & (q_flag)] = 'new_features'
+        domain_status[(t2_flag) & (q_flag)] = 'outside_domain'
+
+        applicability_domain['t2_values'] = t2_values
+        applicability_domain['t2_threshold'] = float(t2_threshold)
+        applicability_domain['q_values'] = q_values
+        applicability_domain['q_threshold'] = float(q_threshold)
+        applicability_domain['domain_status'] = domain_status
 
     return applicability_domain
 
