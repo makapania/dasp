@@ -883,10 +883,10 @@ def predict_with_uncertainty(
             if n_train > n_comp:
                 t2_threshold = (
                     n_comp * (n_train - 1) / (n_train - n_comp)
-                    * sp_stats.f.ppf(0.95, n_comp, n_train - n_comp)
+                    * sp_stats.f.ppf(0.99, n_comp, n_train - n_comp)
                 )
             else:
-                t2_threshold = sp_stats.chi2.ppf(0.95, n_comp)
+                t2_threshold = sp_stats.chi2.ppf(0.99, n_comp)
 
             diff = X_pred_pca - mu
             t2_values = np.array([d @ inv_cov @ d for d in diff])
@@ -896,7 +896,7 @@ def predict_with_uncertainty(
                 pca_model.transform(representative_spectra)
             )
             train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
-            q_threshold = np.percentile(train_q, 95)
+            q_threshold = np.percentile(train_q, 99)
 
             new_reconstructed = pca_model.inverse_transform(X_pred_pca)
             q_values = np.sum((X_processed - new_reconstructed) ** 2, axis=1)
@@ -1051,10 +1051,10 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
         if n_train > n_comp:
             t2_threshold = (
                 n_comp * (n_train - 1) / (n_train - n_comp)
-                * sp_stats.f.ppf(0.95, n_comp, n_train - n_comp)
+                * sp_stats.f.ppf(0.99, n_comp, n_train - n_comp)
             )
         else:
-            t2_threshold = sp_stats.chi2.ppf(0.95, n_comp)
+            t2_threshold = sp_stats.chi2.ppf(0.99, n_comp)
 
         diff = X_pred_pca - mu
         t2_values = np.array([d @ inv_cov @ d for d in diff])
@@ -1063,7 +1063,7 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
             pca_model.transform(representative_spectra)
         )
         train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
-        q_threshold = np.percentile(train_q, 95)
+        q_threshold = np.percentile(train_q, 99)
 
         new_reconstructed = pca_model.inverse_transform(X_pred_pca)
         q_values = np.sum((X_processed - new_reconstructed) ** 2, axis=1)
