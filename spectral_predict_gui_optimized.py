@@ -43891,6 +43891,8 @@ External Validation Performance (n={n_val}):
 
         self.comparison_primary_text.config(state='disabled')
 
+        self._update_comparison_match_indicator()
+
     def _update_comparison_auxiliary_display(self):
         """Update the auxiliary models display text widget."""
         self.comparison_auxiliary_text.config(state='normal')
@@ -43929,6 +43931,8 @@ External Validation Performance (n={n_val}):
                 self.comparison_auxiliary_text.insert(tk.END, text)
 
         self.comparison_auxiliary_text.config(state='disabled')
+
+        self._update_comparison_match_indicator()
 
     def _update_comparison_rules_display(self):
         """Update the conditional flagging rules display."""
@@ -44369,6 +44373,8 @@ External Validation Performance (n={n_val}):
 
         # Clear conversion status when overriding
         self.comparison_conversion_status.config(text="")
+
+        self._update_comparison_match_indicator()
 
     def _comparison_convert_data_type(self):
         """Convert comparison data between reflectance and absorbance."""
@@ -44884,17 +44890,27 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Error", "Please load comparison data first")
             return
 
-        # Check for data type mismatch with primary model
+        # Check for data type mismatch with ALL models
         spectra_type = self.comparison_data_type.get()
         if spectra_type not in ("unknown",):
-            model_type = self.comparison_primary_model.get('metadata', {}).get('data_type')
-            if model_type and model_type != spectra_type:
-                response = messagebox.askyesno(
-                    "Data Type Mismatch",
-                    f"Loaded spectra appear to be {spectra_type}, but the primary model "
-                    f"was trained on {model_type} data.\n\n"
-                    f"Predictions may be incorrect. Continue anyway?")
-                if not response:
+            mismatched = []
+            all_models = []
+            if self.comparison_primary_model:
+                all_models.append(("Primary", self.comparison_primary_model))
+            for aux in self.comparison_auxiliary_models:
+                all_models.append((aux.get('filename', 'Auxiliary'), aux))
+            for name, m in all_models:
+                mt = m.get('metadata', {}).get('data_type')
+                if mt and mt != spectra_type:
+                    mismatched.append(f"  - {name} (trained on {mt})")
+            if mismatched:
+                msg = (
+                    f"Loaded spectra appear to be {spectra_type}, but these models "
+                    f"were trained on different data:\n" + "\n".join(mismatched) +
+                    "\n\nUse the 'Convert' button in Step 2 to match your data type."
+                    "\n\nContinue anyway?"
+                )
+                if not messagebox.askyesno("Data Type Mismatch", msg):
                     return
 
         try:
