@@ -44417,6 +44417,9 @@ External Validation Performance (n={n_val}):
             foreground=self.colors['success']
         )
 
+        # Refresh match/mismatch indicator after data type change
+        self._update_comparison_match_indicator()
+
     def _browse_live_folder(self):
         """Browse for folder to monitor in live mode."""
         from tkinter import filedialog
