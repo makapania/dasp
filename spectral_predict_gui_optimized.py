@@ -43824,6 +43824,7 @@ External Validation Performance (n={n_val}):
         # Results table
         table_frame = ttk.Frame(step5_frame)
         table_frame.pack(fill='both', expand=True, pady=(0, 10))
+        self._tab9_table_frame = table_frame
 
         # Create treeview for results
         self.comparison_results_tree = ttk.Treeview(table_frame, show='headings', height=12)
@@ -43848,6 +43849,59 @@ External Validation Performance (n={n_val}):
 
         ttk.Button(export_btn_frame, text="📈 View Comparison Plots",
                    command=self._show_comparison_plots, style='Modern.TButton').pack(side='left', padx=5)
+
+        # --- Domain Applicability Detail Section (collapsible) ---
+        self._domain_detail_expanded = False
+        self.domain_detail_outer_frame = ttk.Frame(step5_frame)
+        # Not packed yet — _populate_domain_detail_table will pack when data exists
+
+        # Toggle header — clickable label
+        toggle_frame = ttk.Frame(self.domain_detail_outer_frame)
+        toggle_frame.pack(fill='x', pady=(5, 0))
+        self._domain_detail_indicator = tk.Label(
+            toggle_frame, text='\u25B6', font=('Segoe UI', 9), cursor='hand2'
+        )
+        self._domain_detail_indicator.pack(side='left')
+        self._domain_detail_toggle_label = tk.Label(
+            toggle_frame, text='Show Domain Applicability Details',
+            font=('Segoe UI', 9, 'underline'), fg='#0066cc', cursor='hand2'
+        )
+        self._domain_detail_toggle_label.pack(side='left', padx=(4, 0))
+        self._domain_detail_indicator.bind('<Button-1>', lambda e: self._toggle_domain_detail())
+        self._domain_detail_toggle_label.bind('<Button-1>', lambda e: self._toggle_domain_detail())
+
+        # Detail treeview frame (starts hidden)
+        self.domain_detail_frame = ttk.Frame(self.domain_detail_outer_frame)
+
+        detail_tree_frame = ttk.Frame(self.domain_detail_frame)
+        detail_tree_frame.pack(fill='both', expand=True)
+
+        cols = ('Sample', 'Reliability', 'Status', 'T² Value', 'T² Threshold', 'T² Flag',
+                'Q Residual', 'Q Threshold', 'Q Flag')
+        self.domain_detail_tree = ttk.Treeview(
+            detail_tree_frame, columns=cols, show='headings', height=8
+        )
+        widths = (120, 80, 130, 100, 100, 60, 100, 100, 60)
+        for col, w in zip(cols, widths):
+            self.domain_detail_tree.heading(col, text=col)
+            self.domain_detail_tree.column(col, width=w, minwidth=w)
+        self.domain_detail_tree.pack(side='left', fill='both', expand=True)
+
+        detail_scroll_y = ttk.Scrollbar(detail_tree_frame, orient='vertical',
+                                        command=self.domain_detail_tree.yview)
+        detail_scroll_y.pack(side='right', fill='y')
+        self.domain_detail_tree.configure(yscrollcommand=detail_scroll_y.set)
+
+        detail_scroll_x = ttk.Scrollbar(self.domain_detail_frame, orient='horizontal',
+                                        command=self.domain_detail_tree.xview)
+        detail_scroll_x.pack(fill='x')
+        self.domain_detail_tree.configure(xscrollcommand=detail_scroll_x.set)
+
+        # Color tags for detail rows
+        self.domain_detail_tree.tag_configure('within_domain', background='#d4edda')
+        self.domain_detail_tree.tag_configure('influential', background='#fff3cd')
+        self.domain_detail_tree.tag_configure('new_features', background='#fff3cd')
+        self.domain_detail_tree.tag_configure('outside_domain', background='#f8d7da')
 
     # ========================================================================
     # TAB 9 HELPER METHODS: Multi-Model Comparison
@@ -45046,9 +45100,15 @@ External Validation Performance (n={n_val}):
                         except Exception as e:
                             print(f"Warning: Failed to apply rule for {aux_model_target}: {e}")
 
-            # Store domain status for row coloring (don't add column to results)
+            # Add Reliability column from primary model's domain results
+            self._primary_reliability_scores = None
             self._primary_domain_status = None
             if domain_results and primary_col_name in domain_results:
+                reliability = domain_results[primary_col_name].get('reliability_scores')
+                if reliability is not None:
+                    self._primary_reliability_scores = reliability
+                    results['Reliability'] = [f"{int(r)}%" for r in reliability]
+                # Keep domain_status as fallback for older models
                 self._primary_domain_status = domain_results[primary_col_name].get('domain_status')
 
             # Store results
@@ -45057,8 +45117,9 @@ External Validation Performance (n={n_val}):
             # Display results in treeview
             self._display_comparison_results()
 
-            # Update domain summary banner
+            # Update domain summary banner and detail table
             self._update_domain_summary_banner(domain_results, primary_col_name)
+            self._populate_domain_detail_table(domain_results, primary_col_name)
 
             self.comparison_status.config(
                 text=f"> Comparison complete! {len(results)} samples analyzed.",
@@ -45077,52 +45138,155 @@ External Validation Performance (n={n_val}):
             return
 
         ad = domain_results[primary_col_name]
-        domain_status = ad.get('domain_status')
-        if domain_status is None:
-            self.domain_banner_frame.pack_forget()
-            return
+        reliability = ad.get('reliability_scores')
 
-        n_total = len(domain_status)
-        n_ok = int(np.sum(domain_status == 'within_domain'))
-        n_influential = int(np.sum(domain_status == 'influential'))
-        n_novel = int(np.sum(domain_status == 'new_features'))
-        n_outside = int(np.sum(domain_status == 'outside_domain'))
+        if reliability is not None:
+            # Reliability-based banner
+            n_total = len(reliability)
+            n_high = int(np.sum(reliability >= 80))
+            n_moderate = int(np.sum((reliability >= 50) & (reliability < 80)))
+            n_low = int(np.sum((reliability >= 35) & (reliability < 50)))
+            n_very_low = int(np.sum(reliability < 35))
 
-        parts = [f"{n_ok} of {n_total} within domain"]
-        if n_influential:
-            parts.append(f"{n_influential} at edge of range")
-        if n_novel:
-            parts.append(f"{n_novel} unfamiliar spectra")
-        if n_outside:
-            parts.append(f"{n_outside} outside domain")
+            parts = [f"{n_high} of {n_total} high reliability"]
+            if n_moderate:
+                parts.append(f"{n_moderate} moderate")
+            if n_low:
+                parts.append(f"{n_low} low")
+            if n_very_low:
+                parts.append(f"{n_very_low} very low")
 
-        text = f"Domain Check (primary model):  {'  |  '.join(parts)}"
-        legend = ("Green = spectrally similar to training data  |  "
-                  "Orange = at edge of training range or unfamiliar spectral patterns  |  "
-                  "Red = outside model domain (both)")
+            text = f"Prediction Reliability (primary model):  {'  |  '.join(parts)}"
+            legend = ("Green = high (80-95%)  |  Blue = moderate (50-79%)  |  "
+                      "Orange = low (35-49%)  |  Red = very low (<35%)")
 
-        if n_outside > 0:
-            bg, fg = '#f8d7da', '#721c24'  # Red
-        elif n_influential > 0 or n_novel > 0:
-            bg, fg = '#fff3cd', '#856404'  # Orange
+            if n_very_low > 0:
+                bg, fg = '#f8d7da', '#721c24'
+            elif n_low > 0:
+                bg, fg = '#fff3cd', '#856404'
+            elif n_moderate > 0:
+                bg, fg = '#d1ecf1', '#0c5460'
+            else:
+                bg, fg = '#d4edda', '#155724'
         else:
-            bg, fg = '#d4edda', '#155724'  # Green
+            # Fall back to domain status display for older models
+            domain_status = ad.get('domain_status')
+            if domain_status is None:
+                self.domain_banner_frame.pack_forget()
+                return
+
+            n_total = len(domain_status)
+            n_ok = int(np.sum(domain_status == 'within_domain'))
+            n_influential = int(np.sum(domain_status == 'influential'))
+            n_novel = int(np.sum(domain_status == 'new_features'))
+            n_outside = int(np.sum(domain_status == 'outside_domain'))
+
+            parts = [f"{n_ok} of {n_total} within domain"]
+            if n_influential:
+                parts.append(f"{n_influential} at edge of range")
+            if n_novel:
+                parts.append(f"{n_novel} unfamiliar spectra")
+            if n_outside:
+                parts.append(f"{n_outside} outside domain")
+
+            text = f"Domain Check (primary model):  {'  |  '.join(parts)}"
+            legend = ("Green = spectrally similar to training data  |  "
+                      "Orange = at edge of training range or unfamiliar spectral patterns  |  "
+                      "Red = outside model domain (both)")
+
+            if n_outside > 0:
+                bg, fg = '#f8d7da', '#721c24'
+            elif n_influential > 0 or n_novel > 0:
+                bg, fg = '#fff3cd', '#856404'
+            else:
+                bg, fg = '#d4edda', '#155724'
 
         self.domain_banner_frame.config(bg=bg)
         self.domain_banner_label.config(text=text, bg=bg, fg=fg)
         self.domain_banner_legend.config(text=legend, bg=bg)
 
-        # Re-pack the banner (pack_forget + pack to refresh visibility)
+        # Re-pack the banner before the results table
         self.domain_banner_frame.pack_forget()
-        # Pack before the table_frame (second child of step5_frame)
-        children = self.domain_banner_frame.master.winfo_children()
-        # Find the table_frame (first Frame child after banner)
-        for child in children:
-            if isinstance(child, ttk.Frame):
-                self.domain_banner_frame.pack(fill='x', pady=(0, 5), before=child)
-                break
+        self.domain_banner_frame.pack(fill='x', pady=(0, 5), before=self._tab9_table_frame)
+
+    def _toggle_domain_detail(self):
+        """Toggle visibility of the domain applicability detail table."""
+        if self._domain_detail_expanded:
+            self.domain_detail_frame.pack_forget()
+            self._domain_detail_indicator.config(text='\u25B6')
+            self._domain_detail_toggle_label.config(text='Show Domain Applicability Details')
+            self._domain_detail_expanded = False
         else:
-            self.domain_banner_frame.pack(fill='x', pady=(0, 5))
+            self.domain_detail_frame.pack(fill='both', expand=True, pady=(5, 0))
+            self._domain_detail_indicator.config(text='\u25BC')
+            self._domain_detail_toggle_label.config(text='Hide Domain Applicability Details')
+            self._domain_detail_expanded = True
+
+    def _populate_domain_detail_table(self, domain_results, primary_col_name):
+        """Populate the collapsible domain detail table with per-sample T²/Q statistics."""
+        # Always hide and reset on new run
+        self.domain_detail_outer_frame.pack_forget()
+        self.domain_detail_frame.pack_forget()
+
+        # Clear existing rows
+        self.domain_detail_tree.delete(*self.domain_detail_tree.get_children())
+
+        # Reset toggle state
+        self._domain_detail_expanded = False
+        self._domain_detail_indicator.config(text='\u25B6')
+        self._domain_detail_toggle_label.config(text='Show Domain Applicability Details')
+
+        # Early return if no domain data
+        if not domain_results or primary_col_name not in domain_results:
+            return
+
+        ad = domain_results[primary_col_name]
+        domain_status = ad.get('domain_status')
+        t2_values = ad.get('t2_values')
+        q_values = ad.get('q_values')
+        t2_threshold = ad.get('t2_threshold')
+        q_threshold = ad.get('q_threshold')
+        reliability_scores = ad.get('reliability_scores')
+
+        # Need all T²/Q data to display the table
+        if domain_status is None or t2_values is None or q_values is None:
+            return
+
+        # Get sample labels from comparison results
+        if self.comparison_results is not None and 'Sample' in self.comparison_results.columns:
+            sample_labels = list(self.comparison_results['Sample'])
+        else:
+            sample_labels = [f"Sample {i+1}" for i in range(len(domain_status))]
+
+        status_labels = {
+            'within_domain': 'Within domain',
+            'influential': 'At edge of range',
+            'new_features': 'Unfamiliar spectra',
+            'outside_domain': 'Outside domain',
+        }
+
+        for i, label in enumerate(sample_labels):
+            status = domain_status[i] if i < len(domain_status) else 'within_domain'
+            t2_val = t2_values[i] if i < len(t2_values) else 0
+            q_val = q_values[i] if i < len(q_values) else 0
+            t2_ok = t2_val <= t2_threshold if t2_threshold else True
+            q_ok = q_val <= q_threshold if q_threshold else True
+            rel_str = f"{int(reliability_scores[i])}%" if reliability_scores is not None and i < len(reliability_scores) else "N/A"
+
+            self.domain_detail_tree.insert('', 'end', values=(
+                label,
+                rel_str,
+                status_labels.get(status, status),
+                f"{t2_val:.4g}",
+                f"{t2_threshold:.4g}" if t2_threshold else "N/A",
+                '\u2713' if t2_ok else '\u2717',
+                f"{q_val:.4g}",
+                f"{q_threshold:.4g}" if q_threshold else "N/A",
+                '\u2713' if q_ok else '\u2717',
+            ), tags=(status,))
+
+        # Show the outer frame (collapsed by default — detail_frame stays hidden)
+        self.domain_detail_outer_frame.pack(fill='both', expand=False, pady=(0, 10))
 
     def _display_comparison_results(self):
         """Display comparison results in the treeview."""
@@ -45143,6 +45307,8 @@ External Validation Performance (n={n_val}):
             # Set column width based on content type
             if col == 'Sample':
                 width = 100
+            elif col == 'Reliability':
+                width = 80
             elif col == 'Flags':
                 width = 200
             elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
@@ -45166,7 +45332,7 @@ External Validation Performance (n={n_val}):
                 # Format values based on type
                 if pd.isna(val):
                     values.append("")
-                elif col in ('Sample', 'Flags'):
+                elif col in ('Sample', 'Flags', 'Reliability'):
                     values.append(str(val))
                 elif is_classification:
                     # Classification predictions - display as text
@@ -45177,9 +45343,21 @@ External Validation Performance (n={n_val}):
                 else:
                     values.append(str(val))
 
-            # Determine row tag from domain status (by row index)
+            # Determine row tag — prefer reliability scores, fall back to domain status
             tags = ()
-            if domain_status is not None and row_idx < len(domain_status):
+            reliability_scores = getattr(self, '_primary_reliability_scores', None)
+            if reliability_scores is not None and row_idx < len(reliability_scores):
+                r = reliability_scores[row_idx]
+                if r >= 80:
+                    tags = ('reliability_high',)
+                elif r >= 50:
+                    tags = ('reliability_moderate',)
+                elif r >= 35:
+                    tags = ('reliability_low',)
+                else:
+                    tags = ('reliability_very_low',)
+            elif domain_status is not None and row_idx < len(domain_status):
+                # Fallback: old 4-zone coloring for models without reliability scores
                 ds = domain_status[row_idx]
                 if ds == 'outside_domain':
                     tags = ('domain_outside',)
@@ -45195,7 +45373,12 @@ External Validation Performance (n={n_val}):
             self.comparison_results_tree.insert('', 'end', values=values, tags=tags)
             row_idx += 1
 
-        # Configure tag colors
+        # Configure tag colors — reliability-based
+        self.comparison_results_tree.tag_configure('reliability_high', background='#d4edda', foreground='#155724')
+        self.comparison_results_tree.tag_configure('reliability_moderate', background='#d1ecf1', foreground='#0c5460')
+        self.comparison_results_tree.tag_configure('reliability_low', background='#fff3cd', foreground='#856404')
+        self.comparison_results_tree.tag_configure('reliability_very_low', background='#f8d7da', foreground='#721c24')
+        # Fallback domain status colors (for older models)
         self.comparison_results_tree.tag_configure('domain_ok', background='#d4edda', foreground='#155724')
         self.comparison_results_tree.tag_configure('domain_caution', background='#fff3cd', foreground='#856404')
         self.comparison_results_tree.tag_configure('domain_outside', background='#f8d7da', foreground='#721c24')
@@ -45245,8 +45428,14 @@ External Validation Performance (n={n_val}):
 
                     self.comparison_results[summary_cols].to_excel(writer, sheet_name='Summary', index=False)
 
-                    # Sheet 2: All Predictions (add Domain Status for export)
+                    # Sheet 2: All Predictions (add Reliability % and Domain Status for export)
                     export_df = self.comparison_results.copy()
+                    # Replace string Reliability column with numeric for export
+                    reliability_scores = getattr(self, '_primary_reliability_scores', None)
+                    if reliability_scores is not None:
+                        if 'Reliability' in export_df.columns:
+                            export_df.drop(columns=['Reliability'], inplace=True)
+                        export_df['Reliability (%)'] = [int(r) for r in reliability_scores]
                     domain_status = getattr(self, '_primary_domain_status', None)
                     if domain_status is not None:
                         status_map = {
@@ -45306,10 +45495,12 @@ External Validation Performance (n={n_val}):
                                 continue
                             t2_thresh = ad.get('t2_threshold', float('nan'))
                             q_thresh = ad.get('q_threshold', float('nan'))
+                            rel_scores = ad.get('reliability_scores')
                             for i, sample in enumerate(sample_labels):
-                                ad_rows.append({
+                                row_dict = {
                                     'Sample': sample,
                                     'Model': model_name,
+                                    'Reliability (%)': int(rel_scores[i]) if rel_scores is not None and i < len(rel_scores) else None,
                                     'Hotelling_T2': float(t2_vals[i]),
                                     'T2_Threshold': t2_thresh,
                                     'T2_Flag': bool(t2_vals[i] > t2_thresh),
@@ -45317,7 +45508,8 @@ External Validation Performance (n={n_val}):
                                     'Q_Threshold': q_thresh,
                                     'Q_Flag': bool(q_vals[i] > q_thresh),
                                     'Status': str(d_status[i]) if d_status is not None else 'N/A',
-                                })
+                                }
+                                ad_rows.append(row_dict)
                         if ad_rows:
                             pd.DataFrame(ad_rows).to_excel(
                                 writer, sheet_name='Domain Applicability', index=False
@@ -45325,8 +45517,13 @@ External Validation Performance (n={n_val}):
 
                 messagebox.showinfo("Success", f"Results exported to Excel:\n{filepath}")
             else:
-                # CSV export (add Domain Status for export)
+                # CSV export (add Reliability % and Domain Status for export)
                 export_df = self.comparison_results.copy()
+                reliability_scores = getattr(self, '_primary_reliability_scores', None)
+                if reliability_scores is not None:
+                    if 'Reliability' in export_df.columns:
+                        export_df.drop(columns=['Reliability'], inplace=True)
+                    export_df['Reliability (%)'] = [int(r) for r in reliability_scores]
                 domain_status = getattr(self, '_primary_domain_status', None)
                 if domain_status is not None:
                     status_map = {

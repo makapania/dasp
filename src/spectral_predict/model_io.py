@@ -267,15 +267,34 @@ def save_model(
                 'max': float(np.max(pca_distances))
             }
 
+            # Pre-compute Q-threshold from full training data
+            train_reconstructed_full = pca.inverse_transform(X_train_pca)
+            train_q_full = np.sum((X_train - train_reconstructed_full) ** 2, axis=1)
+
+            # Compute T² for all training samples (for reliability score calibration)
+            mu_train = np.mean(X_train_pca, axis=0)
+            cov_train = np.cov(X_train_pca.T)
+            if X_train_pca.shape[1] == 1:
+                cov_train = np.atleast_2d(cov_train)
+            try:
+                inv_cov_train = np.linalg.inv(cov_train)
+            except np.linalg.LinAlgError:
+                cov_train += np.eye(cov_train.shape[0]) * 1e-6
+                inv_cov_train = np.linalg.inv(cov_train)
+            training_t2 = np.array([(x - mu_train) @ inv_cov_train @ (x - mu_train) for x in X_train_pca])
+
             # Save applicability domain data
             ad_data_dict = {
                 'representative_spectra': representative_spectra,
                 'representative_indices': representative_indices,
-                'training_pca_scores': X_train_pca[representative_indices] if n_samples > 100 else X_train_pca,
+                'training_pca_scores': X_train_pca,  # Full training PCA scores for correct T² statistics
                 'distance_thresholds': np.array([distance_thresholds['p50'],
                                                   distance_thresholds['p75'],
                                                   distance_thresholds['p95'],
-                                                  distance_thresholds['max']])
+                                                  distance_thresholds['max']]),
+                'q_threshold': np.array([np.percentile(train_q_full, 99)]),
+                'training_t2_values': training_t2,
+                'training_q_values': train_q_full,
             }
             np.savez_compressed(ad_data_path, **ad_data_dict)
 
@@ -444,6 +463,70 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'pca_model': pca_model,
         'bias_correction': bias_correction,
     }
+
+
+def _compute_reliability_scores(
+    t2_values: np.ndarray,
+    q_values: np.ndarray,
+    t2_threshold: float,
+    q_threshold: float,
+    training_t2: np.ndarray | None = None,
+    training_q: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compute per-sample prediction reliability scores (0-95%).
+
+    Scores reflect how spectrally similar each sample is to training data,
+    which correlates with expected prediction quality. Uses training T²/Q
+    distributions when available for calibrated percentile-based scoring.
+    Falls back to ratio-based scoring for older models.
+
+    Score ranges:
+        80-95%  High reliability — spectrally very similar to training data
+        50-79%  Moderate — within training variability, toward edges
+        35-49%  Low — at or beyond training boundary
+         5-34%  Very low — well outside training domain
+    """
+    if training_t2 is not None and training_q is not None:
+        # Vectorized percentile computation via searchsorted
+        sorted_t2 = np.sort(training_t2)
+        sorted_q = np.sort(training_q)
+        n_train = len(sorted_t2)
+
+        t2_pctl = np.searchsorted(sorted_t2, t2_values, side='right') / n_train
+        q_pctl = np.searchsorted(sorted_q, q_values, side='right') / n_train
+        worst_pctl = np.maximum(t2_pctl, q_pctl)
+
+        # Detect samples beyond training max
+        beyond_t2 = t2_values > sorted_t2[-1]
+        beyond_q = q_values > sorted_q[-1]
+        beyond_training = beyond_t2 | beyond_q
+
+        # Piecewise linear mapping for within-training-range samples
+        scores = np.where(
+            worst_pctl <= 0.90,
+            95 - (worst_pctl / 0.90) * 15,               # 95 -> 80
+            np.where(
+                worst_pctl <= 0.99,
+                80 - ((worst_pctl - 0.90) / 0.09) * 30,  # 80 -> 50
+                50 - ((worst_pctl - 0.99) / 0.01) * 15   # 50 -> 35
+            )
+        )
+
+        # Override for beyond-training samples: exponential decay from 35
+        t2_ratio = np.where(t2_threshold > 0, t2_values / t2_threshold, 0.0)
+        q_ratio = np.where(q_threshold > 0, q_values / q_threshold, 0.0)
+        worst_ratio = np.maximum(t2_ratio, q_ratio)
+        beyond_scores = 35 * np.exp(-0.5 * np.maximum(0, worst_ratio - 1))
+
+        scores = np.where(beyond_training, beyond_scores, scores)
+    else:
+        # Fallback for older models: ratio-based (no training distribution)
+        t2_ratio = np.where(t2_threshold > 0, t2_values / t2_threshold, 0.0)
+        q_ratio = np.where(q_threshold > 0, q_values / q_threshold, 0.0)
+        worst_ratio = np.maximum(t2_ratio, q_ratio)
+        scores = 100 * np.exp(-0.7 * worst_ratio)
+
+    return np.clip(np.round(scores), 5, 95).astype(int)
 
 
 def predict_with_model(
@@ -892,11 +975,16 @@ def predict_with_uncertainty(
             t2_values = np.array([d @ inv_cov @ d for d in diff])
 
             # --- Q-residuals (SPE) ---
-            train_reconstructed = pca_model.inverse_transform(
-                pca_model.transform(representative_spectra)
-            )
-            train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
-            q_threshold = np.percentile(train_q, 99)
+            # Use pre-computed Q-threshold from full training data if available
+            if 'q_threshold' in ad_data:
+                q_threshold = float(ad_data['q_threshold'].item())
+            else:
+                # Fallback for older models: compute from representative spectra
+                train_reconstructed = pca_model.inverse_transform(
+                    pca_model.transform(representative_spectra)
+                )
+                train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
+                q_threshold = np.percentile(train_q, 99)
 
             new_reconstructed = pca_model.inverse_transform(X_pred_pca)
             q_values = np.sum((X_processed - new_reconstructed) ** 2, axis=1)
@@ -915,6 +1003,15 @@ def predict_with_uncertainty(
             applicability_domain['q_values'] = q_values
             applicability_domain['q_threshold'] = float(q_threshold)
             applicability_domain['domain_status'] = domain_status
+
+            # Compute reliability scores
+            training_t2 = ad_data.get('training_t2_values')
+            training_q = ad_data.get('training_q_values')
+            reliability_scores = _compute_reliability_scores(
+                t2_values, q_values, t2_threshold, q_threshold,
+                training_t2=training_t2, training_q=training_q
+            )
+            applicability_domain['reliability_scores'] = reliability_scores
 
             has_applicability_domain = True
 
@@ -1059,11 +1156,16 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
         diff = X_pred_pca - mu
         t2_values = np.array([d @ inv_cov @ d for d in diff])
 
-        train_reconstructed = pca_model.inverse_transform(
-            pca_model.transform(representative_spectra)
-        )
-        train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
-        q_threshold = np.percentile(train_q, 99)
+        # Use pre-computed Q-threshold from full training data if available
+        if 'q_threshold' in ad_data:
+            q_threshold = float(ad_data['q_threshold'].item())
+        else:
+            # Fallback for older models: compute from representative spectra
+            train_reconstructed = pca_model.inverse_transform(
+                pca_model.transform(representative_spectra)
+            )
+            train_q = np.sum((representative_spectra - train_reconstructed) ** 2, axis=1)
+            q_threshold = np.percentile(train_q, 99)
 
         new_reconstructed = pca_model.inverse_transform(X_pred_pca)
         q_values = np.sum((X_processed - new_reconstructed) ** 2, axis=1)
@@ -1081,6 +1183,15 @@ def _aggregate_ensemble_applicability_domain(base_model_dicts, X_processed):
         applicability_domain['q_values'] = q_values
         applicability_domain['q_threshold'] = float(q_threshold)
         applicability_domain['domain_status'] = domain_status
+
+        # Compute reliability scores
+        training_t2 = ad_data.get('training_t2_values')
+        training_q = ad_data.get('training_q_values')
+        reliability_scores = _compute_reliability_scores(
+            t2_values, q_values, t2_threshold, q_threshold,
+            training_t2=training_t2, training_q=training_q
+        )
+        applicability_domain['reliability_scores'] = reliability_scores
 
     return applicability_domain
 
