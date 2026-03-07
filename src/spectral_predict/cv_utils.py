@@ -306,9 +306,13 @@ def cross_validate_with_early_stopping(
             X_val_transformed = X_val.copy()
 
             for step_name, step in model_clone.steps[:-1]:
-                step.fit(X_train_transformed, y_train)
-                X_train_transformed = step.transform(X_train_transformed)
-                X_val_transformed = step.transform(X_val_transformed)
+                if hasattr(step, 'fit_resample'):
+                    X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
+                    # Don't transform validation data - resampling only applies to training
+                elif hasattr(step, 'transform'):
+                    step.fit(X_train_transformed, y_train)
+                    X_train_transformed = step.transform(X_train_transformed)
+                    X_val_transformed = step.transform(X_val_transformed)
 
             # Fit final model with early stopping
             _fit_with_early_stopping(
@@ -333,6 +337,8 @@ def cross_validate_with_early_stopping(
             # Transform test data through pipeline
             X_val_transformed = X_val.copy()
             for step_name, step in model_clone.steps[:-1]:
+                if hasattr(step, 'fit_resample'):
+                    continue  # Resamplers don't transform test data
                 X_val_transformed = step.transform(X_val_transformed)
             y_pred = final_model_clone.predict(X_val_transformed)
         else:
@@ -348,6 +354,8 @@ def cross_validate_with_early_stopping(
             if hasattr(model_clone, 'steps'):
                 X_train_transformed = X_train.copy()
                 for step_name, step in model_clone.steps[:-1]:
+                    if hasattr(step, 'fit_resample'):
+                        continue  # Resamplers don't transform test/train scoring data
                     X_train_transformed = step.transform(X_train_transformed)
                 y_train_pred = final_model_clone.predict(X_train_transformed)
             else:
@@ -445,9 +453,13 @@ def cross_val_predict_with_early_stopping(
             X_val_transformed = X_val.copy()
 
             for step_name, step in model_clone.steps[:-1]:
-                step.fit(X_train_transformed, y_train)
-                X_train_transformed = step.transform(X_train_transformed)
-                X_val_transformed = step.transform(X_val_transformed)
+                if hasattr(step, 'fit_resample'):
+                    X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
+                    # Don't transform validation data - resampling only applies to training
+                elif hasattr(step, 'transform'):
+                    step.fit(X_train_transformed, y_train)
+                    X_train_transformed = step.transform(X_train_transformed)
+                    X_val_transformed = step.transform(X_val_transformed)
 
             _fit_with_early_stopping(
                 final_model_clone,
