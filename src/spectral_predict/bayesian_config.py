@@ -309,6 +309,8 @@ def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classe
             # Edge case: very shallow tree can't support min num_leaves
             num_leaves = max_valid_leaves if max_valid_leaves >= 2 else 2
 
+    boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+
     params = {
         'n_estimators': trial.suggest_int('n_estimators', *n_estimators_range),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
@@ -316,15 +318,21 @@ def _get_lightgbm_space(trial: optuna.Trial, tier: str, task_type: str, n_classe
         'max_depth': max_depth,
         'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
-        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-        'subsample_freq': trial.suggest_int('subsample_freq', 0, 7),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
         'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 2.0),
         'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0),
         'min_sum_hessian_in_leaf': trial.suggest_float('min_sum_hessian_in_leaf', 1e-3, 10.0, log=True),
         'max_bin': trial.suggest_categorical('max_bin', [63, 127, 255]),
-        'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+        'boosting_type': boosting_type,
     }
+
+    # Bagging params only valid for gbdt and dart, not goss
+    if boosting_type != 'goss':
+        params['subsample'] = trial.suggest_float('subsample', 0.6, 1.0)
+        params['subsample_freq'] = trial.suggest_int('subsample_freq', 0, 7)
+    else:
+        params['subsample'] = 1.0
+        params['subsample_freq'] = 0
 
     return params
 

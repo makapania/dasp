@@ -9751,13 +9751,13 @@ class SpectralPredictApp:
 
         ttk.Checkbutton(selection_frame, text="Select all flagged samples",
                        variable=self.select_all_flagged,
-                       command=self._auto_select_flagged).grid(row=0, column=0, sticky=tk.W, pady=5)
+                       command=self._apply_auto_selections).grid(row=0, column=0, sticky=tk.W, pady=5)
         ttk.Checkbutton(selection_frame, text="High confidence (3+ flags)",
                        variable=self.select_high_conf,
-                       command=self._auto_select_high_confidence).grid(row=1, column=0, sticky=tk.W, pady=5)
+                       command=self._apply_auto_selections).grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Checkbutton(selection_frame, text="Moderate confidence (2 flags)",
                        variable=self.select_moderate_conf,
-                       command=self._auto_select_moderate_confidence).grid(row=2, column=0, sticky=tk.W, pady=5)
+                       command=self._apply_auto_selections).grid(row=2, column=0, sticky=tk.W, pady=5)
 
         # Status and action buttons
         self.outlier_selection_status = ttk.Label(selection_frame, text="No samples selected", style='Caption.TLabel')
@@ -14656,32 +14656,38 @@ class SpectralPredictApp:
                 f"{n_valid} sample(s) available for modeling."
             )
 
-        # Keep validation targets in sync with current target column
-        if self.validation_X is not None or self.validation_y is not None:
-            try:
-                if self.validation_X is not None and len(self.validation_X) > 0:
-                    validation_idx = list(self.validation_X.index)
-                elif self.validation_y is not None and len(self.validation_y) > 0:
-                    validation_idx = list(self.validation_y.index)
-                else:
-                    validation_idx = []
+        # Clear target-dependent analysis state
+        self.results_df = None
+        self.results_display_df = None
+        self.results_filtered_df = None
+        self.selected_model_config = None
+        self.refined_model = None
+        self.shap_values = None
+        self.label_encoder = None
+        self.refined_label_encoder = None
+        self.outlier_report = None
+        if hasattr(self, 'best_model_info'):
+            self.best_model_info.config(text="(none yet)")
 
-                if validation_idx:
-                    self.validation_y = self.y.loc[validation_idx]
-                    nan_val = int(self.validation_y.isna().sum())
-                    if nan_val > 0:
-                        messagebox.showwarning(
-                            "Validation Set Warning",
-                            f"{nan_val} validation sample(s) have no value for target '{new_target}'.\n"
-                            "Validation metrics may be affected. Consider recreating the validation set."
-                        )
-                    if hasattr(self, 'validation_status_label'):
-                        self.validation_status_label.config(
-                            text=f"Validation set updated for target '{new_target}' ({len(validation_idx)} samples)"
-                        )
-                    print(f"DEBUG: Updated validation_y after target change (n={len(validation_idx)})")
-            except Exception as e:
-                print(f"WARNING: Could not update validation_y after target change: {e}")
+        # Reset validation set (was selected for old target's distribution)
+        self._reset_validation_set()
+
+        # Clear results table UI
+        if hasattr(self, 'results_tree'):
+            for item in self.results_tree.get_children():
+                self.results_tree.delete(item)
+
+        # Clear outlier table UI
+        if hasattr(self, 'outlier_tree'):
+            for item in self.outlier_tree.get_children():
+                self.outlier_tree.delete(item)
+
+        # Warn about persisting exclusions
+        if self.excluded_spectra:
+            self._log(f"Note: {len(self.excluded_spectra)} excluded sample(s) from previous target still active")
+
+        # Log the reset
+        self._log(f"Target changed to '{new_target}' — analysis results, validation set, and outlier detection cleared")
 
         # Update task type detection and model checkboxes
         self._on_task_type_changed()
@@ -17768,6 +17774,14 @@ class SpectralPredictApp:
             X_available = X_available[~X_available.index.isin(self.excluded_spectra)]
             y_available = y_available[~y_available.index.isin(self.excluded_spectra)]
 
+            # Drop rows with NaN target values before validation selection
+            nan_mask = y_available.isna()
+            if nan_mask.any():
+                n_nan = nan_mask.sum()
+                self._log(f"Note: {n_nan} sample(s) with missing target values excluded from validation selection")
+                y_available = y_available[~nan_mask]
+                X_available = X_available.loc[y_available.index]
+
             if len(X_available) < 10:
                 messagebox.showwarning("Insufficient Data",
                                      "Need at least 10 samples to create validation set")
@@ -18747,6 +18761,7 @@ class SpectralPredictApp:
 
             # Populate table
             self._populate_outlier_table()
+            self._apply_auto_selections()
 
             # Update status
             n_high = len(self.outlier_report['high_confidence_outliers'])
@@ -19549,6 +19564,27 @@ class SpectralPredictApp:
                     if tree_sample_idx == row['Sample_Index'] + 1:
                         self.outlier_tree.selection_add(item)
                         break
+
+        self._update_outlier_selection_status()
+
+    def _apply_auto_selections(self):
+        """Apply auto-selection based on current checkbox states (without intermediate clears)."""
+        if self.outlier_report is None:
+            return
+
+        # Clear all selections once
+        self.outlier_tree.selection_set()
+
+        for item in self.outlier_tree.get_children():
+            values = self.outlier_tree.item(item, 'values')
+            flag_count = int(values[6])  # Total Flags column (index 6)
+
+            if self.select_all_flagged.get() and flag_count >= 1:
+                self.outlier_tree.selection_add(item)
+            elif self.select_high_conf.get() and flag_count >= 3:
+                self.outlier_tree.selection_add(item)
+            elif self.select_moderate_conf.get() and flag_count == 2:
+                self.outlier_tree.selection_add(item)
 
         self._update_outlier_selection_status()
 
