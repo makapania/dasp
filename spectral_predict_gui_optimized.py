@@ -2596,6 +2596,7 @@ class SpectralPredictApp:
         # Interactive plot annotation tracking
         self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
         self.active_annotation = None  # Currently visible annotation object
+        self.root.bind('<Escape>', lambda e: self._dismiss_annotation())
         self._explore_plot_state = {}  # {frame_key: state_dict} for explore plot info bars
         self._highlight_timers = {}  # {sample_idx: after_id} for re-inclusion flash timers
 
@@ -6401,6 +6402,7 @@ class SpectralPredictApp:
             y_range = _ax1.get_ylim()[1] - _ax1.get_ylim()[0]
             threshold = 0.1 * np.sqrt(x_range ** 2 + y_range ** 2)
             if distances[nearest_idx] >= threshold:
+                self._dismiss_annotation()
                 return
 
             sc_x = _scores[nearest_idx, _pc_x_idx]
@@ -18259,6 +18261,17 @@ class SpectralPredictApp:
         self.active_annotation = annotation
         canvas.draw_idle()
 
+    def _dismiss_annotation(self):
+        """Remove the active yellow annotation box."""
+        if self.active_annotation is not None:
+            try:
+                canvas = self.active_annotation.figure.canvas
+                self.active_annotation.remove()
+                canvas.draw_idle()
+            except Exception:
+                pass
+            self.active_annotation = None
+
     def _apply_transformation(self, data):
         """
         Apply absorbance transformation if enabled (legacy compatibility).
@@ -18902,6 +18915,8 @@ class SpectralPredictApp:
 
                 info_text = self._format_specimen_info(nearest_idx, y_value=y_value, extra_info=extra_info)
                 self._create_or_update_annotation(ax, pc1, pc2, info_text, canvas)
+            else:
+                self._dismiss_annotation()
 
         fig.canvas.mpl_connect('button_press_event', on_pca_click)
 
@@ -29731,6 +29746,8 @@ Performance (Classification):
                     elif event.button == 3:  # Right click - context menu
                         self._show_exclude_context_menu(event, specimen_label,
                                                         ax, y_actual, y_predicted, canvas)
+            else:
+                self._dismiss_annotation()
 
         fig.canvas.mpl_connect('button_press_event', on_prediction_click)
 
@@ -30568,6 +30585,8 @@ F1 Score:  {f1:.4f}
                 elif event.button == 3:  # Right click
                     self._show_exclude_context_menu(event, specimen_label,
                                                     ax1, y_predicted, residual_val, canvas)
+            else:
+                self._dismiss_annotation()
 
         def on_residual_vs_index_click(event):
             if event.inaxes != ax2 or event.xdata is None:
@@ -30968,6 +30987,8 @@ F1 Score:  {f1:.4f}
                                                        extra_info=extra_info,
                                                        specimen_label=specimen_label)
                 self._create_or_update_annotation(ax, indices[nearest_idx], leverage_val, info_text, canvas)
+            else:
+                self._dismiss_annotation()
 
         fig.canvas.mpl_connect('button_press_event', on_leverage_click)
 
@@ -36781,6 +36802,8 @@ External Validation Performance (n={n_val}):
                 elif event.button == 3:  # Right click - context menu
                     self._show_exclude_context_menu(event, sample_name,
                                                     ax, y_actual, y_predicted, canvas)
+            else:
+                self._dismiss_annotation()
 
         fig.canvas.mpl_connect('button_press_event', on_click)
 
