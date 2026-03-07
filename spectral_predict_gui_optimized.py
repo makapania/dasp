@@ -14684,10 +14684,10 @@ class SpectralPredictApp:
 
         # Warn about persisting exclusions
         if self.excluded_spectra:
-            self._log(f"Note: {len(self.excluded_spectra)} excluded sample(s) from previous target still active")
+            print(f"Note: {len(self.excluded_spectra)} excluded sample(s) from previous target still active")
 
         # Log the reset
-        self._log(f"Target changed to '{new_target}' — analysis results, validation set, and outlier detection cleared")
+        print(f"Target changed to '{new_target}' — analysis results, validation set, and outlier detection cleared")
 
         # Update task type detection and model checkboxes
         self._on_task_type_changed()
@@ -17749,7 +17749,7 @@ class SpectralPredictApp:
             return X_val.index.tolist()
         except ValueError as e:
             # If stratification fails (e.g., too few samples per bin), fall back to random
-            self._log(f"Stratified sampling failed, using random: {e}")
+            print(f"Stratified sampling failed, using random: {e}")
             return self._validation_random(X, y, n_samples)
 
     def _create_validation_set(self):
@@ -17778,7 +17778,7 @@ class SpectralPredictApp:
             nan_mask = y_available.isna()
             if nan_mask.any():
                 n_nan = nan_mask.sum()
-                self._log(f"Note: {n_nan} sample(s) with missing target values excluded from validation selection")
+                print(f"Note: {n_nan} sample(s) with missing target values excluded from validation selection")
                 y_available = y_available[~nan_mask]
                 X_available = X_available.loc[y_available.index]
 
@@ -20441,14 +20441,17 @@ class SpectralPredictApp:
             )
 
             task_type_setting = self.task_type.get()
-            y_values = self.y.values
+            y_clean = self.y.dropna()
+            if len(y_clean) == 0:
+                return
+            y_values = y_clean.values
 
             # Auto-detect task type if set to "auto"
             if task_type_setting == "auto":
                 # Auto-detect task type (same logic as analysis)
-                if self.y.nunique() == 2:
+                if y_clean.nunique() == 2:
                     task_type = "classification"
-                elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                elif y_clean.dtype == 'object' or y_clean.nunique() < 10:
                     task_type = "classification"
                 else:
                     task_type = "regression"
