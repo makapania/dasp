@@ -2593,11 +2593,9 @@ class SpectralPredictApp:
         self.active_indices = None         # set of active sample indices, or None (= all active)
         self._exclusion_markers = {}  # Dict mapping specimen_label → Line2D artist for red X markers
 
-        # Interactive specimen popup tracking (replaces old matplotlib annotations)
-        self._active_popup = None          # Toplevel window reference
-        self._active_highlight_marker = None  # Line2D artist (orange ring on clicked point)
-        self._active_highlight_canvas = None  # Canvas holding the marker
-        self._popup_escape_binding = None  # Escape key binding ID on root
+        # Interactive plot annotation tracking
+        self.plot_annotations = {}  # Dict of {canvas_id: annotation_object} for click-to-show info
+        self.active_annotation = None  # Currently visible annotation object
         self._explore_plot_state = {}  # {frame_key: state_dict} for explore plot info bars
         self._highlight_timers = {}  # {sample_idx: after_id} for re-inclusion flash timers
 
@@ -6403,7 +6401,6 @@ class SpectralPredictApp:
             y_range = _ax1.get_ylim()[1] - _ax1.get_ylim()[0]
             threshold = 0.1 * np.sqrt(x_range ** 2 + y_range ** 2)
             if distances[nearest_idx] >= threshold:
-                self._dismiss_specimen_popup()
                 return
 
             sc_x = _scores[nearest_idx, _pc_x_idx]
@@ -6417,7 +6414,7 @@ class SpectralPredictApp:
             info_text = self._format_specimen_info(
                 nearest_idx, y_value=y_value, extra_info=extra_info
             )
-            self._create_or_update_annotation(_ax1, sc_x, sc_y, info_text, canvas, event=event)
+            self._create_or_update_annotation(_ax1, sc_x, sc_y, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_explore_pca_click)
 
@@ -7923,10 +7920,6 @@ class SpectralPredictApp:
                      loc='upper left', bbox_to_anchor=(1.01, 1.0),
                      fontsize=8, title_fontsize=9, framealpha=0.9)
 
-        # Dismiss popup on empty-space click (fires before pick_event)
-        fig.canvas.mpl_connect('button_press_event',
-            lambda event: self._dismiss_specimen_popup())
-
         # Connect pick event to shared handler
         fig.canvas.mpl_connect('pick_event',
             lambda event, fk=frame_key: self._on_explore_spectrum_pick(event, fk))
@@ -8066,7 +8059,7 @@ class SpectralPredictApp:
         mid = len(xdata) // 2
         ann_x, ann_y = xdata[mid], ydata[mid]
 
-        self._create_or_update_annotation(state['ax'], ann_x, ann_y, info_text, state['canvas'], event=event)
+        self._create_or_update_annotation(state['ax'], ann_x, ann_y, info_text, state['canvas'])
         state['canvas'].draw_idle()
 
         # Update info bar label
@@ -9751,13 +9744,13 @@ class SpectralPredictApp:
 
         ttk.Checkbutton(selection_frame, text="Select all flagged samples",
                        variable=self.select_all_flagged,
-                       command=self._apply_auto_selections).grid(row=0, column=0, sticky=tk.W, pady=5)
+                       command=self._auto_select_flagged).grid(row=0, column=0, sticky=tk.W, pady=5)
         ttk.Checkbutton(selection_frame, text="High confidence (3+ flags)",
                        variable=self.select_high_conf,
-                       command=self._apply_auto_selections).grid(row=1, column=0, sticky=tk.W, pady=5)
+                       command=self._auto_select_high_confidence).grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Checkbutton(selection_frame, text="Moderate confidence (2 flags)",
                        variable=self.select_moderate_conf,
-                       command=self._apply_auto_selections).grid(row=2, column=0, sticky=tk.W, pady=5)
+                       command=self._auto_select_moderate_confidence).grid(row=2, column=0, sticky=tk.W, pady=5)
 
         # Status and action buttons
         self.outlier_selection_status = ttk.Label(selection_frame, text="No samples selected", style='Caption.TLabel')
@@ -14656,38 +14649,32 @@ class SpectralPredictApp:
                 f"{n_valid} sample(s) available for modeling."
             )
 
-        # Clear target-dependent analysis state
-        self.results_df = None
-        self.results_display_df = None
-        self.results_filtered_df = None
-        self.selected_model_config = None
-        self.refined_model = None
-        self.shap_values = None
-        self.label_encoder = None
-        self.refined_label_encoder = None
-        self.outlier_report = None
-        if hasattr(self, 'best_model_info'):
-            self.best_model_info.config(text="(none yet)")
+        # Keep validation targets in sync with current target column
+        if self.validation_X is not None or self.validation_y is not None:
+            try:
+                if self.validation_X is not None and len(self.validation_X) > 0:
+                    validation_idx = list(self.validation_X.index)
+                elif self.validation_y is not None and len(self.validation_y) > 0:
+                    validation_idx = list(self.validation_y.index)
+                else:
+                    validation_idx = []
 
-        # Reset validation set (was selected for old target's distribution)
-        self._reset_validation_set()
-
-        # Clear results table UI
-        if hasattr(self, 'results_tree'):
-            for item in self.results_tree.get_children():
-                self.results_tree.delete(item)
-
-        # Clear outlier table UI
-        if hasattr(self, 'outlier_tree'):
-            for item in self.outlier_tree.get_children():
-                self.outlier_tree.delete(item)
-
-        # Warn about persisting exclusions
-        if self.excluded_spectra:
-            print(f"Note: {len(self.excluded_spectra)} excluded sample(s) from previous target still active")
-
-        # Log the reset
-        print(f"Target changed to '{new_target}' — analysis results, validation set, and outlier detection cleared")
+                if validation_idx:
+                    self.validation_y = self.y.loc[validation_idx]
+                    nan_val = int(self.validation_y.isna().sum())
+                    if nan_val > 0:
+                        messagebox.showwarning(
+                            "Validation Set Warning",
+                            f"{nan_val} validation sample(s) have no value for target '{new_target}'.\n"
+                            "Validation metrics may be affected. Consider recreating the validation set."
+                        )
+                    if hasattr(self, 'validation_status_label'):
+                        self.validation_status_label.config(
+                            text=f"Validation set updated for target '{new_target}' ({len(validation_idx)} samples)"
+                        )
+                    print(f"DEBUG: Updated validation_y after target change (n={len(validation_idx)})")
+            except Exception as e:
+                print(f"WARNING: Could not update validation_y after target change: {e}")
 
         # Update task type detection and model checkboxes
         self._on_task_type_changed()
@@ -17749,7 +17736,7 @@ class SpectralPredictApp:
             return X_val.index.tolist()
         except ValueError as e:
             # If stratification fails (e.g., too few samples per bin), fall back to random
-            print(f"Stratified sampling failed, using random: {e}")
+            self._log(f"Stratified sampling failed, using random: {e}")
             return self._validation_random(X, y, n_samples)
 
     def _create_validation_set(self):
@@ -17773,14 +17760,6 @@ class SpectralPredictApp:
                 y_available = self.y
             X_available = X_available[~X_available.index.isin(self.excluded_spectra)]
             y_available = y_available[~y_available.index.isin(self.excluded_spectra)]
-
-            # Drop rows with NaN target values before validation selection
-            nan_mask = y_available.isna()
-            if nan_mask.any():
-                n_nan = nan_mask.sum()
-                print(f"Note: {n_nan} sample(s) with missing target values excluded from validation selection")
-                y_available = y_available[~nan_mask]
-                X_available = X_available.loc[y_available.index]
 
             if len(X_available) < 10:
                 messagebox.showwarning("Insufficient Data",
@@ -18062,7 +18041,7 @@ class SpectralPredictApp:
             y_coord = ydata[mid_idx]
 
             # Show annotation with specimen info
-            self._create_or_update_annotation(event.artist.axes, x_coord, y_coord, info_text, event.canvas, event=event)
+            self._create_or_update_annotation(event.artist.axes, x_coord, y_coord, info_text, event.canvas)
 
         # Toggle exclusion (existing behavior)
         if sample_idx in self.excluded_spectra:
@@ -18187,237 +18166,98 @@ class SpectralPredictApp:
 
         return "\n".join(lines)
 
-    def _dismiss_specimen_popup(self):
-        """Dismiss the active specimen popup and remove highlight marker."""
-        # Destroy popup window
-        if self._active_popup is not None:
-            try:
-                self._active_popup.destroy()
-            except tk.TclError:
-                pass
-            self._active_popup = None
-
-        # Remove highlight marker from axes
-        if self._active_highlight_marker is not None:
-            try:
-                self._active_highlight_marker.remove()
-            except (ValueError, AttributeError):
-                pass  # marker may be stale after plot regeneration
-            self._active_highlight_marker = None
-
-        # Redraw canvas if it still exists
-        if self._active_highlight_canvas is not None:
-            try:
-                self._active_highlight_canvas.draw_idle()
-            except tk.TclError:
-                pass  # canvas may be destroyed
-            self._active_highlight_canvas = None
-
-        # Unbind Escape from root
-        if self._popup_escape_binding is not None:
-            try:
-                self.root.unbind('<Escape>', self._popup_escape_binding)
-            except tk.TclError:
-                pass
-            self._popup_escape_binding = None
-
-    def _build_specimen_popup(self, text, screen_x, screen_y):
+    def _create_or_update_annotation(self, ax, x, y, text, canvas):
         """
-        Create a borderless Toplevel popup showing specimen info with scroll support.
+        Create or update annotation in a fixed corner with an arrow to the clicked point.
 
-        Args:
-            text: Formatted specimen info text (newline-separated key: value lines)
-            screen_x: Screen X coordinate for popup placement
-            screen_y: Screen Y coordinate for popup placement
-        """
-        popup = tk.Toplevel(self.root)
-        popup.wm_overrideredirect(True)
-        popup.attributes('-topmost', True)
-
-        card_bg = self.colors.get('card_bg', '#F8F8F8')
-        text_color = self.colors.get('text', '#1A1A2E')
-        accent = self.colors.get('accent', '#0078D4')
-        border_color = self.colors.get('border', '#E2E8F0')
-
-        # Outer frame with 1px border effect
-        outer = tk.Frame(popup, bg=border_color, padx=1, pady=1)
-        outer.pack(fill='both', expand=True)
-
-        inner = tk.Frame(outer, bg=card_bg)
-        inner.pack(fill='both', expand=True)
-
-        # Header row: "Sample Info" + close button
-        header = tk.Frame(inner, bg=card_bg)
-        header.pack(fill='x', padx=8, pady=(6, 2))
-
-        tk.Label(
-            header, text="Sample Info", font=('Segoe UI', 9, 'bold'),
-            bg=card_bg, fg=accent, anchor='w'
-        ).pack(side='left')
-
-        close_btn = tk.Label(
-            header, text="\u2715", font=('Segoe UI', 9), bg=card_bg,
-            fg='#888888', cursor='hand2'
-        )
-        close_btn.pack(side='right')
-        close_btn.bind('<Button-1>', lambda e: self._dismiss_specimen_popup())
-        close_btn.bind('<Enter>', lambda e: close_btn.config(fg='red'))
-        close_btn.bind('<Leave>', lambda e: close_btn.config(fg='#888888'))
-
-        # Separator
-        tk.Frame(inner, bg=border_color, height=1).pack(fill='x', padx=6, pady=2)
-
-        # Scrollable text widget
-        text_frame = tk.Frame(inner, bg=card_bg)
-        text_frame.pack(fill='both', expand=True, padx=6, pady=(2, 6))
-
-        text_widget = tk.Text(
-            text_frame, wrap='word', font=('Segoe UI', 9),
-            bg=card_bg, fg=text_color, relief='flat', borderwidth=0,
-            highlightthickness=0, cursor='arrow', width=40
-        )
-
-        scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-
-        text_widget.pack(side='left', fill='both', expand=True)
-
-        # Configure text tags for styling
-        text_widget.tag_configure('label', font=('Segoe UI', 9, 'bold'), foreground=text_color)
-        text_widget.tag_configure('value', font=('Segoe UI', 9), foreground=text_color)
-        text_widget.tag_configure('specimen_header', font=('Segoe UI', 9, 'bold'), foreground=accent)
-
-        # Parse and insert formatted text
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            if i > 0:
-                text_widget.insert('end', '\n')
-            if ':' in line:
-                label_part, value_part = line.split(':', 1)
-                # First line (Specimen) gets accent color
-                if i == 0:
-                    text_widget.insert('end', f"{label_part}:", 'specimen_header')
-                    text_widget.insert('end', value_part, 'specimen_header')
-                else:
-                    text_widget.insert('end', f"{label_part}:", 'label')
-                    text_widget.insert('end', value_part, 'value')
-            else:
-                text_widget.insert('end', line, 'value')
-
-        text_widget.configure(state='disabled')
-
-        # Calculate required height (cap at 350px)
-        popup.update_idletasks()
-        n_lines = len(lines)
-        line_height = 18
-        header_height = 36
-        content_height = n_lines * line_height + header_height + 16
-        max_height = 350
-        popup_width = 320
-
-        if content_height > max_height:
-            content_height = max_height
-            scrollbar.pack(side='right', fill='y')
-
-        # Clamp to screen bounds (ensure at least partially visible)
-        try:
-            sw = self.root.winfo_screenwidth()
-            sh = self.root.winfo_screenheight()
-            if screen_x + popup_width > sw:
-                screen_x = sw - popup_width - 10
-            if screen_x < 0:
-                screen_x = 10
-            if screen_y + content_height > sh:
-                screen_y = sh - content_height - 10
-            if screen_y < 0:
-                screen_y = 10
-        except tk.TclError:
-            pass
-
-        popup.geometry(f"{popup_width}x{content_height}+{screen_x}+{screen_y}")
-
-        # Allow dragging the popup by its header
-        def start_drag(e):
-            popup._drag_x = e.x_root
-            popup._drag_y = e.y_root
-
-        def do_drag(e):
-            dx = e.x_root - popup._drag_x
-            dy = e.y_root - popup._drag_y
-            x = popup.winfo_x() + dx
-            y = popup.winfo_y() + dy
-            popup.geometry(f"+{x}+{y}")
-            popup._drag_x = e.x_root
-            popup._drag_y = e.y_root
-
-        header.bind('<Button-1>', start_drag)
-        header.bind('<B1-Motion>', do_drag)
-        for child in header.winfo_children():
-            if child != close_btn:
-                child.bind('<Button-1>', start_drag)
-                child.bind('<B1-Motion>', do_drag)
-
-        return popup
-
-    def _create_or_update_annotation(self, ax, x, y, text, canvas, event=None):
-        """
-        Show a specimen info popup near the clicked point with a highlight ring.
+        Places the annotation in a corner of the axes (using axes-fraction coordinates)
+        to avoid clipping and legend overlap, with a curved arrow pointing to the data point.
 
         Args:
             ax: Matplotlib axis object
-            x: X data coordinate of clicked point
-            y: Y data coordinate of clicked point
-            text: Formatted specimen info text
-            canvas: Matplotlib canvas (FigureCanvasTkAgg)
-            event: Optional matplotlib event with screen coordinates
+            x: X coordinate for annotation
+            y: Y coordinate for annotation
+            text: Text to display
+            canvas: Matplotlib canvas for redrawing
         """
-        # Dismiss any existing popup
-        self._dismiss_specimen_popup()
-
-        # Draw orange highlight ring on clicked point
-        try:
-            marker_line, = ax.plot(
-                x, y, 'o', markersize=12, markeredgecolor='#FF6B00',
-                markerfacecolor='none', markeredgewidth=2.5, zorder=999
-            )
-            self._active_highlight_marker = marker_line
-            self._active_highlight_canvas = canvas
-            canvas.draw_idle()
-        except Exception:
-            pass
-
-        # Compute screen position for popup
-        screen_x, screen_y = None, None
-        if event is not None:
-            # For PickEvent, use mouseevent; for MouseEvent, use directly
-            gui_event = getattr(event, 'guiEvent', None)
-            if gui_event is None:
-                mouse_event = getattr(event, 'mouseevent', None)
-                if mouse_event is not None:
-                    gui_event = getattr(mouse_event, 'guiEvent', None)
-            if gui_event is not None:
-                try:
-                    screen_x = gui_event.x_root + 20
-                    screen_y = gui_event.y_root + 20
-                except AttributeError:
-                    pass
-
-        # Fallback: position near canvas center
-        if screen_x is None or screen_y is None:
+        # Remove existing annotation if any
+        if self.active_annotation is not None:
             try:
-                tk_widget = canvas.get_tk_widget()
-                screen_x = tk_widget.winfo_rootx() + tk_widget.winfo_width() // 2
-                screen_y = tk_widget.winfo_rooty() + tk_widget.winfo_height() // 3
-            except tk.TclError:
-                screen_x, screen_y = 200, 200
+                self.active_annotation.remove()
+            except:
+                pass
+            self.active_annotation = None
 
-        # Build the popup
-        self._active_popup = self._build_specimen_popup(text, screen_x, screen_y)
+        # Corner candidates: (x_frac, y_frac, horizontal_align, vertical_align)
+        corners = {
+            'upper right': (0.97, 0.97, 'right', 'top'),
+            'upper left':  (0.03, 0.97, 'left',  'top'),
+            'lower right': (0.97, 0.03, 'right', 'bottom'),
+            'lower left':  (0.03, 0.03, 'left',  'bottom'),
+        }
 
-        # Bind Escape to dismiss (add='+' to avoid overwriting other bindings)
-        self._popup_escape_binding = self.root.bind(
-            '<Escape>', lambda e: self._dismiss_specimen_popup(), add='+'
+        # Determine which corners are occupied by legend / stats text / clicked point
+        occupied = set()
+
+        # Check legend location
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.set_zorder(5)  # Ensure legend renders below annotation
+            loc = legend._loc  # integer location code
+            loc_map = {1: 'upper right', 2: 'upper left',
+                       3: 'lower left', 4: 'lower right'}
+            if loc in loc_map:
+                occupied.add(loc_map[loc])
+
+        # Check for stats text box (e.g. R², RMSE in upper-left of pred vs actual)
+        for child in ax.get_children():
+            if isinstance(child, matplotlib.text.Text):
+                pos = child.get_position()
+                if abs(pos[0] - 0.05) < 0.1 and abs(pos[1] - 0.95) < 0.1:
+                    occupied.add('upper left')
+
+        # Avoid the quadrant the clicked point is in (so arrow is clearly visible)
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        x_rel = (x - xlim[0]) / (xlim[1] - xlim[0]) if xlim[1] != xlim[0] else 0.5
+        y_rel = (y - ylim[0]) / (ylim[1] - ylim[0]) if ylim[1] != ylim[0] else 0.5
+        if x_rel > 0.5 and y_rel > 0.5:
+            occupied.add('upper right')
+        elif x_rel <= 0.5 and y_rel > 0.5:
+            occupied.add('upper left')
+        elif x_rel > 0.5 and y_rel <= 0.5:
+            occupied.add('lower right')
+        else:
+            occupied.add('lower left')
+
+        # Pick best available corner
+        preference = ['upper right', 'lower left', 'upper left', 'lower right']
+        chosen = preference[0]
+        for pref in preference:
+            if pref not in occupied:
+                chosen = pref
+                break
+
+        cx, cy, ha, va = corners[chosen]
+
+        annotation = ax.annotate(
+            text,
+            xy=(x, y),
+            xytext=(cx, cy),
+            textcoords='axes fraction',
+            bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.9, edgecolor='black'),
+            arrowprops=dict(
+                arrowstyle='->', connectionstyle='arc3,rad=0.2',
+                color='black', lw=1.5,
+            ),
+            fontsize=9,
+            zorder=1000,
+            ha=ha,
+            va=va,
+            clip_on=False,
         )
+
+        self.active_annotation = annotation
+        canvas.draw_idle()
 
     def _apply_transformation(self, data):
         """
@@ -18680,10 +18520,6 @@ class SpectralPredictApp:
         if "Derivative" in title:
             ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
 
-        # Dismiss popup on empty-space click (fires before pick_event)
-        fig.canvas.mpl_connect('button_press_event',
-            lambda event: self._dismiss_specimen_popup())
-
         # Add click handler to all spectral plots
         fig.canvas.mpl_connect('pick_event', self._on_spectrum_click)
 
@@ -18761,7 +18597,6 @@ class SpectralPredictApp:
 
             # Populate table
             self._populate_outlier_table()
-            self._apply_auto_selections()
 
             # Update status
             n_high = len(self.outlier_report['high_confidence_outliers'])
@@ -19066,9 +18901,7 @@ class SpectralPredictApp:
                         extra_info[color_by] = "N/A"
 
                 info_text = self._format_specimen_info(nearest_idx, y_value=y_value, extra_info=extra_info)
-                self._create_or_update_annotation(ax, pc1, pc2, info_text, canvas, event=event)
-            else:
-                self._dismiss_specimen_popup()
+                self._create_or_update_annotation(ax, pc1, pc2, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_pca_click)
 
@@ -19145,9 +18978,7 @@ class SpectralPredictApp:
                 }
 
                 info_text = self._format_specimen_info(bar_idx, y_value=y_value, extra_info=extra_info)
-                self._create_or_update_annotation(ax, bar_idx, t2_value, info_text, canvas, event=event)
-            else:
-                self._dismiss_specimen_popup()
+                self._create_or_update_annotation(ax, bar_idx, t2_value, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_t2_click)
 
@@ -19224,9 +19055,7 @@ class SpectralPredictApp:
                 }
 
                 info_text = self._format_specimen_info(bar_idx, y_value=y_value, extra_info=extra_info)
-                self._create_or_update_annotation(ax, bar_idx, q_value, info_text, canvas, event=event)
-            else:
-                self._dismiss_specimen_popup()
+                self._create_or_update_annotation(ax, bar_idx, q_value, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_q_click)
 
@@ -19304,9 +19133,7 @@ class SpectralPredictApp:
                 }
 
                 info_text = self._format_specimen_info(bar_idx, y_value=y_value, extra_info=extra_info)
-                self._create_or_update_annotation(ax, bar_idx, distance, info_text, canvas, event=event)
-            else:
-                self._dismiss_specimen_popup()
+                self._create_or_update_annotation(ax, bar_idx, distance, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_maha_click)
 
@@ -19564,27 +19391,6 @@ class SpectralPredictApp:
                     if tree_sample_idx == row['Sample_Index'] + 1:
                         self.outlier_tree.selection_add(item)
                         break
-
-        self._update_outlier_selection_status()
-
-    def _apply_auto_selections(self):
-        """Apply auto-selection based on current checkbox states (without intermediate clears)."""
-        if self.outlier_report is None:
-            return
-
-        # Clear all selections once
-        self.outlier_tree.selection_set()
-
-        for item in self.outlier_tree.get_children():
-            values = self.outlier_tree.item(item, 'values')
-            flag_count = int(values[6])  # Total Flags column (index 6)
-
-            if self.select_all_flagged.get() and flag_count >= 1:
-                self.outlier_tree.selection_add(item)
-            elif self.select_high_conf.get() and flag_count >= 3:
-                self.outlier_tree.selection_add(item)
-            elif self.select_moderate_conf.get() and flag_count == 2:
-                self.outlier_tree.selection_add(item)
 
         self._update_outlier_selection_status()
 
@@ -20441,17 +20247,14 @@ class SpectralPredictApp:
             )
 
             task_type_setting = self.task_type.get()
-            y_clean = self.y.dropna()
-            if len(y_clean) == 0:
-                return
-            y_values = y_clean.values
+            y_values = self.y.values
 
             # Auto-detect task type if set to "auto"
             if task_type_setting == "auto":
                 # Auto-detect task type (same logic as analysis)
-                if y_clean.nunique() == 2:
+                if self.y.nunique() == 2:
                     task_type = "classification"
-                elif y_clean.dtype == 'object' or y_clean.nunique() < 10:
+                elif self.y.dtype == 'object' or self.y.nunique() < 10:
                     task_type = "classification"
                 else:
                     task_type = "regression"
@@ -24875,9 +24678,6 @@ class SpectralPredictApp:
 
     def _on_tab_changed(self, event):
         """Handle tab change events."""
-        # Dismiss any open specimen popup when switching tabs
-        self._dismiss_specimen_popup()
-
         # Cancel all pending scroll region updates for non-visible tabs
         # This prevents unnecessary recalculations when switching tabs
         current_tab = self.notebook.index(self.notebook.select())
@@ -29924,15 +29724,13 @@ Performance (Classification):
                         info_text = self._format_specimen_info(original_idx, y_value=y_actual,
                                                               y_pred=y_predicted, extra_info=extra_info,
                                                               specimen_label=specimen_label)
-                        self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas, event=event)
+                        self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
                         self._show_exclude_button(self.refine_plot_frame, specimen_label,
                                                   ax, y_actual, y_predicted, canvas)
 
                     elif event.button == 3:  # Right click - context menu
                         self._show_exclude_context_menu(event, specimen_label,
                                                         ax, y_actual, y_predicted, canvas)
-            else:
-                self._dismiss_specimen_popup()
 
         fig.canvas.mpl_connect('button_press_event', on_prediction_click)
 
@@ -30329,7 +30127,7 @@ F1 Score:  {f1:.4f}
                 info_parts.append(f"Rank: {rank}")
 
                 info_text = "\n".join(info_parts)
-                self._create_or_update_annotation(ax1, wl, imp, info_text, fig.canvas, event=event)
+                self._create_or_update_annotation(ax1, wl, imp, info_text, fig.canvas)
 
             fig.canvas.mpl_connect('button_press_event', on_importance_click)
 
@@ -30763,15 +30561,13 @@ F1 Score:  {f1:.4f}
                     info_text = self._format_specimen_info(original_idx, y_value=y_actual,
                                                           y_pred=y_predicted, extra_info=extra_info,
                                                           specimen_label=specimen_label)
-                    self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas, event=event)
+                    self._create_or_update_annotation(ax1, y_predicted, residual_val, info_text, canvas)
                     self._show_exclude_button(self.residual_diagnostics_frame, specimen_label,
                                               ax1, y_predicted, residual_val, canvas)
 
                 elif event.button == 3:  # Right click
                     self._show_exclude_context_menu(event, specimen_label,
                                                     ax1, y_predicted, residual_val, canvas)
-            else:
-                self._dismiss_specimen_popup()
 
         def on_residual_vs_index_click(event):
             if event.inaxes != ax2 or event.xdata is None:
@@ -30807,15 +30603,13 @@ F1 Score:  {f1:.4f}
                     info_text = self._format_specimen_info(original_idx, y_value=y_actual,
                                                           y_pred=y_predicted, extra_info=extra_info,
                                                           specimen_label=specimen_label)
-                    self._create_or_update_annotation(ax2, bar_idx, residual_val, info_text, canvas, event=event)
+                    self._create_or_update_annotation(ax2, bar_idx, residual_val, info_text, canvas)
                     self._show_exclude_button(self.residual_diagnostics_frame, specimen_label,
                                               ax2, bar_idx, residual_val, canvas)
 
                 elif event.button == 3:  # Right click
                     self._show_exclude_context_menu(event, specimen_label,
                                                     ax2, bar_idx, residual_val, canvas)
-            else:
-                self._dismiss_specimen_popup()
 
         fig.canvas.mpl_connect('button_press_event', on_residual_vs_fitted_click)
         fig.canvas.mpl_connect('button_press_event', on_residual_vs_index_click)
@@ -31173,9 +30967,7 @@ F1 Score:  {f1:.4f}
                 info_text = self._format_specimen_info(original_idx, y_value=y_value,
                                                        extra_info=extra_info,
                                                        specimen_label=specimen_label)
-                self._create_or_update_annotation(ax, indices[nearest_idx], leverage_val, info_text, canvas, event=event)
-            else:
-                self._dismiss_specimen_popup()
+                self._create_or_update_annotation(ax, indices[nearest_idx], leverage_val, info_text, canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_leverage_click)
 
@@ -36982,15 +36774,13 @@ External Validation Performance (n={n_val}):
                         else:
                             info_text += f"\n{color_label}: N/A"
 
-                    self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas, event=event)
+                    self._create_or_update_annotation(ax, y_actual, y_predicted, info_text, canvas)
                     self._show_exclude_button(self.prediction_plots_frame, sample_name,
                                               ax, y_actual, y_predicted, canvas)
 
                 elif event.button == 3:  # Right click - context menu
                     self._show_exclude_context_menu(event, sample_name,
                                                     ax, y_actual, y_predicted, canvas)
-            else:
-                self._dismiss_specimen_popup()
 
         fig.canvas.mpl_connect('button_press_event', on_click)
 
@@ -50686,7 +50476,7 @@ External Validation Performance (n={n_val}):
                         lines.append(f"{label}: {ydata[idx]:.4f}")
             if extra_info_fn:
                 lines.extend(extra_info_fn(idx, wl))
-            self._create_or_update_annotation(ax, wl, event.ydata, "\n".join(lines), canvas, event=event)
+            self._create_or_update_annotation(ax, wl, event.ydata, "\n".join(lines), canvas)
 
         fig.canvas.mpl_connect('button_press_event', on_click)
         return on_click  # prevent GC
