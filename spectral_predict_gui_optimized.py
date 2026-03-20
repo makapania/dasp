@@ -14154,10 +14154,11 @@ class SpectralPredictApp:
                 available_cols = sorted(available_cols)
 
                 # Populate dropdowns
+                # Always populate target combo so user can select "(No target variable)"
+                self.target_combo['values'] = ['(No target variable)'] + available_cols
                 if available_cols:
                     self.spectral_file_combo['values'] = available_cols  # Not used for combined files but populate anyway
                     self.id_combo['values'] = ['N/A - Use Filename'] + available_cols
-                    self.target_combo['values'] = ['(No target variable)'] + available_cols
 
                     # Pre-select auto-detected values
                     if metadata.get('generated_ids'):
@@ -14165,8 +14166,10 @@ class SpectralPredictApp:
                     elif metadata.get('specimen_id_col'):
                         self.id_column.set(metadata['specimen_id_col'])
 
-                    if metadata.get('y_col'):
-                        self.target_column.set(metadata['y_col'])
+                if metadata.get('y_col'):
+                    self.target_column.set(metadata['y_col'])
+                else:
+                    self.target_column.set('(No target variable)')
 
                 # Update status with detailed info
                 if metadata['generated_ids']:
@@ -14186,7 +14189,7 @@ class SpectralPredictApp:
                     f"Detected combined {format_type} format!\n\n"
                     f"Auto-detected:\n"
                     f"  - {id_info}\n"
-                    f"  - Target: {metadata['y_col']}\n"
+                    f"  - Target: {metadata['y_col'] or '(none - spectra only)'}\n"
                     f"  - Wavelengths: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f} nm\n"
                     f"  - Spectra: {metadata['n_spectra']}\n\n"
                     f"No reference file needed - all data is in one file.\n"
@@ -14339,10 +14342,11 @@ class SpectralPredictApp:
 
             available_cols = sorted(available_cols)
 
-            if available_cols:
-                self.target_combo['values'] = ['(No target variable)'] + available_cols
-                if metadata.get('y_col'):
-                    self.target_column.set(metadata['y_col'])
+            self.target_combo['values'] = ['(No target variable)'] + available_cols
+            if metadata.get('y_col'):
+                self.target_column.set(metadata['y_col'])
+            else:
+                self.target_column.set('(No target variable)')
 
             # Update status
             format_type = "Excel" if is_excel else "CSV/TXT"

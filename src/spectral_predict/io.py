@@ -1301,7 +1301,7 @@ def auto_detect_y_column(df, exclude_cols):
     candidate_cols = [col for col in df.columns if col not in exclude_cols]
 
     if not candidate_cols:
-        raise ValueError("No remaining columns found for target y variable")
+        return None
 
     # If only one candidate, use it
     if len(candidate_cols) == 1:
@@ -1456,6 +1456,8 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
             exclude_cols.append(specimen_id_col)
 
         y_col = auto_detect_y_column(df, exclude_cols)
+        if y_col is None:
+            no_target = True
 
     if not no_target:
         if y_col not in df.columns:
@@ -2890,6 +2892,8 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
             exclude_cols.append(specimen_id_col)
 
         y_col = auto_detect_y_column(df, exclude_cols)
+        if y_col is None:
+            no_target = True
 
     if not no_target:
         if y_col not in df.columns:
