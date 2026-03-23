@@ -7,6 +7,7 @@ Uses real example data (BoneCollagen ASD spectra + CSV targets).
 """
 from __future__ import annotations
 
+import time
 import numpy as np
 import pandas as pd
 import pytest
@@ -192,4 +193,75 @@ def test_variable_selection_spa_correctness(example_data):
     lgbm_tags = set(lgbm_spa["SubsetTag"].values)
     assert pls_tags == lgbm_tags, (
         f"SPA subsets should be identical for PLS and LightGBM: {pls_tags} vs {lgbm_tags}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bayesian variable selection caching benchmark
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+def test_bayesian_varsel_caching(example_data):
+    """Verify Bayesian optimization caches variable selection across trials.
+
+    Runs Bayesian search with SPA enabled and counts how many times
+    spa_selection is actually called. With caching, it should be called
+    exactly once (first trial computes, remaining trials hit cache).
+    Also measures wall-time savings vs uncached.
+    """
+    from unittest.mock import patch
+    from spectral_predict.search import run_bayesian_search
+    from spectral_predict import variable_selection
+
+    X, y = example_data
+    n_trials = 10
+    call_count = {"spa": 0, "total_spa_seconds": 0.0}
+
+    # Wrap spa_selection to count calls and measure time
+    original_spa = variable_selection.spa_selection
+
+    def counting_spa(*args, **kwargs):
+        t0 = time.perf_counter()
+        result = original_spa(*args, **kwargs)
+        call_count["total_spa_seconds"] += time.perf_counter() - t0
+        call_count["spa"] += 1
+        return result
+
+    # Bayesian search needs float column names (wavelengths), not strings
+    X_float = X.copy()
+    X_float.columns = [float(c) for c in X.columns]
+
+    with patch.object(variable_selection, 'spa_selection', counting_spa):
+        t_start = time.perf_counter()
+        results_df, _ = run_bayesian_search(
+            X_float, y,
+            task_type="regression",
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            n_trials=n_trials,
+            folds=3,
+            enable_variable_subsets=True,
+            variable_counts=[20],
+            variable_selection_methods=["spa"],
+            enable_region_subsets=False,
+            tier="quick",
+        )
+        t_cached = time.perf_counter() - t_start
+
+    assert len(results_df) > 0, "Bayesian search should produce results"
+
+    spa_time = call_count["total_spa_seconds"]
+    estimated_uncached = spa_time * n_trials  # what it would cost without caching
+    time_saved = estimated_uncached - spa_time
+
+    print(f"\n  Bayesian caching results ({n_trials} trials):")
+    print(f"    SPA calls: {call_count['spa']} (expected: 1)")
+    print(f"    SPA compute time: {spa_time:.1f}s (single call)")
+    print(f"    Estimated uncached: {estimated_uncached:.1f}s ({n_trials} calls)")
+    print(f"    Time saved: {time_saved:.1f}s")
+    print(f"    Total Bayesian run: {t_cached:.1f}s")
+
+    # Core assertion: SPA should only be called once thanks to caching
+    assert call_count["spa"] == 1, (
+        f"SPA should be called exactly once with caching, but was called {call_count['spa']} times"
     )
