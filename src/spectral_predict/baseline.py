@@ -30,23 +30,24 @@ def rubber_band_baseline(y: np.ndarray) -> np.ndarray:
     # Andrew's monotone chain: compute lower convex hull.
     # Points are (i, y[i]) already sorted by x (i = 0..n-1).
     # We keep only vertices where the path makes right turns (clockwise).
-    lower = []  # list of (index, value) tuples
+    hull_indices = np.empty(n, dtype=np.intp)
+    hull_size = 0
+
     for i in range(n):
-        while len(lower) >= 2:
-            # Cross product of vectors (lower[-2] → lower[-1]) and (lower[-2] → (i, y[i]))
-            ox, oy = lower[-2]
-            ax, ay = lower[-1]
-            bx, by = i, y[i]
-            cross = (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
+        while hull_size >= 2:
+            # Cross product of vectors (hull[-2] → hull[-1]) and (hull[-2] → i)
+            o = hull_indices[hull_size - 2]
+            a = hull_indices[hull_size - 1]
+            cross = (a - o) * (y[i] - y[o]) - (y[a] - y[o]) * (i - o)
             if cross <= 0:
-                lower.pop()
+                hull_size -= 1
             else:
                 break
-        lower.append((i, y[i]))
+        hull_indices[hull_size] = i
+        hull_size += 1
 
-    indices = [p[0] for p in lower]
-    values = [p[1] for p in lower]
-    baseline = np.interp(np.arange(n), indices, values)
+    hi = hull_indices[:hull_size]
+    baseline = np.interp(np.arange(n), hi, y[hi])
 
     return baseline
 

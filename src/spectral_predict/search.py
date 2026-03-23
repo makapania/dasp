@@ -933,10 +933,10 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     # Fixed random state used throughout codebase
     random_state = RANDOM_STATE
 
-    # Use all cores for parallel execution (will be overridden per-model for CatBoost/SVM)
-    # In frozen (PyInstaller) apps, force n_jobs=1 to prevent spawning new instances
+    # Use all cores for parallel execution. In frozen apps, threading backend (line 4087-4092)
+    # handles parallelism correctly without process spawning.
     is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-    n_jobs_default = 1 if is_frozen else -1
+    n_jobs_default = os.cpu_count() if is_frozen else -1
 
     # Drop rows where y is NaN (safety net for data with empty rows)
     nan_mask = y.isna()
@@ -1805,6 +1805,55 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     current_config = 0
     best_model_so_far = None
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # VARIABLE SELECTION CACHE
+    # Most variable selection methods (UVE, SPA, iPLS, CARS, GA-PLS) build their
+    # own internal models and produce results independent of the outer model being
+    # tested. Caching avoids redundant computation across models and hyperparameter
+    # combos. The 'importance' method is NEVER cached (depends on fitted model).
+    # ═══════════════════════════════════════════════════════════════════════════
+    import threading as _threading
+
+    _varsel_cache: dict = {}
+    _varsel_cache_lock = _threading.Lock()
+
+    # Determine model category for methods that distinguish tree vs linear
+    LINEAR_MODELS_SET = set(LINEAR_MODELS) if 'LINEAR_MODELS' in dir() else set()
+    TREE_MODELS_SET = set(TREE_MODELS) if 'TREE_MODELS' in dir() else set()
+
+    def _varsel_cache_key(
+        preprocess_cfg: dict,
+        varsel_method: str,
+        model_name: str,
+    ) -> tuple:
+        """Build a hashable cache key for variable selection results.
+
+        For model-independent methods (uve, spa, ipls, cars, ga, etc.), the key
+        does not include model_name. For model-category-dependent methods
+        (cars-aware, cars-tree, uve_cars_tree, ga), it includes the category.
+        """
+        # Canonical preprocessing hash: only fields that affect output
+        prep_parts = (
+            preprocess_cfg.get('name', ''),
+            preprocess_cfg.get('base_name', ''),
+            preprocess_cfg.get('deriv', 0),
+            preprocess_cfg.get('window', 0),
+            preprocess_cfg.get('polyorder', 0),
+            str(preprocess_cfg.get('baseline_method', '')),
+        )
+
+        # Methods that depend on model category (tree vs linear)
+        if varsel_method in ('cars-aware', 'cars-tree', 'uve_cars_tree'):
+            category = 'tree' if model_name in TREE_MODELS_SET else 'linear'
+            return (prep_parts, varsel_method, category)
+        elif varsel_method == 'ga':
+            # GA uses ga_pls for linear, ga_lightgbm for tree
+            category = 'tree' if model_name in TREE_MODELS_SET else 'linear'
+            return (prep_parts, varsel_method, category)
+        else:
+            # Model-independent: uve, spa, ipls, cars, uve_spa, etc.
+            return (prep_parts, varsel_method)
+
     # Main search loop
     for preprocess_cfg in preprocess_configs:
         # Check for pause/stop
@@ -2293,8 +2342,30 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             # ===== EXISTING CODE: Standard importance-returning methods =====
                             # Get importances computed on preprocessed data
                             uve_selected_mask = None  # Captured by UVE for method-optimal count
+
+                            # --- Variable selection cache lookup ---
+                            # 'importance' is NEVER cached (depends on fitted model + hyperparams)
+                            _cache_hit = False
+                            if varsel_method != 'importance':
+                                _cache_key = _varsel_cache_key(preprocess_cfg, varsel_method, model_name)
+                                with _varsel_cache_lock:
+                                    if _cache_key in _varsel_cache:
+                                        _cached = _varsel_cache[_cache_key]
+                                        importances = _cached['importances']
+                                        uve_selected_mask = _cached.get('uve_selected_mask')
+                                        _cache_hit = True
+                                        print(f"  -> Using cached {varsel_method} result")
+
+                            if _cache_hit:
+                                pass  # Skip computation, use cached importances
+                            else:
+                                pass  # Fall through to compute importances
+
                             try:
-                                if varsel_method == 'importance':
+                                if _cache_hit:
+                                    pass  # Already have importances from cache
+
+                                elif varsel_method == 'importance':
                                     importances = get_feature_importances(
                                         fitted_model, model_name, X_transformed_varsel, y_np
                                     )
@@ -2561,6 +2632,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                     # This shouldn't happen due to filtering, but handle gracefully
                                     print(f"  -> Skipping unimplemented method '{varsel_method}'")
                                     continue
+
+                                # --- Store result in cache ---
+                                if not _cache_hit and varsel_method != 'importance':
+                                    with _varsel_cache_lock:
+                                        _varsel_cache[_cache_key] = {
+                                            'importances': importances,
+                                            'uve_selected_mask': uve_selected_mask,
+                                        }
 
                                 # Track if uniform fallback was used (for debugging/filtering results)
                                 used_uniform_fallback = False

@@ -411,32 +411,27 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
 
         # Iteratively select remaining variables (n_features - 1 more)
         for step in range(1, n_features):
-            # Compute projections for all available variables
+            # Compute projections for all available variables at once
             # Projection = sum of squared correlations with already-selected variables
-            projections = np.zeros(n_vars)
-
-            # Vectorized computation of correlations
-            # For each unselected variable j, compute corr² with all selected variables
             # Extract selected columns as a 2D array
             X_selected_norm = X_norm[:, selected_indices]
             if X_selected_norm.ndim == 1:
                 X_selected_norm = X_selected_norm.reshape(-1, 1)
 
-            for j in available_indices:
-                # Correlation with selected variables
-                # corr(X[:, j], X[:, i]) = (X_norm[:, j] @ X_norm[:, i]) / n_samples
-                corrs_with_selected = X_norm[:, j] @ X_selected_norm / n_samples
-                # Projection = sum of squared correlations
-                projections[j] = np.sum(corrs_with_selected ** 2)
+            # Vectorized: compute projections for all available variables at once
+            # avail_idx is an array of available column indices
+            avail_idx = np.array(sorted(available_indices))
+            # X_avail_norm has shape (n_samples, len(avail_idx))
+            X_avail_norm = X_norm[:, avail_idx]
+            # Matrix multiply: correlations between every available var and every selected var
+            # Result shape: (len(avail_idx), len(selected_indices))
+            corr_matrix = (X_avail_norm.T @ X_selected_norm) / n_samples
+            # Projection for each available var = sum of squared correlations with selected set
+            proj_values = np.sum(corr_matrix ** 2, axis=1)
 
             # Select variable with MINIMUM projection (least correlated with selected set)
-            # Only consider available indices
-            min_proj_var = None
-            min_proj = np.inf
-            for j in available_indices:
-                if projections[j] < min_proj:
-                    min_proj = projections[j]
-                    min_proj_var = j
+            # np.argmin over the compact array, then map back to original variable index
+            min_proj_var = avail_idx[np.argmin(proj_values)]
 
             selected_indices.append(min_proj_var)
             available_indices.remove(min_proj_var)

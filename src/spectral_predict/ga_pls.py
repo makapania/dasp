@@ -608,23 +608,49 @@ def ga_pls_selection(
     all_chromosomes = []
     all_fitness = []
 
-    for run_idx in range(n_runs):
-        run_seed = random_state + run_idx * 1000
+    # Determine parallelization strategy for runs
+    import os
+    import sys
+    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+    run_backend = 'threading' if is_frozen else 'loky'
+    n_cores = os.cpu_count() or 1
 
-        if verbose > 0:
+    # Parallelize runs when we have multiple runs and cores available.
+    # When runs are parallel, each run uses n_jobs=1 internally to avoid
+    # CPU over-subscription. When sequential, each run gets full n_jobs.
+    parallel_runs = n_runs > 1 and n_cores >= 2 and n_jobs != 1
+    inner_n_jobs = 1 if parallel_runs else n_jobs
+
+    if parallel_runs and verbose > 0:
+        print(f"  Running {n_runs} GA runs in parallel ({min(n_runs, n_cores)} workers)")
+
+    def _execute_single_run(run_idx: int) -> tuple:
+        """Execute a single GA run and return (best_chrom, best_fit, history)."""
+        run_seed = random_state + run_idx * 1000
+        if verbose > 0 and not parallel_runs:
             print(f"\n  Run {run_idx + 1}/{n_runs}...")
 
-        best_chrom, best_fit, history = _run_single_ga(
+        return _run_single_ga(
             X, y, task_type,
             population_size, n_generations,
             crossover_rate, mutation_rate,
             cv_folds, min_wavelengths, n_components,
             early_stopping, run_seed,
-            progress_callback,  # Pass to all runs for continuous progress
-            run_idx, n_runs,  # Pass run context for overall progress calculation
-            n_jobs  # Parallelization
+            progress_callback,
+            run_idx, n_runs,
+            inner_n_jobs
         )
 
+    if parallel_runs:
+        # Parallel execution of independent GA runs
+        run_results = Parallel(n_jobs=min(n_runs, n_cores), backend=run_backend)(
+            delayed(_execute_single_run)(run_idx) for run_idx in range(n_runs)
+        )
+    else:
+        # Sequential execution (single run or user requested n_jobs=1)
+        run_results = [_execute_single_run(run_idx) for run_idx in range(n_runs)]
+
+    for run_idx, (best_chrom, best_fit, history) in enumerate(run_results):
         if best_chrom is not None:
             all_chromosomes.append(best_chrom)
             all_fitness.append(best_fit)
@@ -632,9 +658,9 @@ def ga_pls_selection(
             if verbose > 0:
                 n_selected = np.sum(best_chrom)
                 if task_type == 'regression':
-                    print(f"    Best RMSECV: {-best_fit:.4f}, {n_selected} wavelengths")
+                    print(f"    Run {run_idx + 1}: Best RMSECV: {-best_fit:.4f}, {n_selected} wavelengths")
                 else:
-                    print(f"    Best Accuracy: {best_fit:.4f}, {n_selected} wavelengths")
+                    print(f"    Run {run_idx + 1}: Best Accuracy: {best_fit:.4f}, {n_selected} wavelengths")
 
     if len(all_chromosomes) == 0:
         if verbose > 0:
