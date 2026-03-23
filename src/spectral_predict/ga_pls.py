@@ -618,7 +618,7 @@ def ga_pls_selection(
     # Parallelize runs when we have multiple runs and cores available.
     # When runs are parallel, each run uses n_jobs=1 internally to avoid
     # CPU over-subscription. When sequential, each run gets full n_jobs.
-    parallel_runs = n_runs > 1 and n_cores >= 2 and n_jobs != 1
+    parallel_runs = n_runs > 1 and n_cores >= 2 and n_jobs != 1 and progress_callback is None
     inner_n_jobs = 1 if parallel_runs else n_jobs
 
     if parallel_runs and verbose > 0:

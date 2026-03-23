@@ -239,6 +239,14 @@ def create_objective_function(
             logging.warning(f"Region creation failed: {e}")
             region_subsets = []
 
+    # Cache for model-independent variable selection methods.
+    # SPA/UVE/CARS/iPLS use internal models and produce identical results
+    # for every trial (same X, y, folds, random_state). Only 'importance'
+    # changes per trial (depends on fitted model with trial hyperparams).
+    # Note: 'cars-aware' is model-dependent but safe to cache here because
+    # each model gets its own closure (and thus its own cache instance).
+    _varsel_cache: dict[str, np.ndarray] = {}
+
     def objective(trial: optuna.Trial) -> float:
         """
         Objective function for a single Optuna trial.
@@ -380,11 +388,14 @@ def create_objective_function(
                     # Loop over each variable selection method
                     for varsel_method in variable_selection_methods:
                         try:
-                            # Compute feature importances based on method
+                            # Model-dependent method: always recompute
                             if varsel_method == 'importance':
                                 importances = get_feature_importances(
                                     fitted_model, model_name, X, y
                                 )
+                            elif varsel_method in _varsel_cache:
+                                # Cache hit: reuse previous result
+                                importances = _varsel_cache[varsel_method].copy()
                             elif varsel_method == 'spa':
                                 # SPA: Successive Projections Algorithm
                                 n_to_select = min(max(valid_variable_counts), n_features_available)
@@ -398,6 +409,7 @@ def create_objective_function(
                                     cv_folds=folds,
                                     random_state=random_state
                                 )
+                                _varsel_cache[varsel_method] = importances.copy()
                             elif varsel_method == 'uve':
                                 # UVE: Uninformative Variable Elimination
                                 folds = filtered_kwargs.get('folds', 5)
@@ -411,6 +423,7 @@ def create_objective_function(
                                     cv_folds=folds,
                                     random_state=random_state
                                 )
+                                _varsel_cache[varsel_method] = importances.copy()
                             elif varsel_method == 'uve_spa':
                                 # UVE-SPA: Hybrid method
                                 n_to_select = min(max(valid_variable_counts), n_features_available)
@@ -429,6 +442,7 @@ def create_objective_function(
                                     spa_cv_folds=folds,
                                     random_state=random_state
                                 )
+                                _varsel_cache[varsel_method] = importances.copy()
                             elif varsel_method == 'ipls':
                                 # iPLS: Interval PLS
                                 folds = filtered_kwargs.get('folds', 5)
@@ -442,6 +456,7 @@ def create_objective_function(
                                     cv_folds=folds,
                                     random_state=random_state
                                 )
+                                _varsel_cache[varsel_method] = importances.copy()
                             elif varsel_method in ('cars', 'cars-aware'):
                                 # CARS: Competitive Adaptive Reweighted Sampling
                                 # cars-aware: Use model-appropriate fitness (LightGBM for tree models)
@@ -460,6 +475,7 @@ def create_objective_function(
                                     random_state=random_state,
                                     model_type=model_type_for_cars
                                 )
+                                _varsel_cache[varsel_method] = importances.copy()
                             elif varsel_method == 'vcpa-iriv':
                                 # VCPA-IRIV: Variable Combination Population Analysis
                                 folds = filtered_kwargs.get('folds', 5)
@@ -490,6 +506,7 @@ def create_objective_function(
                                 elif importances is None:
                                     logging.warning("VCPA-IRIV returned no importance scores, skipping")
                                     continue
+                                _varsel_cache[varsel_method] = importances.copy()
                             else:
                                 # Warn about unsupported methods
                                 logging.warning(f"Variable selection method '{varsel_method}' not supported in Bayesian optimization - skipping")

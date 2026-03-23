@@ -936,7 +936,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     # Use all cores for parallel execution. In frozen apps, threading backend (line 4087-4092)
     # handles parallelism correctly without process spawning.
     is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-    n_jobs_default = os.cpu_count() if is_frozen else -1
+    n_jobs_default = (os.cpu_count() or -1) if is_frozen else -1
 
     # Drop rows where y is NaN (safety net for data with empty rows)
     nan_mask = y.isna()
@@ -1818,8 +1818,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     _varsel_cache_lock = _threading.Lock()
 
     # Determine model category for methods that distinguish tree vs linear
-    LINEAR_MODELS_SET = set(LINEAR_MODELS) if 'LINEAR_MODELS' in dir() else set()
-    TREE_MODELS_SET = set(TREE_MODELS) if 'TREE_MODELS' in dir() else set()
+    LINEAR_MODELS_SET = set(LINEAR_MODELS)
+    TREE_MODELS_SET = set(TREE_MODELS)
 
     def _varsel_cache_key(
         preprocess_cfg: dict,
