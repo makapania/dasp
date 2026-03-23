@@ -120,7 +120,6 @@ def test_lightgbm_golden_standard(example_data):
         enable_variable_subsets=False,
         enable_region_subsets=False,
         tier="standard",
-        n_jobs=1,
     )
 
     assert len(results_df) > 0, "LightGBM should produce results"
