@@ -1086,3 +1086,243 @@ def test_backward_compat_peak_def_from_dict_no_baseline_key():
     p = _peak_def_from_dict(d)
     assert p.baseline is None
     assert p.wavenumber == 1020
+
+
+# ---------------------------------------------------------------------------
+# 11. find_peak_in_window() direct tests
+# ---------------------------------------------------------------------------
+
+def test_find_peak_in_window_find_max():
+    """find_peak_in_window with find_max=True should locate the maximum in the window."""
+    wl = np.arange(400, 700, dtype=float)
+    spec = np.zeros_like(wl)
+    # Place a peak at 550
+    spec += 5.0 * np.exp(-0.5 * ((wl - 550) / 5) ** 2)
+    wn, val = find_peak_in_window(wl, spec, target_wn=550, half_width=20, find_max=True)
+    assert wn == pytest.approx(550.0, abs=1.0)
+    assert val == pytest.approx(5.0, abs=0.1)
+
+
+def test_find_peak_in_window_find_min():
+    """find_peak_in_window with find_max=False should locate the minimum in the window."""
+    wl = np.arange(400, 700, dtype=float)
+    # Create a baseline of 5.0 with a dip at 520
+    spec = np.ones_like(wl) * 5.0
+    spec -= 3.0 * np.exp(-0.5 * ((wl - 520) / 5) ** 2)
+    wn, val = find_peak_in_window(wl, spec, target_wn=520, half_width=20, find_max=False)
+    assert wn == pytest.approx(520.0, abs=1.0)
+    assert val == pytest.approx(2.0, abs=0.1)
+
+
+def test_find_peak_in_window_fallback_no_data():
+    """When no points fall in window, find_peak_in_window falls back to nearest point."""
+    wl = np.array([100.0, 200.0, 300.0])
+    spec = np.array([5.0, 2.0, 8.0])
+    wn, val = find_peak_in_window(wl, spec, target_wn=450, half_width=10, find_max=True)
+    # Nearest to 450 is 300
+    assert wn == 300.0
+    assert val == 8.0
+
+
+# ---------------------------------------------------------------------------
+# 12. Baseline interpolation fix: uses found_wn, not nominal
+# ---------------------------------------------------------------------------
+
+def test_baseline_interpolation_uses_found_wn():
+    """Baseline should be interpolated at the actual found peak position, not the nominal.
+
+    A peak nominally at 600 cm-1 is placed at 603 cm-1 in the data.
+    With search_max mode, the baseline should be evaluated at 603, not 600.
+    """
+    wl = np.arange(400, 800, dtype=float)
+    # Create a sloping baseline
+    baseline = 1.0 + (wl - 400) / (800 - 400)  # 1.0 -> 2.0
+    # Add a peak at 603 (not at the nominal 600)
+    peak = 5.0 * np.exp(-0.5 * ((wl - 603) / 5) ** 2)
+    spec = baseline + peak
+
+    bl_region = BaselineRegion(490, 510, 690, 750)
+    peak_def = PeakDefinition(
+        wavenumber=600, mode="search_max", half_width=10,
+        label="test", baseline=bl_region,
+    )
+    corrected, diag = get_baseline_corrected_intensity(wl, spec, peak_def)
+
+    assert diag is not None
+    # The found wavenumber should be 603 (the actual peak), not 600 (nominal)
+    assert diag["found_wn"] == pytest.approx(603.0, abs=1.0)
+    # The baseline_at_peak should be evaluated at 603, not 600
+    expected_bl_at_603 = baseline_at_wavenumber(
+        603.0, diag["left_wn"], diag["left_val"],
+        diag["right_wn"], diag["right_val"],
+    )
+    assert diag["baseline_at_peak"] == pytest.approx(expected_bl_at_603, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# 13. search_max and search_min through get_peak_intensity
+# ---------------------------------------------------------------------------
+
+def test_get_peak_intensity_search_max():
+    """search_max mode should find the actual local maximum, not the value at nominal."""
+    wl = np.arange(400, 700, dtype=float)
+    spec = np.zeros_like(wl)
+    # Place peak at 553 instead of nominal 550
+    spec += 7.0 * np.exp(-0.5 * ((wl - 553) / 5) ** 2)
+    peak_def = PeakDefinition(wavenumber=550, mode="search_max", half_width=10)
+    val = get_peak_intensity(wl, spec, peak_def)
+    # Should return intensity at 553 (the actual max), not 550
+    assert val == pytest.approx(7.0, abs=0.1)
+
+
+def test_get_peak_intensity_search_min():
+    """search_min mode should find the actual local minimum, not the value at nominal."""
+    wl = np.arange(400, 700, dtype=float)
+    # Constant baseline with a dip at 588 instead of nominal 590
+    spec = np.ones_like(wl) * 5.0
+    spec -= 3.0 * np.exp(-0.5 * ((wl - 588) / 5) ** 2)
+    peak_def = PeakDefinition(wavenumber=590, mode="search_min", half_width=10)
+    val = get_peak_intensity(wl, spec, peak_def)
+    # Should return the trough value at 588 (~2.0), not the value at 590
+    assert val == pytest.approx(2.0, abs=0.15)
+
+
+def test_search_max_calls_find_peak_in_window():
+    """search_max mode in get_peak_intensity should delegate to find_peak_in_window."""
+    wl = np.arange(400, 700, dtype=float)
+    spec = np.zeros_like(wl)
+    spec += 4.0 * np.exp(-0.5 * ((wl - 510) / 3) ** 2)
+    peak_def = PeakDefinition(wavenumber=510, mode="search_max", half_width=10)
+    val = get_peak_intensity(wl, spec, peak_def)
+    # Cross-check with find_peak_in_window directly
+    _, expected = find_peak_in_window(wl, spec, 510, 10, find_max=True)
+    assert val == pytest.approx(expected)
+
+
+def test_search_min_calls_find_peak_in_window():
+    """search_min mode in get_peak_intensity should delegate to find_peak_in_window."""
+    wl = np.arange(400, 700, dtype=float)
+    spec = np.ones_like(wl) * 10.0
+    spec -= 6.0 * np.exp(-0.5 * ((wl - 510) / 3) ** 2)
+    peak_def = PeakDefinition(wavenumber=510, mode="search_min", half_width=10)
+    val = get_peak_intensity(wl, spec, peak_def)
+    _, expected = find_peak_in_window(wl, spec, 510, 10, find_max=False)
+    assert val == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# 14. Descending wavenumber array (FTIR compatibility)
+# ---------------------------------------------------------------------------
+
+def test_find_peak_in_window_descending_wavenumbers():
+    """find_peak_in_window should work with descending (FTIR-typical) wavenumber arrays."""
+    wl = np.flip(np.arange(400, 700, dtype=float))  # 699, 698, ..., 400
+    spec_asc = np.zeros(len(wl))
+    # Place peak at 550 (index position will differ from ascending)
+    for i, w in enumerate(wl):
+        spec_asc[i] = 5.0 * np.exp(-0.5 * ((w - 550) / 5) ** 2)
+    wn, val = find_peak_in_window(wl, spec_asc, target_wn=550, half_width=20, find_max=True)
+    assert wn == pytest.approx(550.0, abs=1.0)
+    assert val == pytest.approx(5.0, abs=0.1)
+
+
+def test_find_trough_in_window_descending_wavenumbers():
+    """find_trough_in_window should work with descending wavenumber arrays."""
+    wl = np.flip(np.arange(400, 700, dtype=float))  # 699 -> 400
+    spec = np.ones(len(wl)) * 5.0
+    for i, w in enumerate(wl):
+        spec[i] -= 3.0 * np.exp(-0.5 * ((w - 500) / 5) ** 2)
+    wn, val = find_trough_in_window(wl, spec, 490, 510)
+    assert wn == pytest.approx(500.0, abs=1.0)
+    assert val == pytest.approx(2.0, abs=0.1)
+
+
+def test_get_peak_intensity_descending_wavenumbers():
+    """get_peak_intensity should work correctly with descending wavenumber arrays."""
+    wl = np.flip(np.arange(400, 700, dtype=float))
+    spec = np.zeros(len(wl))
+    for i, w in enumerate(wl):
+        spec[i] = 4.0 * np.exp(-0.5 * ((w - 550) / 5) ** 2)
+
+    # Point mode
+    peak_def = PeakDefinition(wavenumber=550, mode="point")
+    val = get_peak_intensity(wl, spec, peak_def)
+    assert val == pytest.approx(4.0, abs=0.1)
+
+    # search_max mode
+    peak_def_sm = PeakDefinition(wavenumber=550, mode="search_max", half_width=10)
+    val_sm = get_peak_intensity(wl, spec, peak_def_sm)
+    assert val_sm == pytest.approx(4.0, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# 15. WAMPI and AmI/AmII presets exist in BUILT_IN_PRESETS
+# ---------------------------------------------------------------------------
+
+def test_built_in_presets_contain_wampi():
+    """BUILT_IN_PRESETS should include the WAMPI preset."""
+    names = {p.name for p in BUILT_IN_PRESETS}
+    assert "WAMPI" in names
+
+
+def test_built_in_presets_contain_ami_amii():
+    """BUILT_IN_PRESETS should include the AmI/AmII preset."""
+    names = {p.name for p in BUILT_IN_PRESETS}
+    assert "AmI/AmII" in names
+
+
+def test_wampi_preset_has_expected_structure():
+    """WAMPI preset should have search_max peaks with baselines."""
+    wampi = [p for p in BUILT_IN_PRESETS if p.name == "WAMPI"][0]
+    assert wampi.category == "Bone FTIR"
+    assert wampi.peak_a.mode == "search_max"
+    assert wampi.peak_a.baseline is not None
+    assert wampi.peak_b.baseline is not None
+
+
+def test_ami_amii_preset_has_expected_structure():
+    """AmI/AmII preset should have search_max peaks with baselines."""
+    ami = [p for p in BUILT_IN_PRESETS if p.name == "AmI/AmII"][0]
+    assert ami.category == "Bone FTIR"
+    assert ami.peak_a.mode == "search_max"
+    assert ami.peak_b.mode == "search_max"
+    assert ami.peak_a.baseline is not None
+    assert ami.peak_b.baseline is not None
+
+
+# ---------------------------------------------------------------------------
+# 16. SG guard fix: smoothing triggers when subset >= 5
+# ---------------------------------------------------------------------------
+
+def test_sg_smoothing_triggers_with_6_points():
+    """SG smoothing should be applied when the window has 6-8 data points (>= 5)."""
+    # Create a small wavenumber array with only 7 points in the search window
+    wl = np.array([495.0, 497.0, 499.0, 501.0, 503.0, 505.0, 507.0])
+    # Add a noisy peak at 501
+    spec = np.array([1.0, 1.2, 2.0, 5.0, 2.5, 1.1, 0.9])
+    # Window [496, 506] covers 5 points: 497, 499, 501, 503, 505
+    wn, val = find_peak_in_window(wl, spec, target_wn=501, half_width=5, find_max=True)
+    # Should find the peak at 501 (the maximum)
+    assert wn == pytest.approx(501.0, abs=2.0)
+    # The raw value returned should be the actual spectrum value, not smoothed
+    idx = int(np.argmin(np.abs(wl - wn)))
+    assert val == pytest.approx(spec[idx], abs=1e-10)
+
+
+def test_sg_smoothing_with_exactly_5_points():
+    """SG smoothing should apply when there are exactly 5 data points in window."""
+    wl = np.array([498.0, 499.0, 500.0, 501.0, 502.0])
+    spec = np.array([1.0, 2.0, 5.0, 2.5, 1.0])
+    wn, val = find_peak_in_window(wl, spec, target_wn=500, half_width=3, find_max=True)
+    assert wn == pytest.approx(500.0, abs=1.0)
+    assert val == pytest.approx(5.0, abs=0.1)
+
+
+def test_sg_smoothing_not_applied_with_4_points():
+    """SG smoothing should NOT be applied when there are fewer than 5 data points."""
+    wl = np.array([499.0, 500.0, 501.0, 502.0])
+    spec = np.array([1.0, 5.0, 2.0, 1.0])
+    wn, val = find_peak_in_window(wl, spec, target_wn=500, half_width=2, find_max=True)
+    # Without smoothing, should still find the raw max at 500
+    assert wn == pytest.approx(500.0)
+    assert val == pytest.approx(5.0)
