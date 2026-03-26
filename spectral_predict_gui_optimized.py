@@ -7437,11 +7437,20 @@ class SpectralPredictApp:
                     deg = self._explore_custom_bl_poly_degree.get()
                     data = BaselinePolynomial(degree=deg).fit_transform(data)
                 elif method == "ALS":
-                    lam = float(self._explore_custom_bl_als_lambda.get())
-                    p = float(self._explore_custom_bl_als_p.get())
+                    try:
+                        lam = float(self._explore_custom_bl_als_lambda.get())
+                    except ValueError:
+                        lam = 1e5
+                    try:
+                        p = float(self._explore_custom_bl_als_p.get())
+                    except ValueError:
+                        p = 0.01
                     data = BaselineALS(lambda_=lam, p=p).fit_transform(data)
                 elif method == "airPLS":
-                    lam = float(self._explore_custom_bl_airpls_lambda.get())
+                    try:
+                        lam = float(self._explore_custom_bl_airpls_lambda.get())
+                    except ValueError:
+                        lam = 1e5
                     data = BaselineAirPLS(lam=lam).fit_transform(data)
 
             elif step_name == "SNV":
@@ -8399,6 +8408,25 @@ class SpectralPredictApp:
             # Update description
             dialog._desc_label.config(text=p.description or "")
 
+            # Populate local baseline fields from preset
+            for peak_key, peak_def in [("A", p.peak_a), ("B", p.peak_b),
+                                       ("C", p.peak_c)]:
+                if peak_def is not None and getattr(peak_def, 'baseline', None) is not None:
+                    bl = peak_def.baseline
+                    getattr(dialog, f'_bl_{peak_key}_left_min').set(f"{bl.left_min:.1f}")
+                    getattr(dialog, f'_bl_{peak_key}_left_max').set(f"{bl.left_max:.1f}")
+                    getattr(dialog, f'_bl_{peak_key}_right_min').set(f"{bl.right_min:.1f}")
+                    getattr(dialog, f'_bl_{peak_key}_right_max').set(f"{bl.right_max:.1f}")
+                else:
+                    for suffix in ('left_min', 'left_max', 'right_min', 'right_max'):
+                        getattr(dialog, f'_bl_{peak_key}_{suffix}').set("")
+
+            # Show/hide Peak C baseline row based on visibility
+            if dialog._peak_c_visible:
+                dialog._bl_rows["C"].pack(fill='x', pady=1)
+            else:
+                dialog._bl_rows["C"].pack_forget()
+
             self._update_peak_markers(dialog)
 
         pack_combo.bind('<<ComboboxSelected>>', _filter_presets)
@@ -8408,6 +8436,68 @@ class SpectralPredictApp:
         dialog._desc_label = ttk.Label(preset_frame, text="", wraplength=450,
                                        style='Caption.TLabel')
         dialog._desc_label.pack(fill='x', pady=(4, 0))
+
+        # ---- SECTION: Local Baseline ----
+        bl_frame = ttk.LabelFrame(content, text="Local Baseline", padding=8)
+        bl_frame.pack(fill='x', padx=pad_x, pady=5)
+
+        bl_mode_row = ttk.Frame(bl_frame)
+        bl_mode_row.pack(fill='x', pady=(0, 4))
+        ttk.Label(bl_mode_row, text="Mode:").pack(side='left', padx=(0, 5))
+        dialog._bl_mode_var = tk.StringVar(value="Auto (from preset)")
+        dialog._bl_mode_combo = ttk.Combobox(
+            bl_mode_row, textvariable=dialog._bl_mode_var,
+            values=["Auto (from preset)", "None"], state='readonly', width=20,
+        )
+        dialog._bl_mode_combo.pack(side='left')
+
+        # Per-peak baseline entry rows
+        dialog._bl_rows = {}  # key -> frame for show/hide
+        for peak_key in ("A", "B", "C"):
+            row = ttk.Frame(bl_frame)
+            # A and B are always packed; C starts hidden
+            if peak_key != "C":
+                row.pack(fill='x', pady=1)
+
+            ttk.Label(row, text=f"Peak {peak_key}:", width=7).pack(side='left')
+
+            lmin_var = tk.StringVar(value="")
+            lmax_var = tk.StringVar(value="")
+            rmin_var = tk.StringVar(value="")
+            rmax_var = tk.StringVar(value="")
+
+            setattr(dialog, f'_bl_{peak_key}_left_min', lmin_var)
+            setattr(dialog, f'_bl_{peak_key}_left_max', lmax_var)
+            setattr(dialog, f'_bl_{peak_key}_right_min', rmin_var)
+            setattr(dialog, f'_bl_{peak_key}_right_max', rmax_var)
+
+            e_lmin = ttk.Entry(row, textvariable=lmin_var, width=6)
+            e_lmin.pack(side='left', padx=1)
+            ttk.Label(row, text="to").pack(side='left', padx=1)
+            e_lmax = ttk.Entry(row, textvariable=lmax_var, width=6)
+            e_lmax.pack(side='left', padx=1)
+            ttk.Label(row, text="\u2192").pack(side='left', padx=3)
+            e_rmin = ttk.Entry(row, textvariable=rmin_var, width=6)
+            e_rmin.pack(side='left', padx=1)
+            ttk.Label(row, text="to").pack(side='left', padx=1)
+            e_rmax = ttk.Entry(row, textvariable=rmax_var, width=6)
+            e_rmax.pack(side='left', padx=1)
+            ttk.Label(row, text="cm\u207b\u00b9").pack(side='left', padx=(3, 0))
+
+            dialog._bl_rows[peak_key] = row
+
+        def _bl_mode_changed(*_args):
+            """Enable or disable baseline entry fields based on mode."""
+            mode = dialog._bl_mode_var.get()
+            state = 'normal' if mode == "Auto (from preset)" else 'disabled'
+            for pk in ("A", "B", "C"):
+                row_frame = dialog._bl_rows[pk]
+                for child in row_frame.winfo_children():
+                    if isinstance(child, ttk.Entry):
+                        child.configure(state=state)
+            self._update_peak_markers(dialog)
+
+        dialog._bl_mode_combo.bind('<<ComboboxSelected>>', _bl_mode_changed)
 
         # ---- SECTION: Expression builder ----
         expr_frame = ttk.LabelFrame(content, text="Expression Builder", padding=8)
@@ -8635,10 +8725,16 @@ class SpectralPredictApp:
                                         in_=dialog._grouping_frame.master)
             dialog._add_c_btn.config(text="- Remove Peak C")
             self._peak_calc_set_active(dialog, "C")
+            # Show baseline C row
+            if hasattr(dialog, '_bl_rows'):
+                dialog._bl_rows["C"].pack(fill='x', pady=1)
         else:
             dialog._peak_c_frame.pack_forget()
             dialog._grouping_frame.pack_forget()
             dialog._add_c_btn.config(text="+ Add Peak C")
+            # Hide baseline C row
+            if hasattr(dialog, '_bl_rows'):
+                dialog._bl_rows["C"].pack_forget()
         self._update_peak_markers(dialog)
 
     def _on_peak_calc_plot_click(self, event, frame_key):
@@ -8716,6 +8812,39 @@ class SpectralPredictApp:
                     hw = 10
                 span = ax.axvspan(wn - hw, wn + hw, alpha=0.08, color=color)
                 self._peak_marker_lines.append(span)
+
+        # Draw baseline region shading if mode is Auto
+        bl_mode = getattr(dialog, '_bl_mode_var', None)
+        if bl_mode is not None and bl_mode.get() == "Auto (from preset)":
+            peak_keys = ["A", "B"]
+            if dialog._peak_c_visible:
+                peak_keys.append("C")
+            for pk in peak_keys:
+                try:
+                    lmin = float(getattr(dialog, f'_bl_{pk}_left_min').get())
+                    lmax = float(getattr(dialog, f'_bl_{pk}_left_max').get())
+                    rmin = float(getattr(dialog, f'_bl_{pk}_right_min').get())
+                    rmax = float(getattr(dialog, f'_bl_{pk}_right_max').get())
+                except (ValueError, tk.TclError):
+                    continue
+                if lmin == 0.0 and lmax == 0.0 and rmin == 0.0 and rmax == 0.0:
+                    continue
+                # Left baseline window
+                span_l = ax.axvspan(lmin, lmax, alpha=0.06, color='gray')
+                self._peak_marker_lines.append(span_l)
+                txt_l = ax.text(
+                    (lmin + lmax) / 2, ax.get_ylim()[0], "BL",
+                    fontsize=7, ha='center', va='bottom', color='gray', alpha=0.8,
+                )
+                self._peak_marker_lines.append(txt_l)
+                # Right baseline window
+                span_r = ax.axvspan(rmin, rmax, alpha=0.06, color='gray')
+                self._peak_marker_lines.append(span_r)
+                txt_r = ax.text(
+                    (rmin + rmax) / 2, ax.get_ylim()[0], "BL",
+                    fontsize=7, ha='center', va='bottom', color='gray', alpha=0.8,
+                )
+                self._peak_marker_lines.append(txt_r)
 
         state['canvas'].draw_idle()
 
@@ -8801,7 +8930,9 @@ class SpectralPredictApp:
 
     def _peak_calc_build_preset(self, dialog):
         """Build a PeakPreset from current dialog field values."""
-        from spectral_predict.peak_calculator import PeakDefinition, PeakPreset
+        from spectral_predict.peak_calculator import (
+            PeakDefinition, PeakPreset, BaselineRegion,
+        )
 
         def _float_safe(var, default=0.0):
             try:
@@ -8809,17 +8940,33 @@ class SpectralPredictApp:
             except (ValueError, tk.TclError):
                 return default
 
+        def _build_baseline(peak_key: str):
+            """Build a BaselineRegion from dialog fields, or None if empty."""
+            if getattr(dialog, '_bl_mode_var', None) is None:
+                return None
+            if dialog._bl_mode_var.get() != "Auto (from preset)":
+                return None
+            lmin = _float_safe(getattr(dialog, f'_bl_{peak_key}_left_min'))
+            lmax = _float_safe(getattr(dialog, f'_bl_{peak_key}_left_max'))
+            rmin = _float_safe(getattr(dialog, f'_bl_{peak_key}_right_min'))
+            rmax = _float_safe(getattr(dialog, f'_bl_{peak_key}_right_max'))
+            if lmin == 0.0 and lmax == 0.0 and rmin == 0.0 and rmax == 0.0:
+                return None
+            return BaselineRegion(lmin, lmax, rmin, rmax)
+
         peak_a = PeakDefinition(
             wavenumber=_float_safe(dialog._peak_a_wn),
             mode=dialog._peak_a_mode.get(),
             half_width=_float_safe(dialog._peak_a_hw, 10),
             label=dialog._peak_a_label.get(),
+            baseline=_build_baseline("A"),
         )
         peak_b = PeakDefinition(
             wavenumber=_float_safe(dialog._peak_b_wn),
             mode=dialog._peak_b_mode.get(),
             half_width=_float_safe(dialog._peak_b_hw, 10),
             label=dialog._peak_b_label.get(),
+            baseline=_build_baseline("B"),
         )
         peak_c = None
         if dialog._peak_c_visible:
@@ -8828,6 +8975,7 @@ class SpectralPredictApp:
                 mode=dialog._peak_c_mode.get(),
                 half_width=_float_safe(dialog._peak_c_hw, 10),
                 label=dialog._peak_c_label.get(),
+                baseline=_build_baseline("C"),
             )
 
         return PeakPreset(
@@ -8859,7 +9007,14 @@ class SpectralPredictApp:
             messagebox.showwarning("No Spectra", f"No spectra match scope '{scope}'.")
             return
 
-        df = calculate_all_samples(wavelengths, data, preset, sample_names)
+        # Determine whether to use local baseline
+        bl_mode = getattr(dialog, '_bl_mode_var', None)
+        use_bl = bl_mode is None or bl_mode.get() == "Auto (from preset)"
+
+        df = calculate_all_samples(
+            wavelengths, data, preset, sample_names,
+            use_local_baseline=use_bl,
+        )
         dialog._results_df = df
 
         # Compute stats
@@ -8877,6 +9032,22 @@ class SpectralPredictApp:
                 stats_text += f"   NaN: {n_nan}"
         else:
             stats_text = f"All values are NaN (N={len(values)})"
+
+        # Append baseline trough info for first sample if available
+        if use_bl and len(df) > 0:
+            bl_parts = []
+            for pk in ("A", "B", "C"):
+                left_col = f"bl_{pk}_left_wn"
+                right_col = f"bl_{pk}_right_wn"
+                if left_col in df.columns and right_col in df.columns:
+                    lw = df[left_col].iloc[0]
+                    rw = df[right_col].iloc[0]
+                    if not (np.isnan(lw) and np.isnan(rw)):
+                        bl_parts.append(
+                            f"Peak {pk}: troughs at {lw:.1f} & {rw:.1f}"
+                        )
+            if bl_parts:
+                stats_text += "\nBaseline (sample 1): " + "; ".join(bl_parts)
 
         dialog._stats_text = stats_text
         dialog._stats_label.config(text=stats_text)

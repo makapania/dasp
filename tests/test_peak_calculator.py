@@ -403,3 +403,679 @@ def test_load_user_presets_returns_empty_on_corrupt_json(tmp_path, monkeypatch):
         "spectral_predict.peak_calculator._USER_PRESETS_FILE", bad_file
     )
     assert load_user_presets() == []
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for local baseline correction tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def bone_wavelengths():
+    """Wavenumber axis covering the v4 PO4 region (380-700 cm-1) with 1 cm-1 spacing."""
+    return np.arange(380, 701, dtype=float)
+
+
+@pytest.fixture
+def bone_spectrum_sloping(bone_wavelengths):
+    """Synthetic bone-like spectrum: three peaks at 560, 590, 600 cm-1 on a sloping baseline.
+
+    The sloping baseline runs linearly from 0.5 at 380 cm-1 to 1.5 at 700 cm-1.
+    Gaussian peaks of known height sit on top:
+      - 560 cm-1: height 3.0 above baseline
+      - 590 cm-1: height 4.0 above baseline
+      - 600 cm-1: height 3.5 above baseline
+    """
+    slope = 0.5 + (bone_wavelengths - 380) / (700 - 380)  # 0.5 -> 1.5
+    peaks = np.zeros_like(bone_wavelengths)
+    for center, height in [(560, 3.0), (590, 4.0), (600, 3.5)]:
+        peaks += height * np.exp(-0.5 * ((bone_wavelengths - center) / 8) ** 2)
+    return slope + peaks
+
+
+@pytest.fixture
+def bone_baseline_region():
+    """Baseline region bracketing the v4 PO4 peaks: troughs near 400-420 and 650-680."""
+    return BaselineRegion(left_min=400, left_max=420, right_min=650, right_max=680)
+
+
+@pytest.fixture
+def bone_preset_with_baseline(bone_baseline_region):
+    """Crystallinity-like preset with local baseline on all peaks."""
+    bl = bone_baseline_region
+    return PeakPreset(
+        name="Crystallinity BL",
+        peak_a=PeakDefinition(600, "point", 10, "600", baseline=bl),
+        peak_b=PeakDefinition(560, "point", 10, "560", baseline=bl),
+        operator1="+",
+        peak_c=PeakDefinition(590, "point", 10, "590", baseline=bl),
+        operator2="/",
+        grouping="left",
+        description="(600 + 560) / 590 with local baseline",
+        category="Bone FTIR",
+    )
+
+
+@pytest.fixture
+def bone_preset_no_baseline():
+    """Same peak positions but without any baseline region."""
+    return PeakPreset(
+        name="Crystallinity Raw",
+        peak_a=PeakDefinition(600, "point", 10, "600"),
+        peak_b=PeakDefinition(560, "point", 10, "560"),
+        operator1="+",
+        peak_c=PeakDefinition(590, "point", 10, "590"),
+        operator2="/",
+        grouping="left",
+        description="(600 + 560) / 590 no baseline",
+        category="Bone FTIR",
+    )
+
+
+@pytest.fixture
+def bone_multi_sample(bone_wavelengths):
+    """Three sample spectra with different peak heights on sloping baselines."""
+    n_samples = 3
+    data = np.zeros((n_samples, len(bone_wavelengths)))
+    for i in range(n_samples):
+        slope = 0.5 + (bone_wavelengths - 380) / (700 - 380)
+        for center, base_height in [(560, 3.0), (590, 4.0), (600, 3.5)]:
+            slope += (i + 1) * base_height * np.exp(
+                -0.5 * ((bone_wavelengths - center) / 8) ** 2
+            )
+        data[i] = slope
+    return data
+
+
+# ---------------------------------------------------------------------------
+# 1. BaselineRegion dataclass tests
+# ---------------------------------------------------------------------------
+
+def test_baseline_region_defaults():
+    """BaselineRegion should initialise with all zeros."""
+    bl = BaselineRegion()
+    assert bl.left_min == 0.0
+    assert bl.left_max == 0.0
+    assert bl.right_min == 0.0
+    assert bl.right_max == 0.0
+
+
+def test_baseline_region_custom_values():
+    """BaselineRegion should accept and store custom window limits."""
+    bl = BaselineRegion(left_min=400, left_max=420, right_min=630, right_max=670)
+    assert bl.left_min == 400
+    assert bl.left_max == 420
+    assert bl.right_min == 630
+    assert bl.right_max == 670
+
+
+def test_peak_definition_with_baseline():
+    """PeakDefinition should store an optional BaselineRegion."""
+    bl = BaselineRegion(400, 420, 630, 670)
+    p = PeakDefinition(wavenumber=604, mode="point", half_width=10, label="604", baseline=bl)
+    assert p.baseline is not None
+    assert p.baseline.left_min == 400
+    assert p.baseline.right_max == 670
+
+
+def test_peak_definition_baseline_default_is_none():
+    """PeakDefinition.baseline should default to None."""
+    p = PeakDefinition(wavenumber=604)
+    assert p.baseline is None
+
+
+# ---------------------------------------------------------------------------
+# 2. find_trough_in_window() tests
+# ---------------------------------------------------------------------------
+
+def test_find_trough_in_window_finds_minimum(bone_wavelengths, bone_spectrum_sloping):
+    """find_trough_in_window should locate the minimum within the given window."""
+    wn, val = find_trough_in_window(bone_wavelengths, bone_spectrum_sloping, 400, 420)
+    assert 400 <= wn <= 420
+    # The minimum in this region should be near the low end where the slope is lowest
+    # and peaks have not contributed significantly
+    mask = (bone_wavelengths >= 400) & (bone_wavelengths <= 420)
+    assert val == pytest.approx(np.min(bone_spectrum_sloping[mask]), abs=0.01)
+
+
+def test_find_trough_in_window_returns_raw_intensity(bone_wavelengths, bone_spectrum_sloping):
+    """The returned intensity should be the raw (unsmoothed) value at the trough position."""
+    wn, val = find_trough_in_window(bone_wavelengths, bone_spectrum_sloping, 650, 680)
+    idx = int(np.argmin(np.abs(bone_wavelengths - wn)))
+    assert val == pytest.approx(bone_spectrum_sloping[idx], abs=1e-10)
+
+
+def test_find_trough_in_window_fallback_no_points():
+    """When no data points fall in the window, fall back to the nearest point."""
+    wl = np.array([100.0, 200.0, 300.0])
+    spec = np.array([5.0, 2.0, 8.0])
+    # Window 400-500 has no points; centre = 450 => nearest is 300
+    wn, val = find_trough_in_window(wl, spec, 400, 500)
+    assert wn == 300.0
+    assert val == 8.0
+
+
+def test_find_trough_in_window_single_point():
+    """Window containing a single data point should return that point."""
+    wl = np.arange(0, 100, dtype=float)
+    spec = np.ones(100) * 10.0
+    spec[50] = 3.0
+    wn, val = find_trough_in_window(wl, spec, 50, 50)
+    assert wn == 50.0
+    assert val == 3.0
+
+
+def test_find_trough_in_window_flat_region():
+    """In a flat region all points are equal; should still return a valid result."""
+    wl = np.arange(400, 500, dtype=float)
+    spec = np.ones_like(wl) * 2.0
+    wn, val = find_trough_in_window(wl, spec, 420, 460)
+    assert 420 <= wn <= 460
+    assert val == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# 3. baseline_at_wavenumber() tests
+# ---------------------------------------------------------------------------
+
+def test_baseline_at_wavenumber_interpolation():
+    """Linear interpolation at the midpoint of two anchor points."""
+    # Left: (400, 1.0), Right: (600, 2.0), Peak at 500 => 1.5
+    result = baseline_at_wavenumber(500, 400, 1.0, 600, 2.0)
+    assert result == pytest.approx(1.5)
+
+
+def test_baseline_at_wavenumber_at_left_anchor():
+    """At the left anchor wavenumber the baseline should equal left_val."""
+    result = baseline_at_wavenumber(400, 400, 1.0, 600, 2.0)
+    assert result == pytest.approx(1.0)
+
+
+def test_baseline_at_wavenumber_at_right_anchor():
+    """At the right anchor wavenumber the baseline should equal right_val."""
+    result = baseline_at_wavenumber(600, 400, 1.0, 600, 2.0)
+    assert result == pytest.approx(2.0)
+
+
+def test_baseline_at_wavenumber_coincident_anchors():
+    """When both anchors have the same wavenumber, return average of values."""
+    result = baseline_at_wavenumber(500, 500, 3.0, 500, 7.0)
+    assert result == pytest.approx(5.0)
+
+
+def test_baseline_at_wavenumber_negative_slope():
+    """Baseline with a negative slope should interpolate correctly."""
+    # Left: (400, 5.0), Right: (800, 1.0), Peak at 600 => 3.0
+    result = baseline_at_wavenumber(600, 400, 5.0, 800, 1.0)
+    assert result == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# 4. get_baseline_corrected_intensity() tests
+# ---------------------------------------------------------------------------
+
+def test_get_baseline_corrected_with_baseline(bone_wavelengths, bone_spectrum_sloping, bone_baseline_region):
+    """Corrected intensity should subtract the interpolated baseline from raw peak height."""
+    peak_def = PeakDefinition(590, "point", 10, "590", baseline=bone_baseline_region)
+    corrected, diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    assert diag is not None
+    assert "left_wn" in diag
+    assert "right_wn" in diag
+    assert "baseline_at_peak" in diag
+    assert "raw_intensity" in diag
+    # The corrected value should be raw - baseline
+    expected = diag["raw_intensity"] - diag["baseline_at_peak"]
+    assert corrected == pytest.approx(expected, abs=1e-10)
+
+
+def test_get_baseline_corrected_without_baseline(bone_wavelengths, bone_spectrum_sloping):
+    """Without a baseline region, return raw intensity and None diagnostics."""
+    peak_def = PeakDefinition(590, "point", 10, "590")
+    corrected, diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    assert diag is None
+    # Should equal raw intensity from get_peak_intensity
+    raw = get_peak_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    assert corrected == pytest.approx(raw)
+
+
+def test_get_baseline_corrected_reduces_sloping_baseline_effect(bone_wavelengths, bone_spectrum_sloping, bone_baseline_region):
+    """Corrected peaks on a sloping baseline should differ from raw values."""
+    peak_def = PeakDefinition(590, "point", 10, "590", baseline=bone_baseline_region)
+    corrected, diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    raw = get_peak_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    assert corrected < raw, "Baseline correction should reduce the intensity"
+    assert corrected > 0, "Peak should still be positive after correction"
+
+
+def test_get_baseline_corrected_diagnostics_anchor_positions(bone_wavelengths, bone_spectrum_sloping, bone_baseline_region):
+    """Diagnostic trough positions should fall within the specified search windows."""
+    peak_def = PeakDefinition(590, "point", 10, "590", baseline=bone_baseline_region)
+    _, diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    assert 400 <= diag["left_wn"] <= 420
+    assert 650 <= diag["right_wn"] <= 680
+
+
+# ---------------------------------------------------------------------------
+# 5. calculate_expression() with use_local_baseline flag
+# ---------------------------------------------------------------------------
+
+def test_calculate_expression_with_baseline(
+    bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline,
+):
+    """calculate_expression with use_local_baseline=True should use corrected intensities."""
+    result_bl = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline, use_local_baseline=True,
+    )
+    result_raw = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline, use_local_baseline=False,
+    )
+    # With sloping baseline, the two should differ
+    assert result_bl != pytest.approx(result_raw, abs=0.01)
+    assert np.isfinite(result_bl)
+
+
+def test_calculate_expression_without_baseline_flag(
+    bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline,
+):
+    """Setting use_local_baseline=False should ignore baseline regions on peaks."""
+    result = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline, use_local_baseline=False,
+    )
+    # Should be identical to computing with a no-baseline preset
+    no_bl_preset = PeakPreset(
+        name="raw",
+        peak_a=PeakDefinition(600, "point", 10, "600"),
+        peak_b=PeakDefinition(560, "point", 10, "560"),
+        operator1="+",
+        peak_c=PeakDefinition(590, "point", 10, "590"),
+        operator2="/",
+        grouping="left",
+    )
+    result_no_bl = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, no_bl_preset, use_local_baseline=False,
+    )
+    assert result == pytest.approx(result_no_bl)
+
+
+def test_calculate_expression_no_baseline_peaks_unaffected_by_flag(
+    bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline,
+):
+    """Peaks without baseline regions give same result regardless of use_local_baseline."""
+    result_true = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline, use_local_baseline=True,
+    )
+    result_false = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline, use_local_baseline=False,
+    )
+    assert result_true == pytest.approx(result_false)
+
+
+# ---------------------------------------------------------------------------
+# 6. calculate_expression_detailed() tests
+# ---------------------------------------------------------------------------
+
+def test_calculate_expression_detailed_returns_diagnostics(
+    bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline,
+):
+    """Detailed result should contain value and per-peak diagnostics."""
+    result = calculate_expression_detailed(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline,
+    )
+    assert "value" in result
+    assert np.isfinite(result["value"])
+    assert "peak_a_diag" in result
+    assert "peak_b_diag" in result
+    assert "peak_c_diag" in result
+    # All peaks have baselines so all diags should be populated
+    for key in ["peak_a_diag", "peak_b_diag", "peak_c_diag"]:
+        diag = result[key]
+        assert diag is not None
+        assert "left_wn" in diag
+        assert "right_wn" in diag
+        assert "raw_intensity" in diag
+        assert "baseline_at_peak" in diag
+
+
+def test_calculate_expression_detailed_no_baseline_peaks(
+    bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline,
+):
+    """Peaks without baselines should have None diagnostics."""
+    result = calculate_expression_detailed(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline,
+    )
+    assert "value" in result
+    assert result["peak_a_diag"] is None
+    assert result["peak_b_diag"] is None
+    assert result["peak_c_diag"] is None
+
+
+def test_calculate_expression_detailed_two_peak(bone_wavelengths, bone_spectrum_sloping):
+    """Two-peak preset should have peak_c_diag = None."""
+    preset = PeakPreset(
+        name="two peak",
+        peak_a=PeakDefinition(600, "point", 10, "600",
+                              baseline=BaselineRegion(400, 420, 650, 680)),
+        peak_b=PeakDefinition(560, "point", 10, "560",
+                              baseline=BaselineRegion(400, 420, 650, 680)),
+        operator1="/",
+    )
+    result = calculate_expression_detailed(bone_wavelengths, bone_spectrum_sloping, preset)
+    assert result["peak_c_diag"] is None
+    assert result["peak_a_diag"] is not None
+    assert result["peak_b_diag"] is not None
+    assert np.isfinite(result["value"])
+
+
+def test_calculate_expression_detailed_matches_calculate_expression(
+    bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline,
+):
+    """Detailed value should equal the regular calculate_expression result."""
+    detailed = calculate_expression_detailed(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline,
+    )
+    simple = calculate_expression(
+        bone_wavelengths, bone_spectrum_sloping, bone_preset_with_baseline, use_local_baseline=True,
+    )
+    assert detailed["value"] == pytest.approx(simple)
+
+
+# ---------------------------------------------------------------------------
+# 7. calculate_all_samples() with baseline regions
+# ---------------------------------------------------------------------------
+
+def test_calculate_all_samples_baseline_extra_columns(
+    bone_wavelengths, bone_multi_sample, bone_preset_with_baseline,
+):
+    """When baselines are present, output DataFrame should include diagnostic columns."""
+    df = calculate_all_samples(
+        bone_wavelengths, bone_multi_sample, bone_preset_with_baseline, use_local_baseline=True,
+    )
+    assert "Sample" in df.columns
+    assert "Value" in df.columns
+    # Should have baseline diagnostic columns for peaks A, B, and C
+    for label in ["A", "B", "C"]:
+        assert f"bl_{label}_left_wn" in df.columns
+        assert f"bl_{label}_right_wn" in df.columns
+        assert f"bl_{label}_raw" in df.columns
+        assert f"bl_{label}_corrected" in df.columns
+    assert len(df) == bone_multi_sample.shape[0]
+
+
+def test_calculate_all_samples_no_baseline_no_extra_columns(
+    bone_wavelengths, bone_multi_sample, bone_preset_no_baseline,
+):
+    """Without baseline regions, output should have only Sample and Value columns."""
+    df = calculate_all_samples(
+        bone_wavelengths, bone_multi_sample, bone_preset_no_baseline, use_local_baseline=True,
+    )
+    assert list(df.columns) == ["Sample", "Value"]
+
+
+def test_calculate_all_samples_baseline_disabled_no_extra_columns(
+    bone_wavelengths, bone_multi_sample, bone_preset_with_baseline,
+):
+    """Disabling local baseline via flag should produce only Sample and Value columns."""
+    df = calculate_all_samples(
+        bone_wavelengths, bone_multi_sample, bone_preset_with_baseline, use_local_baseline=False,
+    )
+    assert list(df.columns) == ["Sample", "Value"]
+
+
+def test_calculate_all_samples_baseline_values_vary(
+    bone_wavelengths, bone_multi_sample, bone_preset_with_baseline,
+):
+    """Different samples should produce different baseline-corrected values."""
+    df = calculate_all_samples(
+        bone_wavelengths, bone_multi_sample, bone_preset_with_baseline, use_local_baseline=True,
+    )
+    values = df["Value"].values
+    assert len(np.unique(np.round(values, 6))) > 1
+
+
+def test_calculate_all_samples_baseline_with_names(
+    bone_wavelengths, bone_multi_sample, bone_preset_with_baseline,
+):
+    """Sample names should be propagated when baselines are used."""
+    names = ["Bone_A", "Bone_B", "Bone_C"]
+    df = calculate_all_samples(
+        bone_wavelengths, bone_multi_sample, bone_preset_with_baseline,
+        sample_names=names, use_local_baseline=True,
+    )
+    assert list(df["Sample"]) == names
+
+
+# ---------------------------------------------------------------------------
+# 8. Serialization roundtrip with baseline regions
+# ---------------------------------------------------------------------------
+
+def test_peak_def_to_dict_with_baseline():
+    """_peak_def_to_dict should include baseline when present."""
+    bl = BaselineRegion(400, 420, 630, 670)
+    p = PeakDefinition(604, "point", 10, "604", baseline=bl)
+    d = _peak_def_to_dict(p)
+    assert "baseline" in d
+    assert d["baseline"]["left_min"] == 400
+    assert d["baseline"]["right_max"] == 670
+
+
+def test_peak_def_to_dict_without_baseline():
+    """_peak_def_to_dict should omit baseline key when None."""
+    p = PeakDefinition(604, "point", 10, "604")
+    d = _peak_def_to_dict(p)
+    assert "baseline" not in d
+
+
+def test_peak_def_roundtrip_with_baseline():
+    """Serialise then deserialise a PeakDefinition with baseline."""
+    bl = BaselineRegion(400, 420, 630, 670)
+    original = PeakDefinition(604, "point", 10, "v4 PO4", baseline=bl)
+    d = _peak_def_to_dict(original)
+    restored = _peak_def_from_dict(d)
+    assert restored.wavenumber == original.wavenumber
+    assert restored.mode == original.mode
+    assert restored.half_width == original.half_width
+    assert restored.label == original.label
+    assert restored.baseline is not None
+    assert restored.baseline.left_min == bl.left_min
+    assert restored.baseline.left_max == bl.left_max
+    assert restored.baseline.right_min == bl.right_min
+    assert restored.baseline.right_max == bl.right_max
+
+
+def test_peak_def_roundtrip_without_baseline():
+    """Serialise then deserialise a PeakDefinition without baseline."""
+    original = PeakDefinition(1020, "range", 30, "Si-O")
+    d = _peak_def_to_dict(original)
+    restored = _peak_def_from_dict(d)
+    assert restored.wavenumber == original.wavenumber
+    assert restored.baseline is None
+
+
+def test_preset_roundtrip_with_baselines():
+    """Full preset with baseline regions should survive a dict roundtrip."""
+    bl = BaselineRegion(400, 420, 630, 670)
+    preset = PeakPreset(
+        name="Crystallinity BL",
+        peak_a=PeakDefinition(604, "point", 10, "604", baseline=bl),
+        peak_b=PeakDefinition(564, "point", 10, "564", baseline=bl),
+        operator1="+",
+        peak_c=PeakDefinition(590, "point", 10, "590", baseline=bl),
+        operator2="/",
+        grouping="left",
+        description="test",
+        category="Bone FTIR",
+    )
+    d = _preset_to_dict(preset)
+    restored = _preset_from_dict(d)
+    assert restored.name == "Crystallinity BL"
+    assert restored.peak_a.baseline is not None
+    assert restored.peak_a.baseline.left_min == 400
+    assert restored.peak_b.baseline is not None
+    assert restored.peak_c is not None
+    assert restored.peak_c.baseline is not None
+    assert restored.peak_c.baseline.right_max == 670
+
+
+def test_preset_roundtrip_json_with_baselines():
+    """Full preset with baselines should survive JSON serialisation."""
+    bl = BaselineRegion(880, 900, 1150, 1180)
+    preset = PeakPreset(
+        name="Acid Phosphate",
+        peak_a=PeakDefinition(1128, "point", 10, "HPO4", baseline=bl),
+        peak_b=PeakDefinition(1020, "point", 10, "v3 PO4", baseline=bl),
+        operator1="/",
+        category="Bone FTIR",
+    )
+    d = _preset_to_dict(preset)
+    json_str = json.dumps(d)
+    d2 = json.loads(json_str)
+    restored = _preset_from_dict(d2)
+    assert restored.peak_a.baseline.left_min == 880
+    assert restored.peak_b.baseline.right_max == 1180
+
+
+def test_save_load_roundtrip_with_baselines(tmp_path, monkeypatch):
+    """Saving then loading presets with baselines should reproduce them."""
+    monkeypatch.setattr(
+        "spectral_predict.peak_calculator._USER_DIR", tmp_path
+    )
+    monkeypatch.setattr(
+        "spectral_predict.peak_calculator._USER_PRESETS_FILE",
+        tmp_path / "peak_presets.json",
+    )
+
+    bl = BaselineRegion(400, 420, 630, 670)
+    presets = [
+        PeakPreset(
+            name="WithBL",
+            peak_a=PeakDefinition(604, "point", 10, "604", baseline=bl),
+            peak_b=PeakDefinition(564, "point", 10, "564", baseline=bl),
+            operator1="/",
+            category="User",
+        ),
+    ]
+    save_user_presets(presets)
+    loaded = load_user_presets()
+    assert len(loaded) == 1
+    assert loaded[0].peak_a.baseline is not None
+    assert loaded[0].peak_a.baseline.left_min == 400
+    assert loaded[0].peak_b.baseline.right_max == 670
+
+
+# ---------------------------------------------------------------------------
+# 9. Built-in presets with baselines still work correctly
+# ---------------------------------------------------------------------------
+
+def test_built_in_presets_with_baselines_have_valid_windows():
+    """Every built-in preset peak with a baseline should have left < right windows."""
+    for preset in BUILT_IN_PRESETS:
+        for peak, label in [(preset.peak_a, "A"), (preset.peak_b, "B")]:
+            if peak.baseline is not None:
+                bl = peak.baseline
+                assert bl.left_min <= bl.left_max, (
+                    f"{preset.name} peak {label}: left_min > left_max"
+                )
+                assert bl.right_min <= bl.right_max, (
+                    f"{preset.name} peak {label}: right_min > right_max"
+                )
+                assert bl.left_max < bl.right_min, (
+                    f"{preset.name} peak {label}: left window overlaps right window"
+                )
+        if preset.peak_c is not None and preset.peak_c.baseline is not None:
+            bl = preset.peak_c.baseline
+            assert bl.left_min <= bl.left_max
+            assert bl.right_min <= bl.right_max
+            assert bl.left_max < bl.right_min
+
+
+def test_built_in_bone_ftir_presets_have_baselines():
+    """All Bone FTIR presets should have baseline regions on their peaks."""
+    bone_presets = [p for p in BUILT_IN_PRESETS if p.category == "Bone FTIR"]
+    assert len(bone_presets) > 0
+    for preset in bone_presets:
+        assert preset.peak_a.baseline is not None, (
+            f"{preset.name} peak A missing baseline"
+        )
+        assert preset.peak_b.baseline is not None, (
+            f"{preset.name} peak B missing baseline"
+        )
+
+
+def test_built_in_mineralogical_presets_have_no_baselines():
+    """Mineralogical presets should not carry baseline regions (by current design)."""
+    mineral_presets = [p for p in BUILT_IN_PRESETS if p.category == "Mineralogical"]
+    assert len(mineral_presets) > 0
+    for preset in mineral_presets:
+        assert preset.peak_a.baseline is None, (
+            f"{preset.name} peak A should not have baseline"
+        )
+        assert preset.peak_b.baseline is None, (
+            f"{preset.name} peak B should not have baseline"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. Backward compatibility — presets without baselines work as before
+# ---------------------------------------------------------------------------
+
+def test_backward_compat_two_peak_division(simple_wavelengths, peaked_spectrum):
+    """Two-peak preset without baselines should work identically to original behavior."""
+    preset = PeakPreset(
+        name="Compat",
+        peak_a=PeakDefinition(1000, "point", 10, "A"),
+        peak_b=PeakDefinition(2000, "point", 10, "B"),
+        operator1="/",
+    )
+    result = calculate_expression(simple_wavelengths, peaked_spectrum, preset, use_local_baseline=True)
+    # No baseline on peaks, so use_local_baseline should have no effect
+    assert pytest.approx(result, rel=0.01) == 5.0 / 3.0
+
+
+def test_backward_compat_three_peak_left(simple_wavelengths, peaked_spectrum):
+    """Three-peak left grouping without baselines should compute (A + B) / C."""
+    preset = PeakPreset(
+        name="Compat3",
+        peak_a=PeakDefinition(1000, "point", 10, "A"),
+        peak_b=PeakDefinition(2000, "point", 10, "B"),
+        operator1="+",
+        peak_c=PeakDefinition(3000, "point", 10, "C"),
+        operator2="/",
+        grouping="left",
+    )
+    result = calculate_expression(simple_wavelengths, peaked_spectrum, preset, use_local_baseline=True)
+    assert pytest.approx(result, rel=0.01) == (5.0 + 3.0) / 8.0
+
+
+def test_backward_compat_calculate_all_samples(simple_wavelengths, multi_sample_data):
+    """calculate_all_samples without baselines should return only Sample and Value."""
+    preset = PeakPreset(
+        name="Compat",
+        peak_a=PeakDefinition(1000, "point", 10, "A"),
+        peak_b=PeakDefinition(2000, "point", 10, "B"),
+        operator1="/",
+    )
+    df = calculate_all_samples(simple_wavelengths, multi_sample_data, preset, use_local_baseline=True)
+    assert list(df.columns) == ["Sample", "Value"]
+    assert len(df) == multi_sample_data.shape[0]
+
+
+def test_backward_compat_detailed_no_diagnostics(simple_wavelengths, peaked_spectrum):
+    """calculate_expression_detailed on no-baseline preset returns None diagnostics."""
+    preset = PeakPreset(
+        name="Compat",
+        peak_a=PeakDefinition(1000, "point", 10, "A"),
+        peak_b=PeakDefinition(2000, "point", 10, "B"),
+        operator1="/",
+    )
+    result = calculate_expression_detailed(simple_wavelengths, peaked_spectrum, preset)
+    assert result["peak_a_diag"] is None
+    assert result["peak_b_diag"] is None
+    assert result["peak_c_diag"] is None
+    assert pytest.approx(result["value"], rel=0.01) == 5.0 / 3.0
+
+
+def test_backward_compat_peak_def_from_dict_no_baseline_key():
+    """_peak_def_from_dict should handle dicts without a 'baseline' key (old format)."""
+    d = {"wavenumber": 1020, "mode": "point", "half_width": 10, "label": "test"}
+    p = _peak_def_from_dict(d)
+    assert p.baseline is None
+    assert p.wavenumber == 1020
