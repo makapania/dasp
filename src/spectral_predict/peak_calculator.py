@@ -82,11 +82,12 @@ class PeakPreset:
 # Common baseline regions for published bone/enamel indices
 # ---------------------------------------------------------------------------
 
-# v4 PO4 region: troughs at ~400-420 and ~630-670 cm-1
-# (Weiner & Bar-Yosef 1990; Thompson et al. 2009)
-_BL_V4_PO4 = BaselineRegion(400, 420, 630, 670)
+# v4 PO4 region: troughs at ~490-510 and ~690-750 cm-1
+# (Weiner & Bar-Yosef 1990; Surovell & Stiner 2001 use ~500-700;
+#  Grunenwald et al. 2018 confirm ~495-750 as standard)
+_BL_V4_PO4 = BaselineRegion(490, 510, 690, 750)
 
-# v3 CO3 region: troughs at ~1290 and ~1590 cm-1
+# v3 CO3 region: troughs at ~1290-1340 and ~1530-1590 cm-1
 # (Wright & Schwarcz 1996)
 _BL_V3_CO3 = BaselineRegion(1290, 1340, 1530, 1590)
 
@@ -94,7 +95,7 @@ _BL_V3_CO3 = BaselineRegion(1290, 1340, 1530, 1590)
 # (Wright & Schwarcz 1996)
 _BL_V3_PO4 = BaselineRegion(880, 900, 1150, 1180)
 
-# Amide I region: troughs at ~1590 and ~1720 cm-1
+# Amide I region: troughs at ~1590 and ~1700-1720 cm-1
 # (Trueman et al.; Snoeck & Pellegrini 2015)
 _BL_AMIDE_I = BaselineRegion(1590, 1600, 1700, 1720)
 
@@ -106,7 +107,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     # --- Bone FTIR ---
     PeakPreset(
         name="Mineral:Matrix",
-        peak_a=PeakDefinition(1020, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         peak_b=PeakDefinition(1660, "search_max", 15, "Amide I", baseline=_BL_AMIDE_I),
         operator1="/",
         description="Phosphate v3 / Amide I — mineral-to-matrix ratio (auto peak search, local baselines)",
@@ -116,7 +117,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     PeakPreset(
         name="Carbonate:Phosphate",
         peak_a=PeakDefinition(1415, "search_max", 15, "v3 CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(1020, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description=(
             "Carbonate v3 / Phosphate v3 — C/P ratio "
@@ -152,7 +153,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     PeakPreset(
         name="Acid Phosphate",
         peak_a=PeakDefinition(1128, "search_max", 15, "HPO4", baseline=_BL_V3_PO4),
-        peak_b=PeakDefinition(1020, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description="1128 / 1020 — acid phosphate content (auto peak search, local baseline)",
         category="Bone FTIR",
@@ -697,7 +698,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     PeakPreset(
         name="Cyanamide:Phosphate",
         peak_a=PeakDefinition(2010, "search_max", 15, "Cyanamide"),
-        peak_b=PeakDefinition(1015, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description="Cyanamide formation from burning / v3 PO4 (Zazzo et al. 2013, auto peak search)",
         category="Bone FTIR",
@@ -725,11 +726,37 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     PeakPreset(
         name="Amide:Phosphate",
         peak_a=PeakDefinition(1640, "search_max", 15, "v1 Amide", baseline=_BL_AMIDE_I),
-        peak_b=PeakDefinition(1010, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description=(
             "Amide I / Phosphate v3 — Am/P ratio "
             "(Trueman et al., auto peak search, local baselines 1590-1720 and 880-1180 cm⁻¹)"
+        ),
+        category="Bone FTIR",
+        x_unit="cm-1",
+    ),
+    # --- Bone FTIR (WAMPI — collagen screening) ---
+    PeakPreset(
+        name="WAMPI",
+        peak_a=PeakDefinition(1640, "search_max", 15, "Water+Amide", baseline=_BL_AMIDE_I),
+        peak_b=PeakDefinition(604, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        operator1="/",
+        description=(
+            "Water-Amide on Phosphate Index — collagen preservation screening "
+            "(Snoeck & Pellegrini 2015, local baselines)"
+        ),
+        category="Bone FTIR",
+        x_unit="cm-1",
+    ),
+    # --- Bone FTIR (Amide I / Amide II) ---
+    PeakPreset(
+        name="AmI/AmII",
+        peak_a=PeakDefinition(1660, "search_max", 15, "Amide I", baseline=_BL_AMIDE_I),
+        peak_b=PeakDefinition(1540, "search_max", 15, "Amide II", baseline=_BL_V3_CO3),
+        operator1="/",
+        description=(
+            "Amide I / Amide II — collagen structural integrity "
+            "(France et al. 2020, local baselines)"
         ),
         category="Bone FTIR",
         x_unit="cm-1",
@@ -753,7 +780,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     PeakPreset(
         name="Enamel C/P",
         peak_a=PeakDefinition(1415, "search_max", 15, "v3 CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(1015, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description="Carbonate / phosphate — enamel diagenesis indicator (auto peak search, local baselines)",
         category="Enamel FTIR",
@@ -1007,55 +1034,6 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
 # Local baseline correction functions
 # ---------------------------------------------------------------------------
 
-def find_trough_in_window(
-    wavelengths: np.ndarray,
-    spectrum: np.ndarray,
-    window_lo: float,
-    window_hi: float,
-    smooth_window: int = 9,
-) -> tuple[float, float]:
-    """Find the minimum intensity position within a wavenumber window.
-
-    A light Savitzky-Golay smooth is applied before finding the minimum to
-    reduce noise sensitivity, but the *raw* intensity at the detected
-    position is returned so the baseline is anchored to actual data.
-
-    Args:
-        wavelengths: Wavenumber axis (sorted).
-        spectrum: Intensity values (raw).
-        window_lo: Low end of the search window (cm-1).
-        window_hi: High end of the search window (cm-1).
-        smooth_window: SG smoothing window for trough detection.
-
-    Returns:
-        (wavenumber_at_minimum, raw_intensity_at_minimum)
-    """
-    mask = (wavelengths >= window_lo) & (wavelengths <= window_hi)
-    if not mask.any():
-        # Fall back to nearest point to the window centre
-        centre = (window_lo + window_hi) / 2.0
-        idx = int(np.argmin(np.abs(wavelengths - centre)))
-        return float(wavelengths[idx]), float(spectrum[idx])
-
-    subset_idx = np.where(mask)[0]
-    subset_vals = spectrum[subset_idx]
-
-    # Apply light SG smoothing if enough points are available
-    if len(subset_vals) >= max(smooth_window, 5):
-        sw = min(smooth_window, len(subset_vals))
-        if sw % 2 == 0:
-            sw -= 1
-        sw = max(sw, 5)
-        polyorder = min(2, sw - 1)
-        smoothed = savgol_filter(subset_vals, sw, polyorder)
-    else:
-        smoothed = subset_vals
-
-    local_min = int(np.argmin(smoothed))
-    abs_idx = subset_idx[local_min]
-    return float(wavelengths[abs_idx]), float(spectrum[abs_idx])
-
-
 def find_peak_in_window(
     wavelengths: np.ndarray,
     spectrum: np.ndarray,
@@ -1067,10 +1045,12 @@ def find_peak_in_window(
     """Find the actual peak (max) or trough (min) nearest a target wavenumber.
 
     Searches within [target_wn - half_width, target_wn + half_width] for the
-    local extremum.  Returns the position and raw intensity at that position.
+    local extremum.  A light Savitzky-Golay smooth is applied before finding
+    the extremum to reduce noise, but the *raw* intensity is returned.
+    Works with both ascending and descending wavenumber arrays.
 
     Args:
-        wavelengths: Wavenumber axis (sorted).
+        wavelengths: Wavenumber axis (any order).
         spectrum: Intensity values.
         target_wn: Expected peak/trough position.
         half_width: Search radius in spectral units.
@@ -1085,13 +1065,17 @@ def find_peak_in_window(
     mask = (wavelengths >= lo) & (wavelengths <= hi)
     if not mask.any():
         idx = int(np.argmin(np.abs(wavelengths - target_wn)))
+        logger.warning(
+            "No data in search window [%.1f, %.1f]; using nearest point at %.1f",
+            lo, hi, float(wavelengths[idx]),
+        )
         return float(wavelengths[idx]), float(spectrum[idx])
 
     subset_idx = np.where(mask)[0]
     subset_vals = spectrum[subset_idx]
 
-    # Light SG smoothing for robust detection
-    if len(subset_vals) >= max(smooth_window, 5):
+    # SG smoothing: apply if we have at least 5 points (the absolute minimum)
+    if len(subset_vals) >= 5:
         sw = min(smooth_window, len(subset_vals))
         if sw % 2 == 0:
             sw -= 1
@@ -1108,6 +1092,25 @@ def find_peak_in_window(
 
     abs_idx = subset_idx[local_idx]
     return float(wavelengths[abs_idx]), float(spectrum[abs_idx])
+
+
+def find_trough_in_window(
+    wavelengths: np.ndarray,
+    spectrum: np.ndarray,
+    window_lo: float,
+    window_hi: float,
+    smooth_window: int = 9,
+) -> tuple[float, float]:
+    """Find the minimum intensity position within a wavenumber window.
+
+    Convenience wrapper around :func:`find_peak_in_window` with
+    ``find_max=False``.
+    """
+    centre = (window_lo + window_hi) / 2.0
+    half = (window_hi - window_lo) / 2.0
+    return find_peak_in_window(
+        wavelengths, spectrum, centre, half, smooth_window, find_max=False,
+    )
 
 
 def baseline_at_wavenumber(
@@ -1143,6 +1146,8 @@ def get_baseline_corrected_intensity(
         return get_peak_intensity(wavelengths, spectrum, peak_def), None
 
     bl = peak_def.baseline
+
+    # Find baseline trough anchors, or reuse pre-computed ones
     left_wn, left_val = find_trough_in_window(
         wavelengths, spectrum, bl.left_min, bl.left_max, smooth_window,
     )
@@ -1150,8 +1155,18 @@ def get_baseline_corrected_intensity(
         wavelengths, spectrum, bl.right_min, bl.right_max, smooth_window,
     )
 
-    raw_val = get_peak_intensity(wavelengths, spectrum, peak_def)
-    bl_val = baseline_at_wavenumber(peak_def.wavenumber, left_wn, left_val, right_wn, right_val)
+    # For search_max/search_min modes, get the *found* wavenumber so the
+    # baseline is interpolated at the actual peak position, not the nominal.
+    if peak_def.mode in ("search_max", "search_min"):
+        found_wn, raw_val = find_peak_in_window(
+            wavelengths, spectrum, peak_def.wavenumber, peak_def.half_width,
+            smooth_window, find_max=(peak_def.mode == "search_max"),
+        )
+    else:
+        found_wn = peak_def.wavenumber
+        raw_val = get_peak_intensity(wavelengths, spectrum, peak_def)
+
+    bl_val = baseline_at_wavenumber(found_wn, left_wn, left_val, right_wn, right_val)
     corrected = raw_val - bl_val
 
     diag = {
@@ -1161,6 +1176,7 @@ def get_baseline_corrected_intensity(
         "right_val": right_val,
         "baseline_at_peak": bl_val,
         "raw_intensity": raw_val,
+        "found_wn": found_wn,
     }
     return corrected, diag
 
@@ -1256,6 +1272,70 @@ def calculate_expression(
         return _apply_op(val_a, grouped, preset.operator1)
 
 
+def _precompute_troughs(
+    wavelengths: np.ndarray,
+    spectrum: np.ndarray,
+    peaks: list[PeakDefinition],
+    smooth_window: int = 9,
+) -> dict[tuple[float, float, float, float], tuple[float, float, float, float]]:
+    """Pre-compute baseline troughs so shared regions are only searched once.
+
+    Returns a cache mapping (left_min, left_max, right_min, right_max) to
+    (left_wn, left_val, right_wn, right_val).
+    """
+    cache: dict[tuple, tuple] = {}
+    for p in peaks:
+        if p is None or p.baseline is None:
+            continue
+        bl = p.baseline
+        key = (bl.left_min, bl.left_max, bl.right_min, bl.right_max)
+        if key not in cache:
+            left_wn, left_val = find_trough_in_window(
+                wavelengths, spectrum, bl.left_min, bl.left_max, smooth_window,
+            )
+            right_wn, right_val = find_trough_in_window(
+                wavelengths, spectrum, bl.right_min, bl.right_max, smooth_window,
+            )
+            cache[key] = (left_wn, left_val, right_wn, right_val)
+    return cache
+
+
+def _get_corrected_with_cache(
+    wavelengths: np.ndarray,
+    spectrum: np.ndarray,
+    peak_def: PeakDefinition,
+    trough_cache: dict,
+    smooth_window: int = 9,
+) -> tuple[float, dict | None]:
+    """Baseline-corrected intensity using pre-computed trough cache."""
+    if peak_def.baseline is None:
+        return get_peak_intensity(wavelengths, spectrum, peak_def), None
+
+    bl = peak_def.baseline
+    key = (bl.left_min, bl.left_max, bl.right_min, bl.right_max)
+    left_wn, left_val, right_wn, right_val = trough_cache[key]
+
+    if peak_def.mode in ("search_max", "search_min"):
+        found_wn, raw_val = find_peak_in_window(
+            wavelengths, spectrum, peak_def.wavenumber, peak_def.half_width,
+            smooth_window, find_max=(peak_def.mode == "search_max"),
+        )
+    else:
+        found_wn = peak_def.wavenumber
+        raw_val = get_peak_intensity(wavelengths, spectrum, peak_def)
+
+    bl_val = baseline_at_wavenumber(found_wn, left_wn, left_val, right_wn, right_val)
+    corrected = raw_val - bl_val
+
+    diag = {
+        "left_wn": left_wn, "left_val": left_val,
+        "right_wn": right_wn, "right_val": right_val,
+        "baseline_at_peak": bl_val, "raw_intensity": raw_val,
+        "found_wn": found_wn,
+    }
+    return corrected, diag
+
+
 def calculate_expression_detailed(
     wavelengths: np.ndarray,
     spectrum: np.ndarray,
@@ -1263,17 +1343,31 @@ def calculate_expression_detailed(
 ) -> dict:
     """Like calculate_expression but returns full diagnostics.
 
+    Peaks sharing the same BaselineRegion reuse the same trough positions,
+    ensuring consistent baseline anchors.
+
     Returns dict with keys: value, peak_a_diag, peak_b_diag, peak_c_diag.
     Each diag is None (no baseline) or a dict with trough positions.
     """
-    val_a, diag_a = get_baseline_corrected_intensity(wavelengths, spectrum, preset.peak_a)
-    val_b, diag_b = get_baseline_corrected_intensity(wavelengths, spectrum, preset.peak_b)
+    peaks = [preset.peak_a, preset.peak_b]
+    if preset.peak_c is not None:
+        peaks.append(preset.peak_c)
+    trough_cache = _precompute_troughs(wavelengths, spectrum, peaks)
+
+    val_a, diag_a = _get_corrected_with_cache(
+        wavelengths, spectrum, preset.peak_a, trough_cache,
+    )
+    val_b, diag_b = _get_corrected_with_cache(
+        wavelengths, spectrum, preset.peak_b, trough_cache,
+    )
 
     if preset.peak_c is None:
         result = _apply_op(val_a, val_b, preset.operator1)
         return {"value": result, "peak_a_diag": diag_a, "peak_b_diag": diag_b, "peak_c_diag": None}
 
-    val_c, diag_c = get_baseline_corrected_intensity(wavelengths, spectrum, preset.peak_c)
+    val_c, diag_c = _get_corrected_with_cache(
+        wavelengths, spectrum, preset.peak_c, trough_cache,
+    )
     if preset.grouping == "left":
         grouped = _apply_op(val_a, val_b, preset.operator1)
         result = _apply_op(grouped, val_c, preset.operator2)
