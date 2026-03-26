@@ -2350,6 +2350,8 @@ def detect_format(path: Union[str, Path]) -> str:
         '.dpt': 'ascii',
         '.asc': 'ascii',
         '.sp': 'perkinelmer',
+        '.spa': 'omnic',
+        '.spg': 'omnic',
         '.seq': 'agilent',
         '.dmt': 'agilent',
         '.asp': 'agilent',
@@ -2408,6 +2410,7 @@ def read_spectra(
     - Bruker OPUS (requires brukeropus package)
     - PerkinElmer (requires specio package)
     - Agilent (requires agilent-ir-formats package)
+    - Thermo Omnic (.spa, .spg) (requires spectrochempy-omnic package)
 
     Parameters
     ----------
@@ -2522,11 +2525,16 @@ def read_spectra(
     elif format == 'agilent':
         return read_agilent_file(path, **kwargs)
 
+    elif format == 'omnic':
+        if path.is_dir():
+            return read_omnic_dir(path, **kwargs)
+        return read_omnic_file(path, **kwargs)
+
     else:
         raise ValueError(
             f"Unsupported or unknown format: '{format}'. "
             f"Supported formats: csv, excel, asd, spc, jcamp, ascii, opus, "
-            f"perkinelmer, agilent"
+            f"perkinelmer, agilent, omnic"
         )
 
 
@@ -2652,6 +2660,8 @@ def _detect_directory_format(directory: Path) -> str:
         return 'jcamp'
     elif any(f.suffix.lower() in ['.csv'] for f in files):
         return 'csv_dir'
+    elif any(f.suffix.lower() in ['.spa', '.spg'] for f in files):
+        return 'omnic'
     elif any(f.suffix.lower() in ['.xlsx', '.xls'] for f in files):
         return 'excel'
     else:
@@ -3831,6 +3841,115 @@ def read_sp_dir(directory: Union[str, Path], **kwargs) -> Tuple[pd.DataFrame, Di
     from spectral_predict.readers.perkinelmer_reader import read_sp_dir as _read_sp_dir
 
     return _read_sp_dir(directory, **kwargs)
+
+
+def read_omnic_file(
+    path: Union[str, Path],
+    **kwargs
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Read Thermo Omnic .spa or .spg format file.
+
+    Wrapper around spectral_predict.readers.omnic_reader.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to .spa or .spg file
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Spectral data (rows=samples, columns=wavenumbers)
+    metadata : dict
+        Omnic metadata including data_type, source_data_type, x_unit
+    """
+    from spectral_predict.readers.omnic_reader import read_spa_file, read_spg_file
+
+    path = Path(path)
+
+    # Dispatch based on extension
+    if path.suffix.lower() == '.spg':
+        df, file_metadata = read_spg_file(path)
+    else:
+        spectrum, file_metadata = read_spa_file(path)
+        df = pd.DataFrame([spectrum.values], columns=spectrum.index, index=[path.stem])
+
+    # Use Omnic metadata when available, but map into supported types
+    source_data_type = file_metadata.get('source_data_type')
+    omnic_data_type = file_metadata.get('data_type')
+
+    if omnic_data_type in ['absorbance', 'reflectance']:
+        data_type = omnic_data_type
+        type_confidence = 95.0
+        detection_method = f"omnic_metadata({source_data_type})"
+    else:
+        data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+
+    # Merge metadata
+    x_unit = file_metadata.get('x_unit', 'cm-1')
+    metadata = {
+        'n_spectra': len(df),
+        'wavelength_range': file_metadata.get('x_range', (df.columns.min(), df.columns.max())),
+        'file_format': 'omnic',
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method,
+        'source_data_type': source_data_type,
+        'value_scale': value_scale,
+        'x_unit': x_unit,
+        'x_unit_confidence': 95.0,
+        'x_unit_detection_method': 'omnic_metadata',
+        **file_metadata
+    }
+
+    return df, metadata
+
+
+def read_omnic_dir(directory: Union[str, Path], **kwargs) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Read all Thermo Omnic .spa/.spg files from a directory.
+
+    Wrapper around spectral_predict.readers.omnic_reader.read_omnic_dir.
+
+    Parameters
+    ----------
+    directory : str or Path
+        Directory containing .spa and/or .spg files
+    **kwargs
+        Additional arguments passed to reader
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Spectral data (rows=samples, columns=wavenumbers)
+    metadata : dict
+        Combined metadata
+    """
+    from spectral_predict.readers.omnic_reader import read_omnic_dir as _read_omnic_dir
+
+    df, metadata = _read_omnic_dir(directory, **kwargs)
+
+    # Use Omnic metadata when available, but map into supported types
+    source_data_type = metadata.get('dominant_data_type') or metadata.get('data_type')
+    if source_data_type in ['absorbance', 'transmittance']:
+        data_type = 'absorbance' if source_data_type == 'absorbance' else 'reflectance'
+        type_confidence = 95.0
+        detection_method = f"omnic_metadata_dir({source_data_type})"
+    else:
+        data_type, type_confidence, detection_method = detect_spectral_data_type(df)
+    value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+
+    metadata.update({
+        'data_type': data_type,
+        'type_confidence': type_confidence,
+        'detection_method': detection_method,
+        'source_data_type': source_data_type,
+        'value_scale': value_scale
+    })
+
+    return df, metadata
 
 
 def read_agilent_dir(

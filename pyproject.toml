@@ -46,6 +46,8 @@ dependencies = [
     "specdal",
     "brukeropus",
     "specio-py310",
+    "spectrochempy-omnic==0.2.1",
+    "requests",
     # Note: agilent-ir-formats moved to optional (not available on Python 3.11+)
     # Optimization
     "optuna>=3.0.0",

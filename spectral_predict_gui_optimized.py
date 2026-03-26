@@ -1668,6 +1668,27 @@ class SidebarNavigation:
                 section['content'].config(bg=sidebar_bg)
 
 
+# ===== HELPER: IMBALANCE CATEGORY SUFFIX FOR FILENAMES =====
+
+def _get_imbalance_suffix(imbalance_method: str | None) -> str:
+    """Return a short category code suffix for model filenames based on imbalance method."""
+    if not imbalance_method:
+        return ""
+    OVERSAMPLING = {'smote', 'adasyn', 'borderline_smote', 'smogn', 'oversample'}
+    UNDERSAMPLING = {'random_undersampler', 'tomek_links', 'undersample'}
+    HYBRID = {'smote_tomek', 'smote_enn', 'smotetomek'}
+    WEIGHTING = {'class_weight', 'binning', 'rare_boost', 'balanced'}
+    if imbalance_method in OVERSAMPLING:
+        return "_OVR"
+    elif imbalance_method in UNDERSAMPLING:
+        return "_UND"
+    elif imbalance_method in HYBRID:
+        return "_HYB"
+    elif imbalance_method in WEIGHTING:
+        return "_WGT"
+    return ""
+
+
 # ===== SKLEARN-COMPATIBLE WRAPPER CLASSES =====
 # These classes wrap models with preprocessing/wavelength selection
 # and are sklearn-clonable (required for ensemble OOF predictions)
@@ -14071,6 +14092,30 @@ class SpectralPredictApp:
                 )
             return
 
+        # Check for Thermo Omnic files (.spa, .spg)
+        omnic_files = sorted(set(
+            list(path.glob("*.spa")) + list(path.glob("*.SPA"))
+            + list(path.glob("*.spg")) + list(path.glob("*.SPG"))
+        ))
+        if omnic_files:
+            self.detected_type = "omnic"
+            self.detection_status.config(
+                text=f"> Detected {len(omnic_files)} Thermo Omnic files",
+                foreground=self.colors['success']
+            )
+
+            # Auto-detect reference CSV/Excel
+            ref_files = sorted(list(path.glob("*.csv")) + list(path.glob("*.xlsx")) + list(path.glob("*.xls")))
+            if len(ref_files) == 1:
+                self.reference_file.set(str(ref_files[0]))
+                self._auto_detect_columns()
+            elif len(ref_files) > 1:
+                self.detection_status.config(
+                    text=f"> Detected {len(omnic_files)} Omnic files - {len(ref_files)} reference files found, select manually",
+                    foreground=self.colors['accent']
+                )
+            return
+
         # Check for combined format (single CSV/TXT/Excel with all data)
         from src.spectral_predict.io import (
             detect_combined_format,
@@ -14244,7 +14289,7 @@ class SpectralPredictApp:
             foreground=self.colors['warning']
         )
         messagebox.showwarning("No Spectral Data",
-            "No supported spectral files found in this directory.\n\nSupported formats:\n- .asd (ASD files)\n- .csv (CSV spectral data)\n- .xlsx/.xls (Excel files)\n- .spc (GRAMS/Thermo Galactic)\n- .jdx/.dx (JCAMP-DX files)\n- .dpt/.dat/.asc (ASCII text files)\n- .0/.1/.2/etc (Bruker OPUS files)\n- .sp (PerkinElmer files)\n- Combined CSV/TXT/Excel (single file with all spectra + targets)")
+            "No supported spectral files found in this directory.\n\nSupported formats:\n- .asd (ASD files)\n- .csv (CSV spectral data)\n- .xlsx/.xls (Excel files)\n- .spc (GRAMS/Thermo Galactic)\n- .jdx/.dx (JCAMP-DX files)\n- .dpt/.dat/.asc (ASCII text files)\n- .0/.1/.2/etc (Bruker OPUS files)\n- .sp (PerkinElmer files)\n- .spa/.spg (Thermo Omnic files)\n- Combined CSV/TXT/Excel (single file with all spectra + targets)")
 
     def _browse_reference_file(self):
         """Browse for reference file (CSV or Excel)."""
@@ -16288,9 +16333,47 @@ class SpectralPredictApp:
                 self.combined_metadata_df = None  # Clear metadata from any previous combined file
 
             elif self.detected_type == "perkinelmer":
-                from spectral_predict.io import read_perkinelmer_dir
+                from spectral_predict.io import read_sp_dir
 
-                X, metadata = read_perkinelmer_dir(self.spectral_data_path.get())
+                X, metadata = read_sp_dir(self.spectral_data_path.get())
+
+                # Store data type detection results
+                self._apply_data_type_metadata(metadata)
+                self._apply_x_unit_metadata(metadata)
+
+                if self.reference_file.get():
+                    # Load reference data and align
+                    ref = read_reference_csv(self.reference_file.get(), self.spectral_file_column.get())
+
+                    # Align data and get alignment info
+                    X_aligned, y_aligned, alignment_info = align_xy(
+                        X, ref,
+                        self.spectral_file_column.get(),
+                        self.target_column.get(),
+                        return_alignment_info=True,
+                        drop_na_y=False
+                    )
+
+                    # Show alignment report to user
+                    self._show_alignment_report(alignment_info)
+
+                    # Store original unfiltered data
+                    self.X_original = X_aligned
+                    self.y = y_aligned
+                    self.ref = ref
+                else:
+                    # No reference file - load spectra only
+                    self.X_original = X
+                    self.y = None
+                    self.ref = None
+                    self._show_spectra_only_info()
+
+                self.combined_metadata_df = None  # Clear metadata from any previous combined file
+
+            elif self.detected_type == "omnic":
+                from spectral_predict.io import read_omnic_dir
+
+                X, metadata = read_omnic_dir(self.spectral_data_path.get())
 
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
@@ -26927,8 +27010,11 @@ For detailed documentation, see the User Guide.
                 initial_dir = str(Path.home())
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            imbalance_suffix = _get_imbalance_suffix(
+                self.imbalance_method.get() if self.enable_imbalance_handling.get() else None
+            )
             data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
-            default_name = f"ensemble_{ensemble_type}_{timestamp}{data_type_suffix}.dasp"
+            default_name = f"ensemble_{ensemble_type}_{timestamp}{imbalance_suffix}{data_type_suffix}.dasp"
 
             filepath = filedialog.asksaveasfilename(
                 title="Save Ensemble Model",
@@ -33811,8 +33897,11 @@ External Validation Performance (n={n_val}):
             # Create prefix: C/R for Classification/Regression + number of variables
             task_prefix = 'C' if self.refined_config['task_type'] == 'classification' else 'R'
             n_vars = self.refined_config['n_vars']
+            imbalance_suffix = _get_imbalance_suffix(
+                self.selected_model_config.get('imbalance_method') if self.selected_model_config else None
+            )
             data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
-            default_name = f"{task_prefix}{n_vars}_model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{data_type_suffix}.dasp"
+            default_name = f"{task_prefix}{n_vars}_model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{imbalance_suffix}{data_type_suffix}.dasp"
 
             # Get initial directory from spectral data path
             initial_dir = None
@@ -35555,10 +35644,15 @@ External Validation Performance (n={n_val}):
                     self.pred_status.config(text="Loading ASCII files...")
                     self.root.update()
                     self.prediction_data, _ = read_ascii_spectra(str(path))  # Unpack tuple, discard metadata
+                elif list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG")):
+                    self.pred_status.config(text="Loading Omnic files...")
+                    self.root.update()
+                    from spectral_predict.io import read_omnic_dir
+                    self.prediction_data, _ = read_omnic_dir(str(path))
                 else:
                     messagebox.showerror("No Files",
                         "No supported spectral files found in the selected directory.\n"
-                        "Supported formats: ASD, SPC, JCAMP-DX (.jdx/.dx), ASCII (.dpt/.dat/.asc)")
+                        "Supported formats: ASD, SPC, JCAMP-DX (.jdx/.dx), ASCII (.dpt/.dat/.asc), Omnic (.spa/.spg)")
                     return
             else:  # csv or excel
                 if str(path).lower().endswith(('.xlsx', '.xls')):
@@ -39774,7 +39868,15 @@ External Validation Performance (n={n_val}):
             X = df.values
             return wavelengths, X
         else:
-            raise ValueError("No supported spectral files found in directory (ASD, CSV, or SPC)")
+            # Check for Omnic files
+            omnic_files = sorted(glob.glob(os.path.join(directory, "*.spa")) + glob.glob(os.path.join(directory, "*.spg")))
+            if omnic_files:
+                from spectral_predict.io import read_omnic_dir
+                df, metadata = read_omnic_dir(directory)
+                wavelengths = df.columns.astype(float).values
+                X = df.values
+                return wavelengths, X
+            raise ValueError("No supported spectral files found in directory (ASD, CSV, SPC, or Omnic)")
 
     def _load_spectra_from_directory_as_df(self, directory: str) -> pd.DataFrame:
         """Load spectra from a directory, returning a DataFrame with meaningful index.
@@ -39816,6 +39918,13 @@ External Validation Performance (n={n_val}):
             from spectral_predict.io import read_ascii_spectra
             df, _ = read_ascii_spectra(str(directory))
             return df
+        elif sorted(set(
+            list(dir_path.glob("*.spa")) + list(dir_path.glob("*.SPA"))
+            + list(dir_path.glob("*.spg")) + list(dir_path.glob("*.SPG"))
+        )):
+            from spectral_predict.io import read_omnic_dir
+            df, _ = read_omnic_dir(str(directory))
+            return df
         elif csv_files:
             # CSV directory: use existing loader for parsing, then set meaningful index
             wavelengths, X = self._load_spectra_from_directory(directory)
@@ -39829,7 +39938,7 @@ External Validation Performance (n={n_val}):
         else:
             raise ValueError(
                 "No supported spectral files found in directory.\n"
-                "Supported formats: ASD, SPC, JCAMP-DX (.jdx/.dx), ASCII (.dpt/.dat/.asc), CSV"
+                "Supported formats: ASD, SPC, JCAMP-DX (.jdx/.dx), ASCII (.dpt/.dat/.asc), Omnic (.spa/.spg), CSV"
             )
 
     # ========================================================================
@@ -40052,6 +40161,8 @@ External Validation Performance (n={n_val}):
                 return 'asd_folder'
             elif spc_files:
                 return 'spc_folder'
+            elif glob.glob(os.path.join(filepath, "*.spa")) or glob.glob(os.path.join(filepath, "*.spg")):
+                return 'omnic_folder'
             elif csv_files:
                 return 'csv_folder'
             else:
@@ -40706,6 +40817,7 @@ External Validation Performance (n={n_val}):
         asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
+        omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
 
         if asd_files:
             self.ct_primary_detected_type = "asd"
@@ -40717,6 +40829,12 @@ External Validation Performance (n={n_val}):
             self.ct_primary_detected_type = "spc"
             self.ct_primary_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif omnic_files:
+            self.ct_primary_detected_type = "omnic"
+            self.ct_primary_detection_status.config(
+                text=f"> Detected {len(omnic_files)} Thermo Omnic files",
                 foreground=self.colors['success']
             )
         elif csv_files:
@@ -40751,6 +40869,9 @@ External Validation Performance (n={n_val}):
                 df, metadata = read_asd_dir(self.ct_primary_spectra_path_var.get())
             elif self.ct_primary_detected_type == 'spc':
                 df, metadata = read_spc_dir(self.ct_primary_spectra_path_var.get())
+            elif self.ct_primary_detected_type == 'omnic':
+                from spectral_predict.io import read_omnic_dir
+                df, metadata = read_omnic_dir(self.ct_primary_spectra_path_var.get())
             elif self.ct_primary_detected_type == 'csv':
                 df, metadata = read_csv_dir(self.ct_primary_spectra_path_var.get())
             else:
@@ -40813,6 +40934,9 @@ External Validation Performance (n={n_val}):
                 df, metadata = read_asd_dir(self.ct_satellite_spectra_path_var.get())
             elif self.ct_satellite_detected_type == 'spc':
                 df, metadata = read_spc_dir(self.ct_satellite_spectra_path_var.get())
+            elif self.ct_satellite_detected_type == 'omnic':
+                from spectral_predict.io import read_omnic_dir
+                df, metadata = read_omnic_dir(self.ct_satellite_spectra_path_var.get())
             elif self.ct_satellite_detected_type == 'csv':
                 df, metadata = read_csv_dir(self.ct_satellite_spectra_path_var.get())
             else:
@@ -40874,6 +40998,7 @@ External Validation Performance (n={n_val}):
         asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
+        omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
 
         if asd_files:
             self.ct_primary_detected_type = "asd"
@@ -40885,6 +41010,12 @@ External Validation Performance (n={n_val}):
             self.ct_primary_detected_type = "spc"
             self.ct_primary_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif omnic_files:
+            self.ct_primary_detected_type = "omnic"
+            self.ct_primary_detection_status.config(
+                text=f"> Detected {len(omnic_files)} Thermo Omnic files",
                 foreground=self.colors['success']
             )
         elif csv_files:
@@ -40989,6 +41120,9 @@ External Validation Performance (n={n_val}):
                 X, metadata = read_asd_dir(self.ct_primary_spectra_path_var.get())
             elif self.ct_primary_detected_type == 'spc':
                 X, metadata = read_spc_dir(self.ct_primary_spectra_path_var.get())
+            elif self.ct_primary_detected_type == 'omnic':
+                from spectral_predict.io import read_omnic_dir
+                X, metadata = read_omnic_dir(self.ct_primary_spectra_path_var.get())
             elif self.ct_primary_detected_type == 'csv':
                 X, metadata = read_csv_dir(self.ct_primary_spectra_path_var.get())
             else:
@@ -41072,6 +41206,7 @@ External Validation Performance (n={n_val}):
         asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
+        omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
 
         if asd_files:
             self.ct_satellite_detected_type = "asd"
@@ -41083,6 +41218,12 @@ External Validation Performance (n={n_val}):
             self.ct_satellite_detected_type = "spc"
             self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif omnic_files:
+            self.ct_satellite_detected_type = "omnic"
+            self.ct_satellite_detection_status.config(
+                text=f"> Detected {len(omnic_files)} Thermo Omnic files",
                 foreground=self.colors['success']
             )
         elif csv_files:
@@ -41114,6 +41255,7 @@ External Validation Performance (n={n_val}):
         asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
+        omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
 
         if asd_files:
             self.ct_satellite_detected_type = "asd"
@@ -41125,6 +41267,12 @@ External Validation Performance (n={n_val}):
             self.ct_satellite_detected_type = "spc"
             self.ct_satellite_detection_status.config(
                 text=f"> Detected {len(spc_files)} SPC files",
+                foreground=self.colors['success']
+            )
+        elif omnic_files:
+            self.ct_satellite_detected_type = "omnic"
+            self.ct_satellite_detection_status.config(
+                text=f"> Detected {len(omnic_files)} Thermo Omnic files",
                 foreground=self.colors['success']
             )
         elif csv_files:
@@ -41228,6 +41376,9 @@ External Validation Performance (n={n_val}):
                 X, metadata = read_asd_dir(self.ct_satellite_spectra_path_var.get())
             elif self.ct_satellite_detected_type == 'spc':
                 X, metadata = read_spc_dir(self.ct_satellite_spectra_path_var.get())
+            elif self.ct_satellite_detected_type == 'omnic':
+                from spectral_predict.io import read_omnic_dir
+                X, metadata = read_omnic_dir(self.ct_satellite_spectra_path_var.get())
             elif self.ct_satellite_detected_type == 'csv':
                 X, metadata = read_csv_dir(self.ct_satellite_spectra_path_var.get())
             else:
@@ -41612,6 +41763,12 @@ External Validation Performance (n={n_val}):
                     format_type = 'perkinelmer'
                     X_df, metadata = read_sp_dir(filepath)
 
+                # Check for Thermo Omnic files (.spa, .spg)
+                elif any(f.suffix.lower() in ['.spa', '.spg'] for f in files):
+                    format_type = 'omnic'
+                    from spectral_predict.io import read_omnic_dir
+                    X_df, metadata = read_omnic_dir(filepath)
+
                 # Check for ASCII files (.dpt, .dat, .asc)
                 elif any(f.suffix.lower() in ['.dpt', '.dat', '.asc'] for f in files):
                     format_type = 'ascii'
@@ -41625,7 +41782,7 @@ External Validation Performance (n={n_val}):
                 else:
                     raise ValueError(
                         "No supported spectral files found in directory.\n"
-                        "Supported: ASD, SIG, SPC, JCAMP-DX, OPUS, PerkinElmer, ASCII, CSV"
+                        "Supported: ASD, SIG, SPC, JCAMP-DX, OPUS, PerkinElmer, Omnic, ASCII, CSV"
                     )
 
                 # Convert DataFrame to arrays
@@ -42179,7 +42336,7 @@ External Validation Performance (n={n_val}):
         choice = messagebox.askquestion(
             "Load Type",
             "Load a directory of spectral files?\n\n"
-            "Yes = Directory (ASD, SIG, SPC, OPUS, JCAMP, PerkinElmer, ASCII, CSV)\n"
+            "Yes = Directory (ASD, SIG, SPC, OPUS, JCAMP, PerkinElmer, Omnic, ASCII, CSV)\n"
             "No = Single combined file (CSV, Excel, or NumPy)",
             icon='question'
         )
@@ -42267,6 +42424,12 @@ External Validation Performance (n={n_val}):
                 elif any(f.suffix.lower() == '.sp' for f in files):
                     detected_format = 'perkinelmer_folder'
                     X_df, metadata = read_sp_dir(path)
+
+                # Check for Thermo Omnic files (.spa, .spg)
+                elif any(f.suffix.lower() in ['.spa', '.spg'] for f in files):
+                    detected_format = 'omnic_folder'
+                    from spectral_predict.io import read_omnic_dir
+                    X_df, metadata = read_omnic_dir(path)
 
                 # Check for ASCII files (.dpt, .dat, .asc)
                 elif any(f.suffix.lower() in ['.dpt', '.dat', '.asc'] for f in files):
@@ -43378,6 +43541,7 @@ External Validation Performance (n={n_val}):
                     'jcamp_folder': ['.jdx', '.dx'],
                     'opus_folder': None,  # numeric extensions handled separately
                     'perkinelmer_folder': ['.sp'],
+                    'omnic_folder': ['.spa', '.spg'],
                     'ascii_folder': ['.dpt', '.dat', '.asc'],
                 }
 
@@ -45127,14 +45291,21 @@ External Validation Performance (n={n_val}):
                         except Exception as e:
                             print(f"Warning: Failed to apply rule for {aux_model_target}: {e}")
 
-            # Add Reliability column from primary model's domain results
+            # Extract reliability scores for ALL models (primary + auxiliary)
+            self._all_reliability_scores = {}  # {col_name: np.array of scores}
             self._primary_reliability_scores = None
             self._primary_domain_status = None
+            for col_name, dom_data in domain_results.items():
+                rel_scores = dom_data.get('reliability_scores')
+                if rel_scores is not None:
+                    self._all_reliability_scores[col_name] = rel_scores
+
+            # Primary model reliability column (displayed in GUI table)
             if domain_results and primary_col_name in domain_results:
                 reliability = domain_results[primary_col_name].get('reliability_scores')
                 if reliability is not None:
                     self._primary_reliability_scores = reliability
-                    results['Reliability'] = [f"{int(r)}%" for r in reliability]
+                    results['Primary Reliability'] = [f"{int(r)}%" for r in reliability]
                 # Keep domain_status as fallback for older models
                 self._primary_domain_status = domain_results[primary_col_name].get('domain_status')
 
@@ -45160,43 +45331,62 @@ External Validation Performance (n={n_val}):
 
     def _update_domain_summary_banner(self, domain_results, primary_col_name):
         """Update the domain summary banner above the results table."""
-        if not domain_results or primary_col_name not in domain_results:
+        if not domain_results:
             self.domain_banner_frame.pack_forget()
             return
 
-        ad = domain_results[primary_col_name]
-        reliability = ad.get('reliability_scores')
+        # Collect per-model reliability summaries
+        all_rel = getattr(self, '_all_reliability_scores', {})
+        has_any_reliability = bool(all_rel)
 
-        if reliability is not None:
-            # Reliability-based banner
-            n_total = len(reliability)
-            n_high = int(np.sum(reliability >= 80))
-            n_moderate = int(np.sum((reliability >= 50) & (reliability < 80)))
-            n_low = int(np.sum((reliability >= 35) & (reliability < 50)))
-            n_very_low = int(np.sum(reliability < 35))
+        if has_any_reliability:
+            # Build per-model summary lines
+            lines = []
+            worst_category = 'high'  # Track worst across all models for banner color
+            for col_name, reliability in all_rel.items():
+                n_total = len(reliability)
+                n_high = int(np.sum(reliability >= 80))
+                n_moderate = int(np.sum((reliability >= 50) & (reliability < 80)))
+                n_low = int(np.sum((reliability >= 35) & (reliability < 50)))
+                n_very_low = int(np.sum(reliability < 35))
 
-            parts = [f"{n_high} of {n_total} high reliability"]
-            if n_moderate:
-                parts.append(f"{n_moderate} moderate")
-            if n_low:
-                parts.append(f"{n_low} low")
-            if n_very_low:
-                parts.append(f"{n_very_low} very low")
+                # Short model name (truncate if too long)
+                short_name = col_name[:30] + '...' if len(col_name) > 30 else col_name
+                parts = [f"{n_high}/{n_total} high"]
+                if n_moderate:
+                    parts.append(f"{n_moderate} mod")
+                if n_low:
+                    parts.append(f"{n_low} low")
+                if n_very_low:
+                    parts.append(f"{n_very_low} v.low")
+                lines.append(f"{short_name}: {', '.join(parts)}")
 
-            text = f"Prediction Reliability (primary model):  {'  |  '.join(parts)}"
-            legend = ("Green = high (80-95%)  |  Blue = moderate (50-79%)  |  "
-                      "Orange = low (35-49%)  |  Red = very low (<35%)")
+                # Track worst category
+                if n_very_low > 0:
+                    worst_category = 'very_low'
+                elif n_low > 0 and worst_category != 'very_low':
+                    worst_category = 'low'
+                elif n_moderate > 0 and worst_category not in ('very_low', 'low'):
+                    worst_category = 'moderate'
 
-            if n_very_low > 0:
+            text = "Prediction Reliability:  " + "  |  ".join(lines)
+            legend = ("● high (80-95%)  |  ▲ moderate (50-79%)  |  "
+                      "△ low (35-49%)  |  ✕ very low (<35%)")
+
+            if worst_category == 'very_low':
                 bg, fg = '#f8d7da', '#721c24'
-            elif n_low > 0:
+            elif worst_category == 'low':
                 bg, fg = '#fff3cd', '#856404'
-            elif n_moderate > 0:
+            elif worst_category == 'moderate':
                 bg, fg = '#d1ecf1', '#0c5460'
             else:
                 bg, fg = '#d4edda', '#155724'
         else:
             # Fall back to domain status display for older models
+            if primary_col_name not in domain_results:
+                self.domain_banner_frame.pack_forget()
+                return
+            ad = domain_results[primary_col_name]
             domain_status = ad.get('domain_status')
             if domain_status is None:
                 self.domain_banner_frame.pack_forget()
@@ -45334,8 +45524,8 @@ External Validation Performance (n={n_val}):
             # Set column width based on content type
             if col == 'Sample':
                 width = 100
-            elif col == 'Reliability':
-                width = 80
+            elif col == 'Primary Reliability':
+                width = 120
             elif col == 'Flags':
                 width = 200
             elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
@@ -45359,32 +45549,46 @@ External Validation Performance (n={n_val}):
                 # Format values based on type
                 if pd.isna(val):
                     values.append("")
-                elif col in ('Sample', 'Flags', 'Reliability'):
+                elif col in ('Sample', 'Flags', 'Primary Reliability'):
                     values.append(str(val))
                 elif is_classification:
                     # Classification predictions - display as text
-                    values.append(str(val))
+                    display_val = str(val)
+                    # Prepend reliability indicator if available for this model
+                    all_rel = getattr(self, '_all_reliability_scores', {})
+                    if col in all_rel and row_idx < len(all_rel[col]):
+                        r = all_rel[col][row_idx]
+                        indicator = '● ' if r >= 80 else '▲ ' if r >= 50 else '△ ' if r >= 35 else '✕ '
+                        display_val = f"{indicator}{display_val}"
+                    values.append(display_val)
                 elif isinstance(val, (int, float)):
                     # Regression predictions - format as float
-                    values.append(f"{val:.4f}")
+                    display_val = f"{val:.4f}"
+                    # Prepend reliability indicator if available for this model
+                    all_rel = getattr(self, '_all_reliability_scores', {})
+                    if col in all_rel and row_idx < len(all_rel[col]):
+                        r = all_rel[col][row_idx]
+                        indicator = '● ' if r >= 80 else '▲ ' if r >= 50 else '△ ' if r >= 35 else '✕ '
+                        display_val = f"{indicator}{display_val}"
+                    values.append(display_val)
                 else:
                     values.append(str(val))
 
-            # Determine row tag — prefer reliability scores, fall back to domain status
+            # Determine row tag — color only unanimous cases across all models
             tags = ()
-            reliability_scores = getattr(self, '_primary_reliability_scores', None)
-            if reliability_scores is not None and row_idx < len(reliability_scores):
-                r = reliability_scores[row_idx]
-                if r >= 80:
+            all_rel = getattr(self, '_all_reliability_scores', {})
+            row_scores = [
+                scores[row_idx] for scores in all_rel.values()
+                if row_idx < len(scores)
+            ]
+            if row_scores:
+                if all(r >= 80 for r in row_scores):
                     tags = ('reliability_high',)
-                elif r >= 50:
-                    tags = ('reliability_moderate',)
-                elif r >= 35:
-                    tags = ('reliability_low',)
-                else:
+                elif all(r < 35 for r in row_scores):
                     tags = ('reliability_very_low',)
+                # Mixed reliability → no row color (per-cell indicators tell the story)
             elif domain_status is not None and row_idx < len(domain_status):
-                # Fallback: old 4-zone coloring for models without reliability scores
+                # Fallback: old 4-zone coloring for models without any reliability scores
                 ds = domain_status[row_idx]
                 if ds == 'outside_domain':
                     tags = ('domain_outside',)
@@ -45442,11 +45646,14 @@ External Validation Performance (n={n_val}):
 
                     summary_cols = ['Sample']
                     primary_cols = [col for col in self.comparison_results.columns
-                                    if col not in ('Sample', 'Flags') and primary_filename in col]
+                                    if col not in ('Sample', 'Flags')
+                                    and 'Reliability' not in col
+                                    and primary_filename in col]
                     # Fallback: if no match by filename, include first prediction column
                     if not primary_cols:
                         pred_cols = [col for col in self.comparison_results.columns
-                                     if col not in ('Sample', 'Flags')]
+                                     if col not in ('Sample', 'Flags')
+                                     and 'Reliability' not in col]
                         if pred_cols:
                             primary_cols = [pred_cols[0]]
                     summary_cols.extend(primary_cols)
@@ -45455,14 +45662,15 @@ External Validation Performance (n={n_val}):
 
                     self.comparison_results[summary_cols].to_excel(writer, sheet_name='Summary', index=False)
 
-                    # Sheet 2: All Predictions (add Reliability % and Domain Status for export)
+                    # Sheet 2: All Predictions (add per-model Reliability % and Domain Status)
                     export_df = self.comparison_results.copy()
-                    # Replace string Reliability column with numeric for export
-                    reliability_scores = getattr(self, '_primary_reliability_scores', None)
-                    if reliability_scores is not None:
-                        if 'Reliability' in export_df.columns:
-                            export_df.drop(columns=['Reliability'], inplace=True)
-                        export_df['Reliability (%)'] = [int(r) for r in reliability_scores]
+                    # Drop the string "Primary Reliability" column (replaced with numeric below)
+                    if 'Primary Reliability' in export_df.columns:
+                        export_df.drop(columns=['Primary Reliability'], inplace=True)
+                    # Add numeric reliability columns for each model with domain data
+                    all_rel = getattr(self, '_all_reliability_scores', {})
+                    for col_name, scores in all_rel.items():
+                        export_df[f'Reliability ({col_name})'] = [int(r) for r in scores]
                     domain_status = getattr(self, '_primary_domain_status', None)
                     if domain_status is not None:
                         status_map = {
@@ -45471,7 +45679,7 @@ External Validation Performance (n={n_val}):
                             'new_features': 'Unfamiliar spectra',
                             'outside_domain': 'Outside domain',
                         }
-                        export_df['Domain Status'] = [status_map.get(s, '') for s in domain_status]
+                        export_df['Domain Status (Primary)'] = [status_map.get(s, '') for s in domain_status]
                     export_df.to_excel(writer, sheet_name='All Predictions', index=False)
 
                     # Sheet 3: Model Metadata
@@ -45544,13 +45752,15 @@ External Validation Performance (n={n_val}):
 
                 messagebox.showinfo("Success", f"Results exported to Excel:\n{filepath}")
             else:
-                # CSV export (add Reliability % and Domain Status for export)
+                # CSV export (add per-model Reliability % and Domain Status)
                 export_df = self.comparison_results.copy()
-                reliability_scores = getattr(self, '_primary_reliability_scores', None)
-                if reliability_scores is not None:
-                    if 'Reliability' in export_df.columns:
-                        export_df.drop(columns=['Reliability'], inplace=True)
-                    export_df['Reliability (%)'] = [int(r) for r in reliability_scores]
+                # Drop the string "Primary Reliability" column (replaced with numeric below)
+                if 'Primary Reliability' in export_df.columns:
+                    export_df.drop(columns=['Primary Reliability'], inplace=True)
+                # Add numeric reliability columns for each model with domain data
+                all_rel = getattr(self, '_all_reliability_scores', {})
+                for col_name, scores in all_rel.items():
+                    export_df[f'Reliability ({col_name})'] = [int(r) for r in scores]
                 domain_status = getattr(self, '_primary_domain_status', None)
                 if domain_status is not None:
                     status_map = {
@@ -45559,7 +45769,7 @@ External Validation Performance (n={n_val}):
                         'new_features': 'Unfamiliar spectra',
                         'outside_domain': 'Outside domain',
                     }
-                    export_df['Domain Status'] = [status_map.get(s, '') for s in domain_status]
+                    export_df['Domain Status (Primary)'] = [status_map.get(s, '') for s in domain_status]
                 export_df.to_csv(filepath, index=False)
                 messagebox.showinfo("Success", f"Results exported to CSV:\n{filepath}")
 
@@ -49573,6 +49783,13 @@ External Validation Performance (n={n_val}):
             if sp_files:
                 from spectral_predict.io import read_sp_dir
                 df, metadata = read_sp_dir(str(path))
+                return df.values, df.columns.astype(float).values, df.index.tolist()
+
+            # Check for Thermo Omnic files (.spa, .spg)
+            omnic_files = [f for f in files if f.suffix.lower() in ('.spa', '.spg')]
+            if omnic_files:
+                from spectral_predict.io import read_omnic_dir
+                df, metadata = read_omnic_dir(str(path))
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             raise ValueError(f"No supported spectral files found in {path}")

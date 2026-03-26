@@ -8,6 +8,7 @@ This package provides readers for vendor-specific spectroscopy file formats:
 - ASD (.asd, .sig) - native Python or requires specdal for binary
 - SPC (.spc) - requires spc-io
 - JCAMP-DX (.jdx, .dx) - requires jcamp
+- Thermo Omnic (.spa, .spg) - requires spectrochempy-omnic
 
 Install optional dependencies:
     pip install spectral-predict[opus]           # Bruker OPUS
@@ -39,6 +40,13 @@ from spectral_predict.readers.agilent_reader import (
     read_asp_file,
 )
 
+# Thermo Omnic readers
+from spectral_predict.readers.omnic_reader import (
+    read_spa_file,
+    read_spg_file,
+    read_omnic_dir,
+)
+
 __all__ = [
     # Bruker OPUS
     'read_opus_file',
@@ -54,4 +62,8 @@ __all__ = [
     'read_seq_file',
     'read_dmt_file',
     'read_asp_file',
+    # Thermo Omnic
+    'read_spa_file',
+    'read_spg_file',
+    'read_omnic_dir',
 ]
