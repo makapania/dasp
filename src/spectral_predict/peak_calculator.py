@@ -136,7 +136,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
         grouping="left",
         description=(
             "(604 + 564) / 590 — IRSF apatite crystallinity "
-            "(Weiner & Bar-Yosef 1990, auto peak search, local baseline 400-670 cm⁻¹)"
+            "(Weiner & Bar-Yosef 1990, auto peak search, local baseline 490-750 cm⁻¹)"
         ),
         category="Bone FTIR",
         x_unit="cm-1",
@@ -155,7 +155,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
         peak_a=PeakDefinition(1128, "search_max", 15, "HPO4", baseline=_BL_V3_PO4),
         peak_b=PeakDefinition(1035, "search_max", 25, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
-        description="1128 / 1020 — acid phosphate content (auto peak search, local baseline)",
+        description="1128 / 1035 — acid phosphate content (auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
@@ -772,7 +772,7 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
         grouping="left",
         description=(
             "(560 + 600) / 595 — enamel IRSF crystallinity "
-            "(Weiner & Bar-Yosef 1990, auto peak search, local baseline 400-670 cm⁻¹)"
+            "(Weiner & Bar-Yosef 1990, auto peak search, local baseline 490-750 cm⁻¹)"
         ),
         category="Enamel FTIR",
         x_unit="cm-1",
