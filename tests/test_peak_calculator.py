@@ -15,6 +15,7 @@ from spectral_predict.peak_calculator import (
     calculate_all_samples,
     calculate_expression,
     calculate_expression_detailed,
+    find_peak_in_window,
     find_trough_in_window,
     get_baseline_corrected_intensity,
     get_peak_intensity,
@@ -411,21 +412,21 @@ def test_load_user_presets_returns_empty_on_corrupt_json(tmp_path, monkeypatch):
 
 @pytest.fixture
 def bone_wavelengths():
-    """Wavenumber axis covering the v4 PO4 region (380-700 cm-1) with 1 cm-1 spacing."""
-    return np.arange(380, 701, dtype=float)
+    """Wavenumber axis covering the v4 PO4 region (380-800 cm-1) with 1 cm-1 spacing."""
+    return np.arange(380, 801, dtype=float)
 
 
 @pytest.fixture
 def bone_spectrum_sloping(bone_wavelengths):
     """Synthetic bone-like spectrum: three peaks at 560, 590, 600 cm-1 on a sloping baseline.
 
-    The sloping baseline runs linearly from 0.5 at 380 cm-1 to 1.5 at 700 cm-1.
+    The sloping baseline runs linearly from 0.5 at 380 cm-1 to 1.5 at 800 cm-1.
     Gaussian peaks of known height sit on top:
       - 560 cm-1: height 3.0 above baseline
       - 590 cm-1: height 4.0 above baseline
       - 600 cm-1: height 3.5 above baseline
     """
-    slope = 0.5 + (bone_wavelengths - 380) / (700 - 380)  # 0.5 -> 1.5
+    slope = 0.5 + (bone_wavelengths - 380) / (800 - 380)  # 0.5 -> 1.5
     peaks = np.zeros_like(bone_wavelengths)
     for center, height in [(560, 3.0), (590, 4.0), (600, 3.5)]:
         peaks += height * np.exp(-0.5 * ((bone_wavelengths - center) / 8) ** 2)
@@ -434,8 +435,8 @@ def bone_spectrum_sloping(bone_wavelengths):
 
 @pytest.fixture
 def bone_baseline_region():
-    """Baseline region bracketing the v4 PO4 peaks: troughs near 400-420 and 650-680."""
-    return BaselineRegion(left_min=400, left_max=420, right_min=650, right_max=680)
+    """Baseline region bracketing the v4 PO4 peaks: troughs near 490-510 and 690-750."""
+    return BaselineRegion(left_min=490, left_max=510, right_min=690, right_max=750)
 
 
 @pytest.fixture
@@ -477,7 +478,7 @@ def bone_multi_sample(bone_wavelengths):
     n_samples = 3
     data = np.zeros((n_samples, len(bone_wavelengths)))
     for i in range(n_samples):
-        slope = 0.5 + (bone_wavelengths - 380) / (700 - 380)
+        slope = 0.5 + (bone_wavelengths - 380) / (800 - 380)
         for center, base_height in [(560, 3.0), (590, 4.0), (600, 3.5)]:
             slope += (i + 1) * base_height * np.exp(
                 -0.5 * ((bone_wavelengths - center) / 8) ** 2
@@ -622,6 +623,7 @@ def test_get_baseline_corrected_with_baseline(bone_wavelengths, bone_spectrum_sl
     assert "right_wn" in diag
     assert "baseline_at_peak" in diag
     assert "raw_intensity" in diag
+    assert "found_wn" in diag
     # The corrected value should be raw - baseline
     expected = diag["raw_intensity"] - diag["baseline_at_peak"]
     assert corrected == pytest.approx(expected, abs=1e-10)
@@ -650,8 +652,8 @@ def test_get_baseline_corrected_diagnostics_anchor_positions(bone_wavelengths, b
     """Diagnostic trough positions should fall within the specified search windows."""
     peak_def = PeakDefinition(590, "point", 10, "590", baseline=bone_baseline_region)
     _, diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
-    assert 400 <= diag["left_wn"] <= 420
-    assert 650 <= diag["right_wn"] <= 680
+    assert 490 <= diag["left_wn"] <= 510
+    assert 690 <= diag["right_wn"] <= 750
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +735,7 @@ def test_calculate_expression_detailed_returns_diagnostics(
         assert "right_wn" in diag
         assert "raw_intensity" in diag
         assert "baseline_at_peak" in diag
+        assert "found_wn" in diag
 
 
 def test_calculate_expression_detailed_no_baseline_peaks(
@@ -753,9 +756,9 @@ def test_calculate_expression_detailed_two_peak(bone_wavelengths, bone_spectrum_
     preset = PeakPreset(
         name="two peak",
         peak_a=PeakDefinition(600, "point", 10, "600",
-                              baseline=BaselineRegion(400, 420, 650, 680)),
+                              baseline=BaselineRegion(490, 510, 690, 750)),
         peak_b=PeakDefinition(560, "point", 10, "560",
-                              baseline=BaselineRegion(400, 420, 650, 680)),
+                              baseline=BaselineRegion(490, 510, 690, 750)),
         operator1="/",
     )
     result = calculate_expression_detailed(bone_wavelengths, bone_spectrum_sloping, preset)

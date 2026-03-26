@@ -8540,6 +8540,10 @@ class SpectralPredictApp:
                         value="point", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
         ttk.Radiobutton(peak_a_frame, text="Range", variable=dialog._peak_a_mode,
                         value="range", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
+        ttk.Radiobutton(peak_a_frame, text="Search", variable=dialog._peak_a_mode,
+                        value="search_max", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
+        ttk.Radiobutton(peak_a_frame, text="Trough", variable=dialog._peak_a_mode,
+                        value="search_min", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
 
         dialog._peak_a_hw = tk.StringVar(value="10")
         ttk.Label(peak_a_frame, text="HW:").pack(side='left')
@@ -8580,6 +8584,10 @@ class SpectralPredictApp:
                         value="point", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
         ttk.Radiobutton(peak_b_frame, text="Range", variable=dialog._peak_b_mode,
                         value="range", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
+        ttk.Radiobutton(peak_b_frame, text="Search", variable=dialog._peak_b_mode,
+                        value="search_max", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
+        ttk.Radiobutton(peak_b_frame, text="Trough", variable=dialog._peak_b_mode,
+                        value="search_min", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
 
         dialog._peak_b_hw = tk.StringVar(value="10")
         ttk.Label(peak_b_frame, text="HW:").pack(side='left')
@@ -8629,6 +8637,10 @@ class SpectralPredictApp:
                         value="point", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
         ttk.Radiobutton(peak_c_row, text="Range", variable=dialog._peak_c_mode,
                         value="range", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
+        ttk.Radiobutton(peak_c_row, text="Search", variable=dialog._peak_c_mode,
+                        value="search_max", command=lambda: self._update_peak_markers(dialog)).pack(side='left')
+        ttk.Radiobutton(peak_c_row, text="Trough", variable=dialog._peak_c_mode,
+                        value="search_min", command=lambda: self._update_peak_markers(dialog)).pack(side='left', padx=(0, 3))
 
         dialog._peak_c_hw = tk.StringVar(value="10")
         ttk.Label(peak_c_row, text="HW:").pack(side='left')
@@ -8667,7 +8679,8 @@ class SpectralPredictApp:
 
         # ---- SECTION: Results ----
         results_frame = ttk.LabelFrame(content, text="Results", padding=8)
-        results_frame.pack(fill='x', padx=pad_x, pady=5)
+        results_frame.pack(fill='both', expand=True, padx=pad_x, pady=5)
+        dialog._results_frame = results_frame
 
         dialog._stats_label = ttk.Label(results_frame, text="No results yet.",
                                         wraplength=480)
@@ -8677,6 +8690,7 @@ class SpectralPredictApp:
         dialog._hist_frame = ttk.Frame(results_frame)
         dialog._hist_frame.pack(fill='x')
         dialog._results_df = None
+        dialog._table_frame = None
 
         # ---- SECTION: Export ----
         export_frame = ttk.Frame(content)
@@ -9071,6 +9085,42 @@ class SpectralPredictApp:
             hist_canvas = FigureCanvasTkAgg(fig, master=dialog._hist_frame)
             hist_canvas.draw()
             hist_canvas.get_tk_widget().pack(fill='x')
+
+        # --- Results table ---
+        if hasattr(dialog, '_table_frame') and dialog._table_frame is not None:
+            for w in dialog._table_frame.winfo_children():
+                w.destroy()
+        else:
+            dialog._table_frame = ttk.Frame(dialog._results_frame)
+            dialog._table_frame.pack(fill='both', expand=True, pady=(5, 0))
+
+        # Determine columns to show
+        show_cols = ["Sample", "Value"]
+        for col in df.columns:
+            if col not in show_cols and col.startswith("bl_"):
+                show_cols.append(col)
+
+        tree = ttk.Treeview(dialog._table_frame, columns=show_cols, show='headings', height=8)
+        for col in show_cols:
+            tree.heading(col, text=col)
+            width = 120 if col == "Sample" else 80
+            tree.column(col, width=width, anchor='center')
+
+        for _, row in df.iterrows():
+            vals = []
+            for col in show_cols:
+                v = row[col]
+                if isinstance(v, float):
+                    vals.append(f"{v:.4f}" if not np.isnan(v) else "NaN")
+                else:
+                    vals.append(str(v))
+            tree.insert('', 'end', values=vals)
+
+        # Add scrollbar
+        vsb = ttk.Scrollbar(dialog._table_frame, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side='left', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
 
     def _peak_calc_export(self, dialog):
         """Export peak calculation results to CSV."""
