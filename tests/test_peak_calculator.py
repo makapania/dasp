@@ -8,13 +8,22 @@ import pytest
 
 from spectral_predict.peak_calculator import (
     BUILT_IN_PRESETS,
+    BaselineRegion,
     PeakDefinition,
     PeakPreset,
+    baseline_at_wavenumber,
     calculate_all_samples,
     calculate_expression,
+    calculate_expression_detailed,
+    find_trough_in_window,
+    get_baseline_corrected_intensity,
     get_peak_intensity,
     load_user_presets,
     save_user_presets,
+    _peak_def_to_dict,
+    _peak_def_from_dict,
+    _preset_to_dict,
+    _preset_from_dict,
 )
 
 
