@@ -42,9 +42,18 @@ class BaselineRegion:
 
 @dataclass
 class PeakDefinition:
-    """A single peak position in the expression."""
+    """A single peak position in the expression.
+
+    Modes:
+        "point"  — intensity at the nearest wavelength to *wavenumber*.
+        "range"  — maximum intensity within [wavenumber ± half_width].
+        "search_max" — find actual local maximum nearest *wavenumber*
+                       within ± half_width (handles peak shifts).
+        "search_min" — find actual local minimum nearest *wavenumber*
+                       within ± half_width (for trough measurements).
+    """
     wavenumber: float = 0.0
-    mode: str = "point"        # "point" or "range"
+    mode: str = "point"        # "point", "range", "search_max", "search_min"
     half_width: float = 10.0   # spectral units (cm-1 or nm)
     label: str = ""
     baseline: Optional[BaselineRegion] = None  # per-peak local baseline
@@ -97,55 +106,55 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     # --- Bone FTIR ---
     PeakPreset(
         name="Mineral:Matrix",
-        peak_a=PeakDefinition(1020, "point", 10, "v3 PO4", baseline=_BL_V3_PO4),
-        peak_b=PeakDefinition(1660, "point", 10, "Amide I", baseline=_BL_AMIDE_I),
+        peak_a=PeakDefinition(1020, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1660, "search_max", 15, "Amide I", baseline=_BL_AMIDE_I),
         operator1="/",
-        description="Phosphate v3 / Amide I — mineral-to-matrix ratio (local baselines)",
+        description="Phosphate v3 / Amide I — mineral-to-matrix ratio (auto peak search, local baselines)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Carbonate:Phosphate",
-        peak_a=PeakDefinition(1415, "point", 10, "v3 CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(1020, "point", 10, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(1415, "search_max", 15, "v3 CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(1020, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description=(
             "Carbonate v3 / Phosphate v3 — C/P ratio "
-            "(Wright & Schwarcz 1996, local baselines)"
+            "(Wright & Schwarcz 1996, auto peak search, local baselines)"
         ),
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Crystallinity Index",
-        peak_a=PeakDefinition(604, "point", 10, "604", baseline=_BL_V4_PO4),
-        peak_b=PeakDefinition(564, "point", 10, "564", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(604, "search_max", 10, "604", baseline=_BL_V4_PO4),
+        peak_b=PeakDefinition(564, "search_max", 10, "564", baseline=_BL_V4_PO4),
         operator1="+",
-        peak_c=PeakDefinition(590, "point", 10, "590", baseline=_BL_V4_PO4),
+        peak_c=PeakDefinition(590, "search_min", 10, "590 trough", baseline=_BL_V4_PO4),
         operator2="/",
         grouping="left",
         description=(
             "(604 + 564) / 590 — IRSF apatite crystallinity "
-            "(Weiner & Bar-Yosef 1990, local baseline 400-670 cm⁻¹)"
+            "(Weiner & Bar-Yosef 1990, auto peak search, local baseline 400-670 cm⁻¹)"
         ),
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Collagen Maturity",
-        peak_a=PeakDefinition(1660, "point", 10, "1660 mature", baseline=_BL_COLLAGEN_MATURITY),
-        peak_b=PeakDefinition(1690, "point", 10, "1690 immature", baseline=_BL_COLLAGEN_MATURITY),
+        peak_a=PeakDefinition(1660, "search_max", 10, "1660 mature", baseline=_BL_COLLAGEN_MATURITY),
+        peak_b=PeakDefinition(1690, "search_max", 10, "1690 immature", baseline=_BL_COLLAGEN_MATURITY),
         operator1="/",
-        description="1660 / 1690 — mature / immature cross-links (local baseline)",
+        description="1660 / 1690 — mature / immature cross-links (auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Acid Phosphate",
-        peak_a=PeakDefinition(1128, "point", 10, "HPO4", baseline=_BL_V3_PO4),
-        peak_b=PeakDefinition(1020, "point", 10, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(1128, "search_max", 15, "HPO4", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1020, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
-        description="1128 / 1020 — acid phosphate content (local baseline)",
+        description="1128 / 1020 — acid phosphate content (auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
@@ -639,88 +648,88 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     # --- Bone FTIR (additional indices from Colmenares-Prado et al. 2026) ---
     PeakPreset(
         name="B-Type Carbonate (BPI)",
-        peak_a=PeakDefinition(1415, "point", 10, "v3 B-CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(1415, "search_max", 15, "v3 B-CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
         operator1="/",
         description=(
             "B-type CO3 / v4 PO4 — BPI "
-            "(Sponheimer & Lee-Thorp 1999, local baselines)"
+            "(Sponheimer & Lee-Thorp 1999, auto peak search, local baselines)"
         ),
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="A-Type Carbonate (API)",
-        peak_a=PeakDefinition(1540, "point", 10, "A-CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(1540, "search_max", 15, "A-CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
         operator1="/",
-        description="A-type CO3 / v4 PO4 — A-carbonate substitution (local baselines)",
+        description="A-type CO3 / v4 PO4 — A-carbonate substitution (auto peak search, local baselines)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="A/B Carbonate (C/C)",
-        peak_a=PeakDefinition(1445, "point", 10, "A-CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(1415, "point", 10, "B-CO3", baseline=_BL_V3_CO3),
+        peak_a=PeakDefinition(1445, "search_max", 15, "A-CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(1415, "search_max", 15, "B-CO3", baseline=_BL_V3_CO3),
         operator1="/",
-        description="Type A / Type B carbonate substitution ratio (Snoeck et al. 2014, local baseline)",
+        description="Type A / Type B carbonate substitution ratio (Snoeck et al. 2014, auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Protein:Carbonate",
-        peak_a=PeakDefinition(1650, "point", 10, "Amide I", baseline=_BL_AMIDE_I),
-        peak_b=PeakDefinition(1415, "point", 10, "v3 B-CO3", baseline=_BL_V3_CO3),
+        peak_a=PeakDefinition(1650, "search_max", 15, "Amide I", baseline=_BL_AMIDE_I),
+        peak_b=PeakDefinition(1415, "search_max", 15, "v3 B-CO3", baseline=_BL_V3_CO3),
         operator1="/",
-        description="Protein relative to carbonate content (Thompson et al. 2013, local baselines)",
+        description="Protein relative to carbonate content (Thompson et al. 2013, auto peak search, local baselines)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="OH:Phosphate",
-        peak_a=PeakDefinition(630, "point", 10, "OH libration", baseline=_BL_V4_PO4),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(630, "search_max", 10, "OH libration", baseline=_BL_V4_PO4),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
         operator1="/",
-        description="Hydroxyl content relative to v4 PO4 (Snoeck et al. 2014, local baseline)",
+        description="Hydroxyl content relative to v4 PO4 (Snoeck et al. 2014, auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Cyanamide:Phosphate",
-        peak_a=PeakDefinition(2010, "point", 10, "Cyanamide"),
-        peak_b=PeakDefinition(1015, "point", 10, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(2010, "search_max", 15, "Cyanamide"),
+        peak_b=PeakDefinition(1015, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
-        description="Cyanamide formation from burning / v3 PO4 (Zazzo et al. 2013)",
+        description="Cyanamide formation from burning / v3 PO4 (Zazzo et al. 2013, auto peak search)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Phosphate High Temp (PHT)",
-        peak_a=PeakDefinition(625, "point", 10, "PO4 HT", baseline=_BL_V4_PO4),
-        peak_b=PeakDefinition(610, "point", 10, "PO4 ref", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(625, "search_max", 10, "PO4 HT", baseline=_BL_V4_PO4),
+        peak_b=PeakDefinition(610, "search_max", 10, "PO4 ref", baseline=_BL_V4_PO4),
         operator1="/",
-        description="High-temperature phosphate indicator (Thompson et al. 2013, local baseline)",
+        description="High-temperature phosphate indicator (Thompson et al. 2013, auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Phosphate Valley (TPV)",
-        peak_a=PeakDefinition(1088, "point", 10, "v3 PO4 shoulder", baseline=_BL_V3_PO4),
-        peak_b=PeakDefinition(1077, "point", 10, "v3 PO4 valley", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(1088, "search_max", 10, "v3 PO4 shoulder", baseline=_BL_V3_PO4),
+        peak_b=PeakDefinition(1077, "search_min", 10, "v3 PO4 valley", baseline=_BL_V3_PO4),
         operator1="/",
-        description="v3 PO4 sharpening at ~1088 — thermal alteration (Colmenares-Prado et al. 2026, local baseline)",
+        description="v3 PO4 sharpening at ~1088 — thermal alteration (Colmenares-Prado et al. 2026, auto peak search, local baseline)",
         category="Bone FTIR",
         x_unit="cm-1",
     ),
     # --- Bone FTIR (Amide/Phosphate) ---
     PeakPreset(
         name="Amide:Phosphate",
-        peak_a=PeakDefinition(1640, "point", 10, "v1 Amide", baseline=_BL_AMIDE_I),
-        peak_b=PeakDefinition(1010, "point", 10, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(1640, "search_max", 15, "v1 Amide", baseline=_BL_AMIDE_I),
+        peak_b=PeakDefinition(1010, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
         description=(
             "Amide I / Phosphate v3 — Am/P ratio "
-            "(Trueman et al., local baselines 1590-1720 and 880-1180 cm⁻¹)"
+            "(Trueman et al., auto peak search, local baselines 1590-1720 and 880-1180 cm⁻¹)"
         ),
         category="Bone FTIR",
         x_unit="cm-1",
@@ -728,70 +737,70 @@ BUILT_IN_PRESETS: list[PeakPreset] = [
     # --- Enamel FTIR ---
     PeakPreset(
         name="Enamel IRSF",
-        peak_a=PeakDefinition(560, "point", 10, "v4 PO4 560", baseline=_BL_V4_PO4),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4 600", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(560, "search_max", 10, "v4 PO4 560", baseline=_BL_V4_PO4),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4 600", baseline=_BL_V4_PO4),
         operator1="+",
-        peak_c=PeakDefinition(595, "point", 10, "v4 PO4 valley", baseline=_BL_V4_PO4),
+        peak_c=PeakDefinition(595, "search_min", 10, "v4 PO4 valley", baseline=_BL_V4_PO4),
         operator2="/",
         grouping="left",
         description=(
             "(560 + 600) / 595 — enamel IRSF crystallinity "
-            "(Weiner & Bar-Yosef 1990, local baseline 400-670 cm⁻¹)"
+            "(Weiner & Bar-Yosef 1990, auto peak search, local baseline 400-670 cm⁻¹)"
         ),
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Enamel C/P",
-        peak_a=PeakDefinition(1415, "point", 10, "v3 CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(1015, "point", 10, "v3 PO4", baseline=_BL_V3_PO4),
+        peak_a=PeakDefinition(1415, "search_max", 15, "v3 CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(1015, "search_max", 15, "v3 PO4", baseline=_BL_V3_PO4),
         operator1="/",
-        description="Carbonate / phosphate — enamel diagenesis indicator (local baselines)",
+        description="Carbonate / phosphate — enamel diagenesis indicator (auto peak search, local baselines)",
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Enamel BPI",
-        peak_a=PeakDefinition(1415, "point", 10, "v3 B-CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(1415, "search_max", 15, "v3 B-CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
         operator1="/",
-        description="B-type carbonate / v4 PO4 — enamel B-carbonate content (local baselines)",
+        description="B-type carbonate / v4 PO4 — enamel B-carbonate content (auto peak search, local baselines)",
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Enamel API",
-        peak_a=PeakDefinition(1540, "point", 10, "A-CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(1540, "search_max", 15, "A-CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
         operator1="/",
-        description="A-type carbonate / v4 PO4 — enamel A-carbonate content (local baselines)",
+        description="A-type carbonate / v4 PO4 — enamel A-carbonate content (auto peak search, local baselines)",
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Enamel A/B Carbonate",
-        peak_a=PeakDefinition(1445, "point", 10, "A-CO3", baseline=_BL_V3_CO3),
-        peak_b=PeakDefinition(1415, "point", 10, "B-CO3", baseline=_BL_V3_CO3),
+        peak_a=PeakDefinition(1445, "search_max", 15, "A-CO3", baseline=_BL_V3_CO3),
+        peak_b=PeakDefinition(1415, "search_max", 15, "B-CO3", baseline=_BL_V3_CO3),
         operator1="/",
-        description="Type A / Type B carbonate substitution in enamel (local baseline)",
+        description="Type A / Type B carbonate substitution in enamel (auto peak search, local baseline)",
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Enamel OH/P",
-        peak_a=PeakDefinition(630, "point", 10, "OH libration", baseline=_BL_V4_PO4),
-        peak_b=PeakDefinition(600, "point", 10, "v4 PO4", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(630, "search_max", 10, "OH libration", baseline=_BL_V4_PO4),
+        peak_b=PeakDefinition(600, "search_max", 10, "v4 PO4", baseline=_BL_V4_PO4),
         operator1="/",
-        description="Hydroxyl content — fluoride substitution indicator in enamel (local baseline)",
+        description="Hydroxyl content — fluoride substitution indicator in enamel (auto peak search, local baseline)",
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
     PeakPreset(
         name="Enamel PHT",
-        peak_a=PeakDefinition(625, "point", 10, "PO4 HT", baseline=_BL_V4_PO4),
-        peak_b=PeakDefinition(610, "point", 10, "PO4 ref", baseline=_BL_V4_PO4),
+        peak_a=PeakDefinition(625, "search_max", 10, "PO4 HT", baseline=_BL_V4_PO4),
+        peak_b=PeakDefinition(610, "search_max", 10, "PO4 ref", baseline=_BL_V4_PO4),
         operator1="/",
-        description="High-temperature phosphate indicator in enamel (local baseline)",
+        description="High-temperature phosphate indicator in enamel (auto peak search, local baseline)",
         category="Enamel FTIR",
         x_unit="cm-1",
     ),
@@ -1047,6 +1056,60 @@ def find_trough_in_window(
     return float(wavelengths[abs_idx]), float(spectrum[abs_idx])
 
 
+def find_peak_in_window(
+    wavelengths: np.ndarray,
+    spectrum: np.ndarray,
+    target_wn: float,
+    half_width: float = 10.0,
+    smooth_window: int = 9,
+    find_max: bool = True,
+) -> tuple[float, float]:
+    """Find the actual peak (max) or trough (min) nearest a target wavenumber.
+
+    Searches within [target_wn - half_width, target_wn + half_width] for the
+    local extremum.  Returns the position and raw intensity at that position.
+
+    Args:
+        wavelengths: Wavenumber axis (sorted).
+        spectrum: Intensity values.
+        target_wn: Expected peak/trough position.
+        half_width: Search radius in spectral units.
+        smooth_window: SG smoothing window for robust extremum detection.
+        find_max: True to find maximum (peak), False to find minimum (trough).
+
+    Returns:
+        (wavenumber_at_extremum, raw_intensity_at_extremum)
+    """
+    lo = target_wn - half_width
+    hi = target_wn + half_width
+    mask = (wavelengths >= lo) & (wavelengths <= hi)
+    if not mask.any():
+        idx = int(np.argmin(np.abs(wavelengths - target_wn)))
+        return float(wavelengths[idx]), float(spectrum[idx])
+
+    subset_idx = np.where(mask)[0]
+    subset_vals = spectrum[subset_idx]
+
+    # Light SG smoothing for robust detection
+    if len(subset_vals) >= max(smooth_window, 5):
+        sw = min(smooth_window, len(subset_vals))
+        if sw % 2 == 0:
+            sw -= 1
+        sw = max(sw, 5)
+        polyorder = min(2, sw - 1)
+        smoothed = savgol_filter(subset_vals, sw, polyorder)
+    else:
+        smoothed = subset_vals
+
+    if find_max:
+        local_idx = int(np.argmax(smoothed))
+    else:
+        local_idx = int(np.argmin(smoothed))
+
+    abs_idx = subset_idx[local_idx]
+    return float(wavelengths[abs_idx]), float(spectrum[abs_idx])
+
+
 def baseline_at_wavenumber(
     peak_wn: float,
     left_wn: float,
@@ -1114,7 +1177,9 @@ def get_peak_intensity(
     """Return the intensity for a single peak definition.
 
     Point mode: intensity at the nearest wavelength.
-    Range mode: maximum intensity within [center +- half_width].
+    Range mode: maximum intensity within [center ± half_width].
+    search_max mode: find actual local maximum near target within ± half_width.
+    search_min mode: find actual local minimum near target within ± half_width.
     """
     wn = peak_def.wavenumber
     if peak_def.mode == "range":
@@ -1125,6 +1190,16 @@ def get_peak_intensity(
             idx = np.argmin(np.abs(wavelengths - wn))
             return float(spectrum[idx])
         return float(np.max(spectrum[mask]))
+    elif peak_def.mode == "search_max":
+        _, val = find_peak_in_window(
+            wavelengths, spectrum, wn, peak_def.half_width, find_max=True,
+        )
+        return val
+    elif peak_def.mode == "search_min":
+        _, val = find_peak_in_window(
+            wavelengths, spectrum, wn, peak_def.half_width, find_max=False,
+        )
+        return val
     else:
         idx = np.argmin(np.abs(wavelengths - wn))
         return float(spectrum[idx])
