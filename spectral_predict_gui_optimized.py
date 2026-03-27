@@ -7245,6 +7245,12 @@ class SpectralPredictApp:
         bl_top.pack(fill='x', padx=5, pady=2)
         ttk.Label(bl_top, text="Method:").pack(side='left', padx=(0, 5))
         bl_values = ["None", "Rubber Band", "Polynomial", "ALS", "airPLS"]
+        try:
+            from spectral_predict.baseline_advanced import get_dropdown_values, HAS_PYBASELINES
+            if HAS_PYBASELINES:
+                bl_values.extend(get_dropdown_values())
+        except ImportError:
+            pass
         self._custom_bl_combo = ttk.Combobox(
             bl_top, textvariable=self._explore_custom_bl_method,
             values=bl_values,
@@ -7252,8 +7258,6 @@ class SpectralPredictApp:
         )
         self._custom_bl_combo.pack(side='left')
         self._custom_bl_combo.bind('<<ComboboxSelected>>', self._on_custom_bl_change)
-        self._custom_bl_advanced_loaded = False
-        self._custom_bl_combo.bind('<Button-1>', self._lazy_load_advanced_bl_options)
 
         # Polynomial params
         self._custom_bl_poly_frame = ttk.Frame(bl_lf)
@@ -7489,17 +7493,6 @@ class SpectralPredictApp:
             except ImportError:
                 self._advanced_bl_mod = None
         return self._advanced_bl_mod
-
-    def _lazy_load_advanced_bl_options(self, event=None):
-        """Populate the baseline dropdown with advanced algorithms on first click."""
-        if self._custom_bl_advanced_loaded:
-            return
-        self._custom_bl_advanced_loaded = True
-        mod = self._get_advanced_bl_module()
-        if mod:
-            current = list(self._custom_bl_combo['values'])
-            current.extend(mod.get_dropdown_values())
-            self._custom_bl_combo['values'] = current
 
     def _on_custom_bl_change(self, event=None):
         """Show/hide baseline parameter frames based on selected method."""
@@ -8624,16 +8617,28 @@ class SpectralPredictApp:
             else:
                 filtered = [p for p in dialog._all_presets if p.category == pack]
             dialog._filtered_presets = filtered
-            names = [p.name for p in filtered]
+            names = ["-- Manual --"] + [p.name for p in filtered]
             dialog._preset_combo['values'] = names
-            if names and auto_select:
-                dialog._preset_combo.current(0)
+            if len(names) > 1 and auto_select:
+                dialog._preset_combo.current(1)  # first real preset
                 _load_preset()
             else:
-                dialog._preset_var.set("")
+                dialog._preset_var.set("-- Manual --")
+                _load_preset()
 
         def _load_preset(*_args):
             name = dialog._preset_var.get()
+            if not name or name == "-- Manual --":
+                # Manual mode: show the Add Peak C toggle button
+                dialog._add_c_frame.pack(fill='x', pady=2)
+                if dialog._peak_c_visible:
+                    dialog._add_c_btn.config(text="- Remove Peak C")
+                else:
+                    dialog._add_c_btn.config(text="+ Add Peak C")
+                dialog._delete_btn['state'] = 'disabled'
+                dialog._desc_label.config(text="")
+                self._update_peak_markers(dialog)
+                return
             presets = getattr(dialog, '_filtered_presets', dialog._all_presets)
             match = [p for p in presets if p.name == name]
             if not match:
@@ -8657,6 +8662,9 @@ class SpectralPredictApp:
             dialog._peak_b_label.set(p.peak_b.label)
             dialog._peak_b_mode.set(p.peak_b.mode)
             dialog._peak_b_hw.set(str(p.peak_b.half_width))
+
+            # Hide the Add/Remove Peak C frame — presets control Peak C presence
+            dialog._add_c_frame.pack_forget()
 
             if p.peak_c is not None:
                 dialog._peak_c_visible = True
@@ -8868,10 +8876,10 @@ class SpectralPredictApp:
         hw_b.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
 
         # --- Add Peak C toggle ---
-        add_c_frame = ttk.Frame(expr_frame)
-        add_c_frame.pack(fill='x', pady=2)
+        dialog._add_c_frame = ttk.Frame(expr_frame)
+        dialog._add_c_frame.pack(fill='x', pady=2)
         dialog._add_c_btn = ttk.Button(
-            add_c_frame, text="+ Add Peak C", style='Modern.TButton',
+            dialog._add_c_frame, text="+ Add Peak C", style='Modern.TButton',
             command=lambda: self._peak_calc_toggle_c(dialog),
         )
         dialog._add_c_btn.pack(side='left')
@@ -9530,16 +9538,17 @@ class SpectralPredictApp:
         else:
             filtered = [p for p in dialog._all_presets if p.category == pack]
         dialog._filtered_presets = filtered
-        dialog._preset_combo['values'] = [p.name for p in filtered]
+        dialog._preset_combo['values'] = ["-- Manual --"] + [p.name for p in filtered]
         dialog._preset_var.set(name)
-        dialog._delete_btn['state'] = 'normal'
+        # Sync UI with newly saved preset (hides Add Peak C button, etc.)
+        dialog._preset_combo.event_generate('<<ComboboxSelected>>')
 
     def _peak_calc_delete_preset(self, dialog):
         """Delete the selected user preset."""
         from spectral_predict.peak_calculator import BUILT_IN_PRESETS, save_user_presets
 
         name = dialog._preset_var.get()
-        if not name:
+        if not name or name == "-- Manual --":
             return
         # Only delete user presets
         builtin_names = {p.name for p in BUILT_IN_PRESETS}
@@ -9557,12 +9566,14 @@ class SpectralPredictApp:
         else:
             filtered = [p for p in dialog._all_presets if p.category == pack]
         dialog._filtered_presets = filtered
-        names = [p.name for p in filtered]
+        names = ["-- Manual --"] + [p.name for p in filtered]
         dialog._preset_combo['values'] = names
-        if names:
-            dialog._preset_combo.current(0)
+        if len(names) > 1:
+            dialog._preset_combo.current(1)  # first real preset
         else:
-            dialog._preset_var.set("")
+            dialog._preset_var.set("-- Manual --")
+        # Sync UI with new selection
+        dialog._preset_combo.event_generate('<<ComboboxSelected>>')
 
     # ========== SAMPLE SETS METHODS ==========
 
