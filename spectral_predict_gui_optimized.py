@@ -2693,6 +2693,15 @@ class SpectralPredictApp:
         self._explore_custom_bl_als_lambda = tk.StringVar(value="1e5")
         self._explore_custom_bl_als_p = tk.StringVar(value="0.001")
         self._explore_custom_bl_airpls_lambda = tk.StringVar(value="1e5")
+        # Advanced baseline params (pybaselines)
+        self._explore_custom_bl_prev_method = "None"  # for separator revert
+        self._explore_custom_bl_advanced_method = tk.StringVar(value="arpls")
+        self._explore_custom_bl_advanced_lam = tk.StringVar(value="1e5")
+        self._explore_custom_bl_advanced_p = tk.StringVar(value="0.01")
+        self._explore_custom_bl_advanced_eta = tk.StringVar(value="0.5")
+        self._explore_custom_bl_advanced_half_window = tk.StringVar(value="30")
+        self._explore_custom_bl_advanced_max_half_window = tk.StringVar(value="30")
+        self._explore_custom_bl_advanced_poly_order = tk.StringVar(value="5")
         # SNV
         self._explore_custom_snv = tk.BooleanVar(value=False)
         # Derivative params
@@ -7235,10 +7244,19 @@ class SpectralPredictApp:
         bl_top = ttk.Frame(bl_lf)
         bl_top.pack(fill='x', padx=5, pady=2)
         ttk.Label(bl_top, text="Method:").pack(side='left', padx=(0, 5))
+        bl_values = ["None", "Rubber Band", "Polynomial", "ALS", "airPLS"]
+        try:
+            from spectral_predict.baseline_advanced import (
+                HAS_PYBASELINES, get_dropdown_values,
+            )
+            if HAS_PYBASELINES:
+                bl_values.extend(get_dropdown_values())
+        except ImportError:
+            pass
         bl_combo = ttk.Combobox(
             bl_top, textvariable=self._explore_custom_bl_method,
-            values=["None", "Rubber Band", "Polynomial", "ALS", "airPLS"],
-            state='readonly', width=14
+            values=bl_values,
+            state='readonly', width=16
         )
         bl_combo.pack(side='left')
         bl_combo.bind('<<ComboboxSelected>>', self._on_custom_bl_change)
@@ -7273,6 +7291,81 @@ class SpectralPredictApp:
                       state='normal', width=6)
         airpls_lam_combo.pack(side='left')
         airpls_lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # Advanced baseline params (pybaselines) — one frame with sub-frames per param
+        self._custom_bl_advanced_frame = ttk.Frame(bl_lf)
+
+        # Lambda sub-frame
+        self._custom_bl_adv_lam_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        ttk.Label(self._custom_bl_adv_lam_frame, text="Lambda:").pack(side='left', padx=(5, 2))
+        adv_lam_combo = ttk.Combobox(
+            self._custom_bl_adv_lam_frame, textvariable=self._explore_custom_bl_advanced_lam,
+            values=["1e2", "2e2", "5e2", "1e3", "2e3", "5e3", "1e4", "2e4", "5e4",
+                    "1e5", "2e5", "5e5", "1e6", "2e6", "5e6", "1e7", "1e8"],
+            state='normal', width=6)
+        adv_lam_combo.pack(side='left')
+        adv_lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # p sub-frame
+        self._custom_bl_adv_p_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        ttk.Label(self._custom_bl_adv_p_frame, text="p:").pack(side='left', padx=(5, 2))
+        adv_p_combo = ttk.Combobox(
+            self._custom_bl_adv_p_frame, textvariable=self._explore_custom_bl_advanced_p,
+            values=["0.0001", "0.0005", "0.001", "0.005", "0.01",
+                    "0.02", "0.05", "0.1", "0.2", "0.5"],
+            state='normal', width=6)
+        adv_p_combo.pack(side='left')
+        adv_p_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # eta sub-frame (drPLS)
+        self._custom_bl_adv_eta_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        ttk.Label(self._custom_bl_adv_eta_frame, text="eta:").pack(side='left', padx=(5, 2))
+        adv_eta_combo = ttk.Combobox(
+            self._custom_bl_adv_eta_frame, textvariable=self._explore_custom_bl_advanced_eta,
+            values=["0.01", "0.05", "0.1", "0.2", "0.3", "0.5", "0.7", "0.8", "0.9", "1.0"],
+            state='normal', width=6)
+        adv_eta_combo.pack(side='left')
+        adv_eta_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # half_window sub-frame (morphological methods)
+        self._custom_bl_adv_hw_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        ttk.Label(self._custom_bl_adv_hw_frame, text="Half window:").pack(side='left', padx=(5, 2))
+        adv_hw_combo = ttk.Combobox(
+            self._custom_bl_adv_hw_frame, textvariable=self._explore_custom_bl_advanced_half_window,
+            values=["5", "10", "15", "20", "25", "30", "40", "50", "60", "80", "100"],
+            state='normal', width=4)
+        adv_hw_combo.pack(side='left')
+        adv_hw_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # max_half_window sub-frame (SNIP)
+        self._custom_bl_adv_mhw_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        ttk.Label(self._custom_bl_adv_mhw_frame, text="Max half win:").pack(side='left', padx=(5, 2))
+        adv_mhw_combo = ttk.Combobox(
+            self._custom_bl_adv_mhw_frame, textvariable=self._explore_custom_bl_advanced_max_half_window,
+            values=["5", "10", "15", "20", "25", "30", "40", "50", "60", "80", "100"],
+            state='normal', width=4)
+        adv_mhw_combo.pack(side='left')
+        adv_mhw_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # poly_order sub-frame (polynomial methods)
+        self._custom_bl_adv_po_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        ttk.Label(self._custom_bl_adv_po_frame, text="Poly order:").pack(side='left', padx=(5, 2))
+        adv_po_combo = ttk.Combobox(
+            self._custom_bl_adv_po_frame, textvariable=self._explore_custom_bl_advanced_poly_order,
+            values=["1", "2", "3", "4", "5", "6", "7", "8"],
+            state='normal', width=3)
+        adv_po_combo.pack(side='left')
+        adv_po_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
+
+        # Auto-Optimize button
+        self._custom_bl_adv_optimize_frame = ttk.Frame(self._custom_bl_advanced_frame)
+        self._custom_bl_adv_optimize_btn = ttk.Button(
+            self._custom_bl_adv_optimize_frame, text="Auto-Optimize",
+            command=self._auto_optimize_advanced_bl)
+        self._custom_bl_adv_optimize_btn.pack(side='left', padx=5)
+        self._custom_bl_adv_optimize_status = ttk.Label(
+            self._custom_bl_adv_optimize_frame, text="", style='Caption.TLabel')
+        self._custom_bl_adv_optimize_status.pack(side='left', padx=5)
 
         # -- SNV + Derivative row --
         row2 = ttk.Frame(frame)
@@ -7367,17 +7460,98 @@ class SpectralPredictApp:
 
     def _on_custom_bl_change(self, event=None):
         """Show/hide baseline parameter frames based on selected method."""
-        for f in (self._custom_bl_poly_frame, self._custom_bl_als_frame,
-                  self._custom_bl_airpls_frame):
-            f.pack_forget()
         method = self._explore_custom_bl_method.get()
+        # Separator labels are not selectable — revert to previous
+        try:
+            from spectral_predict.baseline_advanced import is_separator
+            if is_separator(method):
+                self._explore_custom_bl_method.set(self._explore_custom_bl_prev_method)
+                return
+        except ImportError:
+            pass
+        self._explore_custom_bl_prev_method = method
+
+        for f in (self._custom_bl_poly_frame, self._custom_bl_als_frame,
+                  self._custom_bl_airpls_frame, self._custom_bl_advanced_frame):
+            f.pack_forget()
         if method == "Polynomial":
             self._custom_bl_poly_frame.pack(fill='x', pady=2)
         elif method == "ALS":
             self._custom_bl_als_frame.pack(fill='x', pady=2)
         elif method == "airPLS":
             self._custom_bl_airpls_frame.pack(fill='x', pady=2)
+        elif method not in ("None", "Rubber Band"):
+            # Advanced algorithm from pybaselines
+            try:
+                from spectral_predict.baseline_advanced import (
+                    get_display_to_key_map, ADVANCED_ALGORITHMS,
+                )
+                display_map = get_display_to_key_map()
+                if method in display_map:
+                    key = display_map[method]
+                    self._explore_custom_bl_advanced_method.set(key)
+                    self._custom_bl_advanced_frame.pack(fill='x', pady=2)
+                    self._update_advanced_bl_param_visibility(key)
+            except ImportError:
+                pass
         self._auto_refresh_custom()
+
+    def _update_advanced_bl_param_visibility(self, method_key: str):
+        """Show only the parameter sub-frames relevant to the selected algorithm."""
+        try:
+            from spectral_predict.baseline_advanced import ADVANCED_ALGORITHMS
+        except ImportError:
+            return
+        info = ADVANCED_ALGORITHMS.get(method_key, {})
+        param_names = set(info.get('default_params', {}).keys())
+
+        # Map param names to their sub-frames
+        param_frame_map = {
+            'lam': self._custom_bl_adv_lam_frame,
+            'p': self._custom_bl_adv_p_frame,
+            'eta': self._custom_bl_adv_eta_frame,
+            'half_window': self._custom_bl_adv_hw_frame,
+            'max_half_window': self._custom_bl_adv_mhw_frame,
+            'poly_order': self._custom_bl_adv_po_frame,
+        }
+        for pname, frame in param_frame_map.items():
+            if pname in param_names:
+                frame.pack(fill='x', pady=1)
+            else:
+                frame.pack_forget()
+
+        # Auto-Optimize button: show for supported methods
+        supports = info.get('supports_optimize', False)
+        self._custom_bl_adv_optimize_frame.pack(fill='x', pady=2)
+        self._custom_bl_adv_optimize_btn.configure(
+            state='normal' if supports else 'disabled')
+        self._custom_bl_adv_optimize_status.config(text="")
+
+    def _auto_optimize_advanced_bl(self):
+        """Run pybaselines auto-optimization on the mean spectrum."""
+        if self.X is None:
+            return
+        try:
+            from spectral_predict.baseline_advanced import BaselineAdvanced
+        except ImportError:
+            return
+        method = self._explore_custom_bl_advanced_method.get()
+        self._custom_bl_adv_optimize_status.config(text="Optimizing...")
+        self.root.update_idletasks()
+        try:
+            wn = self.X.columns.values.astype(float)
+            result = BaselineAdvanced.auto_optimize(
+                self.X.values, wavenumbers=wn, method=method,
+            )
+            # Update param widgets with optimized values
+            if 'lam' in result:
+                self._explore_custom_bl_advanced_lam.set(f"{result['lam']:.2e}")
+            if 'poly_order' in result:
+                self._explore_custom_bl_advanced_poly_order.set(str(int(result['poly_order'])))
+            self._custom_bl_adv_optimize_status.config(text="Done")
+            self._auto_refresh_custom()
+        except Exception as e:
+            self._custom_bl_adv_optimize_status.config(text=f"Error: {e}")
 
     def _on_custom_deriv_change(self, event=None):
         """Show/hide derivative params when order != None, and enforce valid ranges."""
@@ -7482,6 +7656,41 @@ class SpectralPredictApp:
                     except ValueError:
                         lam = 1e5
                     data = BaselineAirPLS(lam=lam).fit_transform(data)
+                elif method not in ("None",):
+                    # Advanced baseline algorithm (pybaselines)
+                    try:
+                        from spectral_predict.baseline_advanced import (
+                            BaselineAdvanced, get_display_to_key_map,
+                            ADVANCED_ALGORITHMS, HAS_PYBASELINES,
+                        )
+                        if HAS_PYBASELINES:
+                            display_map = get_display_to_key_map()
+                            algo_key = display_map.get(method)
+                            if algo_key and algo_key in ADVANCED_ALGORITHMS:
+                                info = ADVANCED_ALGORITHMS[algo_key]
+                                params = {}
+                                var_map = {
+                                    'lam': self._explore_custom_bl_advanced_lam,
+                                    'p': self._explore_custom_bl_advanced_p,
+                                    'eta': self._explore_custom_bl_advanced_eta,
+                                    'half_window': self._explore_custom_bl_advanced_half_window,
+                                    'max_half_window': self._explore_custom_bl_advanced_max_half_window,
+                                    'poly_order': self._explore_custom_bl_advanced_poly_order,
+                                }
+                                for pname in info['default_params']:
+                                    if pname in var_map:
+                                        try:
+                                            val = info['param_info'][pname]['type'](
+                                                var_map[pname].get())
+                                        except (ValueError, KeyError):
+                                            val = info['default_params'][pname]
+                                        params[pname] = val
+                                wn = self.X.columns.values.astype(float)
+                                data = BaselineAdvanced(
+                                    method=algo_key, wavenumbers=wn, **params,
+                                ).fit_transform(data)
+                    except ImportError:
+                        pass
 
             elif step_name == "SNV":
                 if self._explore_custom_snv.get():
@@ -7527,6 +7736,35 @@ class SpectralPredictApp:
                 elif method == "airPLS":
                     lam = self._explore_custom_bl_airpls_lambda.get()
                     parts.append(f"airPLS(\u03bb={lam})")
+                elif method not in ("None",):
+                    # Advanced algorithm title
+                    try:
+                        from spectral_predict.baseline_advanced import (
+                            get_display_to_key_map, ADVANCED_ALGORITHMS,
+                        )
+                        display_map = get_display_to_key_map()
+                        algo_key = display_map.get(method)
+                        if algo_key and algo_key in ADVANCED_ALGORITHMS:
+                            info = ADVANCED_ALGORITHMS[algo_key]
+                            param_strs = []
+                            var_map = {
+                                'lam': ('\u03bb', self._explore_custom_bl_advanced_lam),
+                                'p': ('p', self._explore_custom_bl_advanced_p),
+                                'eta': ('eta', self._explore_custom_bl_advanced_eta),
+                                'half_window': ('hw', self._explore_custom_bl_advanced_half_window),
+                                'max_half_window': ('mhw', self._explore_custom_bl_advanced_max_half_window),
+                                'poly_order': ('d', self._explore_custom_bl_advanced_poly_order),
+                            }
+                            for pname in info['default_params']:
+                                if pname in var_map:
+                                    label, var = var_map[pname]
+                                    param_strs.append(f"{label}={var.get()}")
+                            if param_strs:
+                                parts.append(f"{method}({', '.join(param_strs)})")
+                            else:
+                                parts.append(method)
+                    except ImportError:
+                        parts.append(method)
             elif step_name == "SNV":
                 if self._explore_custom_snv.get():
                     parts.append("SNV")
@@ -10465,7 +10703,14 @@ class SpectralPredictApp:
         ttk.Label(self.baseline_options_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         baseline_method_combo = ttk.Combobox(self.baseline_options_frame, textvariable=self.baseline_method,
                                               width=12, state='readonly')
-        baseline_method_combo['values'] = ['polynomial', 'als', 'rubber_band', 'airpls']
+        bl_methods = ['polynomial', 'als', 'rubber_band', 'airpls']
+        try:
+            from spectral_predict.baseline_advanced import HAS_PYBASELINES
+            if HAS_PYBASELINES:
+                bl_methods.append('advanced')
+        except ImportError:
+            pass
+        baseline_method_combo['values'] = bl_methods
         baseline_method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
         baseline_method_combo.bind('<<ComboboxSelected>>', self._on_baseline_method_changed)
 
@@ -10506,10 +10751,35 @@ class SpectralPredictApp:
         airpls_lambda_combo['values'] = ['1e2', '2e2', '5e2', '1e3', '2e3', '5e3', '1e4', '2e4', '5e4', '1e5', '2e5', '5e5', '1e6', '2e6', '5e6', '1e7', '1e8']
         airpls_lambda_combo.pack(side='left')
 
+        # Advanced baseline options
+        self.baseline_advanced_frame = ttk.Frame(self.baseline_options_frame)
+        self.baseline_advanced_frame.grid(row=0, column=6, sticky=tk.W, padx=(15, 0))
+        ttk.Label(self.baseline_advanced_frame, text="Algorithm:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        adv_algo_values = []
+        try:
+            from spectral_predict.baseline_advanced import HAS_PYBASELINES, ADVANCED_ALGORITHMS
+            if HAS_PYBASELINES:
+                adv_algo_values = list(ADVANCED_ALGORITHMS.keys())
+        except ImportError:
+            pass
+        self.baseline_advanced_algorithm = tk.StringVar(value="arpls")
+        self.baseline_advanced_algo_combo = ttk.Combobox(
+            self.baseline_advanced_frame, textvariable=self.baseline_advanced_algorithm,
+            values=adv_algo_values, state='readonly', width=16)
+        self.baseline_advanced_algo_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(self.baseline_advanced_frame, text="Lambda:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5))
+        self.baseline_advanced_lam = tk.StringVar(value="1e5")
+        ttk.Combobox(
+            self.baseline_advanced_frame, textvariable=self.baseline_advanced_lam,
+            values=["1e2", "5e2", "1e3", "5e3", "1e4", "5e4", "1e5", "5e5", "1e6", "5e6", "1e7", "1e8"],
+            state='normal', width=8).grid(row=1, column=1, sticky=tk.W, padx=5)
+
         # Initially hide all non-default method frames
         self.baseline_poly_frame.grid_remove()
         self.baseline_rubberband_frame.grid_remove()
         self.baseline_airpls_frame.grid_remove()
+        self.baseline_advanced_frame.grid_remove()
 
         # Smoothing Section
         ttk.Separator(prestep_frame, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=10)
@@ -11040,7 +11310,7 @@ class SpectralPredictApp:
                         variable=self.bayes_enable_baseline).grid(row=2, column=0, sticky=tk.W, padx=(0, 5))
         self.bayes_baseline_combo = ttk.Combobox(
             self.bayes_options_frame, textvariable=self.bayes_baseline_method,
-            values=['als', 'polynomial', 'rubber_band', 'airpls'],
+            values=['als', 'polynomial', 'rubber_band', 'airpls', 'advanced'],
             state="readonly", width=12)
         self.bayes_baseline_combo.grid(row=2, column=1, sticky=tk.W, padx=(0, 20))
         ttk.Checkbutton(self.bayes_options_frame, text="Smoothing (SG)",
@@ -20962,6 +21232,7 @@ class SpectralPredictApp:
         self.baseline_asls_frame.grid_remove()
         self.baseline_rubberband_frame.grid_remove()
         self.baseline_airpls_frame.grid_remove()
+        self.baseline_advanced_frame.grid_remove()
 
         method = self.baseline_method.get()
         if method == 'polynomial':
@@ -20972,6 +21243,8 @@ class SpectralPredictApp:
             self.baseline_rubberband_frame.grid()
         elif method == 'airpls':
             self.baseline_airpls_frame.grid()
+        elif method == 'advanced':
+            self.baseline_advanced_frame.grid()
 
     def _get_baseline_params(self):
         """Get current baseline correction parameters."""
@@ -20999,6 +21272,14 @@ class SpectralPredictApp:
                 params['lam'] = float(self.baseline_airpls_lambda.get())
             except ValueError:
                 params['lam'] = 1e5
+        elif method == 'advanced':
+            algo = self.baseline_advanced_algorithm.get()
+            params['algorithm'] = algo
+            try:
+                lam = float(self.baseline_advanced_lam.get())
+            except ValueError:
+                lam = 1e5
+            params['lam'] = lam
 
         return method, params
 
@@ -21033,6 +21314,12 @@ class SpectralPredictApp:
         elif method == 'airpls':
             try:
                 params['lam'] = float(self.baseline_airpls_lambda.get())
+            except ValueError:
+                params['lam'] = 1e5
+        elif method == 'advanced':
+            params['algorithm'] = self.baseline_advanced_algorithm.get()
+            try:
+                params['lam'] = float(self.baseline_advanced_lam.get())
             except ValueError:
                 params['lam'] = 1e5
         return method, params
@@ -32444,7 +32731,7 @@ F1 Score:  {f1:.4f}
                 parts = preprocess_str.split('+')
 
                 # Check for baseline methods
-                baseline_methods = ['airpls', 'als', 'polynomial', 'modpoly', 'imodpoly', 'rubber_band']
+                baseline_methods = ['airpls', 'als', 'polynomial', 'modpoly', 'imodpoly', 'rubber_band', 'advanced']
                 for part in parts[:]:  # Use slice to avoid modifying during iteration
                     if part.lower() in baseline_methods:
                         result['baseline'] = part.lower()

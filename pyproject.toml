@@ -52,6 +52,8 @@ dependencies = [
     # Optimization
     "optuna>=3.0.0",
     "pymoo>=0.6.0",
+    # Advanced baseline correction
+    "pybaselines>=1.1.0",
 ]
 
 [project.optional-dependencies]

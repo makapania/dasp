@@ -490,6 +490,26 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
                 lam = params.get('lam', 1e5)
                 steps.append(("baseline", BaselineAirPLS(lam=lam)))
 
+            elif baseline_method == 'advanced':
+                try:
+                    from spectral_predict.baseline_advanced import (
+                        BaselineAdvanced, HAS_PYBASELINES,
+                    )
+                    if not HAS_PYBASELINES:
+                        print("WARNING: pybaselines not installed, skipping advanced baseline")
+                    else:
+                        algo = params.get('algorithm', 'arpls')
+                        wn = params.get('wavenumbers')
+                        algo_params = {
+                            k: v for k, v in params.items()
+                            if k not in ('algorithm', 'wavenumbers')
+                        }
+                        steps.append(("baseline", BaselineAdvanced(
+                            method=algo, wavenumbers=wn, **algo_params,
+                        )))
+                except ImportError:
+                    print("WARNING: baseline_advanced module not available, skipping")
+
             else:
                 print(f"WARNING: Unknown baseline method '{baseline_method}', skipping baseline correction")
 

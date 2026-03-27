@@ -478,7 +478,7 @@ def compute_validation_metrics_for_top_models(
                 parts = str(preprocess_name).split('+')
                 core_parts = []
                 for part in parts:
-                    if part in ('als', 'polynomial', 'rubber_band', 'airpls'):
+                    if part in ('als', 'polynomial', 'rubber_band', 'airpls', 'advanced'):
                         baseline_method = part
                     elif part == 'sg0':
                         smoothing = True
