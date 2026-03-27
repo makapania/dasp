@@ -642,7 +642,7 @@ def test_get_baseline_corrected_without_baseline(bone_wavelengths, bone_spectrum
 def test_get_baseline_corrected_reduces_sloping_baseline_effect(bone_wavelengths, bone_spectrum_sloping, bone_baseline_region):
     """Corrected peaks on a sloping baseline should differ from raw values."""
     peak_def = PeakDefinition(590, "point", 10, "590", baseline=bone_baseline_region)
-    corrected, diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
+    corrected, _diag = get_baseline_corrected_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
     raw = get_peak_intensity(bone_wavelengths, bone_spectrum_sloping, peak_def)
     assert corrected < raw, "Baseline correction should reduce the intensity"
     assert corrected > 0, "Peak should still be positive after correction"
@@ -1146,7 +1146,7 @@ def test_baseline_interpolation_uses_found_wn():
         wavenumber=600, mode="search_max", half_width=10,
         label="test", baseline=bl_region,
     )
-    corrected, diag = get_baseline_corrected_intensity(wl, spec, peak_def)
+    _corrected, diag = get_baseline_corrected_intensity(wl, spec, peak_def)
 
     assert diag is not None
     # The found wavenumber should be 603 (the actual peak), not 600 (nominal)
@@ -1273,7 +1273,7 @@ def test_built_in_presets_contain_ami_amii():
 
 def test_wampi_preset_has_expected_structure():
     """WAMPI preset should have search_max peaks with baselines."""
-    wampi = [p for p in BUILT_IN_PRESETS if p.name == "WAMPI"][0]
+    wampi = next(p for p in BUILT_IN_PRESETS if p.name == "WAMPI")
     assert wampi.category == "Bone FTIR"
     assert wampi.peak_a.mode == "search_max"
     assert wampi.peak_a.baseline is not None
@@ -1282,7 +1282,7 @@ def test_wampi_preset_has_expected_structure():
 
 def test_ami_amii_preset_has_expected_structure():
     """AmI/AmII preset should have search_max peaks with baselines."""
-    ami = [p for p in BUILT_IN_PRESETS if p.name == "AmI/AmII"][0]
+    ami = next(p for p in BUILT_IN_PRESETS if p.name == "AmI/AmII")
     assert ami.category == "Bone FTIR"
     assert ami.peak_a.mode == "search_max"
     assert ami.peak_b.mode == "search_max"
