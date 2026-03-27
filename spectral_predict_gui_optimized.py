@@ -7452,33 +7452,63 @@ class SpectralPredictApp:
             self._custom_smooth_gauss_frame.pack(fill='x', pady=2)
         self._auto_refresh_custom()
 
+    def _get_advanced_bl_params_from_ui(self, mod, display_name: str) -> tuple:
+        """Read advanced baseline params from UI widgets for a given display name.
+
+        Returns (algo_key, params_dict) or (None, {}) if not recognized.
+        """
+        display_map = mod.get_display_to_key_map()
+        algo_key = display_map.get(display_name)
+        if not algo_key or algo_key not in mod.ADVANCED_ALGORITHMS:
+            return None, {}
+        info = mod.ADVANCED_ALGORITHMS[algo_key]
+        var_map = {
+            'lam': self._explore_custom_bl_advanced_lam,
+            'p': self._explore_custom_bl_advanced_p,
+            'eta': self._explore_custom_bl_advanced_eta,
+            'half_window': self._explore_custom_bl_advanced_half_window,
+            'max_half_window': self._explore_custom_bl_advanced_max_half_window,
+            'poly_order': self._explore_custom_bl_advanced_poly_order,
+        }
+        params = {}
+        for pname in info['default_params']:
+            if pname in var_map:
+                try:
+                    params[pname] = info['param_info'][pname]['type'](
+                        var_map[pname].get())
+                except (ValueError, KeyError):
+                    params[pname] = info['default_params'][pname]
+        return algo_key, params
+
+    def _get_advanced_bl_module(self):
+        """Lazy-load and cache the baseline_advanced module. Returns None if unavailable."""
+        if not hasattr(self, '_advanced_bl_mod'):
+            try:
+                import spectral_predict.baseline_advanced as mod
+                self._advanced_bl_mod = mod if mod.HAS_PYBASELINES else None
+            except ImportError:
+                self._advanced_bl_mod = None
+        return self._advanced_bl_mod
+
     def _lazy_load_advanced_bl_options(self, event=None):
         """Populate the baseline dropdown with advanced algorithms on first click."""
         if self._custom_bl_advanced_loaded:
             return
         self._custom_bl_advanced_loaded = True
-        try:
-            from spectral_predict.baseline_advanced import (
-                HAS_PYBASELINES, get_dropdown_values,
-            )
-            if HAS_PYBASELINES:
-                current = list(self._custom_bl_combo['values'])
-                current.extend(get_dropdown_values())
-                self._custom_bl_combo['values'] = current
-        except ImportError:
-            pass
+        mod = self._get_advanced_bl_module()
+        if mod:
+            current = list(self._custom_bl_combo['values'])
+            current.extend(mod.get_dropdown_values())
+            self._custom_bl_combo['values'] = current
 
     def _on_custom_bl_change(self, event=None):
         """Show/hide baseline parameter frames based on selected method."""
         method = self._explore_custom_bl_method.get()
         # Separator labels are not selectable — revert to previous
-        try:
-            from spectral_predict.baseline_advanced import is_separator
-            if is_separator(method):
-                self._explore_custom_bl_method.set(self._explore_custom_bl_prev_method)
-                return
-        except ImportError:
-            pass
+        mod = self._get_advanced_bl_module()
+        if mod and mod.is_separator(method):
+            self._explore_custom_bl_method.set(self._explore_custom_bl_prev_method)
+            return
         self._explore_custom_bl_prev_method = method
 
         for f in (self._custom_bl_poly_frame, self._custom_bl_als_frame,
@@ -7490,32 +7520,23 @@ class SpectralPredictApp:
             self._custom_bl_als_frame.pack(fill='x', pady=2)
         elif method == "airPLS":
             self._custom_bl_airpls_frame.pack(fill='x', pady=2)
-        elif method not in ("None", "Rubber Band"):
-            # Advanced algorithm from pybaselines
-            try:
-                from spectral_predict.baseline_advanced import (
-                    get_display_to_key_map, ADVANCED_ALGORITHMS,
-                )
-                display_map = get_display_to_key_map()
-                if method in display_map:
-                    key = display_map[method]
-                    self._explore_custom_bl_advanced_method.set(key)
-                    self._custom_bl_advanced_frame.pack(fill='x', pady=2)
-                    self._update_advanced_bl_param_visibility(key)
-            except ImportError:
-                pass
+        elif method not in ("None", "Rubber Band") and mod:
+            display_map = mod.get_display_to_key_map()
+            if method in display_map:
+                key = display_map[method]
+                self._explore_custom_bl_advanced_method.set(key)
+                self._custom_bl_advanced_frame.pack(fill='x', pady=2)
+                self._update_advanced_bl_param_visibility(key)
         self._auto_refresh_custom()
 
     def _update_advanced_bl_param_visibility(self, method_key: str):
         """Show only the parameter sub-frames relevant to the selected algorithm."""
-        try:
-            from spectral_predict.baseline_advanced import ADVANCED_ALGORITHMS
-        except ImportError:
+        mod = self._get_advanced_bl_module()
+        if not mod:
             return
-        info = ADVANCED_ALGORITHMS.get(method_key, {})
+        info = mod.ADVANCED_ALGORITHMS.get(method_key, {})
         param_names = set(info.get('default_params', {}).keys())
 
-        # Map param names to their sub-frames
         param_frame_map = {
             'lam': self._custom_bl_adv_lam_frame,
             'p': self._custom_bl_adv_p_frame,
@@ -7530,7 +7551,6 @@ class SpectralPredictApp:
             else:
                 frame.pack_forget()
 
-        # Auto-Optimize button: show for supported methods
         supports = info.get('supports_optimize', False)
         self._custom_bl_adv_optimize_frame.pack(fill='x', pady=2)
         self._custom_bl_adv_optimize_btn.configure(
@@ -7541,19 +7561,17 @@ class SpectralPredictApp:
         """Run pybaselines auto-optimization on the mean spectrum."""
         if self.X is None:
             return
-        try:
-            from spectral_predict.baseline_advanced import BaselineAdvanced
-        except ImportError:
+        mod = self._get_advanced_bl_module()
+        if not mod:
             return
         method = self._explore_custom_bl_advanced_method.get()
         self._custom_bl_adv_optimize_status.config(text="Optimizing...")
         self.root.update_idletasks()
         try:
             wn = self.X.columns.values.astype(float)
-            result = BaselineAdvanced.auto_optimize(
+            result = mod.BaselineAdvanced.auto_optimize(
                 self.X.values, wavenumbers=wn, method=method,
             )
-            # Update param widgets with optimized values
             if 'lam' in result:
                 self._explore_custom_bl_advanced_lam.set(f"{result['lam']:.2e}")
             if 'poly_order' in result:
@@ -7668,39 +7686,15 @@ class SpectralPredictApp:
                     data = BaselineAirPLS(lam=lam).fit_transform(data)
                 elif method not in ("None",):
                     # Advanced baseline algorithm (pybaselines)
-                    try:
-                        from spectral_predict.baseline_advanced import (
-                            BaselineAdvanced, get_display_to_key_map,
-                            ADVANCED_ALGORITHMS, HAS_PYBASELINES,
-                        )
-                        if HAS_PYBASELINES:
-                            display_map = get_display_to_key_map()
-                            algo_key = display_map.get(method)
-                            if algo_key and algo_key in ADVANCED_ALGORITHMS:
-                                info = ADVANCED_ALGORITHMS[algo_key]
-                                params = {}
-                                var_map = {
-                                    'lam': self._explore_custom_bl_advanced_lam,
-                                    'p': self._explore_custom_bl_advanced_p,
-                                    'eta': self._explore_custom_bl_advanced_eta,
-                                    'half_window': self._explore_custom_bl_advanced_half_window,
-                                    'max_half_window': self._explore_custom_bl_advanced_max_half_window,
-                                    'poly_order': self._explore_custom_bl_advanced_poly_order,
-                                }
-                                for pname in info['default_params']:
-                                    if pname in var_map:
-                                        try:
-                                            val = info['param_info'][pname]['type'](
-                                                var_map[pname].get())
-                                        except (ValueError, KeyError):
-                                            val = info['default_params'][pname]
-                                        params[pname] = val
-                                wn = self.X.columns.values.astype(float)
-                                data = BaselineAdvanced(
-                                    method=algo_key, wavenumbers=wn, **params,
-                                ).fit_transform(data)
-                    except ImportError:
-                        pass
+                    mod = self._get_advanced_bl_module()
+                    if mod:
+                        algo_key, params = self._get_advanced_bl_params_from_ui(
+                            mod, method)
+                        if algo_key:
+                            wn = self.X.columns.values.astype(float)
+                            data = mod.BaselineAdvanced(
+                                method=algo_key, wavenumbers=wn, **params,
+                            ).fit_transform(data)
 
             elif step_name == "SNV":
                 if self._explore_custom_snv.get():
@@ -7748,32 +7742,22 @@ class SpectralPredictApp:
                     parts.append(f"airPLS(\u03bb={lam})")
                 elif method not in ("None",):
                     # Advanced algorithm title
-                    try:
-                        from spectral_predict.baseline_advanced import (
-                            get_display_to_key_map, ADVANCED_ALGORITHMS,
-                        )
-                        display_map = get_display_to_key_map()
-                        algo_key = display_map.get(method)
-                        if algo_key and algo_key in ADVANCED_ALGORITHMS:
-                            info = ADVANCED_ALGORITHMS[algo_key]
-                            param_strs = []
-                            var_map = {
-                                'lam': ('\u03bb', self._explore_custom_bl_advanced_lam),
-                                'p': ('p', self._explore_custom_bl_advanced_p),
-                                'eta': ('eta', self._explore_custom_bl_advanced_eta),
-                                'half_window': ('hw', self._explore_custom_bl_advanced_half_window),
-                                'max_half_window': ('mhw', self._explore_custom_bl_advanced_max_half_window),
-                                'poly_order': ('d', self._explore_custom_bl_advanced_poly_order),
-                            }
-                            for pname in info['default_params']:
-                                if pname in var_map:
-                                    label, var = var_map[pname]
-                                    param_strs.append(f"{label}={var.get()}")
-                            if param_strs:
-                                parts.append(f"{method}({', '.join(param_strs)})")
-                            else:
-                                parts.append(method)
-                    except ImportError:
+                    mod = self._get_advanced_bl_module()
+                    if mod:
+                        algo_key, params = self._get_advanced_bl_params_from_ui(
+                            mod, method)
+                        if algo_key and params:
+                            param_labels = {'lam': '\u03bb', 'p': 'p', 'eta': 'eta',
+                                            'half_window': 'hw', 'max_half_window': 'mhw',
+                                            'poly_order': 'd'}
+                            param_strs = [f"{param_labels.get(k, k)}={v}"
+                                          for k, v in params.items()
+                                          if k in param_labels]
+                            parts.append(f"{method}({', '.join(param_strs)})"
+                                         if param_strs else method)
+                        else:
+                            parts.append(method)
+                    else:
                         parts.append(method)
             elif step_name == "SNV":
                 if self._explore_custom_snv.get():
@@ -21228,11 +21212,10 @@ class SpectralPredictApp:
         """Populate the advanced algorithm combobox on first click."""
         if self.baseline_advanced_algo_combo['values']:
             return
-        try:
-            from spectral_predict.baseline_advanced import ADVANCED_ALGORITHMS
-            self.baseline_advanced_algo_combo['values'] = list(ADVANCED_ALGORITHMS.keys())
-        except ImportError:
-            pass
+        mod = self._get_advanced_bl_module()
+        if mod:
+            self.baseline_advanced_algo_combo['values'] = list(
+                mod.ADVANCED_ALGORITHMS.keys())
 
     def _on_baseline_method_changed(self, event):
         """Show/hide method-specific baseline options."""
