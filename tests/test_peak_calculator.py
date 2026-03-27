@@ -218,13 +218,15 @@ def test_get_peak_intensity_range_mode_max(simple_wavelengths, peaked_spectrum):
     assert pytest.approx(val, abs=0.01) == 5.0
 
 
-def test_get_peak_intensity_range_mode_fallback_to_nearest(simple_wavelengths, flat_spectrum):
+def test_get_peak_intensity_range_mode_fallback_to_nearest(simple_wavelengths):
     """Range mode should fall back to nearest point when no wavelength in range."""
+    # Use a linearly increasing spectrum so each index has a distinct value
+    spectrum = np.arange(len(simple_wavelengths), dtype=float)
     # Request a range entirely outside the axis (centred at 100, which is below 400)
     peak_def = PeakDefinition(wavenumber=100, mode="range", half_width=5)
-    val = get_peak_intensity(simple_wavelengths, flat_spectrum, peak_def)
-    # Should snap to 400 (nearest) and return 1.0
-    assert val == 1.0
+    val = get_peak_intensity(simple_wavelengths, spectrum, peak_def)
+    # Should snap to 400 (index 0) and return 0.0
+    assert val == 0.0
 
 
 def test_get_peak_intensity_flat_spectrum(simple_wavelengths, flat_spectrum):

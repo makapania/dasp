@@ -1693,14 +1693,22 @@ def _build_transform_from_config(config: dict):
 
         # Apply baseline correction
         baseline = config.get('baseline')
+        bl_params = config.get('baseline_params', {})
         if baseline == 'polynomial':
-            bl = BaselinePolynomial(degree=2)
+            bl = BaselinePolynomial(degree=bl_params.get('degree', 2))
             X_out = bl.fit_transform(X_out)
         elif baseline == 'als':
-            bl = BaselineALS(lambda_=1e6, p=0.01, niter=10)
+            bl = BaselineALS(
+                lambda_=bl_params.get('lam', 1e5),
+                p=bl_params.get('p', 0.01),
+                niter=10,
+            )
             X_out = bl.fit_transform(X_out)
         elif baseline == 'airpls':
-            bl = BaselineAirPLS(lam=1e6, max_iter=15)
+            bl = BaselineAirPLS(
+                lam=bl_params.get('lam', 1e5),
+                max_iter=15,
+            )
             X_out = bl.fit_transform(X_out)
 
         # Apply main preprocessing
@@ -2672,7 +2680,8 @@ class SpectralPredictApp:
         self._explore_custom_deriv_polyorder = tk.IntVar(value=2)
 
         # Manual baseline state
-        self._mbl_points = []  # list of (wavelength, intensity) tuples
+        self._mbl_points = []  # list of (wavelength, intensity) tuples, kept sorted by wavelength
+        self._mbl_undo_stack = []  # insertion-order stack for undo
         self._mbl_interp_var = tk.StringVar(value="Linear")
         self._mbl_spectrum_var = tk.StringVar(value="Mean spectrum")
         self._mbl_fig = None
@@ -7651,6 +7660,7 @@ class SpectralPredictApp:
         self._mbl_spectrum_combo['values'] = sample_names
 
         self._mbl_points = []
+        self._mbl_undo_stack = []
 
         # Clear plot frame
         for widget in self._mbl_plot_frame.winfo_children():
@@ -7711,13 +7721,17 @@ class SpectralPredictApp:
             idx = np.argmin(np.abs(wavelengths - wl))
             snap_wl = wavelengths[idx]
             snap_y = spectrum[idx]
-            self._mbl_points.append((snap_wl, snap_y))
+            point = (snap_wl, snap_y)
+            self._mbl_points.append(point)
             self._mbl_points.sort(key=lambda p: p[0])
+            self._mbl_undo_stack.append(point)
         elif event.button == 3:  # Right click: remove nearest
             if self._mbl_points:
                 dists = [abs(p[0] - event.xdata) for p in self._mbl_points]
                 nearest = np.argmin(dists)
-                self._mbl_points.pop(nearest)
+                removed = self._mbl_points.pop(nearest)
+                if removed in self._mbl_undo_stack:
+                    self._mbl_undo_stack.remove(removed)
 
         self._update_mbl_plot()
 
@@ -7817,14 +7831,19 @@ class SpectralPredictApp:
         return corrected
 
     def _mbl_undo(self):
-        """Remove the last anchor point."""
-        if self._mbl_points:
-            self._mbl_points.pop()
+        """Remove the most recently added anchor point."""
+        if self._mbl_undo_stack:
+            last = self._mbl_undo_stack.pop()
+            try:
+                self._mbl_points.remove(last)
+            except ValueError:
+                pass
             self._update_mbl_plot()
 
     def _mbl_clear(self):
         """Clear all anchor points."""
         self._mbl_points = []
+        self._mbl_undo_stack = []
         self._update_mbl_plot()
 
     def _mbl_save(self):
@@ -21297,14 +21316,22 @@ class SpectralPredictApp:
                     X_out = smoother.fit_transform(X_out)
 
                 # Apply baseline correction
+                bl_params = config.get('baseline_params', {})
                 if config['baseline'] == 'polynomial':
-                    baseline = BaselinePolynomial(degree=2)
+                    baseline = BaselinePolynomial(degree=bl_params.get('degree', 2))
                     X_out = baseline.fit_transform(X_out)
                 elif config['baseline'] == 'als':
-                    baseline = BaselineALS(lambda_=1e6, p=0.01, niter=10)
+                    baseline = BaselineALS(
+                        lambda_=bl_params.get('lam', 1e5),
+                        p=bl_params.get('p', 0.01),
+                        niter=10,
+                    )
                     X_out = baseline.fit_transform(X_out)
                 elif config['baseline'] == 'airpls':
-                    baseline = BaselineAirPLS(lam=1e6, max_iter=15)
+                    baseline = BaselineAirPLS(
+                        lam=bl_params.get('lam', 1e5),
+                        max_iter=15,
+                    )
                     X_out = baseline.fit_transform(X_out)
 
                 # Apply main preprocessing
