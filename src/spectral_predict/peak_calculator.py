@@ -1197,28 +1197,48 @@ def get_peak_intensity(
     search_max mode: find actual local maximum near target within ± half_width.
     search_min mode: find actual local minimum near target within ± half_width.
     """
+    _, val = get_peak_intensity_with_position(wavelengths, spectrum, peak_def)
+    return val
+
+
+def get_peak_intensity_with_position(
+    wavelengths: np.ndarray,
+    spectrum: np.ndarray,
+    peak_def: PeakDefinition,
+) -> tuple[float, float]:
+    """Return (found_wavenumber, intensity) for a single peak definition.
+
+    Like :func:`get_peak_intensity` but also returns the actual wavenumber
+    where the measurement was taken, which may differ from the nominal
+    ``peak_def.wavenumber`` depending on mode:
+
+    - point: nearest grid point wavenumber
+    - range: wavenumber of the maximum within [center ± half_width]
+    - search_max/search_min: actual extremum position from peak search
+    """
     wn = peak_def.wavenumber
     if peak_def.mode == "range":
         lo = wn - peak_def.half_width
         hi = wn + peak_def.half_width
         mask = (wavelengths >= lo) & (wavelengths <= hi)
         if not mask.any():
-            idx = np.argmin(np.abs(wavelengths - wn))
-            return float(spectrum[idx])
-        return float(np.max(spectrum[mask]))
+            idx = int(np.argmin(np.abs(wavelengths - wn)))
+            return float(wavelengths[idx]), float(spectrum[idx])
+        subset_idx = np.where(mask)[0]
+        best = int(np.argmax(spectrum[subset_idx]))
+        abs_idx = subset_idx[best]
+        return float(wavelengths[abs_idx]), float(spectrum[abs_idx])
     elif peak_def.mode == "search_max":
-        _, val = find_peak_in_window(
+        return find_peak_in_window(
             wavelengths, spectrum, wn, peak_def.half_width, find_max=True,
         )
-        return val
     elif peak_def.mode == "search_min":
-        _, val = find_peak_in_window(
+        return find_peak_in_window(
             wavelengths, spectrum, wn, peak_def.half_width, find_max=False,
         )
-        return val
     else:
-        idx = np.argmin(np.abs(wavelengths - wn))
-        return float(spectrum[idx])
+        idx = int(np.argmin(np.abs(wavelengths - wn)))
+        return float(wavelengths[idx]), float(spectrum[idx])
 
 
 def _apply_op(a: float, b: float, op: str) -> float:
@@ -1306,23 +1326,19 @@ def _get_corrected_with_cache(
     peak_def: PeakDefinition,
     trough_cache: dict,
     smooth_window: int = 9,
-) -> tuple[float, dict | None]:
+) -> tuple[float, dict]:
     """Baseline-corrected intensity using pre-computed trough cache."""
     if peak_def.baseline is None:
-        return get_peak_intensity(wavelengths, spectrum, peak_def), None
+        found_wn, val = get_peak_intensity_with_position(wavelengths, spectrum, peak_def)
+        return val, {"found_wn": found_wn, "raw_intensity": val}
 
     bl = peak_def.baseline
     key = (bl.left_min, bl.left_max, bl.right_min, bl.right_max)
     left_wn, left_val, right_wn, right_val = trough_cache[key]
 
-    if peak_def.mode in ("search_max", "search_min"):
-        found_wn, raw_val = find_peak_in_window(
-            wavelengths, spectrum, peak_def.wavenumber, peak_def.half_width,
-            smooth_window, find_max=(peak_def.mode == "search_max"),
-        )
-    else:
-        found_wn = peak_def.wavenumber
-        raw_val = get_peak_intensity(wavelengths, spectrum, peak_def)
+    found_wn, raw_val = get_peak_intensity_with_position(
+        wavelengths, spectrum, peak_def,
+    )
 
     bl_val = baseline_at_wavenumber(found_wn, left_wn, left_val, right_wn, right_val)
     corrected = raw_val - bl_val
@@ -1347,7 +1363,9 @@ def calculate_expression_detailed(
     ensuring consistent baseline anchors.
 
     Returns dict with keys: value, peak_a_diag, peak_b_diag, peak_c_diag.
-    Each diag is None (no baseline) or a dict with trough positions.
+    Each diag is a dict containing at least ``found_wn`` and ``raw_intensity``.
+    Peaks with baselines also include trough positions and baseline values.
+    ``peak_c_diag`` is ``None`` when the preset has no third peak.
     """
     peaks = [preset.peak_a, preset.peak_b]
     if preset.peak_c is not None:
@@ -1387,10 +1405,10 @@ def calculate_all_samples(
 ) -> pd.DataFrame:
     """Calculate the expression for every sample row.
 
-    Returns a DataFrame with columns ``["Sample", "Value"]``.
-    When any peak in the preset carries a BaselineRegion and
-    *use_local_baseline* is True, additional columns report the detected
-    trough positions for quality control.
+    Returns a DataFrame with columns ``["Sample", "Value"]`` plus
+    ``found_{A/B/C}_wn`` columns reporting the actual wavenumber where
+    each peak was measured.  When baselines are active, additional
+    ``bl_*`` columns report trough positions for quality control.
     """
     n = data_matrix.shape[0]
     values = np.empty(n, dtype=float)
@@ -1402,26 +1420,39 @@ def calculate_all_samples(
     )
 
     diag_rows: list[dict] = []
+    peaks_list: list[tuple[PeakDefinition | None, str]] = [
+        (preset.peak_a, "A"), (preset.peak_b, "B"), (preset.peak_c, "C"),
+    ]
 
     for i in range(n):
+        row: dict = {}
         if has_baseline:
             result = calculate_expression_detailed(wavelengths, data_matrix[i, :], preset)
             values[i] = result["value"]
-            row: dict = {}
             for key, label in [
                 ("peak_a_diag", "A"), ("peak_b_diag", "B"), ("peak_c_diag", "C"),
             ]:
                 d = result[key]
                 if d is not None:
-                    row[f"bl_{label}_left_wn"] = d["left_wn"]
-                    row[f"bl_{label}_right_wn"] = d["right_wn"]
-                    row[f"bl_{label}_raw"] = d["raw_intensity"]
-                    row[f"bl_{label}_corrected"] = d["raw_intensity"] - d["baseline_at_peak"]
-            diag_rows.append(row)
+                    row[f"found_{label}_wn"] = d["found_wn"]
+                    if "left_wn" in d:
+                        row[f"bl_{label}_left_wn"] = d["left_wn"]
+                        row[f"bl_{label}_right_wn"] = d["right_wn"]
+                        row[f"bl_{label}_raw"] = d["raw_intensity"]
+                        row[f"bl_{label}_corrected"] = (
+                            d["raw_intensity"] - d["baseline_at_peak"]
+                        )
         else:
             values[i] = calculate_expression(
                 wavelengths, data_matrix[i, :], preset, use_local_baseline=False,
             )
+            for peak_def, label in peaks_list:
+                if peak_def is not None:
+                    found_wn, _ = get_peak_intensity_with_position(
+                        wavelengths, data_matrix[i, :], peak_def,
+                    )
+                    row[f"found_{label}_wn"] = found_wn
+        diag_rows.append(row)
 
     names = sample_names if sample_names is not None else np.arange(n)
     df = pd.DataFrame({"Sample": names, "Value": values})

@@ -8838,6 +8838,11 @@ class SpectralPredictApp:
             return
         ax = state['ax']
 
+        found_positions = getattr(dialog, '_found_positions', {})
+        has_found = bool(found_positions)
+        # Use dimmed nominal markers when found positions are available
+        nominal_alpha = 0.35 if has_found else 0.8
+
         markers_config = [
             (dialog._peak_a_wn, dialog._peak_a_mode, dialog._peak_a_hw, 'red', 'A'),
             (dialog._peak_b_wn, dialog._peak_b_mode, dialog._peak_b_hw, 'green', 'B'),
@@ -8855,17 +8860,60 @@ class SpectralPredictApp:
             if wn <= 0:
                 continue
 
-            line = ax.axvline(x=wn, color=color, linestyle='--', linewidth=1.2,
-                              alpha=0.8, label=f"Peak {label}")
+            # Nominal position: dashed line (dimmed if found positions exist)
+            line = ax.axvline(x=wn, color=color, linestyle='--', linewidth=1.0,
+                              alpha=nominal_alpha, label=f"Peak {label} (nominal)")
             self._peak_marker_lines.append(line)
 
-            if mode_var.get() == "range":
+            mode = mode_var.get()
+            if mode in ("range", "search_max", "search_min"):
                 try:
                     hw = float(hw_var.get())
                 except (ValueError, tk.TclError):
                     hw = 10
-                span = ax.axvspan(wn - hw, wn + hw, alpha=0.08, color=color)
+                span = ax.axvspan(wn - hw, wn + hw, alpha=0.06, color=color)
                 self._peak_marker_lines.append(span)
+
+        # Draw found position markers (dots on spectrum + annotation)
+        if has_found:
+            spec_wl = getattr(dialog, '_peak_calc_wavelengths', None)
+            spec_data = getattr(dialog, '_peak_calc_spectrum', None)
+
+            for wn_var, mode_var, hw_var, color, label in markers_config:
+                if label not in found_positions:
+                    continue
+                found_wn = found_positions[label]
+
+                # Get y-value at found position from stored spectrum data
+                y_val = None
+                if spec_wl is not None and spec_data is not None:
+                    sort_idx = np.argsort(spec_wl)
+                    y_val = float(np.interp(found_wn, spec_wl[sort_idx], spec_data[sort_idx]))
+
+                if y_val is not None:
+                    # Dot marker on the spectrum
+                    dot, = ax.plot(
+                        found_wn, y_val, 'o', color=color, markersize=7,
+                        markeredgecolor='white', markeredgewidth=0.8,
+                        zorder=5, label=f"Peak {label} ({found_wn:.1f})",
+                    )
+                    self._peak_marker_lines.append(dot)
+
+                    # Wavenumber annotation
+                    ann = ax.annotate(
+                        f"{found_wn:.1f}", xy=(found_wn, y_val),
+                        xytext=(0, 10), textcoords='offset points',
+                        fontsize=7, color=color, ha='center', fontweight='bold',
+                        zorder=5,
+                    )
+                    self._peak_marker_lines.append(ann)
+                else:
+                    # Fallback: solid line at found position if no spectrum data
+                    line = ax.axvline(
+                        x=found_wn, color=color, linestyle='-', linewidth=1.5,
+                        alpha=0.9, label=f"Peak {label} ({found_wn:.1f})",
+                    )
+                    self._peak_marker_lines.append(line)
 
         # Draw baseline region shading if mode is Auto
         bl_mode = getattr(dialog, '_bl_mode_var', None)
@@ -9071,6 +9119,18 @@ class SpectralPredictApp:
         )
         dialog._results_df = df
 
+        # Store found positions and spectrum data for plot markers
+        dialog._found_positions = {}
+        if len(df) > 0:
+            for label in ("A", "B", "C"):
+                col = f"found_{label}_wn"
+                if col in df.columns:
+                    val = df[col].iloc[0]
+                    if not np.isnan(val):
+                        dialog._found_positions[label] = val
+        dialog._peak_calc_wavelengths = wavelengths
+        dialog._peak_calc_spectrum = data[0] if len(data) > 0 else None
+
         # Compute stats
         values = df["Value"].values
         valid = values[~np.isnan(values)]
@@ -9102,6 +9162,22 @@ class SpectralPredictApp:
                         )
             if bl_parts:
                 stats_text += "\nBaseline (sample 1): " + "; ".join(bl_parts)
+
+        # Append found peak positions for first sample
+        if len(df) > 0:
+            found_parts = []
+            for pk, peak_def in [
+                ("A", preset.peak_a), ("B", preset.peak_b), ("C", preset.peak_c),
+            ]:
+                col = f"found_{pk}_wn"
+                if peak_def is not None and col in df.columns:
+                    fw = df[col].iloc[0]
+                    if not np.isnan(fw):
+                        found_parts.append(
+                            f"Peak {pk}: {peak_def.wavenumber:.1f} \u2192 {fw:.1f}"
+                        )
+            if found_parts:
+                stats_text += "\nFound positions (sample 1): " + ";  ".join(found_parts)
 
         dialog._stats_text = stats_text
         dialog._stats_label.config(text=stats_text)
@@ -9137,7 +9213,7 @@ class SpectralPredictApp:
         # Determine columns to show
         show_cols = ["Sample", "Value"]
         for col in df.columns:
-            if col not in show_cols and col.startswith("bl_"):
+            if col not in show_cols and (col.startswith("found_") or col.startswith("bl_")):
                 show_cols.append(col)
 
         tree = ttk.Treeview(dialog._table_frame, columns=show_cols, show='headings', height=8)
@@ -9161,6 +9237,9 @@ class SpectralPredictApp:
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side='left', fill='both', expand=True)
         vsb.pack(side='right', fill='y')
+
+        # Refresh plot markers to show found positions
+        self._update_peak_markers(dialog)
 
     def _peak_calc_export(self, dialog):
         """Export peak calculation results to CSV."""

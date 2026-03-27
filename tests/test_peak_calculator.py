@@ -19,6 +19,7 @@ from spectral_predict.peak_calculator import (
     find_trough_in_window,
     get_baseline_corrected_intensity,
     get_peak_intensity,
+    get_peak_intensity_with_position,
     load_user_presets,
     save_user_presets,
     _peak_def_to_dict,
@@ -316,11 +317,14 @@ def test_calculate_expression_subtraction():
 def test_calculate_all_samples_shape(
     simple_wavelengths, multi_sample_data, basic_preset
 ):
-    """Output DataFrame should have one row per sample."""
+    """Output DataFrame should have one row per sample with found positions."""
     df = calculate_all_samples(simple_wavelengths, multi_sample_data, basic_preset)
     assert isinstance(df, pd.DataFrame)
     assert len(df) == multi_sample_data.shape[0]
-    assert list(df.columns) == ["Sample", "Value"]
+    assert "Sample" in df.columns
+    assert "Value" in df.columns
+    assert "found_A_wn" in df.columns
+    assert "found_B_wn" in df.columns
 
 
 def test_calculate_all_samples_with_names(
@@ -743,14 +747,16 @@ def test_calculate_expression_detailed_returns_diagnostics(
 def test_calculate_expression_detailed_no_baseline_peaks(
     bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline,
 ):
-    """Peaks without baselines should have None diagnostics."""
+    """Peaks without baselines should have minimal diagnostics with found_wn."""
     result = calculate_expression_detailed(
         bone_wavelengths, bone_spectrum_sloping, bone_preset_no_baseline,
     )
     assert "value" in result
-    assert result["peak_a_diag"] is None
-    assert result["peak_b_diag"] is None
-    assert result["peak_c_diag"] is None
+    for key in ("peak_a_diag", "peak_b_diag", "peak_c_diag"):
+        d = result[key]
+        assert d is not None, f"{key} should contain diagnostics"
+        assert "found_wn" in d
+        assert "raw_intensity" in d
 
 
 def test_calculate_expression_detailed_two_peak(bone_wavelengths, bone_spectrum_sloping):
@@ -808,21 +814,27 @@ def test_calculate_all_samples_baseline_extra_columns(
 def test_calculate_all_samples_no_baseline_no_extra_columns(
     bone_wavelengths, bone_multi_sample, bone_preset_no_baseline,
 ):
-    """Without baseline regions, output should have only Sample and Value columns."""
+    """Without baseline regions, output should have found_wn columns but no bl_ columns."""
     df = calculate_all_samples(
         bone_wavelengths, bone_multi_sample, bone_preset_no_baseline, use_local_baseline=True,
     )
-    assert list(df.columns) == ["Sample", "Value"]
+    assert "Sample" in df.columns
+    assert "Value" in df.columns
+    assert "found_A_wn" in df.columns
+    assert not any(c.startswith("bl_") for c in df.columns)
 
 
 def test_calculate_all_samples_baseline_disabled_no_extra_columns(
     bone_wavelengths, bone_multi_sample, bone_preset_with_baseline,
 ):
-    """Disabling local baseline via flag should produce only Sample and Value columns."""
+    """Disabling local baseline via flag should produce found_wn but no bl_ columns."""
     df = calculate_all_samples(
         bone_wavelengths, bone_multi_sample, bone_preset_with_baseline, use_local_baseline=False,
     )
-    assert list(df.columns) == ["Sample", "Value"]
+    assert "Sample" in df.columns
+    assert "Value" in df.columns
+    assert "found_A_wn" in df.columns
+    assert not any(c.startswith("bl_") for c in df.columns)
 
 
 def test_calculate_all_samples_baseline_values_finite(
@@ -1055,7 +1067,7 @@ def test_backward_compat_three_peak_left(simple_wavelengths, peaked_spectrum):
 
 
 def test_backward_compat_calculate_all_samples(simple_wavelengths, multi_sample_data):
-    """calculate_all_samples without baselines should return only Sample and Value."""
+    """calculate_all_samples without baselines should include found position columns."""
     preset = PeakPreset(
         name="Compat",
         peak_a=PeakDefinition(1000, "point", 10, "A"),
@@ -1063,12 +1075,15 @@ def test_backward_compat_calculate_all_samples(simple_wavelengths, multi_sample_
         operator1="/",
     )
     df = calculate_all_samples(simple_wavelengths, multi_sample_data, preset, use_local_baseline=True)
-    assert list(df.columns) == ["Sample", "Value"]
+    assert "Sample" in df.columns
+    assert "Value" in df.columns
+    assert "found_A_wn" in df.columns
+    assert "found_B_wn" in df.columns
     assert len(df) == multi_sample_data.shape[0]
 
 
 def test_backward_compat_detailed_no_diagnostics(simple_wavelengths, peaked_spectrum):
-    """calculate_expression_detailed on no-baseline preset returns None diagnostics."""
+    """calculate_expression_detailed on no-baseline preset returns minimal diagnostics."""
     preset = PeakPreset(
         name="Compat",
         peak_a=PeakDefinition(1000, "point", 10, "A"),
@@ -1076,8 +1091,10 @@ def test_backward_compat_detailed_no_diagnostics(simple_wavelengths, peaked_spec
         operator1="/",
     )
     result = calculate_expression_detailed(simple_wavelengths, peaked_spectrum, preset)
-    assert result["peak_a_diag"] is None
-    assert result["peak_b_diag"] is None
+    assert result["peak_a_diag"] is not None
+    assert "found_wn" in result["peak_a_diag"]
+    assert result["peak_b_diag"] is not None
+    assert "found_wn" in result["peak_b_diag"]
     assert result["peak_c_diag"] is None
     assert pytest.approx(result["value"], rel=0.01) == 5.0 / 3.0
 
