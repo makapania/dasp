@@ -6942,7 +6942,7 @@ class SpectralPredictApp:
         ttk.Label(ctrl, text="Lambda:").pack(side='left', padx=(0, 5))
         lam_combo = ttk.Combobox(
             ctrl, textvariable=self._explore_als_lambda,
-            values=["1e2", "5e2", "1e3", "5e3", "1e4", "5e4", "1e5", "5e5", "1e6", "5e6", "1e7", "1e8", "1e9"],
+            values=["1e2", "2e2", "5e2", "1e3", "2e3", "5e3", "1e4", "2e4", "5e4", "1e5", "2e5", "5e5", "1e6", "2e6", "5e6", "1e7", "1e8"],
             state='normal', width=6
         )
         lam_combo.pack(side='left', padx=(0, 10))
@@ -6951,7 +6951,7 @@ class SpectralPredictApp:
         ttk.Label(ctrl, text="p:").pack(side='left', padx=(0, 5))
         p_combo = ttk.Combobox(
             ctrl, textvariable=self._explore_als_p,
-            values=["0.0001", "0.0005", "0.001", "0.005", "0.01", "0.05", "0.1", "0.5"],
+            values=["0.0001", "0.0002", "0.0005", "0.001", "0.002", "0.005", "0.01", "0.02", "0.05", "0.1", "0.2", "0.3", "0.4", "0.5"],
             state='normal', width=6
         )
         p_combo.pack(side='left', padx=(0, 10))
@@ -7016,7 +7016,7 @@ class SpectralPredictApp:
         ttk.Label(ctrl, text="Lambda:").pack(side='left', padx=(0, 5))
         lam_combo = ttk.Combobox(
             ctrl, textvariable=self._explore_airpls_lambda,
-            values=["1e2", "5e2", "1e3", "5e3", "1e4", "5e4", "1e5", "5e5", "1e6", "5e6", "1e7", "1e8", "1e9"],
+            values=["1e2", "2e2", "5e2", "1e3", "2e3", "5e3", "1e4", "2e4", "5e4", "1e5", "2e5", "5e5", "1e6", "2e6", "5e6", "1e7", "1e8"],
             state='normal', width=6
         )
         lam_combo.pack(side='left', padx=(0, 10))
@@ -7254,13 +7254,13 @@ class SpectralPredictApp:
         self._custom_bl_als_frame = ttk.Frame(bl_lf)
         ttk.Label(self._custom_bl_als_frame, text="Lambda:").pack(side='left', padx=(5, 2))
         als_lam_combo = ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_lambda,
-                      values=["1e2", "5e2", "1e3", "5e3", "1e4", "5e4", "1e5", "5e5", "1e6", "5e6", "1e7", "1e8", "1e9"],
+                      values=["1e2", "2e2", "5e2", "1e3", "2e3", "5e3", "1e4", "2e4", "5e4", "1e5", "2e5", "5e5", "1e6", "2e6", "5e6", "1e7", "1e8"],
                       state='normal', width=6)
         als_lam_combo.pack(side='left', padx=(0, 8))
         als_lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
         ttk.Label(self._custom_bl_als_frame, text="p:").pack(side='left', padx=(0, 2))
         als_p_combo = ttk.Combobox(self._custom_bl_als_frame, textvariable=self._explore_custom_bl_als_p,
-                      values=["0.0001", "0.0005", "0.001", "0.005", "0.01", "0.05", "0.1", "0.5"],
+                      values=["0.0001", "0.0002", "0.0005", "0.001", "0.002", "0.005", "0.01", "0.02", "0.05", "0.1", "0.2", "0.3", "0.4", "0.5"],
                       state='normal', width=6)
         als_p_combo.pack(side='left')
         als_p_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
@@ -7269,7 +7269,7 @@ class SpectralPredictApp:
         self._custom_bl_airpls_frame = ttk.Frame(bl_lf)
         ttk.Label(self._custom_bl_airpls_frame, text="Lambda:").pack(side='left', padx=(5, 2))
         airpls_lam_combo = ttk.Combobox(self._custom_bl_airpls_frame, textvariable=self._explore_custom_bl_airpls_lambda,
-                      values=["1e2", "5e2", "1e3", "5e3", "1e4", "5e4", "1e5", "5e5", "1e6", "5e6", "1e7", "1e8", "1e9"],
+                      values=["1e2", "2e2", "5e2", "1e3", "2e3", "5e3", "1e4", "2e4", "5e4", "1e5", "2e5", "5e5", "1e6", "2e6", "5e6", "1e7", "1e8"],
                       state='normal', width=6)
         airpls_lam_combo.pack(side='left')
         airpls_lam_combo.bind('<<ComboboxSelected>>', self._auto_refresh_custom)
@@ -10484,12 +10484,12 @@ class SpectralPredictApp:
         ttk.Label(self.baseline_asls_frame, text="Lambda:").pack(side='left', padx=(0, 5))
         asls_lambda_combo = ttk.Combobox(self.baseline_asls_frame, textvariable=self.baseline_asls_lambda,
                                           width=8, state='readonly')
-        asls_lambda_combo['values'] = ['1e3', '1e4', '1e5', '1e6', '1e7']
+        asls_lambda_combo['values'] = ['1e2', '2e2', '5e2', '1e3', '2e3', '5e3', '1e4', '2e4', '5e4', '1e5', '2e5', '5e5', '1e6', '2e6', '5e6', '1e7', '1e8']
         asls_lambda_combo.pack(side='left', padx=(0, 10))
         ttk.Label(self.baseline_asls_frame, text="p:").pack(side='left', padx=(0, 5))
         asls_p_combo = ttk.Combobox(self.baseline_asls_frame, textvariable=self.baseline_asls_p,
                                      width=6, state='readonly')
-        asls_p_combo['values'] = ['0.001', '0.005', '0.01', '0.05', '0.1']
+        asls_p_combo['values'] = ['0.0001', '0.0002', '0.0005', '0.001', '0.002', '0.005', '0.01', '0.02', '0.05', '0.1', '0.2', '0.3', '0.4', '0.5']
         asls_p_combo.pack(side='left')
 
         # Rubber band options (no tuneable params)
@@ -10503,7 +10503,7 @@ class SpectralPredictApp:
         ttk.Label(self.baseline_airpls_frame, text="Lambda:").pack(side='left', padx=(0, 5))
         airpls_lambda_combo = ttk.Combobox(self.baseline_airpls_frame, textvariable=self.baseline_airpls_lambda,
                                             width=8, state='readonly')
-        airpls_lambda_combo['values'] = ['1e3', '1e4', '1e5', '1e6', '1e7']
+        airpls_lambda_combo['values'] = ['1e2', '2e2', '5e2', '1e3', '2e3', '5e3', '1e4', '2e4', '5e4', '1e5', '2e5', '5e5', '1e6', '2e6', '5e6', '1e7', '1e8']
         airpls_lambda_combo.pack(side='left')
 
         # Initially hide all non-default method frames
