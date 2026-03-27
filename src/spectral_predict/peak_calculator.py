@@ -1157,11 +1157,16 @@ def get_baseline_corrected_intensity(
 
     # For search_max/search_min modes, get the *found* wavenumber so the
     # baseline is interpolated at the actual peak position, not the nominal.
+    # Detrend the spectrum first so the argmax is not biased by baseline slope.
     if peak_def.mode in ("search_max", "search_min"):
-        found_wn, raw_val = find_peak_in_window(
-            wavelengths, spectrum, peak_def.wavenumber, peak_def.half_width,
+        bl_line = np.interp(wavelengths, [left_wn, right_wn], [left_val, right_val])
+        detrended = spectrum - bl_line
+        found_wn, _ = find_peak_in_window(
+            wavelengths, detrended, peak_def.wavenumber, peak_def.half_width,
             smooth_window, find_max=(peak_def.mode == "search_max"),
         )
+        abs_idx = int(np.argmin(np.abs(wavelengths - found_wn)))
+        raw_val = float(spectrum[abs_idx])
     else:
         found_wn = peak_def.wavenumber
         raw_val = get_peak_intensity(wavelengths, spectrum, peak_def)
@@ -1336,9 +1341,21 @@ def _get_corrected_with_cache(
     key = (bl.left_min, bl.left_max, bl.right_min, bl.right_max)
     left_wn, left_val, right_wn, right_val = trough_cache[key]
 
-    found_wn, raw_val = get_peak_intensity_with_position(
-        wavelengths, spectrum, peak_def,
-    )
+    # Detrend so argmax is not biased by baseline slope (mirrors
+    # get_baseline_corrected_intensity logic).
+    if peak_def.mode in ("search_max", "search_min"):
+        bl_line = np.interp(wavelengths, [left_wn, right_wn], [left_val, right_val])
+        detrended = spectrum - bl_line
+        found_wn, _ = find_peak_in_window(
+            wavelengths, detrended, peak_def.wavenumber, peak_def.half_width,
+            smooth_window, find_max=(peak_def.mode == "search_max"),
+        )
+        abs_idx = int(np.argmin(np.abs(wavelengths - found_wn)))
+        raw_val = float(spectrum[abs_idx])
+    else:
+        found_wn, raw_val = get_peak_intensity_with_position(
+            wavelengths, spectrum, peak_def,
+        )
 
     bl_val = baseline_at_wavenumber(found_wn, left_wn, left_val, right_wn, right_val)
     corrected = raw_val - bl_val

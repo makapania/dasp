@@ -1345,3 +1345,54 @@ def test_sg_smoothing_not_applied_with_4_points():
     # Without smoothing, should still find the raw max at 500
     assert wn == pytest.approx(500.0)
     assert val == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
+# Detrended peak search (baseline slope bias fix)
+# ---------------------------------------------------------------------------
+
+def test_detrended_search_removes_slope_bias():
+    """Baseline-corrected peak search should find the true peak, not slope-biased one."""
+    wl = np.arange(1590.0, 1721.0, dtype=float)
+    # Steep sloping baseline: high on left, low on right
+    baseline = 2.0 - (wl - 1590) / (1720 - 1590) * 1.5
+    # Symmetric Gaussian peak centred at exactly 1640
+    peak = 1.0 * np.exp(-0.5 * ((wl - 1640) / 10) ** 2)
+    spec = baseline + peak
+
+    bl_region = BaselineRegion(1590, 1600, 1700, 1720)
+    peak_def = PeakDefinition(1640, "search_max", 15, "Amide I", baseline=bl_region)
+    _, diag = get_baseline_corrected_intensity(wl, spec, peak_def)
+
+    assert diag["found_wn"] == pytest.approx(1640.0, abs=2.0)
+
+
+def test_detrended_search_end_to_end_detailed():
+    """calculate_expression_detailed should also use detrended peak search."""
+    wl = np.arange(800.0, 1800.0, dtype=float)
+    # Sloping baseline across amide I region
+    baseline = 2.0 - (wl - 800) / 1000 * 1.5
+    # Amide I peak at 1640, phosphate peak at 1035
+    amide = 1.0 * np.exp(-0.5 * ((wl - 1640) / 10) ** 2)
+    phosphate = 2.0 * np.exp(-0.5 * ((wl - 1035) / 15) ** 2)
+    spec = baseline + amide + phosphate
+
+    # Use the actual Amide:Phosphate preset
+    preset = next(p for p in BUILT_IN_PRESETS if p.name == "Amide:Phosphate")
+    result = calculate_expression_detailed(wl, spec, preset)
+
+    assert result["peak_a_diag"]["found_wn"] == pytest.approx(1640.0, abs=2.0)
+    assert result["peak_b_diag"]["found_wn"] == pytest.approx(1035.0, abs=2.0)
+
+
+def test_no_baseline_peaks_unaffected_by_detrending():
+    """Peaks without a baseline region should be unaffected by the detrending fix."""
+    wl = np.arange(400.0, 700.0, dtype=float)
+    spec = 5.0 * np.exp(-0.5 * ((wl - 550) / 5) ** 2)
+
+    peak_def = PeakDefinition(550, "search_max", 20, "test")
+    val, diag = get_baseline_corrected_intensity(wl, spec, peak_def)
+
+    # No baseline → diag is None, returns raw intensity
+    assert diag is None
+    assert val == pytest.approx(5.0, abs=0.1)
