@@ -7245,21 +7245,15 @@ class SpectralPredictApp:
         bl_top.pack(fill='x', padx=5, pady=2)
         ttk.Label(bl_top, text="Method:").pack(side='left', padx=(0, 5))
         bl_values = ["None", "Rubber Band", "Polynomial", "ALS", "airPLS"]
-        try:
-            from spectral_predict.baseline_advanced import (
-                HAS_PYBASELINES, get_dropdown_values,
-            )
-            if HAS_PYBASELINES:
-                bl_values.extend(get_dropdown_values())
-        except ImportError:
-            pass
-        bl_combo = ttk.Combobox(
+        self._custom_bl_combo = ttk.Combobox(
             bl_top, textvariable=self._explore_custom_bl_method,
             values=bl_values,
             state='readonly', width=16
         )
-        bl_combo.pack(side='left')
-        bl_combo.bind('<<ComboboxSelected>>', self._on_custom_bl_change)
+        self._custom_bl_combo.pack(side='left')
+        self._custom_bl_combo.bind('<<ComboboxSelected>>', self._on_custom_bl_change)
+        self._custom_bl_advanced_loaded = False
+        self._custom_bl_combo.bind('<Button-1>', self._lazy_load_advanced_bl_options)
 
         # Polynomial params
         self._custom_bl_poly_frame = ttk.Frame(bl_lf)
@@ -7457,6 +7451,22 @@ class SpectralPredictApp:
         elif method == "Gaussian":
             self._custom_smooth_gauss_frame.pack(fill='x', pady=2)
         self._auto_refresh_custom()
+
+    def _lazy_load_advanced_bl_options(self, event=None):
+        """Populate the baseline dropdown with advanced algorithms on first click."""
+        if self._custom_bl_advanced_loaded:
+            return
+        self._custom_bl_advanced_loaded = True
+        try:
+            from spectral_predict.baseline_advanced import (
+                HAS_PYBASELINES, get_dropdown_values,
+            )
+            if HAS_PYBASELINES:
+                current = list(self._custom_bl_combo['values'])
+                current.extend(get_dropdown_values())
+                self._custom_bl_combo['values'] = current
+        except ImportError:
+            pass
 
     def _on_custom_bl_change(self, event=None):
         """Show/hide baseline parameter frames based on selected method."""
@@ -10703,13 +10713,7 @@ class SpectralPredictApp:
         ttk.Label(self.baseline_options_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
         baseline_method_combo = ttk.Combobox(self.baseline_options_frame, textvariable=self.baseline_method,
                                               width=12, state='readonly')
-        bl_methods = ['polynomial', 'als', 'rubber_band', 'airpls']
-        try:
-            from spectral_predict.baseline_advanced import HAS_PYBASELINES
-            if HAS_PYBASELINES:
-                bl_methods.append('advanced')
-        except ImportError:
-            pass
+        bl_methods = ['polynomial', 'als', 'rubber_band', 'airpls', 'advanced']
         baseline_method_combo['values'] = bl_methods
         baseline_method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
         baseline_method_combo.bind('<<ComboboxSelected>>', self._on_baseline_method_changed)
@@ -10755,18 +10759,13 @@ class SpectralPredictApp:
         self.baseline_advanced_frame = ttk.Frame(self.baseline_options_frame)
         self.baseline_advanced_frame.grid(row=0, column=6, sticky=tk.W, padx=(15, 0))
         ttk.Label(self.baseline_advanced_frame, text="Algorithm:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        adv_algo_values = []
-        try:
-            from spectral_predict.baseline_advanced import HAS_PYBASELINES, ADVANCED_ALGORITHMS
-            if HAS_PYBASELINES:
-                adv_algo_values = list(ADVANCED_ALGORITHMS.keys())
-        except ImportError:
-            pass
         self.baseline_advanced_algorithm = tk.StringVar(value="arpls")
         self.baseline_advanced_algo_combo = ttk.Combobox(
             self.baseline_advanced_frame, textvariable=self.baseline_advanced_algorithm,
-            values=adv_algo_values, state='readonly', width=16)
+            values=[], state='readonly', width=16)
         self.baseline_advanced_algo_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        self.baseline_advanced_algo_combo.bind(
+            '<Button-1>', self._lazy_load_analysis_advanced_algos)
 
         ttk.Label(self.baseline_advanced_frame, text="Lambda:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5))
         self.baseline_advanced_lam = tk.StringVar(value="1e5")
@@ -21224,6 +21223,16 @@ class SpectralPredictApp:
             'vip': "PLS VIP: Variable Importance in Projection (chemometrics standard)"
         }
         self.importance_desc_label.config(text=descriptions.get(method, ""))
+
+    def _lazy_load_analysis_advanced_algos(self, event=None):
+        """Populate the advanced algorithm combobox on first click."""
+        if self.baseline_advanced_algo_combo['values']:
+            return
+        try:
+            from spectral_predict.baseline_advanced import ADVANCED_ALGORITHMS
+            self.baseline_advanced_algo_combo['values'] = list(ADVANCED_ALGORITHMS.keys())
+        except ImportError:
+            pass
 
     def _on_baseline_method_changed(self, event):
         """Show/hide method-specific baseline options."""
