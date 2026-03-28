@@ -44286,8 +44286,9 @@ External Validation Performance (n={n_val}):
         main_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         main_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab9", canvas))
-        canvas.create_window((0, 0), window=main_frame, anchor="nw")
+        canvas_window = canvas.create_window((0, 0), window=main_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.bind("<Configure>", lambda e, c=canvas, cw=canvas_window: c.itemconfig(cw, width=e.width))
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -44648,9 +44649,15 @@ External Validation Performance (n={n_val}):
         self.domain_banner_frame.pack(fill='x', pady=(0, 5))
         self.domain_banner_frame.pack_forget()
 
-        # Results table
-        table_frame = ttk.Frame(step5_frame)
-        table_frame.pack(fill='both', expand=True, pady=(0, 10))
+        # Results table - use pack_propagate(False) so the Treeview's column widths
+        # don't push the parent frame wider than the viewport
+        table_container = ttk.Frame(step5_frame)
+        table_container.pack(fill='both', expand=True, pady=(0, 10))
+        table_container.pack_propagate(False)
+        table_container.configure(height=300)
+
+        table_frame = ttk.Frame(table_container)
+        table_frame.pack(fill='both', expand=True)
         self._tab9_table_frame = table_frame
 
         # Create treeview for results
@@ -46159,18 +46166,18 @@ External Validation Performance (n={n_val}):
 
             # Set column width based on content type
             if col == 'Sample':
-                width = 100
+                width = 80
             elif col == 'Primary Reliability':
-                width = 120
+                width = 100
             elif col == 'Flags':
-                width = 200
+                width = 140
             elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
                  pd.api.types.is_string_dtype(self.comparison_results[col].dtype):
-                width = 150
+                width = 110
             else:
-                width = 120
+                width = 90
 
-            self.comparison_results_tree.column(col, width=width, anchor='center')
+            self.comparison_results_tree.column(col, width=width, minwidth=60, anchor='center')
 
         # Insert data
         domain_status = getattr(self, '_primary_domain_status', None)
