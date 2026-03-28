@@ -956,7 +956,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     label_encoder = None
     if task_type == "classification":
         # Check if labels are non-numeric (text labels like "low", "medium", "high")
-        if y_np.dtype == object or not np.issubdtype(y_np.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y_np.dtype):
             from sklearn.preprocessing import LabelEncoder
             label_encoder = LabelEncoder()
             y_original = y_np.copy()  # Keep original for logging
@@ -3150,7 +3150,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     # Handle categorical labels for classification
     label_encoder = None
     if task_type == "classification":
-        if y_np.dtype == object or not np.issubdtype(y_np.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y_np.dtype):
             from sklearn.preprocessing import LabelEncoder
             label_encoder = LabelEncoder()
             y_original = y_np.copy()

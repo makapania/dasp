@@ -12,6 +12,7 @@ This module does NOT modify grid search - it only provides preprocessing configs
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from typing import List, Dict, Callable, Optional, Tuple, Any
 from sklearn.model_selection import cross_val_score
 from sklearn.cross_decomposition import PLSRegression
@@ -129,7 +130,7 @@ def compute_importance(
 
     # Handle classification labels
     y_encoded = y
-    if task_type == 'classification' and y.dtype == object:
+    if task_type == 'classification' and not pd.api.types.is_numeric_dtype(y.dtype):
         le = LabelEncoder()
         y_encoded = le.fit_transform(y)
 

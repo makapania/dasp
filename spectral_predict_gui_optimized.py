@@ -3460,9 +3460,8 @@ class SpectralPredictApp:
         """Check if target variable is categorical (non-numeric)."""
         if self.y is None:
             return False
-        return (self.y.dtype == 'object' or
-                self.y.dtype.name == 'category' or
-                not np.issubdtype(self.y.dtype, np.number))
+        return (not pd.api.types.is_numeric_dtype(self.y.dtype) or
+                self.y.dtype.name == 'category')
 
     def _get_available_color_variables(self):
         """Get list of available variables for plot coloring.
@@ -3533,9 +3532,8 @@ class SpectralPredictApp:
 
             # Check dtype
             if hasattr(values, 'dtype'):
-                return (values.dtype == 'object' or
-                        values.dtype.name == 'category' or
-                        not np.issubdtype(values.dtype, np.number))
+                return (not pd.api.types.is_numeric_dtype(values.dtype) or
+                        values.dtype.name == 'category')
             return False
 
     def _get_explore_color_map(self):
@@ -6787,7 +6785,7 @@ class SpectralPredictApp:
 
             # Convert to consistent type for comparison (handle mixed float/str)
             y_values = self.y.dropna().copy()
-            if y_values.dtype == 'object':
+            if not pd.api.types.is_numeric_dtype(y_values.dtype):
                 # Convert all to string for consistent comparison
                 y_for_unique = y_values.astype(str)
             else:
@@ -6795,7 +6793,7 @@ class SpectralPredictApp:
 
             # Determine if classification or regression
             n_unique = len(pd.unique(y_for_unique))  # pd.unique doesn't sort, avoids comparison issues
-            is_classification = n_unique < 15 or y_values.dtype == 'object'
+            is_classification = n_unique < 15 or not pd.api.types.is_numeric_dtype(y_values.dtype)
 
             if is_classification:
                 # Bar chart for categorical/classification - use value_counts instead of np.unique
@@ -15114,7 +15112,7 @@ class SpectralPredictApp:
         if task_type == "auto":
             # If auto and data is loaded, try to detect
             if hasattr(self, 'y') and self.y is not None:
-                if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                     actual_task = "classification"
                 else:
                     actual_task = "regression"
@@ -15161,7 +15159,7 @@ class SpectralPredictApp:
             # Auto-detect from loaded data
             if self.y is not None:
                 # Use same logic as in analysis to detect task type
-                if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                     actual_task = "classification"
                 else:
                     actual_task = "regression"
@@ -15224,7 +15222,7 @@ class SpectralPredictApp:
         # Determine actual task type (handle "auto" mode)
         if task_type == "auto" and self.y is not None:
             # Auto-detection logic: classification if <10 unique values or non-numeric
-            if self.y.nunique() < 10 or self.y.dtype == 'object':
+            if self.y.nunique() < 10 or not pd.api.types.is_numeric_dtype(self.y.dtype):
                 actual_task = "classification"
             else:
                 actual_task = "regression"
@@ -17183,7 +17181,7 @@ class SpectralPredictApp:
                 elif self.task_type.get() == "auto":
                     if self.y.nunique() == 2:
                         detected_type = "classification (binary)"
-                    elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                    elif not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                         detected_type = "classification"
                     else:
                         detected_type = "regression"
@@ -18318,7 +18316,7 @@ class SpectralPredictApp:
             raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
 
         # Handle categorical y values by encoding them
-        if y_values.dtype == object or not np.issubdtype(y_values.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y_values.dtype):
             # Categorical data - encode to numeric
             le = LabelEncoder()
             y_array = le.fit_transform(y_values).reshape(-1, 1).astype(float)
@@ -18476,7 +18474,7 @@ class SpectralPredictApp:
             # Determine if classification task for validation warnings
             task_type_setting = self.task_type.get()
             if task_type_setting == "auto":
-                is_classification = y_available.nunique() < 10 or y_available.dtype == 'object'
+                is_classification = y_available.nunique() < 10 or not pd.api.types.is_numeric_dtype(y_available.dtype)
             else:
                 is_classification = task_type_setting == "classification"
 
@@ -20285,7 +20283,7 @@ class SpectralPredictApp:
 
             # Handle categorical/string targets by encoding them
             y_numeric = self.y.copy()
-            if y_numeric.dtype == 'object' or isinstance(y_numeric.iloc[0], str):
+            if not pd.api.types.is_numeric_dtype(y_numeric.dtype):
                 # Label encode string targets
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
@@ -20340,7 +20338,7 @@ class SpectralPredictApp:
 
             # Handle categorical/string targets by encoding them
             y_numeric = self.y.copy()
-            if y_numeric.dtype == 'object' or isinstance(y_numeric.iloc[0], str):
+            if not pd.api.types.is_numeric_dtype(y_numeric.dtype):
                 le = LabelEncoder()
                 y_numeric = pd.Series(le.fit_transform(y_numeric.astype(str)), index=X_filtered.index)
                 print(f"[i] Encoded categorical target for VIP: {dict(zip(le.classes_, range(len(le.classes_))))}")
@@ -20422,7 +20420,7 @@ class SpectralPredictApp:
             is_classification = n_unique < 10 and isinstance(y_clean.iloc[0], (str, np.str_)) or n_unique <= 10
 
             # Check if target is categorical
-            if y_clean.dtype == 'object' or n_unique <= 10:
+            if not pd.api.types.is_numeric_dtype(y_clean.dtype) or n_unique <= 10:
                 is_classification = True
 
             self.screening_status.config(text="Training Random Forest (may take a moment)...")
@@ -20960,7 +20958,7 @@ class SpectralPredictApp:
                 # Auto-detect task type (same logic as analysis)
                 if self.y.nunique() == 2:
                     task_type = "classification"
-                elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                elif not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                     task_type = "classification"
                 else:
                     task_type = "regression"
@@ -22692,7 +22690,7 @@ class SpectralPredictApp:
                 # Auto-detect task type
                 if self.y.nunique() == 2:
                     task_type = "classification"
-                elif self.y.dtype == 'object' or self.y.nunique() < 10:
+                elif not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                     task_type = "classification"
                 else:
                     task_type = "regression"
@@ -24707,7 +24705,7 @@ class SpectralPredictApp:
                             y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
 
                             # Filter NaN target values from training data for validation
-                            train_nan_mask = pd.isna(y_np) if hasattr(y_np, 'dtype') and y_np.dtype == object else np.isnan(y_np)
+                            train_nan_mask = pd.isna(y_np)
                             if np.any(train_nan_mask):
                                 n_dropped = int(np.sum(train_nan_mask))
                                 self._log_progress(f"  Dropping {n_dropped} training sample(s) with NaN target for validation")
@@ -24718,7 +24716,7 @@ class SpectralPredictApp:
                                 y_np_clean = y_np
 
                             # Filter NaN target values from validation data
-                            val_nan_mask = pd.isna(y_val_np) if hasattr(y_val_np, 'dtype') and y_val_np.dtype == object else np.isnan(y_val_np)
+                            val_nan_mask = pd.isna(y_val_np)
                             if np.any(val_nan_mask):
                                 n_dropped = int(np.sum(val_nan_mask))
                                 self._log_progress(f"  Dropping {n_dropped} validation sample(s) with NaN target")
@@ -24931,7 +24929,7 @@ class SpectralPredictApp:
                         y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
 
                         # Filter NaN target values from training data for validation
-                        train_nan_mask = pd.isna(y_np) if hasattr(y_np, 'dtype') and y_np.dtype == object else np.isnan(y_np)
+                        train_nan_mask = pd.isna(y_np)
                         if np.any(train_nan_mask):
                             n_dropped = int(np.sum(train_nan_mask))
                             self._log_progress(f"  Dropping {n_dropped} training sample(s) with NaN target for validation")
@@ -24942,7 +24940,7 @@ class SpectralPredictApp:
                             y_np_clean = y_np
 
                         # Filter NaN target values from validation data
-                        val_nan_mask = pd.isna(y_val_np) if hasattr(y_val_np, 'dtype') and y_val_np.dtype == object else np.isnan(y_val_np)
+                        val_nan_mask = pd.isna(y_val_np)
                         if np.any(val_nan_mask):
                             n_dropped = int(np.sum(val_nan_mask))
                             self._log_progress(f"  Dropping {n_dropped} validation sample(s) with NaN target")
@@ -27683,7 +27681,7 @@ For detailed documentation, see the User Guide.
             elif hasattr(self, 'y') and self.y is not None:
                 # Infer from data
                 import numpy as np
-                if self.y.dtype == object or not np.issubdtype(self.y.dtype, np.number):
+                if not pd.api.types.is_numeric_dtype(self.y.dtype):
                     task_type = 'classification'
                 elif len(np.unique(self.y)) < 20:  # Heuristic for classification
                     task_type = 'classification'
@@ -28661,7 +28659,7 @@ For detailed documentation, see the User Guide.
 
         if cond == "has value":
             mask = series.notna()
-            if series.dtype == object:
+            if pd.api.types.is_string_dtype(series.dtype):
                 mask = mask & (series.astype(str).str.strip() != '')
             return set(series.index[mask])
 
@@ -29979,7 +29977,7 @@ Performance (Classification):
         # Set task type FIRST (auto-detect from data) - CRITICAL FIX for PLS-DA loading
         # This must happen before model validation so we validate against the correct task type
         if self.y is not None:
-            if self.y.nunique() == 2 or self.y.dtype == 'object' or self.y.nunique() < 10:
+            if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                 detected_task_type = 'classification'
                 self.refine_task_type.set('classification')
             else:
@@ -33319,7 +33317,7 @@ F1 Score:  {f1:.4f}
             local_label_encoder = None
             if task_type == "classification":
                 # Check if labels are non-numeric (text labels like "Clean", "Contaminated", etc.)
-                if y_series.dtype == object or not np.issubdtype(y_series.dtype, np.number):
+                if not pd.api.types.is_numeric_dtype(y_series.dtype):
                     from sklearn.preprocessing import LabelEncoder
                     local_label_encoder = LabelEncoder()
                     y_original = y_series.copy()  # Keep original for logging
@@ -39631,7 +39629,7 @@ External Validation Performance (n={n_val}):
             pred_text = f"Transferred {len(y_pred)} spectra using {self.ct_pred_transfer_model.method.upper()}\n"
             pred_text += f"Predictions (first 10):\n"
             y_pred_arr = np.array(y_pred)
-            is_numeric = np.issubdtype(y_pred_arr.dtype, np.number)
+            is_numeric = pd.api.types.is_numeric_dtype(y_pred_arr.dtype)
             for i in range(min(10, len(y_pred))):
                 if is_numeric:
                     pred_text += f"  {self.ct_pred_sample_ids[i]}: {y_pred_arr[i]:.3f}\n"
@@ -45890,7 +45888,7 @@ External Validation Performance (n={n_val}):
                         # Apply condition based on type
                         try:
                             # Detect if column is classification or regression
-                            is_classification = '(Class)' in col or results[col].dtype == 'object'
+                            is_classification = '(Class)' in col or pd.api.types.is_string_dtype(results[col].dtype)
 
                             if condition == '==':
                                 # Works for both text and numeric
@@ -46167,7 +46165,7 @@ External Validation Performance (n={n_val}):
             elif col == 'Flags':
                 width = 200
             elif 'classification' in str(self.comparison_results[col].dtype).lower() or \
-                 self.comparison_results[col].dtype == 'object':
+                 pd.api.types.is_string_dtype(self.comparison_results[col].dtype):
                 width = 150
             else:
                 width = 120
@@ -46182,7 +46180,7 @@ External Validation Performance (n={n_val}):
             for col in columns:
                 val = row[col]
                 # Check if this is a classification column (by task indicator or dtype)
-                is_classification = '(Class)' in col or self.comparison_results[col].dtype == 'object'
+                is_classification = '(Class)' in col or pd.api.types.is_string_dtype(self.comparison_results[col].dtype)
 
                 # Format values based on type
                 if pd.isna(val):

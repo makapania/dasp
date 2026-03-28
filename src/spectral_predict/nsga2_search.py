@@ -1807,7 +1807,7 @@ def run_nsga2_search(
     if task_type == 'classification' and imbalance_method is not None:
         # Need to encode y first for validation
         y_for_validation = y
-        if y.dtype == object or not np.issubdtype(y.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y.dtype):
             from sklearn.preprocessing import LabelEncoder as LE
             y_for_validation = LE().fit_transform(y)
         validate_classification_config(
@@ -1835,7 +1835,7 @@ def run_nsga2_search(
     # (CARS-Tree uses numeric targets internally)
     y_for_importance = y
     if task_type == 'classification':
-        if y.dtype == object or not np.issubdtype(y.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y.dtype):
             label_encoder_for_importance = LabelEncoder()
             y_for_importance = label_encoder_for_importance.fit_transform(y)
 

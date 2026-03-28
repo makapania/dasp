@@ -1437,7 +1437,7 @@ def run_unified_bayesian(
     wavelengths = np.asarray(wavelengths)
 
     # Drop rows where y is NaN (safety net for data with empty rows)
-    nan_mask = np.isnan(y) if np.issubdtype(y.dtype, np.floating) else np.array([False] * len(y))
+    nan_mask = pd.isna(y)
     if nan_mask.any():
         n_dropped = int(nan_mask.sum())
         print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values before optimization.")

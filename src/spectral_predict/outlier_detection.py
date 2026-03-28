@@ -412,8 +412,7 @@ def check_y_data_consistency(y, lower_bound=None, upper_bound=None):
         y_array = np.array(y)
 
     # Check if data is categorical (non-numeric)
-    is_categorical = (y_array.dtype == object or
-                     not np.issubdtype(y_array.dtype, np.number))
+    is_categorical = not pd.api.types.is_numeric_dtype(y_array.dtype)
 
     if is_categorical:
         # For categorical data, return class distribution instead of outliers

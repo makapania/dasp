@@ -687,7 +687,7 @@ def predict_with_model(
     if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
         label_encoder = model_dict['label_encoder']
         # Check if predictions are already text labels (some models decode internally)
-        if predictions.dtype == object or predictions.dtype.kind == 'U':
+        if pd.api.types.is_string_dtype(predictions.dtype):
             # Already decoded text labels, return as-is
             pass
         else:

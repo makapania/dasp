@@ -30,6 +30,7 @@ References
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from typing import Tuple, Callable, Optional, Dict, Any, List
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import cross_val_predict, KFold, StratifiedKFold
@@ -382,7 +383,7 @@ def _evaluate_with_actual_model(
         # Prepare y for classification
         if task_type == 'classification':
             y_class = np.asarray(y)
-            if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+            if not pd.api.types.is_numeric_dtype(y_class.dtype):
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
                 y_class = le.fit_transform(y_class)
@@ -453,7 +454,7 @@ def _evaluate_pls(X, y, cv, n_comp, task_type):
 
     if task_type == 'classification':
         y_class = np.asarray(y)
-        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y_class.dtype):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
             y_class = le.fit_transform(y_class)
@@ -468,7 +469,7 @@ def _evaluate_lightgbm(X, y, cv, task_type, random_state):
     """Evaluate fitness using LightGBM."""
     if task_type == 'classification':
         y_class = np.asarray(y)
-        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y_class.dtype):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
             y_class = le.fit_transform(y_class)
@@ -497,7 +498,7 @@ def _evaluate_mlp(X, y, cv, task_type, random_state):
 
     if task_type == 'classification':
         y_class = np.asarray(y)
-        if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+        if not pd.api.types.is_numeric_dtype(y_class.dtype):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
             y_class = le.fit_transform(y_class)
@@ -527,7 +528,7 @@ def _evaluate_neuralboosted(X, y, cv, n_comp, task_type, random_state):
 
         if task_type == 'classification':
             y_class = np.asarray(y)
-            if y_class.dtype == object or not np.issubdtype(y_class.dtype, np.number):
+            if not pd.api.types.is_numeric_dtype(y_class.dtype):
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
                 y_class = le.fit_transform(y_class)

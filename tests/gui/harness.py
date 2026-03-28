@@ -12,6 +12,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any, Callable
 
+import pandas as pd
+
 if TYPE_CHECKING:
     from spectral_predict_gui_optimized import SpectralPredictApp
 
@@ -523,7 +525,7 @@ class GUITestHarness:
         task_type = self.app.task_type.get()
         if task_type == 'auto':
             # Auto-detect based on y dtype
-            if y_train.dtype == 'object' or not hasattr(y_train.dtype, 'kind'):
+            if pd.api.types.is_string_dtype(y_train.dtype) or not hasattr(y_train.dtype, 'kind'):
                 task_type = 'classification'
             elif y_train.dtype.kind in 'iufb':  # int, uint, float, bool
                 task_type = 'regression'

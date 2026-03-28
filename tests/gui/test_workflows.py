@@ -11,6 +11,7 @@ Usage:
 
 import pytest
 import numpy as np
+import pandas as pd
 
 
 # ============================================================
@@ -37,7 +38,7 @@ class TestDataLoading:
         assert len(harness.app.X) == len(harness.app.y), "X and y have different lengths"
 
         # Check y is numeric (regression)
-        assert np.issubdtype(harness.app.y.dtype, np.number), "y should be numeric for regression"
+        assert pd.api.types.is_numeric_dtype(harness.app.y.dtype), "y should be numeric for regression"
 
         # Check y range is reasonable for %Collagen
         assert harness.app.y.min() >= 0, "Collagen % should be >= 0"

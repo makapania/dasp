@@ -72,7 +72,7 @@ wavelengths = np.array([float(c) for c in wavelength_cols])
 
 # For classification, encode labels if they are strings
 from sklearn.preprocessing import LabelEncoder
-if y.dtype == object or isinstance(y[0], str):
+if not pd.api.types.is_numeric_dtype(y.dtype):
     label_encoder = LabelEncoder()
     y = label_encoder.fit_transform(y)
     class_names = label_encoder.classes_
