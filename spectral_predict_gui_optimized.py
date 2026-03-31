@@ -34537,7 +34537,41 @@ External Validation Performance (n={n_val}):
                 self.selected_model_config.get('imbalance_method') if self.selected_model_config else None
             )
             data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
-            default_name = f"{task_prefix}{n_vars}_model_{self.refined_config['model_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{imbalance_suffix}{data_type_suffix}.dasp"
+
+            # Build descriptive filename tokens
+            preprocess_token = (self.refined_config.get('preprocessing') or 'raw').lower().replace(' ', '')
+
+            target_name = self.target_column.get()
+            if target_name and target_name != '(No target variable)':
+                target_token = re.sub(r'[^a-z0-9]', '-', target_name.lower().strip())
+                target_token = re.sub(r'-+', '-', target_token).strip('-')[:15].rstrip('-')
+            else:
+                target_token = ""
+
+            perf_token = ""
+            if self.refined_performance:
+                if self.refined_config['task_type'] == 'regression':
+                    val_r2 = self.refined_performance.get('val_r2')
+                    cv_r2 = self.refined_performance.get('r2_mean')
+                    if val_r2 is not None and np.isfinite(val_r2):
+                        perf_token = f"r2p-{val_r2:.2f}"
+                    elif cv_r2 is not None and np.isfinite(cv_r2):
+                        perf_token = f"r2-{cv_r2:.2f}"
+                else:  # classification
+                    val_acc = self.refined_performance.get('val_accuracy')
+                    cv_acc = self.refined_performance.get('accuracy_mean')
+                    if val_acc is not None and np.isfinite(val_acc):
+                        perf_token = f"acc-{val_acc:.2f}"
+                    elif cv_acc is not None and np.isfinite(cv_acc):
+                        perf_token = f"acc-{cv_acc:.2f}"
+
+            parts = [f"{task_prefix}{n_vars}", self.refined_config['model_name'], preprocess_token]
+            if target_token:
+                parts.append(target_token)
+            if perf_token:
+                parts.append(perf_token)
+            parts.append(datetime.now().strftime('%Y%m%d_%H%M%S'))
+            default_name = f"{'_'.join(parts)}{imbalance_suffix}{data_type_suffix}.dasp"
 
             # Get initial directory from spectral data path
             initial_dir = None
@@ -46217,45 +46251,15 @@ External Validation Performance (n={n_val}):
                 else:
                     values.append(str(val))
 
-            # Determine row tag — color only unanimous cases across all models
+            # Flagged tag for rows with flags
             tags = ()
-            all_rel = getattr(self, '_all_reliability_scores', {})
-            row_scores = [
-                scores[row_idx] for scores in all_rel.values()
-                if row_idx < len(scores)
-            ]
-            if row_scores:
-                if all(r >= 80 for r in row_scores):
-                    tags = ('reliability_high',)
-                elif all(r < 35 for r in row_scores):
-                    tags = ('reliability_very_low',)
-                # Mixed reliability → no row color (per-cell indicators tell the story)
-            elif domain_status is not None and row_idx < len(domain_status):
-                # Fallback: old 4-zone coloring for models without any reliability scores
-                ds = domain_status[row_idx]
-                if ds == 'outside_domain':
-                    tags = ('domain_outside',)
-                elif ds in ('influential', 'new_features'):
-                    tags = ('domain_caution',)
-                elif ds == 'within_domain':
-                    tags = ('domain_ok',)
-
-            # Flagged tag takes priority (set last so it overrides)
             if 'Flags' in columns and row['Flags']:
                 tags = ('flagged',)
 
             self.comparison_results_tree.insert('', 'end', values=values, tags=tags)
             row_idx += 1
 
-        # Configure tag colors — reliability-based
-        self.comparison_results_tree.tag_configure('reliability_high', background='#d4edda', foreground='#155724')
-        self.comparison_results_tree.tag_configure('reliability_moderate', background='#d1ecf1', foreground='#0c5460')
-        self.comparison_results_tree.tag_configure('reliability_low', background='#fff3cd', foreground='#856404')
-        self.comparison_results_tree.tag_configure('reliability_very_low', background='#f8d7da', foreground='#721c24')
-        # Fallback domain status colors (for older models)
-        self.comparison_results_tree.tag_configure('domain_ok', background='#d4edda', foreground='#155724')
-        self.comparison_results_tree.tag_configure('domain_caution', background='#fff3cd', foreground='#856404')
-        self.comparison_results_tree.tag_configure('domain_outside', background='#f8d7da', foreground='#721c24')
+        # Configure tag colors
         self.comparison_results_tree.tag_configure('flagged', background='#FFF3CD', foreground='#856404')
 
     def _export_comparison_results(self):
