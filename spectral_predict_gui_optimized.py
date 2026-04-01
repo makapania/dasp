@@ -18427,7 +18427,7 @@ class SpectralPredictApp:
             return X_val.index.tolist()
         except ValueError as e:
             # If stratification fails (e.g., too few samples per bin), fall back to random
-            self._log(f"Stratified sampling failed, using random: {e}")
+            self._log_progress(f"Stratified sampling failed, using random: {e}")
             return self._validation_random(X, y, n_samples)
 
     def _create_validation_set(self):
@@ -18451,6 +18451,14 @@ class SpectralPredictApp:
                 y_available = self.y
             X_available = X_available[~X_available.index.isin(self.excluded_spectra)]
             y_available = y_available[~y_available.index.isin(self.excluded_spectra)]
+
+            # Drop rows with missing target values — can't evaluate predictions without them
+            nan_mask = y_available.isna()
+            if nan_mask.any():
+                n_nan = nan_mask.sum()
+                self._log_progress(f"Excluding {n_nan} sample(s) with missing target values from validation selection")
+                X_available = X_available[~nan_mask]
+                y_available = y_available[~nan_mask]
 
             if len(X_available) < 10:
                 messagebox.showwarning("Insufficient Data",

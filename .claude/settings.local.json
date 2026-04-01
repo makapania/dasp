@@ -281,7 +281,20 @@
       "Bash(.cfg$ \")",
       "WebFetch(domain:docs.scipy.org)",
       "Bash(C:/Users/mspon/AppData/Roaming/npm/codex exec:*)",
-      "Bash(gh pr:*)"
+      "Bash(gh pr:*)",
+      "Bash(C:/Users/sponheim/git/dasp/venv311/Scripts/pip install:*)",
+      "Bash(C:/Users/sponheim/venvs/venv311/Scripts/python.exe -m pip check)",
+      "Read(//c/Users/sponheim/venvs/venv311/Scripts/**)",
+      "Read(//c/Users/sponheim/**)",
+      "Bash(where.exe python:*)",
+      "Bash(/c/Users/sponheim/git/dasp/.venv/Scripts/python.exe --version 2>&1)",
+      "Bash(pip list:*)",
+      "Bash(git diff:*)",
+      "Bash(while read:*)",
+      "Bash(do if:*)",
+      "Bash(then echo:*)",
+      "Bash(break)",
+      "Skill(codex)"
     ],
     "deny": [],
     "ask": []
