@@ -50,9 +50,9 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
     A sample is flagged as contaminated if EITHER statistic exceeds
     its confidence threshold.
 
-    This is the classic chemometrics approach to contamination screening,
-    equivalent to DD-SIMCA when using both T² and Q statistics with
-    proper F-distribution thresholds.
+    Uses the diagonal T² formulation (t_a² / lambda_a) for numerical
+    stability and the Jackson-Mudholkar approximation for Q-residual
+    thresholds when sufficient residual eigenvalues are available.
 
     Parameters
     ----------
@@ -61,16 +61,11 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         to explain that fraction of variance.
     alpha : float, default=0.05
         Significance level for the T² and Q thresholds (0.05 = 95% confidence).
-    contamination : float, default=0.05
-        Expected fraction of outliers. Used to calibrate thresholds when
-        the F-distribution assumption is too conservative.
     """
 
-    def __init__(self, n_components: int | float = 5, alpha: float = 0.05,
-                 contamination: float = 0.05):
+    def __init__(self, n_components: int | float = 5, alpha: float = 0.05):
         self.n_components = n_components
         self.alpha = alpha
-        self.contamination = contamination
 
     def fit(self, X, y=None):
         """Fit PCA model on clean/inlier samples only.
@@ -101,6 +96,9 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         self.scores_ = self.pca_.fit_transform(X)
         self.n_train_ = n_samples
 
+        # Store eigenvalues for diagonal T² computation
+        self.eigenvalues_ = self.pca_.explained_variance_
+
         # Hotelling T² threshold (F-distribution)
         p = self.n_components_
         n = n_samples
@@ -112,13 +110,11 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         else:
             self.t2_threshold_ = stats.chi2.ppf(1 - self.alpha, p)
 
-        # Q-residual threshold (from training data distribution)
-        q_residuals_train = self._compute_q_residuals(X)
-        self.q_threshold_ = np.percentile(
-            q_residuals_train, 100 * (1 - self.alpha)
-        )
+        # Q-residual threshold (Jackson-Mudholkar approximation)
+        # Uses residual eigenvalues for a theoretically grounded threshold
+        self.q_threshold_ = self._compute_q_threshold(X)
 
-        # Compute training T² for score normalization
+        # Compute training T² for reference
         self.t2_train_ = self._compute_t2(self.scores_)
 
         return self
@@ -174,21 +170,19 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         return self.decision_function(X)
 
     def _compute_t2(self, scores):
-        """Compute Hotelling T² for PC scores."""
-        # Covariance from training scores
-        cov = np.cov(self.scores_.T)
+        """Compute Hotelling T² using diagonal formulation.
+
+        Uses T² = sum(t_a² / lambda_a) which is numerically stable
+        and exact for PCA scores (which are orthogonal by construction).
+        """
+        eigenvalues = self.eigenvalues_
         if self.n_components_ == 1:
-            var = np.var(self.scores_)
-            if var < 1e-10:
-                var = 1e-10
-            return (scores.ravel() ** 2) / var
+            lam = max(eigenvalues[0], 1e-10)
+            return (scores.ravel() ** 2) / lam
         else:
-            try:
-                inv_cov = np.linalg.inv(cov)
-            except np.linalg.LinAlgError:
-                cov += np.eye(self.n_components_) * 1e-6
-                inv_cov = np.linalg.inv(cov)
-            return np.array([s @ inv_cov @ s.T for s in scores])
+            # Vectorized: T² = sum_a (score_a² / lambda_a)
+            lam = np.maximum(eigenvalues, 1e-10)
+            return np.sum(scores ** 2 / lam, axis=1)
 
     def _compute_q_residuals(self, X):
         """Compute Q-residuals (SPE) for samples."""
@@ -198,11 +192,54 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         residuals = X - X_reconstructed
         return np.sum(residuals ** 2, axis=1)
 
+    def _compute_q_threshold(self, X):
+        """Compute Q-residual threshold using Jackson-Mudholkar approximation.
+
+        Falls back to percentile-based threshold when there are too few
+        residual eigenvalues for the approximation.
+
+        Reference: Jackson, J.E. & Mudholkar, G.S. (1979).
+        """
+        X = np.asarray(X, dtype=np.float64)
+        n_samples, n_features = X.shape
+
+        # Get ALL eigenvalues (need residual eigenvalues beyond n_components)
+        n_full = min(n_samples, n_features)
+        if n_full > self.n_components_ + 2:
+            pca_full = PCA(n_components=n_full)
+            pca_full.fit(X)
+            all_eigenvalues = pca_full.explained_variance_
+
+            # Residual eigenvalues (beyond retained components)
+            residual_eigenvalues = all_eigenvalues[self.n_components_:]
+            residual_eigenvalues = residual_eigenvalues[residual_eigenvalues > 1e-10]
+
+            if len(residual_eigenvalues) >= 2:
+                # Jackson-Mudholkar approximation
+                theta1 = np.sum(residual_eigenvalues)
+                theta2 = np.sum(residual_eigenvalues ** 2)
+                theta3 = np.sum(residual_eigenvalues ** 3)
+
+                if theta1 > 1e-10 and theta2 > 1e-10:
+                    h0 = 1.0 - (2.0 * theta1 * theta3) / (3.0 * theta2 ** 2)
+                    if abs(h0) > 1e-10:
+                        c_alpha = stats.norm.ppf(1 - self.alpha)
+                        q_alpha = theta1 * (
+                            c_alpha * np.sqrt(2.0 * theta2 * h0 ** 2) / theta1
+                            + 1.0
+                            + theta2 * h0 * (h0 - 1.0) / (theta1 ** 2)
+                        ) ** (1.0 / h0)
+                        if q_alpha > 0:
+                            return q_alpha
+
+        # Fallback: percentile-based threshold
+        q_residuals_train = self._compute_q_residuals(X)
+        return np.percentile(q_residuals_train, 100 * (1 - self.alpha))
+
     def get_params(self, deep=True):
         return {
             'n_components': self.n_components,
             'alpha': self.alpha,
-            'contamination': self.contamination,
         }
 
     def set_params(self, **params):
@@ -258,7 +295,7 @@ def get_one_class_model(model_name: str, **kwargs):
         return LocalOutlierFactor(**defaults)
 
     elif model_name == 'PCA-SIMCA':
-        defaults = dict(n_components=5, alpha=0.05, contamination=0.05)
+        defaults = dict(n_components=5, alpha=0.05)
         defaults.update(kwargs)
         return PCASIMCA(**defaults)
 

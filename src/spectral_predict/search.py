@@ -4769,14 +4769,14 @@ def run_one_class_search(
 
     # Build preprocessing configs
     if preprocessing_methods is None:
-        preprocessing_methods = ['raw', 'snv', 'deriv1', 'deriv2']
+        preprocessing_methods = ['raw', 'snv', 'deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2']
     if window_sizes is None:
         window_sizes = [7, 19]
 
     preprocess_configs = []
     for method in preprocessing_methods:
-        if method in ('deriv1', 'deriv2'):
-            deriv_order = 1 if method == 'deriv1' else 2
+        if method in ('deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2'):
+            deriv_order = 1 if method.endswith('1') else 2
             for ws in window_sizes:
                 preprocess_configs.append({
                     'name': f'{method}_w{ws}',
@@ -4910,6 +4910,15 @@ def run_one_class_search(
                             scaler = StandardScaler()
                             X_train = scaler.fit_transform(X_preprocessed[train_idx])
                             X_test = scaler.transform(X_preprocessed[test_idx])
+
+                            # EllipticEnvelope requires n_samples > n_features
+                            # Auto-reduce with PCA when this is violated
+                            if model_name == 'EllipticEnvelope' and X_train.shape[1] > X_train.shape[0]:
+                                from sklearn.decomposition import PCA as _PCA
+                                n_pca = max(2, X_train.shape[0] // 2)
+                                pca_reducer = _PCA(n_components=n_pca)
+                                X_train = pca_reducer.fit_transform(X_train)
+                                X_test = pca_reducer.transform(X_test)
                         else:
                             X_train = X_preprocessed[train_idx]
                             X_test = X_preprocessed[test_idx]
@@ -4946,6 +4955,15 @@ def run_one_class_search(
                         scaler = StandardScaler()
                         X_inlier_scaled = scaler.fit_transform(X_preprocessed[inlier_indices])
                         X_all_scaled = scaler.transform(X_preprocessed)
+
+                        # EllipticEnvelope auto-PCA reduction
+                        if model_name == 'EllipticEnvelope' and X_inlier_scaled.shape[1] > X_inlier_scaled.shape[0]:
+                            from sklearn.decomposition import PCA as _PCA
+                            n_pca = max(2, X_inlier_scaled.shape[0] // 2)
+                            pca_reducer = _PCA(n_components=n_pca)
+                            X_inlier_scaled = pca_reducer.fit_transform(X_inlier_scaled)
+                            X_all_scaled = pca_reducer.transform(X_all_scaled)
+
                         cal_model.fit(X_inlier_scaled)
                         y_pred_cal = cal_model.predict(X_all_scaled)
                         scores_cal = (
@@ -4962,8 +4980,22 @@ def run_one_class_search(
                             else None
                         )
                     cal_metrics = one_class_metrics(y_oc, y_pred_cal, scores_cal)
+
+                    # Per-contaminant sensitivity (if multiple outlier classes)
+                    per_contaminant = {}
+                    if n_outliers > 0:
+                        outlier_labels_unique = np.unique(y_np[outlier_mask])
+                        for lbl in outlier_labels_unique:
+                            lbl_mask = y_np == lbl
+                            if lbl_mask.sum() > 0:
+                                lbl_preds = y_pred_cal[lbl_mask]
+                                # sensitivity = fraction flagged as outlier (-1)
+                                per_contaminant[str(lbl)] = float(np.mean(lbl_preds == -1))
+                    cal_metrics['per_contaminant'] = per_contaminant
+
                 except Exception:
                     cal_metrics = {k: np.nan for k in ['sensitivity', 'specificity', 'precision', 'f1', 'accuracy', 'balanced_accuracy', 'auc']}
+                    cal_metrics['per_contaminant'] = {}
 
                 # Build result dict
                 n_vars = X_preprocessed.shape[1]
@@ -5002,7 +5034,13 @@ def run_one_class_search(
                     "inlier_class": str(inlier_class_label),
                     "top_vars": "N/A",
                     "all_vars": ','.join([f"{w:.1f}" for w in wavelengths]),
+                    "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
                 }
+
+                # Add per-contaminant columns for display
+                per_contam = cal_metrics.get('per_contaminant', {})
+                for contam_label, contam_sens in per_contam.items():
+                    result[f'Sens_{contam_label}'] = contam_sens
 
                 df_results = add_result(df_results, result)
 
@@ -5010,7 +5048,11 @@ def run_one_class_search(
                 sens_cv = _safe_mean('sensitivity')
                 spec_cv = _safe_mean('specificity')
                 bal_cv = _safe_mean('balanced_accuracy')
-                print(f"     Sens={sens_cv:.3f}, Spec={spec_cv:.3f}, BalAcc={bal_cv:.3f}")
+                contam_info = ""
+                if per_contam:
+                    contam_parts = [f"{k}={v:.2f}" for k, v in per_contam.items()]
+                    contam_info = f", Per-contam: [{', '.join(contam_parts)}]"
+                print(f"     Sens={sens_cv:.3f}, Spec={spec_cv:.3f}, BalAcc={bal_cv:.3f}{contam_info}")
 
                 # Update best tracker
                 if best_result is None or bal_cv > best_result.get('BalancedAcccv', 0):
