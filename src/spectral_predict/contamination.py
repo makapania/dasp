@@ -475,7 +475,7 @@ def one_class_metrics(y_true, y_pred, scores=None):
 # ONE-CLASS CROSS-VALIDATION
 # ============================================================================
 
-def one_class_cv(model, X, y_true, folds=5, random_state=42):
+def one_class_cv(model, X, y_true, folds=5, random_state=42, scale=False):
     """Cross-validate a one-class model with proper train/test splitting.
 
     Training folds contain ONLY inlier samples (+1).
@@ -493,6 +493,9 @@ def one_class_cv(model, X, y_true, folds=5, random_state=42):
         Number of CV folds.
     random_state : int, default=42
         Random seed for reproducibility.
+    scale : bool, default=False
+        If True, apply StandardScaler (fit on training inliers only).
+        Recommended for OCSVM, EllipticEnvelope, and LOF.
 
     Returns
     -------
@@ -501,6 +504,7 @@ def one_class_cv(model, X, y_true, folds=5, random_state=42):
     """
     from sklearn.model_selection import KFold
     from sklearn.base import clone
+    from sklearn.preprocessing import StandardScaler
 
     X = np.asarray(X, dtype=np.float64)
     y_true = np.asarray(y_true)
@@ -536,19 +540,28 @@ def one_class_cv(model, X, y_true, folds=5, random_state=42):
             -np.ones(n_outliers, dtype=int)
         ])
 
+        X_train = X[train_idx]
+        X_test = X[test_idx]
+
+        # Apply scaling if requested (fit on training inliers only)
+        if scale:
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X_train)
+            X_test = scaler.transform(X_test)
+
         # Fit on clean training data only
         model_clone = clone(model)
-        model_clone.fit(X[train_idx])
+        model_clone.fit(X_train)
 
         # Predict on test set
-        y_pred = model_clone.predict(X[test_idx])
+        y_pred = model_clone.predict(X_test)
 
         # Get decision scores if available
         scores = None
         if hasattr(model_clone, 'decision_function'):
-            scores = model_clone.decision_function(X[test_idx])
+            scores = model_clone.decision_function(X_test)
         elif hasattr(model_clone, 'score_samples'):
-            scores = model_clone.score_samples(X[test_idx])
+            scores = model_clone.score_samples(X_test)
 
         fold_result = one_class_metrics(test_labels, y_pred, scores)
         fold_metrics.append(fold_result)

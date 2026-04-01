@@ -4656,6 +4656,7 @@ def run_one_class_search(
     X, y, inlier_class_label,
     folds=5, preprocessing_methods=None, window_sizes=None,
     tier='standard', enabled_models=None,
+    variable_penalty=0, gap_penalty=0,
     analysis_wl_min=None, analysis_wl_max=None,
     progress_callback=None, controller=None,
     baseline_method=None, baseline_params=None,
@@ -5034,7 +5035,7 @@ def run_one_class_search(
                     "n_outliers": n_outliers,
                     "inlier_class": str(inlier_class_label),
                     "top_vars": "N/A",
-                    "all_vars": ','.join([f"{w:.1f}" for w in wavelengths]),
+                    "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths]),
                     "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
                 }
 
@@ -5059,11 +5060,12 @@ def run_one_class_search(
                 if best_result is None or bal_cv > best_result.get('BalancedAcccv', 0):
                     best_result = result
 
-    # Rank results by balanced accuracy (CV)
+    # Rank results using composite score (consistent with regression/classification)
     if len(df_results) > 0:
-        # Sort by BalancedAcccv descending
-        df_results = df_results.sort_values('BalancedAcccv', ascending=False).reset_index(drop=True)
-        df_results['Rank'] = range(1, len(df_results) + 1)
+        from .scoring import compute_composite_score
+        df_results = compute_composite_score(
+            df_results, 'one_class', variable_penalty, gap_penalty
+        )
 
     print(f"\n{'='*70}")
     print(f"ONE-CLASS SEARCH COMPLETE")

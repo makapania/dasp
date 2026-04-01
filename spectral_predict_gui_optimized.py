@@ -24659,6 +24659,8 @@ class SpectralPredictApp:
                     window_sizes=window_sizes_oc,
                     tier=tier,
                     enabled_models=selected_oc_models,
+                    variable_penalty=self.variable_penalty.get(),
+                    gap_penalty=self.gap_penalty.get(),
                     analysis_wl_min=locals().get('analysis_wl_min_value'),
                     analysis_wl_max=locals().get('analysis_wl_max_value'),
                     progress_callback=self._progress_callback,

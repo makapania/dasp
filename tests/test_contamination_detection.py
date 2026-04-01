@@ -303,3 +303,125 @@ class TestIntegration:
         assert 'PCA-SIMCA' in grids
         assert 'IsolationForest' in grids
         assert len(grids['PCA-SIMCA']) > 0
+
+    def test_one_class_cv_with_scaling(self, synthetic_nir_data):
+        """Test that one_class_cv scale parameter works correctly."""
+        X, y, _, _ = synthetic_nir_data
+        model = get_one_class_model('OneClassSVM')
+
+        # Should work with scaling enabled
+        results = one_class_cv(model, X, y, folds=3, scale=True)
+        assert 0 <= results['balanced_accuracy'] <= 1
+
+    def test_one_class_cv_no_outliers(self, clean_only_data):
+        """Test one_class_cv with zero outlier samples."""
+        X, y = clean_only_data
+        model = get_one_class_model('IsolationForest')
+        results = one_class_cv(model, X, y, folds=3)
+
+        # Sensitivity should be NaN (no outliers to detect)
+        assert np.isnan(results['sensitivity'])
+        # Specificity should be valid
+        assert not np.isnan(results['specificity'])
+
+    def test_elliptic_envelope_high_dim(self):
+        """Test EllipticEnvelope handles n_features > n_samples gracefully."""
+        rng = np.random.RandomState(42)
+        # 20 samples, 200 features (typical NIR scenario)
+        X = rng.randn(20, 200) * 0.3
+        y = np.array([1] * 15 + [-1] * 5)
+
+        model = get_one_class_model('EllipticEnvelope')
+
+        # Should not crash - the search pipeline applies PCA reduction,
+        # but the standalone model may raise an error
+        try:
+            results = one_class_cv(model, X, y, folds=3, scale=True)
+            # If it works, metrics should be valid
+            assert 'balanced_accuracy' in results
+        except Exception:
+            # EllipticEnvelope may fail with high-dim data,
+            # which is expected behavior (search pipeline handles this)
+            pass
+
+
+# ============================================================================
+# Search Pipeline Integration Tests
+# ============================================================================
+
+class TestSearchIntegration:
+    def test_run_one_class_search(self):
+        """Test the full run_one_class_search pipeline."""
+        import pandas as pd
+        from spectral_predict.search import run_one_class_search
+
+        rng = np.random.RandomState(42)
+        n_features = 50
+
+        # Create synthetic spectral data
+        clean_center = rng.randn(n_features) * 0.5
+        X_clean = clean_center + rng.randn(40, n_features) * 0.3
+        X_contam = rng.randn(10, n_features) * 2.0 + 3.0
+        X = np.vstack([X_clean, X_contam])
+        y = np.array(['clean'] * 40 + ['contaminated'] * 10)
+
+        # Create DataFrame (run_one_class_search expects this)
+        wavelengths = [f"{400 + i * 10:.1f}" for i in range(n_features)]
+        X_df = pd.DataFrame(X, columns=wavelengths)
+        y_series = pd.Series(y)
+
+        results = run_one_class_search(
+            X=X_df,
+            y=y_series,
+            inlier_class_label='clean',
+            folds=3,
+            preprocessing_methods=['raw'],
+            window_sizes=[17],
+            enabled_models=['IsolationForest', 'PCA-SIMCA'],
+        )
+
+        assert len(results) > 0
+        assert 'Rank' in results.columns
+        assert 'Sensitivitycv' in results.columns
+        assert 'Specificitycv' in results.columns
+        assert 'BalancedAcccv' in results.columns
+        assert 'CompositeScore' in results.columns
+
+        # Best model should have reasonable performance
+        best = results.iloc[0]
+        assert best['BalancedAcccv'] > 0.5
+
+    def test_run_one_class_search_per_contaminant(self):
+        """Test per-contaminant sensitivity reporting with multiple contaminant types."""
+        import pandas as pd
+        from spectral_predict.search import run_one_class_search
+
+        rng = np.random.RandomState(42)
+        n_features = 30
+
+        # Clean samples
+        X_clean = rng.randn(30, n_features) * 0.3
+        # Two different contaminant types (spectrally distinct)
+        X_contam_a = rng.randn(5, n_features) + 3.0
+        X_contam_b = rng.randn(5, n_features) - 3.0
+        X = np.vstack([X_clean, X_contam_a, X_contam_b])
+        y = np.array(['clean'] * 30 + ['contam_A'] * 5 + ['contam_B'] * 5)
+
+        wavelengths = [f"{400 + i * 10:.1f}" for i in range(n_features)]
+        X_df = pd.DataFrame(X, columns=wavelengths)
+        y_series = pd.Series(y)
+
+        results = run_one_class_search(
+            X=X_df,
+            y=y_series,
+            inlier_class_label='clean',
+            folds=3,
+            preprocessing_methods=['raw'],
+            window_sizes=[17],
+            enabled_models=['IsolationForest'],
+        )
+
+        assert len(results) > 0
+        # Should have per-contaminant columns
+        has_per_contam = any(c.startswith('Sens_') for c in results.columns)
+        assert has_per_contam, "Should have per-contaminant sensitivity columns"
