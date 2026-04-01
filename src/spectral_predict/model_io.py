@@ -195,6 +195,16 @@ def save_model(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
 
+        # Extract one-class auxiliary objects BEFORE JSON serialization
+        # (sklearn objects are not JSON-serializable)
+        oc_scaler = None
+        oc_pca_reducer = None
+        if metadata_complete.get("task_type") == "one_class":
+            oc_scaler = metadata_complete.pop("scaler", None)
+            oc_pca_reducer = metadata_complete.pop("pca_reducer", None)
+            metadata_complete["has_scaler"] = oc_scaler is not None
+            metadata_complete["has_pca_reducer"] = oc_pca_reducer is not None
+
         # Save metadata as JSON
         metadata_path = tmppath / 'metadata.json'
         with open(metadata_path, 'w', encoding='utf-8') as f:
@@ -213,6 +223,12 @@ def save_model(
         label_encoder_path = tmppath / 'label_encoder.pkl'
         if label_encoder is not None:
             joblib.dump(label_encoder, label_encoder_path, compress=3)
+
+        # Save one-class auxiliary objects if present
+        if oc_scaler is not None:
+            joblib.dump(oc_scaler, tmppath / "scaler.pkl", compress=3)
+        if oc_pca_reducer is not None:
+            joblib.dump(oc_pca_reducer, tmppath / "pca_reducer.pkl", compress=3)
 
         # Save CV data if present (for uncertainty estimation)
         cv_data_path = tmppath / 'cv_data.npz'
@@ -340,6 +356,13 @@ def save_model(
                 zf.write(tmppath / 'pca_model.pkl', 'pca_model.pkl')
             if bias_correction_path.exists():
                 zf.write(bias_correction_path, 'bias_correction.json')
+            # One-class auxiliary files
+            scaler_zip_path = tmppath / "scaler.pkl"
+            if scaler_zip_path.exists():
+                zf.write(scaler_zip_path, "scaler.pkl")
+            pca_reducer_zip_path = tmppath / "pca_reducer.pkl"
+            if pca_reducer_zip_path.exists():
+                zf.write(pca_reducer_zip_path, "pca_reducer.pkl")
 
 
 def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -427,6 +450,17 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if label_encoder_path.exists():
             label_encoder = joblib.load(label_encoder_path)
 
+        # Load one-class auxiliary objects if present
+        scaler = None
+        scaler_path = tmppath / "scaler.pkl"
+        if scaler_path.exists():
+            scaler = joblib.load(scaler_path)
+
+        pca_reducer = None
+        pca_reducer_path = tmppath / "pca_reducer.pkl"
+        if pca_reducer_path.exists():
+            pca_reducer = joblib.load(pca_reducer_path)
+
         # Load CV data if present (for uncertainty estimation)
         cv_data = None
         cv_data_path = tmppath / 'cv_data.npz'
@@ -462,6 +496,8 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'ad_data': ad_data,
         'pca_model': pca_model,
         'bias_correction': bias_correction,
+        'scaler': scaler,
+        'pca_reducer': pca_reducer,
     }
 
 
@@ -679,6 +715,29 @@ def predict_with_model(
                 X_processed = X_new
     else:
         raise TypeError(f"X_new must be DataFrame or ndarray, got {type(X_new)}")
+
+    # One-class prediction branch
+    task_type = metadata.get("task_type", "regression")
+    if task_type == "one_class":
+        # Apply one-class scaler if present
+        oc_scaler = model_dict.get("scaler")
+        if oc_scaler is not None:
+            X_processed = oc_scaler.transform(X_processed)
+
+        # Apply one-class PCA reducer if present
+        oc_pca_reducer = model_dict.get("pca_reducer")
+        if oc_pca_reducer is not None:
+            X_processed = oc_pca_reducer.transform(X_processed)
+
+        # Predict labels and decision scores
+        predictions = model.predict(X_processed)
+        scores = None
+        if hasattr(model, 'decision_function'):
+            scores = model.decision_function(X_processed)
+        elif hasattr(model, 'score_samples'):
+            scores = model.score_samples(X_processed)
+
+        return {'labels': predictions, 'scores': scores}
 
     # Make predictions
     predictions = model.predict(X_processed)

@@ -342,6 +342,8 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
 
     elif task_type == "one_class":
         return get_one_class_model(model_name)
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
     return model
 
@@ -513,6 +515,8 @@ def build_model(model_name, params, task_type='regression'):
 
     elif task_type == "one_class":
         return build_one_class_model(model_name, params)
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
 
 def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
@@ -1676,6 +1680,8 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                     model = build_one_class_model(model_name, params)
                     configs.append((model, params))
                 grids[model_name] = configs
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
     return grids
 

@@ -4661,6 +4661,7 @@ def run_one_class_search(
     progress_callback=None, controller=None,
     baseline_method=None, baseline_params=None,
     enable_smoothing=False, smoothing_window=17, smoothing_polyorder=2,
+    oc_hyperparams=None,
 ):
     """Run one-class model search for contamination screening.
 
@@ -4737,19 +4738,19 @@ def run_one_class_search(
     n_inliers = len(inlier_indices)
     n_outliers = len(outlier_indices)
 
-    print(f"\n{'='*70}")
-    print(f"ONE-CLASS CONTAMINATION SCREENING")
-    print(f"{'='*70}")
-    print(f"Inlier class: '{inlier_class_label}' ({n_inliers} samples)")
-    print(f"Outlier classes: {n_outliers} samples")
+    logger.info("=" * 70)
+    logger.info("ONE-CLASS CONTAMINATION SCREENING")
+    logger.info("=" * 70)
+    logger.info("Inlier class: '%s' (%d samples)", inlier_class_label, n_inliers)
+    logger.info("Outlier classes: %d samples", n_outliers)
     if n_outliers > 0:
         outlier_labels = np.unique(y_np[outlier_mask])
         for lbl in outlier_labels:
             count = np.sum(y_np == lbl)
-            print(f"  - '{lbl}': {count} samples")
+            logger.info("  - '%s': %d samples", lbl, count)
     else:
-        print("  WARNING: No outlier samples! Evaluation will only measure specificity.")
-    print(f"{'='*70}\n")
+        logger.warning("No outlier samples! Evaluation will only measure specificity.")
+    logger.info("=" * 70)
 
     if n_inliers < folds:
         raise ValueError(
@@ -4757,7 +4758,12 @@ def run_one_class_search(
             f"Need at least {folds}."
         )
 
-    # Apply wavelength range filtering
+    # Store full wavelengths before any masking (2a)
+    wavelengths_full = wavelengths.copy()
+
+    # Build wavelength mask but defer application until after preprocessing (2a)
+    wl_mask = None
+    wavelength_restriction_active = False
     if analysis_wl_min is not None or analysis_wl_max is not None:
         wl_float = wavelengths.astype(float)
         wl_mask = np.ones(len(wavelengths), dtype=bool)
@@ -4765,9 +4771,12 @@ def run_one_class_search(
             wl_mask &= wl_float >= analysis_wl_min
         if analysis_wl_max is not None:
             wl_mask &= wl_float <= analysis_wl_max
-        X_np = X_np[:, wl_mask]
-        wavelengths = wavelengths[wl_mask]
-        print(f"Wavelength range: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} ({len(wavelengths)} features)")
+        wavelength_restriction_active = True
+        masked_wl = wavelengths[wl_mask]
+        logger.info(
+            "Wavelength range: %.1f - %.1f (%d features)",
+            masked_wl[0], masked_wl[-1], len(masked_wl),
+        )
 
     # Build preprocessing configs
     if preprocessing_methods is None:
@@ -4779,12 +4788,15 @@ def run_one_class_search(
     for method in preprocessing_methods:
         if method in ('deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2'):
             deriv_order = 1 if method.endswith('1') else 2
+            # Map display names to build_preprocessing_pipeline names
+            pipeline_method = method.replace('1', '').replace('2', '')  # deriv1->deriv, snv_deriv2->snv_deriv
             for ws in window_sizes:
                 preprocess_configs.append({
+                    'method': pipeline_method,  # 2d: base method name for build_preprocessing_pipeline
                     'name': f'{method}_w{ws}',
                     'deriv': deriv_order,
                     'window': ws,
-                    'polyorder': 2,
+                    'polyorder': None,  # 2c: let SavgolDerivative auto-detect via polyorder_map
                     'baseline_method': baseline_method,
                     'baseline_params': baseline_params,
                     'smoothing': enable_smoothing,
@@ -4793,10 +4805,11 @@ def run_one_class_search(
                 })
         else:
             preprocess_configs.append({
+                'method': method,  # 2d: base method name for build_preprocessing_pipeline
                 'name': method,
                 'deriv': None,
                 'window': None,
-                'polyorder': None,
+                'polyorder': None,  # 2c: consistent with derivative configs
                 'baseline_method': baseline_method,
                 'baseline_params': baseline_params,
                 'smoothing': enable_smoothing,
@@ -4808,6 +4821,21 @@ def run_one_class_search(
     if enabled_models is None:
         enabled_models = get_tier_models(tier, task_type='one_class')
     oc_grids = get_one_class_model_grids()
+
+    # Override grid defaults with user-specified hyperparameters
+    if oc_hyperparams:
+        for model_name, param_list in oc_grids.items():
+            for params in param_list:
+                if model_name == 'OneClassSVM' and 'nu' in oc_hyperparams:
+                    params['nu'] = oc_hyperparams['nu']
+                if model_name in ('IsolationForest', 'EllipticEnvelope', 'LOF'):
+                    if 'contamination' in oc_hyperparams:
+                        params['contamination'] = oc_hyperparams['contamination']
+                if model_name == 'PCA-SIMCA':
+                    if 'alpha' in oc_hyperparams:
+                        params['alpha'] = oc_hyperparams['alpha']
+                    if 'n_components' in oc_hyperparams:
+                        params['n_components'] = oc_hyperparams['n_components']
 
     # Filter to enabled models
     model_grids = {}
@@ -4822,14 +4850,22 @@ def run_one_class_search(
     )
     current_config = 0
 
-    print(f"Models: {list(model_grids.keys())}")
-    print(f"Preprocessing configs: {len(preprocess_configs)}")
-    print(f"Total configurations: {total_configs}")
-    print(f"CV: {folds}-fold on inlier data (outliers in test only)\n")
+    logger.info("Models: %s", list(model_grids.keys()))
+    logger.info("Preprocessing configs: %d", len(preprocess_configs))
+    logger.info("Total configurations: %d", total_configs)
+    logger.info("CV: %d-fold on inlier data (outliers in test only)", folds)
+    if progress_callback:
+        progress_callback({
+            'stage': 'info',
+            'message': f"Starting one-class search: {total_configs} configurations",
+            'current': 0,
+            'total': total_configs,
+        })
 
     # Create results container
     df_results = create_results_dataframe('one_class')
     best_result = None
+    skipped_configs = 0  # 2g: track skipped configurations
 
     # KFold for splitting inlier samples
     kf = KFold(n_splits=folds, shuffle=True, random_state=random_state)
@@ -4837,7 +4873,7 @@ def run_one_class_search(
     for preprocess_cfg in preprocess_configs:
         # Apply preprocessing to full dataset
         pipe_steps = build_preprocessing_pipeline(
-            preprocess_cfg["name"].split('_w')[0] if '_w' in preprocess_cfg["name"] else preprocess_cfg["name"],
+            preprocess_cfg["method"],  # 2d: use dedicated 'method' key
             preprocess_cfg["deriv"],
             preprocess_cfg["window"],
             preprocess_cfg["polyorder"],
@@ -4853,15 +4889,31 @@ def run_one_class_search(
         if pipe_steps:
             from sklearn.pipeline import Pipeline as SkPipeline
             prep_pipe = SkPipeline(pipe_steps)
-            try:
+            try:  # 2k: narrow to expected error types
                 # Fit on inlier data only (important for some preprocessing methods)
                 prep_pipe.fit(X_np[inlier_indices])
                 X_preprocessed = prep_pipe.transform(X_np)
-            except Exception as e:
-                print(f"  Warning: Preprocessing '{preprocess_cfg['name']}' failed: {e}")
+            except (ValueError, np.linalg.LinAlgError) as e:
+                logger.warning("Preprocessing '%s' failed: %s", preprocess_cfg['name'], e)
+                # 2k: increment current_config for all skipped configs in this preprocessing group
+                n_skipped = sum(len(pl) for pl in model_grids.values())
+                current_config += n_skipped
+                skipped_configs += n_skipped  # 2g
                 continue
         else:
             X_preprocessed = X_np.copy()
+
+        # 2a: Apply wavelength mask AFTER preprocessing (deferred from before the loop)
+        wavelengths_current = wavelengths_full.copy()
+        if wavelength_restriction_active and wl_mask is not None:
+            X_preprocessed = X_preprocessed[:, wl_mask]
+            wavelengths_current = wavelengths_full[wl_mask]
+
+        # 2b: Apply edge mask for derivative preprocessing when no wavelength restriction
+        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window") and not wavelength_restriction_active:
+            X_preprocessed, wavelengths_current, _ = _apply_edge_mask_to_data(
+                X_preprocessed, wavelengths_current, preprocess_cfg
+            )
 
         for model_name, param_list in model_grids.items():
             if controller and not controller.check_and_wait():
@@ -4882,7 +4934,7 @@ def run_one_class_search(
                         f" | Best: BalAcc={best_result.get('BalancedAcccv', 0):.3f}, "
                         f"Sens={best_result.get('Sensitivitycv', 0):.3f}"
                     )
-                print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
+                logger.info("[%d/%d] %s%s", current_config, total_configs, progress_msg, best_info)
 
                 if progress_callback:
                     progress_callback({
@@ -4937,12 +4989,16 @@ def run_one_class_search(
 
                         fold_result = one_class_metrics(test_labels, y_pred, scores)
                         fold_metrics.append(fold_result)
-                    except Exception as e:
-                        print(f"  Fold failed: {e}")
+                    except (np.linalg.LinAlgError, ValueError) as e:  # 2e: narrow exception
+                        logger.warning("Fold failed for %s (%s): %s", model_name, type(e).__name__, e)
                         continue
 
-                if len(fold_metrics) < 2:
-                    print(f"  [SKIP] Too few successful folds ({len(fold_metrics)})")
+                if len(fold_metrics) < max(2, folds // 2):  # 2i: improved fold skip threshold
+                    logger.warning(
+                        "[SKIP] Too few successful folds (%d) for %s + %s",
+                        len(fold_metrics), model_name, preprocess_cfg['name'],
+                    )
+                    skipped_configs += 1  # 2g
                     continue
 
                 # Average metrics across folds
@@ -4995,12 +5051,19 @@ def run_one_class_search(
                                 per_contaminant[str(lbl)] = float(np.mean(lbl_preds == -1))
                     cal_metrics['per_contaminant'] = per_contaminant
 
-                except Exception:
+                except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
+                    logger.warning("Calibration failed for %s: %s", model_name, e)
                     cal_metrics = {k: np.nan for k in ['sensitivity', 'specificity', 'precision', 'f1', 'accuracy', 'balanced_accuracy', 'auc']}
                     cal_metrics['per_contaminant'] = {}
 
                 # Build result dict
                 n_vars = X_preprocessed.shape[1]
+
+                # 2j: Guard NaN in balanced_accuracy for zero-outlier case
+                bal_acc_cv = _safe_mean('balanced_accuracy')
+                if np.isnan(bal_acc_cv):
+                    bal_acc_cv = _safe_mean('specificity')
+
                 result = {
                     "Task": "one_class",
                     "Model": model_name,
@@ -5011,7 +5074,7 @@ def run_one_class_search(
                     "Poly": preprocess_cfg["polyorder"],
                     "LVs": params.get("n_components") if model_name == "PCA-SIMCA" else None,
                     "n_vars": n_vars,
-                    "full_vars": len(wavelengths),
+                    "full_vars": len(wavelengths_current),
                     "SubsetTag": "full",
                     "Imbalance": "—",
                     # Calibration metrics
@@ -5028,14 +5091,14 @@ def run_one_class_search(
                     "Precisioncv": _safe_mean('precision'),
                     "F1cv": _safe_mean('f1'),
                     "Accuracycv": _safe_mean('accuracy'),
-                    "BalancedAcccv": _safe_mean('balanced_accuracy'),
+                    "BalancedAcccv": bal_acc_cv,  # 2j: NaN-guarded
                     "AUCcv": _safe_mean('auc'),
                     # Metadata
                     "n_inliers": n_inliers,
                     "n_outliers": n_outliers,
                     "inlier_class": str(inlier_class_label),
                     "top_vars": "N/A",
-                    "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths]),
+                    "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths_current]),
                     "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
                 }
 
@@ -5049,15 +5112,17 @@ def run_one_class_search(
                 # Show result
                 sens_cv = _safe_mean('sensitivity')
                 spec_cv = _safe_mean('specificity')
-                bal_cv = _safe_mean('balanced_accuracy')
                 contam_info = ""
                 if per_contam:
                     contam_parts = [f"{k}={v:.2f}" for k, v in per_contam.items()]
                     contam_info = f", Per-contam: [{', '.join(contam_parts)}]"
-                print(f"     Sens={sens_cv:.3f}, Spec={spec_cv:.3f}, BalAcc={bal_cv:.3f}{contam_info}")
+                logger.info(
+                    "     Sens=%.3f, Spec=%.3f, BalAcc=%.3f%s",
+                    sens_cv, spec_cv, bal_acc_cv, contam_info,
+                )
 
                 # Update best tracker
-                if best_result is None or bal_cv > best_result.get('BalancedAcccv', 0):
+                if best_result is None or bal_acc_cv > best_result.get('BalancedAcccv', 0):
                     best_result = result
 
     # Rank results using composite score (consistent with regression/classification)
@@ -5067,17 +5132,28 @@ def run_one_class_search(
             df_results, 'one_class', variable_penalty, gap_penalty
         )
 
-    print(f"\n{'='*70}")
-    print(f"ONE-CLASS SEARCH COMPLETE")
-    print(f"{'='*70}")
-    print(f"Total configurations tested: {len(df_results)}")
+    logger.info("=" * 70)
+    logger.info("ONE-CLASS SEARCH COMPLETE")
+    logger.info("=" * 70)
+    logger.info("Total configurations tested: %d", len(df_results))
+    logger.info("Skipped configurations: %d", skipped_configs)  # 2g
     if len(df_results) > 0:
         best = df_results.iloc[0]
-        print(f"Best model: {best['Model']} + {best['Preprocess']}")
-        print(f"  Sensitivity (CV): {best['Sensitivitycv']:.3f}")
-        print(f"  Specificity (CV): {best['Specificitycv']:.3f}")
-        print(f"  Balanced Accuracy (CV): {best['BalancedAcccv']:.3f}")
-        print(f"  AUC (CV): {best['AUCcv']:.3f}")
-    print(f"{'='*70}\n")
+        logger.info("Best model: %s + %s", best['Model'], best['Preprocess'])
+        logger.info("  Sensitivity (CV): %.3f", best['Sensitivitycv'])
+        logger.info("  Specificity (CV): %.3f", best['Specificitycv'])
+        logger.info("  Balanced Accuracy (CV): %.3f", best['BalancedAcccv'])
+        logger.info("  AUC (CV): %.3f", best['AUCcv'])
+    logger.info("=" * 70)
+    if progress_callback:
+        progress_callback({
+            'stage': 'info',
+            'message': (
+                f"One-class search complete: {len(df_results)} results, "
+                f"{skipped_configs} skipped"
+            ),
+            'current': total_configs,
+            'total': total_configs,
+        })
 
     return df_results

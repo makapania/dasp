@@ -2779,6 +2779,12 @@ class SpectralPredictApp:
         # Inlier class label for one-class models
         self.inlier_class_label = tk.StringVar(value="")
 
+        # One-class hyperparameter variables
+        self.oc_nu = tk.DoubleVar(value=0.05)           # OneClassSVM nu parameter
+        self.oc_contamination = tk.DoubleVar(value=0.05)  # IsolationForest/EllipticEnvelope/LOF
+        self.oc_alpha = tk.DoubleVar(value=0.05)         # PCA-SIMCA (DD-SIMCA) alpha
+        self.oc_n_components = tk.IntVar(value=5)        # PCA-SIMCA n_components
+
         # Create model name to checkbox mapping
         self.model_checkboxes = {
             'PLS': self.use_pls,
@@ -2807,6 +2813,10 @@ class SpectralPredictApp:
 
         # Add trace callbacks to model checkboxes to switch to Custom tier when manually changed
         for var in self.model_checkboxes.values():
+            var.trace_add('write', self._on_model_checkbox_changed)
+
+        # Add trace callbacks for one-class model checkboxes (same pattern)
+        for var in self.one_class_model_checkboxes.values():
             var.trace_add('write', self._on_model_checkbox_changed)
 
         # Preprocessing method selection
@@ -6001,6 +6011,37 @@ class SpectralPredictApp:
         ttk.Radiobutton(task_type_subframe, text="One-Class (Contamination)", variable=self.task_type, value="one_class").pack(side=tk.LEFT, padx=5)
         self.task_type_detection_label = ttk.Label(task_type_subframe, text="", style='Caption.TLabel')
         self.task_type_detection_label.pack(side=tk.LEFT, padx=10)
+        cfg_row += 1
+
+        # Inlier class selection (visible only for one-class task type)
+        self.inlier_class_frame = ttk.Frame(config_frame)
+        self.inlier_class_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
+        ttk.Label(self.inlier_class_frame, text="Inlier (Clean) Class:").pack(side=tk.LEFT, padx=(0, 5))
+        self.inlier_class_combo = ttk.Combobox(
+            self.inlier_class_frame, textvariable=self.inlier_class_label, width=20, state='readonly'
+        )
+        self.inlier_class_combo.pack(side=tk.LEFT, padx=5)
+        ttk.Label(self.inlier_class_frame, text="(leave empty to auto-detect most frequent class)",
+                 style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
+        self.inlier_class_frame.grid_remove()  # Hidden by default
+        cfg_row += 1
+
+        # One-class hyperparameters frame (visible only for one-class task type)
+        self.oc_hyperparams_frame = ttk.Frame(config_frame)
+        self.oc_hyperparams_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
+        ttk.Label(self.oc_hyperparams_frame, text="nu (OCSVM):").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_nu, from_=0.001, to=1.0,
+                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.oc_hyperparams_frame, text="contamination:").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_contamination, from_=0.001, to=0.5,
+                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.oc_hyperparams_frame, text="alpha (DD-SIMCA):").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_alpha, from_=0.001, to=0.5,
+                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.oc_hyperparams_frame, text="n_components:").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_n_components, from_=1, to=50,
+                    increment=1, width=5).pack(side=tk.LEFT, padx=(0, 10))
+        self.oc_hyperparams_frame.grid_remove()  # Hidden by default
         cfg_row += 1
 
         # Wavelength/Wavenumber Range
@@ -15331,6 +15372,23 @@ class SpectralPredictApp:
 
         # Update ensemble controls state (disabled for classification)
         self._update_ensemble_controls_state()
+
+        # Show/hide one-class controls based on task type
+        self._update_one_class_controls_visibility()
+
+    def _update_one_class_controls_visibility(self):
+        """Show/hide one-class specific controls based on task type."""
+        task_type = self.task_type.get()
+        if task_type == "one_class":
+            self.inlier_class_frame.grid()
+            self.oc_hyperparams_frame.grid()
+            # Populate inlier class combo with unique y values if data is loaded
+            if self.y is not None:
+                unique_vals = sorted([str(v) for v in np.unique(self.y.values)])
+                self.inlier_class_combo['values'] = [''] + unique_vals
+        else:
+            self.inlier_class_frame.grid_remove()
+            self.oc_hyperparams_frame.grid_remove()
 
     def _update_ensemble_controls_state(self):
         """Enable/disable ensemble controls based on task type.
@@ -24695,10 +24753,22 @@ class SpectralPredictApp:
                 # Get inlier class label
                 inlier_label = self.inlier_class_label.get().strip()
                 if not inlier_label:
-                    # Try to auto-detect: use most frequent class as inlier
+                    # Auto-detect most frequent class but require user confirmation
                     unique_labels, counts = np.unique(y_filtered.values, return_counts=True)
-                    inlier_label = unique_labels[np.argmax(counts)]
-                    self._log_progress(f"Auto-detected inlier class: '{inlier_label}' (most frequent)")
+                    auto_label = unique_labels[np.argmax(counts)]
+                    class_dist = dict(zip(unique_labels.tolist(), counts.tolist()))
+                    confirm = messagebox.askyesno(
+                        "Confirm Inlier Class",
+                        f"No inlier class specified.\n\n"
+                        f"Auto-detected: '{auto_label}' ({counts[np.argmax(counts)]} samples)\n"
+                        f"All classes: {class_dist}\n\n"
+                        f"Use '{auto_label}' as the clean/inlier class?"
+                    )
+                    if not confirm:
+                        self._log_progress("One-class screening cancelled: no inlier class confirmed.")
+                        return
+                    inlier_label = auto_label
+                    self._log_progress(f"User confirmed inlier class: '{inlier_label}'")
                 else:
                     # Check if label exists in data
                     if inlier_label not in y_filtered.values:
@@ -24762,8 +24832,8 @@ class SpectralPredictApp:
                     enabled_models=selected_oc_models,
                     variable_penalty=self.variable_penalty.get(),
                     gap_penalty=self.gap_penalty.get(),
-                    analysis_wl_min=locals().get('analysis_wl_min_value'),
-                    analysis_wl_max=locals().get('analysis_wl_max_value'),
+                    analysis_wl_min=analysis_wl_min_value,
+                    analysis_wl_max=analysis_wl_max_value,
                     progress_callback=self._progress_callback,
                     controller=self.search_controller,
                     baseline_method=baseline_method,
@@ -24771,6 +24841,12 @@ class SpectralPredictApp:
                     enable_smoothing=self.enable_smoothing.get(),
                     smoothing_window=self.smoothing_window.get(),
                     smoothing_polyorder=self.smoothing_polyorder.get(),
+                    oc_hyperparams={
+                        'nu': self.oc_nu.get(),
+                        'contamination': self.oc_contamination.get(),
+                        'alpha': self.oc_alpha.get(),
+                        'n_components': self.oc_n_components.get(),
+                    },
                 )
 
                 label_encoder = None

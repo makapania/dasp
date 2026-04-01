@@ -1,18 +1,23 @@
 """Tests for one-class contamination detection models.
 
 Tests the contamination.py module including:
-- PCA-SIMCA one-class classifier
+- PCA-SIMCA one-class classifier (DD-SIMCA)
 - One-class model factory functions
 - One-class metrics computation
-- One-class cross-validation
 - Model registry and config integration
+- Composite scoring for one_class task type
+- Model save/load roundtrip
 """
 
 from __future__ import annotations
 
+import tempfile
+
 import numpy as np
+import pandas as pd
 import pytest
-from sklearn.datasets import make_blobs
+from sklearn.ensemble import IsolationForest
+from sklearn.metrics import roc_auc_score
 
 from spectral_predict.contamination import (
     PCASIMCA,
@@ -20,8 +25,9 @@ from spectral_predict.contamination import (
     build_one_class_model,
     get_one_class_model_grids,
     one_class_metrics,
-    one_class_cv,
 )
+from spectral_predict.scoring import compute_composite_score
+from spectral_predict.model_io import save_model, load_model
 
 
 # ============================================================================
@@ -211,38 +217,6 @@ class TestOneClassMetrics:
 
 
 # ============================================================================
-# Cross-Validation Tests
-# ============================================================================
-
-class TestOneClassCV:
-    def test_cv_basic(self, synthetic_nir_data):
-        X, y, _, _ = synthetic_nir_data
-        model = get_one_class_model('IsolationForest')
-        results = one_class_cv(model, X, y, folds=3)
-
-        assert 'sensitivity' in results
-        assert 'specificity' in results
-        assert 'balanced_accuracy' in results
-        assert results['n_folds'] == 3
-        assert 0 <= results['balanced_accuracy'] <= 1
-
-    def test_cv_too_few_inliers(self):
-        X = np.random.randn(3, 10)
-        y = np.array([1, 1, -1])
-        model = get_one_class_model('IsolationForest')
-
-        with pytest.raises(ValueError, match="Not enough inlier samples"):
-            one_class_cv(model, X, y, folds=5)
-
-    def test_cv_all_models(self, synthetic_nir_data):
-        X, y, _, _ = synthetic_nir_data
-        for model_name in ['OneClassSVM', 'IsolationForest', 'PCA-SIMCA']:
-            model = get_one_class_model(model_name)
-            results = one_class_cv(model, X, y, folds=3)
-            assert results['balanced_accuracy'] >= 0, f"{model_name} failed CV"
-
-
-# ============================================================================
 # Model Registry Integration Tests
 # ============================================================================
 
@@ -304,45 +278,6 @@ class TestIntegration:
         assert 'IsolationForest' in grids
         assert len(grids['PCA-SIMCA']) > 0
 
-    def test_one_class_cv_with_scaling(self, synthetic_nir_data):
-        """Test that one_class_cv scale parameter works correctly."""
-        X, y, _, _ = synthetic_nir_data
-        model = get_one_class_model('OneClassSVM')
-
-        # Should work with scaling enabled
-        results = one_class_cv(model, X, y, folds=3, scale=True)
-        assert 0 <= results['balanced_accuracy'] <= 1
-
-    def test_one_class_cv_no_outliers(self, clean_only_data):
-        """Test one_class_cv with zero outlier samples."""
-        X, y = clean_only_data
-        model = get_one_class_model('IsolationForest')
-        results = one_class_cv(model, X, y, folds=3)
-
-        # Sensitivity should be NaN (no outliers to detect)
-        assert np.isnan(results['sensitivity'])
-        # Specificity should be valid
-        assert not np.isnan(results['specificity'])
-
-    def test_elliptic_envelope_high_dim(self):
-        """Test EllipticEnvelope handles n_features > n_samples gracefully."""
-        rng = np.random.RandomState(42)
-        # 20 samples, 200 features (typical NIR scenario)
-        X = rng.randn(20, 200) * 0.3
-        y = np.array([1] * 15 + [-1] * 5)
-
-        model = get_one_class_model('EllipticEnvelope')
-
-        # Should not crash - the search pipeline applies PCA reduction,
-        # but the standalone model may raise an error
-        try:
-            results = one_class_cv(model, X, y, folds=3, scale=True)
-            # If it works, metrics should be valid
-            assert 'balanced_accuracy' in results
-        except Exception:
-            # EllipticEnvelope may fail with high-dim data,
-            # which is expected behavior (search pipeline handles this)
-            pass
 
 
 # ============================================================================
@@ -389,7 +324,7 @@ class TestSearchIntegration:
 
         # Best model should have reasonable performance
         best = results.iloc[0]
-        assert best['BalancedAcccv'] > 0.5
+        assert best['BalancedAcccv'] >= 0.8
 
     def test_run_one_class_search_per_contaminant(self):
         """Test per-contaminant sensitivity reporting with multiple contaminant types."""
@@ -425,3 +360,216 @@ class TestSearchIntegration:
         # Should have per-contaminant columns
         has_per_contam = any(c.startswith('Sens_') for c in results.columns)
         assert has_per_contam, "Should have per-contaminant sensitivity columns"
+
+    def test_run_one_class_search_with_preprocessing(self):
+        """Test search pipeline with SNV and first-derivative preprocessing (6g)."""
+        from spectral_predict.search import run_one_class_search
+
+        rng = np.random.RandomState(42)
+        n_features = 50
+
+        clean_center = rng.randn(n_features) * 0.5
+        X_clean = clean_center + rng.randn(40, n_features) * 0.3
+        X_contam = rng.randn(10, n_features) * 2.0 + 3.0
+        X = np.vstack([X_clean, X_contam])
+        y = np.array(['clean'] * 40 + ['contaminated'] * 10)
+
+        wavelengths = [f"{400 + i * 10:.1f}" for i in range(n_features)]
+        X_df = pd.DataFrame(X, columns=wavelengths)
+        y_series = pd.Series(y)
+
+        # run_one_class_search accepts high-level method names like 'snv', 'deriv1'
+        # which it maps internally to build_preprocessing_pipeline-compatible names
+        results = run_one_class_search(
+            X=X_df,
+            y=y_series,
+            inlier_class_label='clean',
+            folds=3,
+            preprocessing_methods=['snv', 'deriv1'],
+            window_sizes=[17],
+            enabled_models=['IsolationForest', 'PCA-SIMCA'],
+        )
+
+        assert len(results) > 0
+        assert 'Rank' in results.columns
+        assert 'CompositeScore' in results.columns
+
+
+# ============================================================================
+# Composite Scoring Tests
+# ============================================================================
+
+class TestCompositeScoring:
+    def test_compute_composite_score_one_class(self):
+        """Verify composite scoring assigns Rank and non-NaN CompositeScore (6a)."""
+        df = pd.DataFrame({
+            'Model': ['IsolationForest', 'PCA-SIMCA'],
+            'Preprocess': ['raw', 'snv'],
+            'Deriv': [0, 0],
+            'Window': [0, 0],
+            'Poly': [0, 0],
+            'LVs': [0, 0],
+            'n_vars': [100, 100],
+            'full_vars': [100, 100],
+            'SubsetTag': ['', ''],
+            'Imbalance': [0.2, 0.2],
+            'Task': ['one_class', 'one_class'],
+            'Params': ['{}', '{}'],
+            'Sensitivity': [0.90, 0.85],
+            'Specificity': [0.95, 0.92],
+            'Precision': [0.80, 0.75],
+            'F1': [0.85, 0.80],
+            'Accuracy': [0.94, 0.91],
+            'BalancedAcc': [0.925, 0.885],
+            'AUC': [0.95, 0.90],
+            'Sensitivitycv': [0.85, 0.80],
+            'Specificitycv': [0.92, 0.90],
+            'Precisioncv': [0.78, 0.72],
+            'F1cv': [0.82, 0.76],
+            'Accuracycv': [0.91, 0.88],
+            'BalancedAcccv': [0.885, 0.850],
+            'AUCcv': [0.92, 0.87],
+            'top_vars': ['', ''],
+            'all_vars': ['', ''],
+        })
+
+        result = compute_composite_score(df, 'one_class')
+        assert 'Rank' in result.columns
+        assert 'CompositeScore' in result.columns
+        assert result['CompositeScore'].notna().all()
+        assert result['Rank'].min() == 1
+
+    def test_compute_composite_score_zero_outliers(self):
+        """Verify scoring handles NaN BalancedAcccv without crashing (6i)."""
+        df = pd.DataFrame({
+            'Model': ['IsolationForest'],
+            'Preprocess': ['raw'],
+            'Deriv': [0],
+            'Window': [0],
+            'Poly': [0],
+            'LVs': [0],
+            'n_vars': [50],
+            'full_vars': [50],
+            'SubsetTag': [''],
+            'Imbalance': [0.0],
+            'Task': ['one_class'],
+            'Params': ['{}'],
+            'Sensitivity': [np.nan],
+            'Specificity': [0.95],
+            'Precision': [np.nan],
+            'F1': [np.nan],
+            'Accuracy': [0.95],
+            'BalancedAcc': [np.nan],
+            'AUC': [np.nan],
+            'Sensitivitycv': [np.nan],
+            'Specificitycv': [0.92],
+            'Precisioncv': [np.nan],
+            'F1cv': [np.nan],
+            'Accuracycv': [0.92],
+            'BalancedAcccv': [np.nan],
+            'AUCcv': [np.nan],
+            'top_vars': [''],
+            'all_vars': [''],
+        })
+
+        result = compute_composite_score(df, 'one_class')
+        assert 'Rank' in result.columns
+        assert result['Rank'].iloc[0] == 1
+
+
+# ============================================================================
+# DD-SIMCA Statistical Properties Tests
+# ============================================================================
+
+class TestDDSIMCAProperties:
+    def test_inlier_false_reject_rate(self):
+        """DD-SIMCA with alpha=0.05 should classify >= 85% of clean data as inlier (6c).
+
+        Uses simple isotropic data (200 samples, 20 features) where the
+        chi-squared distribution fitting is well-conditioned.
+        """
+        rng = np.random.RandomState(42)
+        X_clean = rng.randn(200, 20) * 0.3
+
+        model = PCASIMCA(n_components=2, alpha=0.05)
+        model.fit(X_clean)
+
+        predictions = model.predict(X_clean)
+        inlier_rate = np.mean(predictions == 1)
+        assert inlier_rate >= 0.85, (
+            f"Expected >= 85% inlier rate on training clean data, got {inlier_rate:.1%}"
+        )
+
+
+# ============================================================================
+# AUC Sign Convention Test
+# ============================================================================
+
+class TestAUCSignConvention:
+    def test_isolation_forest_auc_sign(self, synthetic_nir_data):
+        """Verify AUC > 0.8 using negated decision_function scores (6d)."""
+        X, y, n_clean, _ = synthetic_nir_data
+        X_clean = X[:n_clean]
+
+        model = IsolationForest(n_estimators=100, random_state=42)
+        model.fit(X_clean)
+
+        scores = model.decision_function(X)
+        # IsolationForest: positive scores = inlier, negative = outlier
+        # For AUC with y_true where 1=inlier, -1=outlier: negate scores so
+        # outliers get higher values
+        y_bin = (y == -1).astype(int)  # 1 = outlier, 0 = inlier
+        auc = roc_auc_score(y_bin, -scores)
+        assert auc > 0.8, f"Expected AUC > 0.8 for well-separated data, got {auc:.3f}"
+
+
+# ============================================================================
+# Model Save/Load Roundtrip Test
+# ============================================================================
+
+class TestModelSaveLoad:
+    def test_pcasimca_save_load_roundtrip(self, synthetic_nir_data):
+        """Save a fitted PCASIMCA model, load it back, verify predictions match (6h)."""
+        X, y, n_clean, _ = synthetic_nir_data
+        X_clean = X[:n_clean]
+
+        model = PCASIMCA(n_components=5, alpha=0.05)
+        model.fit(X_clean)
+        original_preds = model.predict(X)
+        original_scores = model.decision_function(X)
+
+        wavelengths = [float(i) for i in range(X.shape[1])]
+        metadata = {
+            'model_name': 'PCA-SIMCA',
+            'task_type': 'one_class',
+            'wavelengths': wavelengths,
+            'n_vars': len(wavelengths),
+            'performance': {'BalancedAcc': 0.95},
+            'n_components': 5,
+            'alpha': 0.05,
+        }
+
+        with tempfile.NamedTemporaryFile(suffix='.dasp', delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            save_model(
+                model=model,
+                preprocessor=None,
+                metadata=metadata,
+                filepath=tmp_path,
+            )
+
+            loaded = load_model(tmp_path)
+            assert loaded['metadata']['model_name'] == 'PCA-SIMCA'
+            assert loaded['metadata']['task_type'] == 'one_class'
+
+            loaded_model = loaded['model']
+            loaded_preds = loaded_model.predict(X)
+            loaded_scores = loaded_model.decision_function(X)
+
+            np.testing.assert_array_equal(original_preds, loaded_preds)
+            np.testing.assert_array_almost_equal(original_scores, loaded_scores)
+        finally:
+            import os
+            os.unlink(tmp_path)

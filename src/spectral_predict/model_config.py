@@ -175,8 +175,10 @@ def get_tier_models(tier: str = 'standard', task_type: str = 'regression') -> Li
         tier_dict = CLASSIFICATION_TIERS
     elif task_type == 'one_class':
         tier_dict = ONE_CLASS_TIERS
-    else:
+    elif task_type == 'regression':
         tier_dict = MODEL_TIERS
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
     if tier not in tier_dict:
         raise ValueError(f"Unknown tier: {tier}. Must be one of {list(tier_dict.keys())}")

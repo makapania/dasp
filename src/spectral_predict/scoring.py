@@ -55,7 +55,8 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     if task_type == "regression":
         performance_score = -df["R2cv"]
     elif task_type == "one_class":
-        performance_score = -df["BalancedAcccv"] - 0.0001 * df["Sensitivitycv"]
+        bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
+        performance_score = -bal_acc_cv - 0.0001 * df["Sensitivitycv"].fillna(0)
     else:  # classification
         performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
@@ -64,7 +65,8 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     if task_type == "regression":
         perf_range = df["R2cv"].max() - df["R2cv"].min()
     elif task_type == "one_class":
-        perf_range = df["BalancedAcccv"].max() - df["BalancedAcccv"].min()
+        bal_acc_cv_range = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
+        perf_range = bal_acc_cv_range.max() - bal_acc_cv_range.min()
     else:
         perf_range = df["Accuracycv"].max() - df["Accuracycv"].min()
 
@@ -109,10 +111,14 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
 
         elif task_type == "one_class":
             # One-class: use balanced accuracy for gap calculation
-            bal_acc = df["BalancedAcc"].astype(np.float64)
-            bal_acc_cv = df["BalancedAcccv"].astype(np.float64)
+            # Guard NaN: fall back to Specificity columns when BalancedAcc is NaN
+            bal_acc = df["BalancedAcc"].fillna(df.get("Specificity", np.nan)).astype(np.float64)
+            bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", np.nan)).astype(np.float64)
+            both_nan = bal_acc.isna() & bal_acc_cv.isna()
+            bal_acc = bal_acc.fillna(0.0)
+            bal_acc_cv = bal_acc_cv.fillna(0.0)
             gap_ratio = np.where(bal_acc_cv > 1e-10, bal_acc / bal_acc_cv, 1.0)
-            gap_fraction = np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0)
+            gap_fraction = np.where(both_nan, 1.0, np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0))
 
         else:  # classification
             acc = df["Accuracy"].astype(np.float64)

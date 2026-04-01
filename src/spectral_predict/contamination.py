@@ -10,7 +10,8 @@ Models provided:
 - IsolationForest: Isolation-based anomaly detection (fast, high-dim friendly)
 - EllipticEnvelope: Mahalanobis-based (assumes roughly Gaussian clean class)
 - LocalOutlierFactor: Density-based novelty detection
-- PCA-SIMCA: PCA residuals + Hotelling T² (classic chemometrics approach)
+- PCASIMCA: DD-SIMCA — data-driven chi-squared thresholds with Fisher's
+  combined p-value test for joint T²/Q acceptance.
 
 Usage pattern:
     All models follow sklearn's one-class convention:
@@ -24,9 +25,13 @@ References
 - Oliveri, P. & Downey, G. (2012). DD-SIMCA for food authentication.
 - Rodionova, O.Y. et al. (2016). Rigorous and compliant approaches to
   one-class classification.
+- Vanden Branden, K. & Hubert, M. (2005). Robust classification in high
+  dimensions based on the SIMCA method.
 """
 
 from __future__ import annotations
+
+import logging
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
@@ -37,22 +42,29 @@ from sklearn.covariance import EllipticEnvelope
 from sklearn.neighbors import LocalOutlierFactor
 from scipy import stats
 
+logger = logging.getLogger(__name__)
+
 
 # ============================================================================
 # PCA-SIMCA: Classic chemometrics one-class model
 # ============================================================================
 
 class PCASIMCA(BaseEstimator, ClassifierMixin):
-    """PCA-based one-class classifier (SIMCA-style) for spectral data.
+    """DD-SIMCA one-class classifier for spectral data.
 
-    Builds a PCA model on clean/inlier samples and uses the combined
-    Hotelling T² and Q-residual (SPE) statistics to detect outliers.
-    A sample is flagged as contaminated if EITHER statistic exceeds
-    its confidence threshold.
+    Implements the Data-Driven SIMCA (DD-SIMCA) method: a PCA model is built
+    on clean/inlier samples and scaled chi-squared distributions are fitted
+    to the training Hotelling T² and Q-residual (SPE) statistics.
 
-    Uses the diagonal T² formulation (t_a² / lambda_a) for numerical
-    stability and the Jackson-Mudholkar approximation for Q-residual
-    thresholds when sufficient residual eigenvalues are available.
+    Acceptance is determined by Fisher's combined p-value test.  For each
+    sample the T² and Q p-values are computed from their fitted chi-squared
+    distributions and combined via ``-2 * ln(p_T2 * p_Q) ~ chi2(4)``.
+    A sample is accepted (inlier) when this combined statistic does not
+    exceed the ``chi2(4)`` quantile at level ``1 - alpha``.  This gives
+    proper type-I error control at the requested ``alpha``.
+
+    A method-of-moments fallback is used when scipy's MLE chi-squared fit
+    fails (common for very small training sets).
 
     Parameters
     ----------
@@ -68,7 +80,13 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         self.alpha = alpha
 
     def fit(self, X, y=None):
-        """Fit PCA model on clean/inlier samples only.
+        """Fit DD-SIMCA model on clean/inlier samples only.
+
+        Fits a PCA model and then estimates data-driven chi-squared
+        distributions for both Hotelling T² and Q-residuals.  The joint
+        acceptance test uses Fisher's method to combine the two p-values
+        into a single chi-squared(4) statistic, giving proper type-I error
+        control at the requested ``alpha``.
 
         Parameters
         ----------
@@ -79,10 +97,14 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         X = np.asarray(X, dtype=np.float64)
         n_samples, n_features = X.shape
 
+        if n_samples < 3:
+            raise ValueError(
+                f"Need at least 3 clean samples to fit DD-SIMCA, got {n_samples}"
+            )
+
         # Determine n_components
         max_components = min(n_samples - 1, n_features)
         if isinstance(self.n_components, float) and 0 < self.n_components < 1:
-            # Fit full PCA first to find how many components explain the variance
             pca_full = PCA(n_components=max_components)
             pca_full.fit(X)
             cumvar = np.cumsum(pca_full.explained_variance_ratio_)
@@ -99,25 +121,69 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         # Store eigenvalues for diagonal T² computation
         self.eigenvalues_ = self.pca_.explained_variance_
 
-        # Hotelling T² threshold (F-distribution)
-        p = self.n_components_
-        n = n_samples
-        if n > p:
-            self.t2_threshold_ = (
-                p * (n - 1) / (n - p) *
-                stats.f.ppf(1 - self.alpha, p, n - p)
-            )
+        # Data-driven chi-squared fit to training T² values
+        t2_train = self._compute_t2(self.scores_)
+        self.t2_train_ = t2_train
+        self.t2_dof_, _, self.t2_scale_ = self._fit_chi2(t2_train, "T2")
+
+        # Data-driven chi-squared fit to training Q residuals
+        q_train = self._compute_q_residuals(X)
+        if np.max(q_train) > 1e-10:
+            self.q_dof_, _, self.q_scale_ = self._fit_chi2(q_train, "Q")
+            self.q_threshold_method_ = "chi2_fit"
         else:
-            self.t2_threshold_ = stats.chi2.ppf(1 - self.alpha, p)
+            # PCA reconstructs perfectly — Q is degenerate
+            self.q_dof_ = 2.0
+            self.q_scale_ = 1e-10
+            self.q_threshold_method_ = "zero_guard"
 
-        # Q-residual threshold (Jackson-Mudholkar approximation)
-        # Uses residual eigenvalues for a theoretically grounded threshold
-        self.q_threshold_ = self._compute_q_threshold(X)
+        # Joint threshold via Fisher's method: -2*ln(p_t2*p_q) ~ chi2(4)
+        self.joint_threshold_ = stats.chi2.ppf(1 - self.alpha, 4)
 
-        # Compute training T² for reference
-        self.t2_train_ = self._compute_t2(self.scores_)
+        # Store per-axis thresholds for diagnostics (not used in accept/reject)
+        self.t2_threshold_ = stats.chi2.ppf(
+            1 - self.alpha, self.t2_dof_, loc=0, scale=self.t2_scale_
+        )
+        self.q_threshold_ = stats.chi2.ppf(
+            1 - self.alpha, self.q_dof_, loc=0, scale=self.q_scale_
+        )
 
         return self
+
+    def _fit_chi2(self, values: np.ndarray, label: str) -> tuple[float, float, float]:
+        """Fit a scaled chi-squared distribution to positive sample statistics.
+
+        Tries scipy MLE first; falls back to method-of-moments if MLE raises.
+
+        Parameters
+        ----------
+        values : ndarray
+            Positive statistic values (T² or Q) computed on training data.
+        label : str
+            Name used in debug log messages.
+
+        Returns
+        -------
+        dof, loc, scale : float
+            Fitted chi-squared degrees of freedom, location (always 0), and scale.
+        """
+        try:
+            dof, loc, scale = stats.chi2.fit(values, floc=0)
+            return dof, loc, scale
+        except (RuntimeError, ValueError) as exc:
+            logger.debug("chi2.fit failed for %s (%s); using method-of-moments", label, exc)
+
+        # Method-of-moments fallback: df = 2*mean²/var, scale = var/(2*mean)
+        mean_val = np.mean(values)
+        var_val = np.var(values)
+        if var_val > 1e-10 and mean_val > 1e-10:
+            dof = 2 * mean_val**2 / var_val
+            scale = var_val / (2 * mean_val)
+        else:
+            # Last resort: match mean to chi2(df=2) scaled by mean/2
+            dof = 2.0
+            scale = max(mean_val / 2.0, 1e-10)
+        return dof, 0.0, scale
 
     def predict(self, X):
         """Predict inlier (+1) or outlier (-1) for each sample.
@@ -135,10 +201,13 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         return np.where(scores >= 0, 1, -1)
 
     def decision_function(self, X):
-        """Compute anomaly score for each sample.
+        """Compute anomaly score via Fisher's combined p-value test.
 
-        Higher values indicate more normal samples. Negative values
-        indicate outliers.
+        For each sample, p-values are computed from the fitted T² and Q
+        chi-squared distributions.  These are combined using Fisher's
+        method: ``-2 * ln(p_T2 * p_Q) ~ chi2(4)``.  The score is the
+        difference ``joint_threshold - fisher_stat``; positive means
+        inlier, negative means outlier.
 
         Parameters
         ----------
@@ -152,18 +221,22 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         X = np.asarray(X, dtype=np.float64)
         pc_scores = self.pca_.transform(X)
 
-        # Hotelling T² (normalized by threshold so 1.0 = on boundary)
         t2 = self._compute_t2(pc_scores)
-        t2_ratio = t2 / self.t2_threshold_
-
-        # Q-residuals (normalized by threshold)
         q = self._compute_q_residuals(X)
-        q_ratio = q / self.q_threshold_
 
-        # Combined score: worst of the two ratios
-        # Score > 0 means inlier, < 0 means outlier
-        worst_ratio = np.maximum(t2_ratio, q_ratio)
-        return 1.0 - worst_ratio
+        # Per-axis p-values from fitted chi-squared distributions
+        p_t2 = 1.0 - stats.chi2.cdf(t2, self.t2_dof_, loc=0, scale=self.t2_scale_)
+        p_q = 1.0 - stats.chi2.cdf(q, self.q_dof_, loc=0, scale=self.q_scale_)
+
+        # Clip to avoid log(0); 1e-300 is safely above float64 underflow
+        p_t2 = np.clip(p_t2, 1e-300, 1.0)
+        p_q = np.clip(p_q, 1e-300, 1.0)
+
+        # Fisher's method: combine independent p-values → chi2(4)
+        fisher_stat = -2.0 * (np.log(p_t2) + np.log(p_q))
+
+        # Score: positive = inside acceptance, negative = outside
+        return self.joint_threshold_ - fisher_stat
 
     def score_samples(self, X):
         """Alias for decision_function (sklearn convention)."""
@@ -191,61 +264,6 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         X_reconstructed = scores @ self.pca_.components_ + self.pca_.mean_
         residuals = X - X_reconstructed
         return np.sum(residuals ** 2, axis=1)
-
-    def _compute_q_threshold(self, X):
-        """Compute Q-residual threshold using Jackson-Mudholkar approximation.
-
-        Falls back to percentile-based threshold when there are too few
-        residual eigenvalues for the approximation.
-
-        Reference: Jackson, J.E. & Mudholkar, G.S. (1979).
-        """
-        X = np.asarray(X, dtype=np.float64)
-        n_samples, n_features = X.shape
-
-        # Get ALL eigenvalues (need residual eigenvalues beyond n_components)
-        n_full = min(n_samples, n_features)
-        if n_full > self.n_components_ + 2:
-            pca_full = PCA(n_components=n_full)
-            pca_full.fit(X)
-            all_eigenvalues = pca_full.explained_variance_
-
-            # Residual eigenvalues (beyond retained components)
-            residual_eigenvalues = all_eigenvalues[self.n_components_:]
-            residual_eigenvalues = residual_eigenvalues[residual_eigenvalues > 1e-10]
-
-            if len(residual_eigenvalues) >= 2:
-                # Jackson-Mudholkar approximation
-                theta1 = np.sum(residual_eigenvalues)
-                theta2 = np.sum(residual_eigenvalues ** 2)
-                theta3 = np.sum(residual_eigenvalues ** 3)
-
-                if theta1 > 1e-10 and theta2 > 1e-10:
-                    h0 = 1.0 - (2.0 * theta1 * theta3) / (3.0 * theta2 ** 2)
-                    if abs(h0) > 1e-10:
-                        c_alpha = stats.norm.ppf(1 - self.alpha)
-                        q_alpha = theta1 * (
-                            c_alpha * np.sqrt(2.0 * theta2 * h0 ** 2) / theta1
-                            + 1.0
-                            + theta2 * h0 * (h0 - 1.0) / (theta1 ** 2)
-                        ) ** (1.0 / h0)
-                        if q_alpha > 0:
-                            return q_alpha
-
-        # Fallback: percentile-based threshold
-        q_residuals_train = self._compute_q_residuals(X)
-        return np.percentile(q_residuals_train, 100 * (1 - self.alpha))
-
-    def get_params(self, deep=True):
-        return {
-            'n_components': self.n_components,
-            'alpha': self.alpha,
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
 
 
 # ============================================================================
@@ -463,123 +481,10 @@ def one_class_metrics(y_true, y_pred, scores=None):
             # Negate scores: higher decision_function = more normal,
             # but AUC expects higher score = more positive (outlier)
             metrics['auc'] = roc_auc_score(y_true_bin, -np.asarray(scores))
-        except Exception:
+        except (ValueError, TypeError) as exc:
+            logger.debug("AUC computation failed: %s", exc)
             metrics['auc'] = np.nan
     else:
         metrics['auc'] = np.nan
 
     return metrics
-
-
-# ============================================================================
-# ONE-CLASS CROSS-VALIDATION
-# ============================================================================
-
-def one_class_cv(model, X, y_true, folds=5, random_state=42, scale=False):
-    """Cross-validate a one-class model with proper train/test splitting.
-
-    Training folds contain ONLY inlier samples (+1).
-    Test folds contain BOTH inliers and outliers to evaluate detection.
-
-    Parameters
-    ----------
-    model : estimator
-        One-class model with fit/predict/decision_function interface.
-    X : ndarray of shape (n_samples, n_features)
-        Feature matrix (all samples).
-    y_true : ndarray of shape (n_samples,)
-        True labels: +1 for inlier, -1 for outlier.
-    folds : int, default=5
-        Number of CV folds.
-    random_state : int, default=42
-        Random seed for reproducibility.
-    scale : bool, default=False
-        If True, apply StandardScaler (fit on training inliers only).
-        Recommended for OCSVM, EllipticEnvelope, and LOF.
-
-    Returns
-    -------
-    results : dict
-        Averaged metrics across folds plus per-fold details.
-    """
-    from sklearn.model_selection import KFold
-    from sklearn.base import clone
-    from sklearn.preprocessing import StandardScaler
-
-    X = np.asarray(X, dtype=np.float64)
-    y_true = np.asarray(y_true)
-
-    # Split inliers and outliers
-    inlier_mask = y_true == 1
-    outlier_mask = y_true == -1
-    inlier_indices = np.where(inlier_mask)[0]
-    outlier_indices = np.where(outlier_mask)[0]
-
-    n_inliers = len(inlier_indices)
-    n_outliers = len(outlier_indices)
-
-    if n_inliers < folds:
-        raise ValueError(
-            f"Not enough inlier samples ({n_inliers}) for {folds}-fold CV. "
-            f"Need at least {folds} inlier samples."
-        )
-
-    # KFold on inlier indices only
-    kf = KFold(n_splits=folds, shuffle=True, random_state=random_state)
-
-    fold_metrics = []
-    for train_inlier_idx, test_inlier_idx in kf.split(inlier_indices):
-        # Training set: only inliers from training fold
-        train_idx = inlier_indices[train_inlier_idx]
-
-        # Test set: held-out inliers + ALL outliers
-        test_inlier = inlier_indices[test_inlier_idx]
-        test_idx = np.concatenate([test_inlier, outlier_indices])
-        test_labels = np.concatenate([
-            np.ones(len(test_inlier), dtype=int),
-            -np.ones(n_outliers, dtype=int)
-        ])
-
-        X_train = X[train_idx]
-        X_test = X[test_idx]
-
-        # Apply scaling if requested (fit on training inliers only)
-        if scale:
-            scaler = StandardScaler()
-            X_train = scaler.fit_transform(X_train)
-            X_test = scaler.transform(X_test)
-
-        # Fit on clean training data only
-        model_clone = clone(model)
-        model_clone.fit(X_train)
-
-        # Predict on test set
-        y_pred = model_clone.predict(X_test)
-
-        # Get decision scores if available
-        scores = None
-        if hasattr(model_clone, 'decision_function'):
-            scores = model_clone.decision_function(X_test)
-        elif hasattr(model_clone, 'score_samples'):
-            scores = model_clone.score_samples(X_test)
-
-        fold_result = one_class_metrics(test_labels, y_pred, scores)
-        fold_metrics.append(fold_result)
-
-    # Average metrics across folds
-    avg_metrics = {}
-    for key in fold_metrics[0]:
-        values = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
-        if values:
-            avg_metrics[key] = np.mean(values)
-            avg_metrics[f'{key}_std'] = np.std(values)
-        else:
-            avg_metrics[key] = np.nan
-            avg_metrics[f'{key}_std'] = np.nan
-
-    avg_metrics['n_folds'] = folds
-    avg_metrics['n_inliers'] = n_inliers
-    avg_metrics['n_outliers'] = n_outliers
-    avg_metrics['fold_metrics'] = fold_metrics
-
-    return avg_metrics
