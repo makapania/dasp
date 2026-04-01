@@ -19,6 +19,11 @@ from catboost import CatBoostRegressor, CatBoostClassifier
 # Import tiered configuration
 from .model_config import get_tier_models, get_hyperparameters
 
+# Import one-class models for contamination detection
+from .contamination import (
+    get_one_class_model, build_one_class_model, get_one_class_model_grids
+)
+
 
 class PLSTransformer(BaseEstimator, TransformerMixin):
     """Wrapper for PLSRegression that ensures transform() returns 2D output for classification.
@@ -231,7 +236,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         else:
             raise ValueError(f"Unknown regression model: {model_name}")
 
-    else:  # classification
+    elif task_type == "classification":
         if model_name in ["PLS-DA", "PLS"]:
             # For classification, PLS is used as a transformer
             return PLSTransformer(n_components=n_components, scale=False)
@@ -335,6 +340,9 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         else:
             raise ValueError(f"Unknown classification model: {model_name}")
 
+    elif task_type == "one_class":
+        return get_one_class_model(model_name)
+
     return model
 
 
@@ -434,7 +442,7 @@ def build_model(model_name, params, task_type='regression'):
         else:
             raise ValueError(f"Unknown regression model: {model_name}")
 
-    else:  # classification
+    elif task_type == "classification":
         if model_name in ["PLS-DA", "PLS"]:
             return PLSTransformer(scale=False, **params)
 
@@ -502,6 +510,9 @@ def build_model(model_name, params, task_type='regression'):
 
         else:
             raise ValueError(f"Unknown classification model: {model_name}")
+
+    elif task_type == "one_class":
+        return build_one_class_model(model_name, params)
 
 
 def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
@@ -1308,7 +1319,7 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                                                 )
             grids["CatBoost"] = catboost_configs
 
-    else:  # classification
+    elif task_type == "classification":
         # PLS-DA (PLS + LogisticRegression) - tier-aware
         # Stage 1: PLSTransformer (n_components, max_iter, tol)
         # Stage 2: LogisticRegression (lr_C, lr_solver, lr_max_iter)
@@ -1654,6 +1665,17 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                                                     (CatBoostClassifier(**model_kwargs), params_dict)
                                                 )
             grids["CatBoost"] = catboost_configs
+
+    elif task_type == "one_class":
+        # One-class models use their own grid system from contamination module
+        oc_grids = get_one_class_model_grids()
+        for model_name, param_list in oc_grids.items():
+            if model_name in enabled_models:
+                configs = []
+                for params in param_list:
+                    model = build_one_class_model(model_name, params)
+                    configs.append((model, params))
+                grids[model_name] = configs
 
     return grids
 

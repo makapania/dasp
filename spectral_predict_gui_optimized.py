@@ -2769,6 +2769,16 @@ class SpectralPredictApp:
         self.use_svm = tk.BooleanVar(value=False)          # Experimental (very slow) - for classification
         self.use_mlp = tk.BooleanVar(value=False)          # Experimental
 
+        # One-class model selection (for contamination screening)
+        self.use_ocsvm = tk.BooleanVar(value=True)
+        self.use_isolation_forest = tk.BooleanVar(value=True)
+        self.use_elliptic_envelope = tk.BooleanVar(value=False)
+        self.use_lof = tk.BooleanVar(value=False)
+        self.use_pca_simca = tk.BooleanVar(value=True)
+
+        # Inlier class label for one-class models
+        self.inlier_class_label = tk.StringVar(value="")
+
         # Create model name to checkbox mapping
         self.model_checkboxes = {
             'PLS': self.use_pls,
@@ -2784,6 +2794,15 @@ class SpectralPredictApp:
             'SVM': self.use_svm,
             'MLP': self.use_mlp,
             'NeuralBoosted': self.use_neuralboosted
+        }
+
+        # One-class model checkboxes
+        self.one_class_model_checkboxes = {
+            'OneClassSVM': self.use_ocsvm,
+            'IsolationForest': self.use_isolation_forest,
+            'EllipticEnvelope': self.use_elliptic_envelope,
+            'LOF': self.use_lof,
+            'PCA-SIMCA': self.use_pca_simca,
         }
 
         # Add trace callbacks to model checkboxes to switch to Custom tier when manually changed
@@ -5878,6 +5897,7 @@ class SpectralPredictApp:
         ttk.Radiobutton(task_type_subframe, text="Auto-detect", variable=self.task_type, value="auto").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Regression", variable=self.task_type, value="regression").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Classification", variable=self.task_type, value="classification").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(task_type_subframe, text="One-Class (Contamination)", variable=self.task_type, value="one_class").pack(side=tk.LEFT, padx=5)
         self.task_type_detection_label = ttk.Label(task_type_subframe, text="", style='Caption.TLabel')
         self.task_type_detection_label.pack(side=tk.LEFT, padx=10)
         cfg_row += 1
@@ -21487,33 +21507,42 @@ class SpectralPredictApp:
             return
 
         # Validate at least one model selected
-        selected_models = []
-        if self.use_pls.get():
-            selected_models.append("PLS")
-        if self.use_plsda.get():
-            selected_models.append("PLS-DA")
-        if self.use_ridge.get():
-            selected_models.append("Ridge")
-        if self.use_lasso.get():
-            selected_models.append("Lasso")
-        if self.use_elasticnet.get():
-            selected_models.append("ElasticNet")
-        if self.use_randomforest.get():
-            selected_models.append("RandomForest")
-        if self.use_mlp.get():
-            selected_models.append("MLP")
-        if self.use_neuralboosted.get():
-            selected_models.append("NeuralBoosted")
-        if self.use_svr.get():
-            selected_models.append("SVR")
-        if self.use_svm.get():
-            selected_models.append("SVM")
-        if self.use_xgboost.get():
-            selected_models.append("XGBoost")
-        if self.use_lightgbm.get():
-            selected_models.append("LightGBM")
-        if self.use_catboost.get():
-            selected_models.append("CatBoost")
+        task_type_check = self.task_type.get()
+
+        if task_type_check == "one_class":
+            # For one-class contamination screening, use one-class model checkboxes
+            selected_models = [
+                name for name, var in self.one_class_model_checkboxes.items()
+                if var.get()
+            ]
+        else:
+            selected_models = []
+            if self.use_pls.get():
+                selected_models.append("PLS")
+            if self.use_plsda.get():
+                selected_models.append("PLS-DA")
+            if self.use_ridge.get():
+                selected_models.append("Ridge")
+            if self.use_lasso.get():
+                selected_models.append("Lasso")
+            if self.use_elasticnet.get():
+                selected_models.append("ElasticNet")
+            if self.use_randomforest.get():
+                selected_models.append("RandomForest")
+            if self.use_mlp.get():
+                selected_models.append("MLP")
+            if self.use_neuralboosted.get():
+                selected_models.append("NeuralBoosted")
+            if self.use_svr.get():
+                selected_models.append("SVR")
+            if self.use_svm.get():
+                selected_models.append("SVM")
+            if self.use_xgboost.get():
+                selected_models.append("XGBoost")
+            if self.use_lightgbm.get():
+                selected_models.append("LightGBM")
+            if self.use_catboost.get():
+                selected_models.append("CatBoost")
 
         # Get tier selection
         tier = self.model_tier.get()
@@ -24555,6 +24584,103 @@ class SpectralPredictApp:
             imbalance_method, imbalance_params = self._get_imbalance_params()
             if imbalance_method:
                 self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
+
+            # ═══════════════════════════════════════════════════════════════════
+            # ONE-CLASS CONTAMINATION SCREENING (separate pipeline)
+            # ═══════════════════════════════════════════════════════════════════
+            if task_type == "one_class":
+                from spectral_predict.search import run_one_class_search
+
+                # Get inlier class label
+                inlier_label = self.inlier_class_label.get().strip()
+                if not inlier_label:
+                    # Try to auto-detect: use most frequent class as inlier
+                    unique_labels, counts = np.unique(y_filtered.values, return_counts=True)
+                    inlier_label = unique_labels[np.argmax(counts)]
+                    self._log_progress(f"Auto-detected inlier class: '{inlier_label}' (most frequent)")
+                else:
+                    # Check if label exists in data
+                    if inlier_label not in y_filtered.values:
+                        # Try numeric conversion
+                        try:
+                            inlier_label_num = float(inlier_label)
+                            if inlier_label_num in y_filtered.values:
+                                inlier_label = inlier_label_num
+                        except ValueError:
+                            pass
+                    if inlier_label not in y_filtered.values:
+                        self._log_progress(f"ERROR: Inlier class '{inlier_label}' not found in data!")
+                        self._log_progress(f"Available classes: {list(np.unique(y_filtered.values))}")
+                        messagebox.showerror("Invalid Inlier Class",
+                            f"Class '{inlier_label}' not found.\n"
+                            f"Available: {list(np.unique(y_filtered.values))}")
+                        return
+
+                # Collect selected one-class models
+                selected_oc_models = [
+                    name for name, var in self.one_class_model_checkboxes.items()
+                    if var.get()
+                ]
+                if not selected_oc_models:
+                    selected_oc_models = None  # Use tier defaults
+
+                # Collect preprocessing methods
+                preprocess_list = []
+                if self.use_raw.get():
+                    preprocess_list.append('raw')
+                if self.use_snv.get():
+                    preprocess_list.append('snv')
+                if self.use_sg1.get():
+                    preprocess_list.append('deriv1')
+                if self.use_sg2.get():
+                    preprocess_list.append('deriv2')
+                if not preprocess_list:
+                    preprocess_list = ['raw', 'snv', 'deriv1']
+
+                # Collect window sizes
+                window_sizes_oc = []
+                if self.window_7.get(): window_sizes_oc.append(7)
+                if self.window_11.get(): window_sizes_oc.append(11)
+                if self.window_17.get(): window_sizes_oc.append(17)
+                if self.window_23.get(): window_sizes_oc.append(23)
+                if self.window_31.get(): window_sizes_oc.append(31)
+                if not window_sizes_oc:
+                    window_sizes_oc = [17]
+
+                baseline_method, baseline_params = self._get_baseline_params()
+
+                self._log_progress("\nRunning One-Class Contamination Screening...")
+                results_df = run_one_class_search(
+                    X=X_filtered,
+                    y=y_filtered,
+                    inlier_class_label=inlier_label,
+                    folds=self.folds.get(),
+                    preprocessing_methods=preprocess_list,
+                    window_sizes=window_sizes_oc,
+                    tier=tier,
+                    enabled_models=selected_oc_models,
+                    analysis_wl_min=analysis_wl_min_value if 'analysis_wl_min_value' in dir() else None,
+                    analysis_wl_max=analysis_wl_max_value if 'analysis_wl_max_value' in dir() else None,
+                    progress_callback=self._progress_callback,
+                    controller=self.search_controller,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    enable_smoothing=self.enable_smoothing.get(),
+                    smoothing_window=self.smoothing_window.get(),
+                    smoothing_polyorder=self.smoothing_polyorder.get(),
+                )
+
+                label_encoder = None
+                self.label_encoder = None
+
+                if results_df is not None and len(results_df) > 0:
+                    self._log_progress(f"\nOne-class search complete: {len(results_df)} configurations tested")
+                    self.results = results_df
+                    self._update_results_table(results_df)
+                else:
+                    self._log_progress("\nNo valid one-class results.")
+                    messagebox.showwarning("No Results", "One-class search produced no valid results.")
+                return
 
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
             optimization_method = self.optimization_method.get()

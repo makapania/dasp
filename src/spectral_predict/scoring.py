@@ -54,6 +54,8 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     # Performance score (lower is better) — always use direct metric ranking
     if task_type == "regression":
         performance_score = -df["R2cv"]
+    elif task_type == "one_class":
+        performance_score = -df["BalancedAcccv"] - 0.0001 * df["Sensitivitycv"]
     else:  # classification
         performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
@@ -61,6 +63,8 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     # Both penalties scale relative to this so same spinbox value = same max impact
     if task_type == "regression":
         perf_range = df["R2cv"].max() - df["R2cv"].min()
+    elif task_type == "one_class":
+        perf_range = df["BalancedAcccv"].max() - df["BalancedAcccv"].min()
     else:
         perf_range = df["Accuracycv"].max() - df["Accuracycv"].min()
 
@@ -357,6 +361,16 @@ def create_results_dataframe(task_type):
     if task_type == "regression":
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
         metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER"]
+    elif task_type == "one_class":
+        # One-class contamination screening metrics
+        metric_cols = [
+            # Calibration metrics
+            "Sensitivity", "Specificity", "Precision", "F1",
+            "Accuracy", "BalancedAcc", "AUC",
+            # Cross-validation metrics
+            "Sensitivitycv", "Specificitycv", "Precisioncv", "F1cv",
+            "Accuracycv", "BalancedAcccv", "AUCcv",
+        ]
     else:
         # Calibration metrics first, then CV metrics, then advanced metrics
         metric_cols = [

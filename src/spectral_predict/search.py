@@ -4646,3 +4646,393 @@ def _run_single_config(
         # Keep all_vars that we already set above
 
     return result
+
+
+# ============================================================================
+# ONE-CLASS CONTAMINATION SEARCH
+# ============================================================================
+
+def run_one_class_search(
+    X, y, inlier_class_label,
+    folds=5, preprocessing_methods=None, window_sizes=None,
+    tier='standard', enabled_models=None,
+    analysis_wl_min=None, analysis_wl_max=None,
+    progress_callback=None, controller=None,
+    baseline_method=None, baseline_params=None,
+    enable_smoothing=False, smoothing_window=17, smoothing_polyorder=2,
+):
+    """Run one-class model search for contamination screening.
+
+    Trains models ONLY on inlier (clean) samples and evaluates detection
+    of outliers (contaminated samples). Uses a fundamentally different CV
+    strategy than standard classification: training folds contain only
+    inliers, while test folds contain both inliers and outliers.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Spectral data (samples x wavelengths).
+    y : pd.Series
+        Class labels. One class is designated as the inlier (clean) class.
+    inlier_class_label : str or int
+        The label in y that represents clean/inlier samples.
+        All other labels are treated as outliers (contaminated).
+    folds : int, default=5
+        Number of CV folds for inlier data.
+    preprocessing_methods : list of str, optional
+        Preprocessing methods to test (e.g., ['raw', 'snv', 'deriv1']).
+    window_sizes : list of int, optional
+        Savitzky-Golay window sizes.
+    tier : str, default='standard'
+        Model tier ('quick', 'standard', 'comprehensive', 'experimental').
+    enabled_models : list of str, optional
+        Explicit list of one-class models to test.
+    analysis_wl_min : float, optional
+        Minimum wavelength for analysis range.
+    analysis_wl_max : float, optional
+        Maximum wavelength for analysis range.
+    progress_callback : callable, optional
+        Callback for progress updates.
+    controller : object, optional
+        Pause/stop controller.
+    baseline_method : str, optional
+        Baseline correction method.
+    baseline_params : dict, optional
+        Baseline correction parameters.
+    enable_smoothing : bool, default=False
+        Whether to apply pre-smoothing.
+    smoothing_window : int, default=17
+        Smoothing window size.
+    smoothing_polyorder : int, default=2
+        Smoothing polynomial order.
+
+    Returns
+    -------
+    df_results : pd.DataFrame
+        Results dataframe ranked by balanced accuracy.
+    """
+    from sklearn.model_selection import KFold
+    from sklearn.base import clone
+    from sklearn.preprocessing import StandardScaler
+    from .contamination import (
+        build_one_class_model, get_one_class_model_grids, one_class_metrics,
+    )
+    from .scoring import create_results_dataframe, add_result
+
+    random_state = RANDOM_STATE
+
+    # Validate inputs
+    X_np = X.values if hasattr(X, 'values') else np.asarray(X)
+    y_np = y.values if hasattr(y, 'values') else np.asarray(y)
+    wavelengths = X.columns.values if hasattr(X, 'columns') else np.arange(X_np.shape[1])
+
+    # Convert labels to one-class format: +1 = inlier, -1 = outlier
+    y_oc = np.where(y_np == inlier_class_label, 1, -1)
+    inlier_mask = y_oc == 1
+    outlier_mask = y_oc == -1
+    inlier_indices = np.where(inlier_mask)[0]
+    outlier_indices = np.where(outlier_mask)[0]
+    n_inliers = len(inlier_indices)
+    n_outliers = len(outlier_indices)
+
+    print(f"\n{'='*70}")
+    print(f"ONE-CLASS CONTAMINATION SCREENING")
+    print(f"{'='*70}")
+    print(f"Inlier class: '{inlier_class_label}' ({n_inliers} samples)")
+    print(f"Outlier classes: {n_outliers} samples")
+    if n_outliers > 0:
+        outlier_labels = np.unique(y_np[outlier_mask])
+        for lbl in outlier_labels:
+            count = np.sum(y_np == lbl)
+            print(f"  - '{lbl}': {count} samples")
+    else:
+        print("  WARNING: No outlier samples! Evaluation will only measure specificity.")
+    print(f"{'='*70}\n")
+
+    if n_inliers < folds:
+        raise ValueError(
+            f"Not enough inlier samples ({n_inliers}) for {folds}-fold CV. "
+            f"Need at least {folds}."
+        )
+
+    # Apply wavelength range filtering
+    if analysis_wl_min is not None or analysis_wl_max is not None:
+        wl_float = wavelengths.astype(float)
+        wl_mask = np.ones(len(wavelengths), dtype=bool)
+        if analysis_wl_min is not None:
+            wl_mask &= wl_float >= analysis_wl_min
+        if analysis_wl_max is not None:
+            wl_mask &= wl_float <= analysis_wl_max
+        X_np = X_np[:, wl_mask]
+        wavelengths = wavelengths[wl_mask]
+        print(f"Wavelength range: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} ({len(wavelengths)} features)")
+
+    # Build preprocessing configs
+    if preprocessing_methods is None:
+        preprocessing_methods = ['raw', 'snv', 'deriv1', 'deriv2']
+    if window_sizes is None:
+        window_sizes = [7, 19]
+
+    preprocess_configs = []
+    for method in preprocessing_methods:
+        if method in ('deriv1', 'deriv2'):
+            deriv_order = 1 if method == 'deriv1' else 2
+            for ws in window_sizes:
+                preprocess_configs.append({
+                    'name': f'{method}_w{ws}',
+                    'deriv': deriv_order,
+                    'window': ws,
+                    'polyorder': 2,
+                    'baseline_method': baseline_method,
+                    'baseline_params': baseline_params,
+                    'smoothing': enable_smoothing,
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder,
+                })
+        else:
+            preprocess_configs.append({
+                'name': method,
+                'deriv': None,
+                'window': None,
+                'polyorder': None,
+                'baseline_method': baseline_method,
+                'baseline_params': baseline_params,
+                'smoothing': enable_smoothing,
+                'smoothing_window': smoothing_window,
+                'smoothing_polyorder': smoothing_polyorder,
+            })
+
+    # Get model grids
+    if enabled_models is None:
+        enabled_models = get_tier_models(tier, task_type='one_class')
+    oc_grids = get_one_class_model_grids()
+
+    # Filter to enabled models
+    model_grids = {}
+    for model_name, param_list in oc_grids.items():
+        if model_name in enabled_models:
+            model_grids[model_name] = param_list
+
+    # Calculate total configurations
+    total_configs = sum(
+        len(params) * len(preprocess_configs)
+        for params in model_grids.values()
+    )
+    current_config = 0
+
+    print(f"Models: {list(model_grids.keys())}")
+    print(f"Preprocessing configs: {len(preprocess_configs)}")
+    print(f"Total configurations: {total_configs}")
+    print(f"CV: {folds}-fold on inlier data (outliers in test only)\n")
+
+    # Create results container
+    df_results = create_results_dataframe('one_class')
+    best_result = None
+
+    # KFold for splitting inlier samples
+    kf = KFold(n_splits=folds, shuffle=True, random_state=random_state)
+
+    for preprocess_cfg in preprocess_configs:
+        # Apply preprocessing to full dataset
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["name"].split('_w')[0] if '_w' in preprocess_cfg["name"] else preprocess_cfg["name"],
+            preprocess_cfg["deriv"],
+            preprocess_cfg["window"],
+            preprocess_cfg["polyorder"],
+            task_type='one_class',
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+        )
+
+        # Apply preprocessing (fit on inlier data, transform all)
+        if pipe_steps:
+            from sklearn.pipeline import Pipeline as SkPipeline
+            prep_pipe = SkPipeline(pipe_steps)
+            try:
+                # Fit on inlier data only (important for some preprocessing methods)
+                prep_pipe.fit(X_np[inlier_indices])
+                X_preprocessed = prep_pipe.transform(X_np)
+            except Exception as e:
+                print(f"  Warning: Preprocessing '{preprocess_cfg['name']}' failed: {e}")
+                continue
+        else:
+            X_preprocessed = X_np.copy()
+
+        for model_name, param_list in model_grids.items():
+            if controller and not controller.check_and_wait():
+                break
+
+            for params in param_list:
+                if controller and not controller.check_and_wait():
+                    break
+
+                current_config += 1
+                param_str = ", ".join(f"{k}={v}" for k, v in list(params.items())[:3])
+                prep_name = preprocess_cfg["name"]
+                progress_msg = f"Testing {model_name} ({param_str}) + {prep_name}"
+
+                best_info = ""
+                if best_result is not None:
+                    best_info = (
+                        f" | Best: BalAcc={best_result.get('BalancedAcccv', 0):.3f}, "
+                        f"Sens={best_result.get('Sensitivitycv', 0):.3f}"
+                    )
+                print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
+
+                if progress_callback:
+                    progress_callback({
+                        'stage': 'model_testing',
+                        'message': progress_msg,
+                        'current': current_config,
+                        'total': total_configs,
+                        'best_model': best_result,
+                    })
+
+                # Run one-class CV
+                fold_metrics = []
+                for train_inlier_idx, test_inlier_idx in kf.split(inlier_indices):
+                    train_idx = inlier_indices[train_inlier_idx]
+                    test_inlier = inlier_indices[test_inlier_idx]
+                    test_idx = np.concatenate([test_inlier, outlier_indices])
+                    test_labels = np.concatenate([
+                        np.ones(len(test_inlier), dtype=int),
+                        -np.ones(n_outliers, dtype=int),
+                    ])
+
+                    try:
+                        model = build_one_class_model(model_name, params)
+
+                        # Scale data for OCSVM and EllipticEnvelope
+                        if model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+                            scaler = StandardScaler()
+                            X_train = scaler.fit_transform(X_preprocessed[train_idx])
+                            X_test = scaler.transform(X_preprocessed[test_idx])
+                        else:
+                            X_train = X_preprocessed[train_idx]
+                            X_test = X_preprocessed[test_idx]
+
+                        model.fit(X_train)
+                        y_pred = model.predict(X_test)
+
+                        # Get decision scores if available
+                        scores = None
+                        if hasattr(model, 'decision_function'):
+                            scores = model.decision_function(X_test)
+                        elif hasattr(model, 'score_samples'):
+                            scores = model.score_samples(X_test)
+
+                        fold_result = one_class_metrics(test_labels, y_pred, scores)
+                        fold_metrics.append(fold_result)
+                    except Exception as e:
+                        print(f"  Fold failed: {e}")
+                        continue
+
+                if len(fold_metrics) < 2:
+                    print(f"  [SKIP] Too few successful folds ({len(fold_metrics)})")
+                    continue
+
+                # Average metrics across folds
+                def _safe_mean(key):
+                    vals = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
+                    return np.mean(vals) if vals else np.nan
+
+                # Calibration: fit on ALL inliers, evaluate on all data
+                try:
+                    cal_model = build_one_class_model(model_name, params)
+                    if model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+                        scaler = StandardScaler()
+                        X_inlier_scaled = scaler.fit_transform(X_preprocessed[inlier_indices])
+                        X_all_scaled = scaler.transform(X_preprocessed)
+                        cal_model.fit(X_inlier_scaled)
+                        y_pred_cal = cal_model.predict(X_all_scaled)
+                        scores_cal = (
+                            cal_model.decision_function(X_all_scaled)
+                            if hasattr(cal_model, 'decision_function')
+                            else None
+                        )
+                    else:
+                        cal_model.fit(X_preprocessed[inlier_indices])
+                        y_pred_cal = cal_model.predict(X_preprocessed)
+                        scores_cal = (
+                            cal_model.decision_function(X_preprocessed)
+                            if hasattr(cal_model, 'decision_function')
+                            else None
+                        )
+                    cal_metrics = one_class_metrics(y_oc, y_pred_cal, scores_cal)
+                except Exception:
+                    cal_metrics = {k: np.nan for k in ['sensitivity', 'specificity', 'precision', 'f1', 'accuracy', 'balanced_accuracy', 'auc']}
+
+                # Build result dict
+                n_vars = X_preprocessed.shape[1]
+                result = {
+                    "Task": "one_class",
+                    "Model": model_name,
+                    "Params": str(params),
+                    "Preprocess": preprocess_cfg["name"],
+                    "Deriv": preprocess_cfg["deriv"],
+                    "Window": preprocess_cfg["window"],
+                    "Poly": preprocess_cfg["polyorder"],
+                    "LVs": params.get("n_components") if model_name == "PCA-SIMCA" else None,
+                    "n_vars": n_vars,
+                    "full_vars": len(wavelengths),
+                    "SubsetTag": "full",
+                    "Imbalance": "—",
+                    # Calibration metrics
+                    "Sensitivity": cal_metrics.get('sensitivity', np.nan),
+                    "Specificity": cal_metrics.get('specificity', np.nan),
+                    "Precision": cal_metrics.get('precision', np.nan),
+                    "F1": cal_metrics.get('f1', np.nan),
+                    "Accuracy": cal_metrics.get('accuracy', np.nan),
+                    "BalancedAcc": cal_metrics.get('balanced_accuracy', np.nan),
+                    "AUC": cal_metrics.get('auc', np.nan),
+                    # CV metrics
+                    "Sensitivitycv": _safe_mean('sensitivity'),
+                    "Specificitycv": _safe_mean('specificity'),
+                    "Precisioncv": _safe_mean('precision'),
+                    "F1cv": _safe_mean('f1'),
+                    "Accuracycv": _safe_mean('accuracy'),
+                    "BalancedAcccv": _safe_mean('balanced_accuracy'),
+                    "AUCcv": _safe_mean('auc'),
+                    # Metadata
+                    "n_inliers": n_inliers,
+                    "n_outliers": n_outliers,
+                    "inlier_class": str(inlier_class_label),
+                    "top_vars": "N/A",
+                    "all_vars": ','.join([f"{w:.1f}" for w in wavelengths]),
+                }
+
+                df_results = add_result(df_results, result)
+
+                # Show result
+                sens_cv = _safe_mean('sensitivity')
+                spec_cv = _safe_mean('specificity')
+                bal_cv = _safe_mean('balanced_accuracy')
+                print(f"     Sens={sens_cv:.3f}, Spec={spec_cv:.3f}, BalAcc={bal_cv:.3f}")
+
+                # Update best tracker
+                if best_result is None or bal_cv > best_result.get('BalancedAcccv', 0):
+                    best_result = result
+
+    # Rank results by balanced accuracy (CV)
+    if len(df_results) > 0:
+        # Sort by BalancedAcccv descending
+        df_results = df_results.sort_values('BalancedAcccv', ascending=False).reset_index(drop=True)
+        df_results['Rank'] = range(1, len(df_results) + 1)
+
+    print(f"\n{'='*70}")
+    print(f"ONE-CLASS SEARCH COMPLETE")
+    print(f"{'='*70}")
+    print(f"Total configurations tested: {len(df_results)}")
+    if len(df_results) > 0:
+        best = df_results.iloc[0]
+        print(f"Best model: {best['Model']} + {best['Preprocess']}")
+        print(f"  Sensitivity (CV): {best['Sensitivitycv']:.3f}")
+        print(f"  Specificity (CV): {best['Specificitycv']:.3f}")
+        print(f"  Balanced Accuracy (CV): {best['BalancedAcccv']:.3f}")
+        print(f"  AUC (CV): {best['AUCcv']:.3f}")
+    print(f"{'='*70}\n")
+
+    return df_results
