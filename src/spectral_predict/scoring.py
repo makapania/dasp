@@ -107,6 +107,13 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
             # Normalize: ratio 1.0 = no gap (0 penalty), ratio 5.0 = max penalty (1.0)
             gap_fraction = np.clip((gap_ratio - 1.0) / 4.0, 0.0, 1.0)
 
+        elif task_type == "one_class":
+            # One-class: use balanced accuracy for gap calculation
+            bal_acc = df["BalancedAcc"].astype(np.float64)
+            bal_acc_cv = df["BalancedAcccv"].astype(np.float64)
+            gap_ratio = np.where(bal_acc_cv > 1e-10, bal_acc / bal_acc_cv, 1.0)
+            gap_fraction = np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0)
+
         else:  # classification
             acc = df["Accuracy"].astype(np.float64)
             acc_cv_col = "Accuracycv" if "Accuracycv" in df.columns else "AccuracyCV"

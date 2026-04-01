@@ -24611,9 +24611,9 @@ class SpectralPredictApp:
                     if inlier_label not in y_filtered.values:
                         self._log_progress(f"ERROR: Inlier class '{inlier_label}' not found in data!")
                         self._log_progress(f"Available classes: {list(np.unique(y_filtered.values))}")
-                        messagebox.showerror("Invalid Inlier Class",
+                        self.root.after(0, lambda: messagebox.showerror("Invalid Inlier Class",
                             f"Class '{inlier_label}' not found.\n"
-                            f"Available: {list(np.unique(y_filtered.values))}")
+                            f"Available: {list(np.unique(y_filtered.values))}"))
                         return
 
                 # Collect selected one-class models
@@ -24659,8 +24659,8 @@ class SpectralPredictApp:
                     window_sizes=window_sizes_oc,
                     tier=tier,
                     enabled_models=selected_oc_models,
-                    analysis_wl_min=analysis_wl_min_value if 'analysis_wl_min_value' in dir() else None,
-                    analysis_wl_max=analysis_wl_max_value if 'analysis_wl_max_value' in dir() else None,
+                    analysis_wl_min=locals().get('analysis_wl_min_value'),
+                    analysis_wl_max=locals().get('analysis_wl_max_value'),
                     progress_callback=self._progress_callback,
                     controller=self.search_controller,
                     baseline_method=baseline_method,
@@ -24676,10 +24676,10 @@ class SpectralPredictApp:
                 if results_df is not None and len(results_df) > 0:
                     self._log_progress(f"\nOne-class search complete: {len(results_df)} configurations tested")
                     self.results = results_df
-                    self._update_results_table(results_df)
+                    self.root.after(0, lambda: self._populate_results_table(results_df))
                 else:
                     self._log_progress("\nNo valid one-class results.")
-                    messagebox.showwarning("No Results", "One-class search produced no valid results.")
+                    self.root.after(0, lambda: messagebox.showwarning("No Results", "One-class search produced no valid results."))
                 return
 
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection

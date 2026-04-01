@@ -4717,6 +4717,7 @@ def run_one_class_search(
     from .contamination import (
         build_one_class_model, get_one_class_model_grids, one_class_metrics,
     )
+    from .model_config import get_tier_models
     from .scoring import create_results_dataframe, add_result
 
     random_state = RANDOM_STATE
