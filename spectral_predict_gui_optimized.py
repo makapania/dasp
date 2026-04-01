@@ -3669,7 +3669,63 @@ class SpectralPredictApp:
 
         return sample_colors, legend_entries, color_label
 
-    def _apply_color_scheme(self, ax, fig, x_data, y_data, color_by, indices=None, **scatter_kwargs):
+    def _resolve_cv_color_values(
+        self,
+        color_by: str,
+        specimen_ids: list | None = None,
+        y_values: np.ndarray | None = None,
+    ) -> tuple:
+        """Resolve color values aligned to CV or prediction specimen IDs.
+
+        Parameters
+        ----------
+        color_by : str
+            Variable to color by ('None', 'Y Value', 'Set', or metadata column)
+        specimen_ids : list, optional
+            Specimen IDs for looking up Set/metadata values via label-based indexing
+        y_values : array-like, optional
+            Pre-aligned Y values (for 'Y Value' case, already in correct order)
+
+        Returns
+        -------
+        color_values : array-like or None
+        is_categorical : bool
+        color_label : str or None
+        """
+        if color_by == 'None':
+            return None, False, None
+
+        if color_by == 'Y Value':
+            if y_values is not None:
+                is_cat = self._is_categorical_target()
+                return np.asarray(y_values), is_cat, 'Y Value'
+            return None, False, None
+
+        if color_by == 'Set':
+            if self.sample_sets is not None and specimen_ids is not None:
+                color_values = self.sample_sets.reindex(specimen_ids).values
+                return color_values, True, 'Set'
+            return None, False, None
+
+        # Metadata column — check combined_metadata_df first, then ref
+        metadata_source = None
+        if (hasattr(self, 'combined_metadata_df')
+                and self.combined_metadata_df is not None
+                and color_by in self.combined_metadata_df.columns):
+            metadata_source = self.combined_metadata_df
+        elif self.ref is not None and color_by in self.ref.columns:
+            metadata_source = self.ref
+
+        if metadata_source is not None and specimen_ids is not None:
+            color_values = metadata_source[color_by].reindex(specimen_ids).values
+            is_cat = self._is_categorical_variable(color_by, color_values)
+            return color_values, is_cat, color_by
+
+        return None, False, None
+
+    def _apply_color_scheme(self, ax, fig, x_data, y_data, color_by, indices=None,
+                            color_values=None, color_label=None, is_categorical=None,
+                            **scatter_kwargs):
         """Apply color scheme to scatter plot based on selected variable.
 
         Parameters
@@ -3687,6 +3743,13 @@ class SpectralPredictApp:
         indices : array-like, optional
             Indices into self.y and self.ref for the data points
             If None, assumes x_data and y_data align with self.y and self.ref
+        color_values : array-like, optional
+            Pre-resolved color values aligned with x_data/y_data.
+            When provided, skips internal lookup and renders directly.
+        color_label : str, optional
+            Label for colorbar/legend when using pre-resolved values.
+        is_categorical : bool, optional
+            Whether pre-resolved values are categorical.
         **scatter_kwargs : dict
             Additional arguments passed to ax.scatter()
 
@@ -3697,12 +3760,50 @@ class SpectralPredictApp:
         has_legend : bool
             True if categorical legend was added
         """
-        if indices is None:
-            indices = np.arange(len(x_data))
-
         # Default scatter arguments
         default_kwargs = {'alpha': 0.6, 'edgecolors': 'black', 'linewidths': 0.5, 's': 50}
         default_kwargs.update(scatter_kwargs)
+
+        # Pre-resolved color values path — used by CV-based plots
+        if color_values is not None:
+            if color_label is None:
+                color_label = color_by
+            if is_categorical:
+                unique_vals = np.unique(color_values[pd.notna(color_values)])
+                n_vals = len(unique_vals)
+                if n_vals <= 10:
+                    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+                else:
+                    colors = plt.cm.tab20(np.linspace(0, 1, 20))
+                color_map = {val: colors[i % len(colors)] for i, val in enumerate(unique_vals)}
+                for val in unique_vals:
+                    mask = color_values == val
+                    if np.any(mask):
+                        ax.scatter(x_data[mask], y_data[mask],
+                                   c=[color_map[val]], label=str(val), **default_kwargs)
+                nan_mask = pd.isna(color_values)
+                if np.any(nan_mask):
+                    ax.scatter(x_data[nan_mask], y_data[nan_mask],
+                               c='lightgray', label='N/A', **default_kwargs)
+                ax.legend(title=color_label, loc='best', framealpha=0.9, fontsize=8)
+                return None, True
+            else:
+                numeric_values = pd.to_numeric(color_values, errors='coerce')
+                valid_mask = pd.notna(numeric_values)
+                scatter = None
+                if np.any(valid_mask):
+                    scatter = ax.scatter(x_data[valid_mask], y_data[valid_mask],
+                                         c=numeric_values[valid_mask],
+                                         cmap='viridis', **default_kwargs)
+                    fig.colorbar(scatter, ax=ax, label=color_label)
+                if np.any(~valid_mask):
+                    ax.scatter(x_data[~valid_mask], y_data[~valid_mask],
+                               c='lightgray', label='N/A', **default_kwargs)
+                return scatter, False
+
+        # Legacy index-based lookup path — used by Explore, PCA tabs
+        if indices is None:
+            indices = np.arange(len(x_data))
 
         if color_by == 'None':
             # Single color
@@ -25579,12 +25680,12 @@ class SpectralPredictApp:
         # Force-commit any in-progress cell edit when leaving a tab
         if hasattr(self, 'data_viewer_sheet'):
             try:
-                self.data_viewer_sheet.deselect()
+                self.data_viewer_sheet.close_text_editor()
             except Exception:
                 pass
         if hasattr(self, 'merged_data_sheet'):
             try:
-                self.merged_data_sheet.deselect()
+                self.merged_data_sheet.close_text_editor()
             except Exception:
                 pass
 
@@ -30411,52 +30512,15 @@ Performance (Classification):
         # Get color variable selection
         color_by = self.regression_pred_color_var.get()
 
-        # Determine coloring values - need to align with CV indices
-        if color_by == 'Y Value':
-            color_values = y_true.copy()
-            is_categorical = self._is_categorical_target()
-            color_label = 'Y Value'
-        elif color_by == 'None':
-            color_values = None
-            is_categorical = False
-            color_label = None
-        elif color_by == 'Set':
-            if self.sample_sets is not None and hasattr(self, 'refined_cv_indices'):
-                if hasattr(self, 'refined_specimen_ids'):
-                    cv_specimen_ids = self.refined_specimen_ids
-                else:
-                    cv_specimen_ids = self.y.index[self.refined_cv_indices]
-                color_values = self.sample_sets.loc[cv_specimen_ids].values
-                is_categorical = True
-                color_label = 'Set'
-            else:
-                color_values = None
-                is_categorical = False
-                color_label = None
-        else:
-            # Metadata column - need to map using refined_cv_indices
-            if self.ref is not None and color_by in self.ref.columns and hasattr(self, 'refined_cv_indices'):
-                # Get specimen IDs for CV samples
-                # CRITICAL FIX: Use the stored specimen IDs that match the CV data
-                if hasattr(self, 'refined_specimen_ids'):
-                    cv_specimen_ids = self.refined_specimen_ids
-                else:
-                    # Fallback to old behavior (might be incorrect with validation set)
-                    cv_specimen_ids = self.y.index[self.refined_cv_indices]
+        # Resolve specimen IDs for label-based metadata/set lookup
+        specimen_ids = getattr(self, 'refined_specimen_ids', None)
+        if specimen_ids is None and hasattr(self, 'refined_cv_indices') and self.y is not None:
+            specimen_ids = self.y.index[self.refined_cv_indices].tolist()
 
-                # Align metadata with these specimen IDs
-                try:
-                    color_values = self.ref.loc[cv_specimen_ids, color_by].values
-                    is_categorical = self._is_categorical_variable(color_by, color_values)
-                    color_label = color_by
-                except KeyError:
-                    color_values = None
-                    is_categorical = False
-                    color_label = None
-            else:
-                color_values = None
-                is_categorical = False
-                color_label = None
+        # Resolve color values using shared helper
+        color_values, is_categorical, color_label = self._resolve_cv_color_values(
+            color_by, specimen_ids=specimen_ids, y_values=y_true,
+        )
 
         # Apply coloring
         if color_values is None:
@@ -31315,41 +31379,15 @@ F1 Score:  {f1:.4f}
         # Get color variable selection
         color_by = self.residual_color_var.get()
 
-        # Determine coloring values - align with CV indices
-        if color_by == 'Y Value':
-            color_values = y_true.copy()
-            is_categorical = self._is_categorical_target()
-            color_label = 'Y Value'
-        elif color_by == 'None':
-            color_values = None
-            is_categorical = False
-            color_label = None
-        elif color_by == 'Set':
-            if self.sample_sets is not None and hasattr(self, 'refined_cv_indices'):
-                cv_specimen_ids = self.y.index[self.refined_cv_indices]
-                color_values = self.sample_sets.loc[cv_specimen_ids].values
-                is_categorical = True
-                color_label = 'Set'
-            else:
-                color_values = None
-                is_categorical = False
-                color_label = None
-        else:
-            # Metadata column - align with CV indices
-            if self.ref is not None and color_by in self.ref.columns and hasattr(self, 'refined_cv_indices'):
-                cv_specimen_ids = self.y.index[self.refined_cv_indices]
-                try:
-                    color_values = self.ref.loc[cv_specimen_ids, color_by].values
-                    is_categorical = self._is_categorical_variable(color_by, color_values)
-                    color_label = color_by
-                except KeyError:
-                    color_values = None
-                    is_categorical = False
-                    color_label = None
-            else:
-                color_values = None
-                is_categorical = False
-                color_label = None
+        # Resolve specimen IDs for label-based metadata/set lookup
+        specimen_ids = getattr(self, 'refined_specimen_ids', None)
+        if specimen_ids is None and hasattr(self, 'refined_cv_indices') and self.y is not None:
+            specimen_ids = self.y.index[self.refined_cv_indices].tolist()
+
+        # Resolve color values using shared helper
+        color_values, is_categorical, color_label = self._resolve_cv_color_values(
+            color_by, specimen_ids=specimen_ids, y_values=y_true,
+        )
 
         # Create 1x3 subplot figure
         fig = Figure(figsize=(12, 4))
@@ -31357,6 +31395,8 @@ F1 Score:  {f1:.4f}
         # Plot 1: Residuals vs Fitted
         ax1 = fig.add_subplot(131)
         self._apply_color_scheme(ax1, fig, y_pred, residuals, color_by,
+                                color_values=color_values, color_label=color_label,
+                                is_categorical=is_categorical,
                                 alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
         ax1.axhline(y=0, color='r', linestyle='--', linewidth=2)
         ax1.set_xlabel('Fitted Values', fontsize=10)
@@ -31368,6 +31408,8 @@ F1 Score:  {f1:.4f}
         ax2 = fig.add_subplot(132)
         indices = np.arange(len(residuals))
         self._apply_color_scheme(ax2, fig, indices, residuals, color_by,
+                                color_values=color_values, color_label=color_label,
+                                is_categorical=is_categorical,
                                 alpha=0.6, edgecolors='black', linewidths=0.5, s=40)
         ax2.axhline(y=0, color='r', linestyle='--', linewidth=2)
         ax2.set_xlabel('Sample Index', fontsize=10)
@@ -37506,7 +37548,11 @@ External Validation Performance (n={n_val}):
         plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         # Get prediction columns - exclude Sample, Actual, Consensus_*, and metadata columns
-        metadata_cols = list(self.ref.columns) if self.ref is not None else []
+        metadata_cols = []
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+            metadata_cols = list(self.combined_metadata_df.columns)
+        elif self.ref is not None:
+            metadata_cols = list(self.ref.columns)
         prediction_cols = [col for col in self.predictions_df.columns
                           if col not in ['Sample', 'Actual'] + metadata_cols
                           and not col.startswith('Consensus_')]
@@ -37524,41 +37570,11 @@ External Validation Performance (n={n_val}):
         # Get color variable selection
         color_by = self.pred_results_color_var.get()
 
-        # Determine coloring values - align with prediction samples
-        if color_by == 'Y Value':
-            color_values = y_true.copy()
-            is_categorical = self._is_categorical_target()
-            color_label = 'Y Value'
-        elif color_by == 'None':
-            color_values = None
-            is_categorical = False
-            color_label = None
-        elif color_by == 'Set':
-            if self.sample_sets is not None:
-                sample_ids = self.predictions_df['Sample'].values
-                color_values = self.sample_sets.loc[sample_ids].values
-                is_categorical = True
-                color_label = 'Set'
-            else:
-                color_values = None
-                is_categorical = False
-                color_label = None
-        else:
-            # Metadata column - align with prediction sample IDs
-            if self.ref is not None and color_by in self.ref.columns:
-                sample_ids = self.predictions_df['Sample'].values
-                try:
-                    color_values = self.ref.loc[sample_ids, color_by].values
-                    is_categorical = self._is_categorical_variable(color_by, color_values)
-                    color_label = color_by
-                except KeyError:
-                    color_values = None
-                    is_categorical = False
-                    color_label = None
-            else:
-                color_values = None
-                is_categorical = False
-                color_label = None
+        # Resolve color values using shared helper (specimen IDs from predictions table)
+        specimen_ids = self.predictions_df['Sample'].values.tolist()
+        color_values, is_categorical, color_label = self._resolve_cv_color_values(
+            color_by, specimen_ids=specimen_ids, y_values=y_true,
+        )
 
         # Determine grid size for subplots
         n_models = len(prediction_cols)
