@@ -97,9 +97,9 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         X = np.asarray(X, dtype=np.float64)
         n_samples, n_features = X.shape
 
-        if n_samples < 3:
+        if n_samples < 10:
             raise ValueError(
-                f"Need at least 3 clean samples to fit DD-SIMCA, got {n_samples}"
+                f"Need at least 10 clean samples to fit DD-SIMCA, got {n_samples}"
             )
 
         # Determine n_components

@@ -34914,6 +34914,17 @@ External Validation Performance (n={n_val}):
                     metadata['regional_rmse'] = self.refined_performance['regional_rmse']
                 if 'y_quartiles' in self.refined_performance:
                     metadata['y_quartiles'] = self.refined_performance['y_quartiles']
+            elif self.refined_config['task_type'] == 'one_class':
+                perf = {
+                    'BalancedAcc': self.refined_performance.get('balanced_accuracy_mean'),
+                    'Sensitivity': self.refined_performance.get('sensitivity_mean'),
+                    'Specificity': self.refined_performance.get('specificity_mean'),
+                }
+                metadata['performance'] = perf
+                metadata['inlier_class_label'] = self.inlier_class_label.get()
+                # Attach fitted scaler/PCA reducer for one-class persistence
+                metadata['scaler'] = getattr(self, 'refined_oc_scaler', None)
+                metadata['pca_reducer'] = getattr(self, 'refined_oc_pca_reducer', None)
             else:  # classification
                 perf = {
                     'Accuracy': self.refined_performance.get('accuracy_mean'),

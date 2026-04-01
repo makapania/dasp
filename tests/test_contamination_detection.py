@@ -392,6 +392,11 @@ class TestSearchIntegration:
 
         assert len(results) > 0
         assert 'Rank' in results.columns
+        # Verify both preprocessing paths were evaluated
+        unique_preprocess = results['Preprocess'].unique()
+        assert len(unique_preprocess) >= 2, (
+            f"Expected at least 2 preprocessing methods, got {list(unique_preprocess)}"
+        )
         assert 'CompositeScore' in results.columns
 
 
@@ -475,6 +480,8 @@ class TestCompositeScoring:
         result = compute_composite_score(df, 'one_class')
         assert 'Rank' in result.columns
         assert result['Rank'].iloc[0] == 1
+        assert result['CompositeScore'].notna().all()
+        assert np.isfinite(result['CompositeScore'].values).all()
 
 
 # ============================================================================

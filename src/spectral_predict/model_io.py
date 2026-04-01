@@ -729,15 +729,9 @@ def predict_with_model(
         if oc_pca_reducer is not None:
             X_processed = oc_pca_reducer.transform(X_processed)
 
-        # Predict labels and decision scores
+        # Predict labels (+1 inlier, -1 outlier)
         predictions = model.predict(X_processed)
-        scores = None
-        if hasattr(model, 'decision_function'):
-            scores = model.decision_function(X_processed)
-        elif hasattr(model, 'score_samples'):
-            scores = model.score_samples(X_processed)
-
-        return {'labels': predictions, 'scores': scores}
+        return predictions
 
     # Make predictions
     predictions = model.predict(X_processed)
