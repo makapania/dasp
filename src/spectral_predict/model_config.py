@@ -72,18 +72,18 @@ CLASSIFICATION_TIERS = {
     }
 }
 
-# One-class model tiers for contamination screening
+# One-class model tiers
 ONE_CLASS_TIERS = {
     'quick': {
         'description': 'Fast one-class screening with classic methods',
         'models': ['PCA-SIMCA', 'IsolationForest'],
-        'recommended_for': 'Quick contamination screening, daily QC'
+        'recommended_for': 'Quick one-class screening, daily QC'
     },
 
     'standard': {
         'description': 'Robust one-class detection with multiple approaches',
         'models': ['PCA-SIMCA', 'OneClassSVM', 'IsolationForest'],
-        'recommended_for': 'Standard contamination screening, authentication'
+        'recommended_for': 'Standard one-class screening, authentication'
     },
 
     'comprehensive': {

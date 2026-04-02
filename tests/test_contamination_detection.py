@@ -25,6 +25,7 @@ from spectral_predict.contamination import (
     build_one_class_model,
     get_one_class_model_grids,
     one_class_metrics,
+    run_one_class_cv,
 )
 from spectral_predict.scoring import compute_composite_score
 from spectral_predict.model_io import save_model, load_model
@@ -580,3 +581,80 @@ class TestModelSaveLoad:
         finally:
             import os
             os.unlink(tmp_path)
+
+
+class TestRunOneClassCV:
+    """Tests for the extracted run_one_class_cv function."""
+
+    def test_run_one_class_cv_basic(self):
+        """Basic run_one_class_cv with PCA-SIMCA returns expected dict structure."""
+        rng = np.random.RandomState(42)
+        X_inlier = rng.randn(50, 20)
+        X_outlier = rng.randn(10, 20) + 3
+        X = np.vstack([X_inlier, X_outlier])
+        y_oc = np.array([1] * 50 + [-1] * 10)
+
+        result = run_one_class_cv(
+            X, y_oc, 'PCA-SIMCA', {'n_components': 5, 'alpha': 0.05},
+            n_folds=3, random_state=42,
+        )
+
+        expected_keys = {
+            'fold_metrics', 'mean_metrics', 'cal_model', 'cal_scaler',
+            'cal_pca_reducer', 'cal_metrics', 'per_contaminant_sensitivity', 'skipped',
+        }
+        assert set(result.keys()) == expected_keys
+        assert result['skipped'] is False
+
+        metric_keys = {'sensitivity', 'specificity', 'precision', 'f1',
+                       'accuracy', 'balanced_accuracy', 'auc'}
+        assert set(result['mean_metrics'].keys()) == metric_keys
+
+        # PCA-SIMCA doesn't use scaler
+        assert result['cal_scaler'] is None
+        assert result['cal_model'] is not None
+
+    def test_run_one_class_cv_with_scaling(self):
+        """OneClassSVM path applies StandardScaler."""
+        rng = np.random.RandomState(42)
+        X = np.vstack([rng.randn(40, 10), rng.randn(8, 10) + 3])
+        y_oc = np.array([1] * 40 + [-1] * 8)
+
+        result = run_one_class_cv(
+            X, y_oc, 'OneClassSVM', {'nu': 0.1, 'kernel': 'rbf'},
+            n_folds=3, random_state=42,
+        )
+
+        assert result['skipped'] is False
+        assert result['cal_scaler'] is not None
+
+    def test_run_one_class_cv_skipped(self):
+        """Too few inliers for requested folds returns skipped=True."""
+        rng = np.random.RandomState(42)
+        # Only 4 inliers with n_folds=5 — KFold will raise, which should be caught
+        X = np.vstack([rng.randn(4, 10), rng.randn(3, 10) + 3])
+        y_oc = np.array([1] * 4 + [-1] * 3)
+
+        # n_folds=5 but only 4 inliers — should handle gracefully
+        result = run_one_class_cv(
+            X, y_oc, 'PCA-SIMCA', {'n_components': 2, 'alpha': 0.05},
+            n_folds=5, random_state=42,
+        )
+
+        assert result['skipped'] is True
+
+    def test_run_one_class_cv_per_contaminant(self):
+        """Per-contaminant sensitivity computed when y_original provided."""
+        rng = np.random.RandomState(42)
+        X = np.vstack([rng.randn(40, 10), rng.randn(5, 10) + 3, rng.randn(5, 10) + 5])
+        y_oc = np.array([1] * 40 + [-1] * 10)
+        y_original = np.array(['clean'] * 40 + ['contam_A'] * 5 + ['contam_B'] * 5)
+
+        result = run_one_class_cv(
+            X, y_oc, 'IsolationForest', {'n_estimators': 50, 'contamination': 0.05},
+            n_folds=3, random_state=42, y_original=y_original,
+        )
+
+        assert result['skipped'] is False
+        assert 'contam_A' in result['per_contaminant_sensitivity']
+        assert 'contam_B' in result['per_contaminant_sensitivity']

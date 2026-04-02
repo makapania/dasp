@@ -2769,7 +2769,7 @@ class SpectralPredictApp:
         self.use_svm = tk.BooleanVar(value=False)          # Experimental (very slow) - for classification
         self.use_mlp = tk.BooleanVar(value=False)          # Experimental
 
-        # One-class model selection (for contamination screening)
+        # One-class model selection
         self.use_ocsvm = tk.BooleanVar(value=True)
         self.use_isolation_forest = tk.BooleanVar(value=True)
         self.use_elliptic_envelope = tk.BooleanVar(value=False)
@@ -6008,7 +6008,7 @@ class SpectralPredictApp:
         ttk.Radiobutton(task_type_subframe, text="Auto-detect", variable=self.task_type, value="auto").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Regression", variable=self.task_type, value="regression").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Classification", variable=self.task_type, value="classification").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(task_type_subframe, text="One-Class (Contamination)", variable=self.task_type, value="one_class").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(task_type_subframe, text="One-Class", variable=self.task_type, value="one_class").pack(side=tk.LEFT, padx=5)
         self.task_type_detection_label = ttk.Label(task_type_subframe, text="", style='Caption.TLabel')
         self.task_type_detection_label.pack(side=tk.LEFT, padx=10)
         cfg_row += 1
@@ -11162,6 +11162,7 @@ class SpectralPredictApp:
         varsel_card_outer, varsel_card = self._create_card(content_frame, title="Advanced Variable Selection",
                                                              subtitle="Sophisticated wavelength selection techniques")
         varsel_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        self.varsel_card_outer = varsel_card_outer
         row += 1
 
         # ===== VARIABLE SELECTION DECISION MATRIX (Collapsible) =====
@@ -11501,6 +11502,7 @@ class SpectralPredictApp:
         # Inner frame for grid layout within card
         models_frame = tk.Frame(models_card, bg=self.colors['card_bg'])
         models_frame.pack(fill='both', expand=True)
+        self.standard_models_frame = models_frame
 
         # Core Models (Column 1)
         ttk.Label(models_frame, text="Core Models", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
@@ -11595,6 +11597,29 @@ class SpectralPredictApp:
             'MLP': self.mlp_checkbox,
             'NeuralBoosted': self.neuralboosted_checkbox
         }
+
+        # One-Class Models Frame (hidden by default, shown when task_type is one_class)
+        self.oc_models_frame = tk.Frame(models_card, bg=self.colors['card_bg'])
+
+        ttk.Label(self.oc_models_frame, text="One-Class Models", style='Subheading.TLabel').grid(
+            row=0, column=0, sticky=tk.W, pady=(0, 5))
+
+        oc_row = 1
+        oc_model_info = [
+            ("PCA-SIMCA", self.use_pca_simca, "DD-SIMCA (classic chemometrics)"),
+            ("OneClassSVM", self.use_ocsvm, "Kernel-based boundary"),
+            ("IsolationForest", self.use_isolation_forest, "Isolation-based anomaly detection"),
+            ("EllipticEnvelope", self.use_elliptic_envelope, "Mahalanobis-based (Gaussian)"),
+            ("LOF", self.use_lof, "Local Outlier Factor (density-based)"),
+        ]
+        self.oc_model_checkbox_widgets = {}
+        for name, var, desc in oc_model_info:
+            cb = ttk.Checkbutton(self.oc_models_frame, text=name, variable=var)
+            cb.grid(row=oc_row, column=0, sticky=tk.W, pady=5)
+            ttk.Label(self.oc_models_frame, text=desc, style='Caption.TLabel').grid(
+                row=oc_row, column=1, sticky=tk.W, padx=15)
+            self.oc_model_checkbox_widgets[name] = cb
+            oc_row += 1
 
         # === Advanced Model Options ===
         self._create_section_header(content_frame, "Advanced Model Options", row=row, columnspan=2)
@@ -13828,6 +13853,7 @@ class SpectralPredictApp:
         task_frame.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Radiobutton(task_frame, text="Regression", variable=self.refine_task_type, value='regression').pack(side='left', padx=5)
         ttk.Radiobutton(task_frame, text="Classification", variable=self.refine_task_type, value='classification').pack(side='left', padx=5)
+        ttk.Radiobutton(task_frame, text="One-Class", variable=self.refine_task_type, value='one_class').pack(side='left', padx=5)
 
         # === Model Hyperparameters (Dynamic per Model) ===
         hyperparams_outer_frame = ttk.LabelFrame(content_frame, text="Model Hyperparameters", padding="20")
@@ -14907,9 +14933,9 @@ class SpectralPredictApp:
             # Try to read and detect columns
             try:
                 if is_excel:
-                    X, y, metadata_df, metadata = read_combined_excel(combined_file, sheet_name=sheet_name)
+                    X, y, metadata_df, metadata = read_combined_excel(combined_file, sheet_name=sheet_name, drop_na_y=False)
                 else:
-                    X, y, metadata_df, metadata = read_combined_csv(combined_file)
+                    X, y, metadata_df, metadata = read_combined_csv(combined_file, drop_na_y=False)
 
                 # Store metadata for later use
                 self.combined_metadata = metadata
@@ -15097,11 +15123,11 @@ class SpectralPredictApp:
 
             # Try to read and validate the file
             if is_excel:
-                X, y, metadata_df, metadata = read_combined_excel(filepath)
+                X, y, metadata_df, metadata = read_combined_excel(filepath, drop_na_y=False)
                 self.detected_type = 'combined_excel'
                 self.combined_sheet_name = 0  # Default to first sheet
             else:
-                X, y, metadata_df, metadata = read_combined_csv(filepath)
+                X, y, metadata_df, metadata = read_combined_csv(filepath, drop_na_y=False)
                 self.detected_type = 'combined'
                 self.combined_sheet_name = 0  # Not used for CSV, but consistent
 
@@ -15291,23 +15317,30 @@ class SpectralPredictApp:
             # If tier not found, keep current selection
             return
 
-        # Get all supported models for this task type
-        if actual_task == "classification":
-            supported_models = set(get_supported_models("classification"))
-        else:
-            supported_models = set(get_supported_models("regression"))
-
         # Set flag to prevent triggering custom tier switch
         self._updating_from_tier = True
 
-        # Update checkboxes
-        for model_name, checkbox_var in self.model_checkboxes.items():
-            # Check if model should be selected for this tier AND is supported for task type
-            should_select = model_name in tier_models and model_name in supported_models
-            # Don't enable CatBoost if it's not available
-            if model_name == 'CatBoost' and not HAS_CATBOOST:
-                should_select = False
-            checkbox_var.set(1 if should_select else 0)
+        if actual_task == "one_class":
+            # Update one-class model checkboxes from ONE_CLASS_TIERS
+            supported_models = set(get_supported_models("one_class"))
+            for model_name, checkbox_var in self.one_class_model_checkboxes.items():
+                should_select = model_name in tier_models and model_name in supported_models
+                checkbox_var.set(1 if should_select else 0)
+        else:
+            # Get all supported models for this task type
+            if actual_task == "classification":
+                supported_models = set(get_supported_models("classification"))
+            else:
+                supported_models = set(get_supported_models("regression"))
+
+            # Update checkboxes
+            for model_name, checkbox_var in self.model_checkboxes.items():
+                # Check if model should be selected for this tier AND is supported for task type
+                should_select = model_name in tier_models and model_name in supported_models
+                # Don't enable CatBoost if it's not available
+                if model_name == 'CatBoost' and not HAS_CATBOOST:
+                    should_select = False
+                checkbox_var.set(1 if should_select else 0)
 
         # Reset flag
         self._updating_from_tier = False
@@ -15386,9 +15419,25 @@ class SpectralPredictApp:
             if self.y is not None:
                 unique_vals = sorted([str(v) for v in np.unique(self.y.values)])
                 self.inlier_class_combo['values'] = [''] + unique_vals
+            # Swap model panels: hide standard, show one-class
+            if hasattr(self, 'standard_models_frame'):
+                self.standard_models_frame.pack_forget()
+            if hasattr(self, 'oc_models_frame'):
+                self.oc_models_frame.pack(fill='both', expand=True)
+            # Disable variable selection methods (PLS-specific, not applicable to one-class)
+            if hasattr(self, 'varsel_card_outer'):
+                self.varsel_card_outer.grid_remove()
         else:
             self.inlier_class_frame.grid_remove()
             self.oc_hyperparams_frame.grid_remove()
+            # Swap model panels: show standard, hide one-class
+            if hasattr(self, 'oc_models_frame'):
+                self.oc_models_frame.pack_forget()
+            if hasattr(self, 'standard_models_frame'):
+                self.standard_models_frame.pack(fill='both', expand=True)
+            # Re-enable variable selection methods
+            if hasattr(self, 'varsel_card_outer'):
+                self.varsel_card_outer.grid()
 
     def _update_ensemble_controls_state(self):
         """Enable/disable ensemble controls based on task type.
@@ -15562,7 +15611,9 @@ class SpectralPredictApp:
 
         # If current model is not supported for new task type, switch to default
         if current_model not in supported_models:
-            if task_type == 'classification':
+            if task_type == 'one_class':
+                self.refine_model_type.set('PCA-SIMCA')
+            elif task_type == 'classification':
                 self.refine_model_type.set('PLS-DA')
             else:
                 self.refine_model_type.set('PLS')
@@ -24820,7 +24871,7 @@ class SpectralPredictApp:
 
                 baseline_method, baseline_params = self._get_baseline_params()
 
-                self._log_progress("\nRunning One-Class Contamination Screening...")
+                self._log_progress("\nRunning One-Class Screening...")
                 results_df = run_one_class_search(
                     X=X_filtered,
                     y=y_filtered,
@@ -26021,8 +26072,9 @@ For detailed documentation, see the User Guide.
             self._regional_rankings = None
             self._class_rankings = None
 
-            # Determine task type (regression vs classification)
+            # Determine task type (regression vs classification vs one-class)
             is_classification = 'per_class_metrics' in results_df.columns
+            is_one_class = 'Task' in results_df.columns and (results_df['Task'] == 'one_class').any()
 
             if is_classification:
                 # Compute class rankings for top model highlighting (classification)
@@ -26115,7 +26167,7 @@ For detailed documentation, see the User Guide.
                     self.use_rmsep_gap.set(False)
 
             # Create active filter controls with new data's unique values
-            self._create_active_filter_controls(is_classification)
+            self._create_active_filter_controls(is_classification, is_one_class=is_one_class)
 
             # Pack active filter frame and sort hint above treeview (if not already packed)
             self.active_filter_frame.pack_forget()
@@ -26374,7 +26426,7 @@ For detailed documentation, see the User Guide.
             current_values[0] = '☑' if self.results_df.loc[resolved_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
 
-    def _create_active_filter_controls(self, is_classification: bool = False):
+    def _create_active_filter_controls(self, is_classification: bool = False, is_one_class: bool = False):
         """Build the active filter bar for hiding non-matching result rows.
 
         Creates Model/Preprocess combos, LVs/n_vars/R2cv spinboxes,
@@ -26382,6 +26434,7 @@ For detailed documentation, see the User Guide.
 
         Args:
             is_classification: True for classification tasks, False for regression
+            is_one_class: True for one-class tasks
         """
         # Remove old variable traces before rebuilding controls
         for var, trace_id in getattr(self, '_filter_trace_ids', []):
@@ -26396,6 +26449,7 @@ For detailed documentation, see the User Guide.
             widget.destroy()
 
         self._filter_is_classification = is_classification
+        self._filter_is_one_class = is_one_class
         df = self.results_df
         if df is None or len(df) == 0:
             return
@@ -26468,6 +26522,17 @@ For detailed documentation, see the User Guide.
                 command=self._apply_filters_debounced
             )
             acccv_spinbox.pack(side='left', padx=(2, 8))
+
+        # --- BalancedAcccv ≥ spinbox (one-class only) ---
+        if is_one_class and 'BalancedAcccv' in df.columns:
+            self.filter_min_r2cv_var.set(0.0)
+            ttk.Label(self.active_filter_frame, text="BalAcc_cv ≥").pack(side='left')
+            balacccv_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=0.0, to=1.0, increment=0.01,
+                textvariable=self.filter_min_r2cv_var, width=5, format="%.2f",
+                command=self._apply_filters_debounced
+            )
+            balacccv_spinbox.pack(side='left', padx=(2, 8))
 
         # --- RMSEcv ≤ spinbox (when column exists) ---
         if 'RMSEcv' in df.columns:
@@ -26598,6 +26663,15 @@ For detailed documentation, see the User Guide.
             threshold = self.filter_min_r2cv_var.get()
             if threshold > 0.0 and 'Accuracycv' in df.columns:
                 numeric_metric = pd.to_numeric(df['Accuracycv'], errors='coerce')
+                mask = numeric_metric.isna() | (numeric_metric >= threshold)
+                df = df[mask]
+                any_active = True
+
+        # BalancedAcccv ≥ filter (one-class)
+        if getattr(self, '_filter_is_one_class', False):
+            threshold = self.filter_min_r2cv_var.get()
+            if threshold > 0.0 and 'BalancedAcccv' in df.columns:
+                numeric_metric = pd.to_numeric(df['BalancedAcccv'], errors='coerce')
                 mask = numeric_metric.isna() | (numeric_metric >= threshold)
                 df = df[mask]
                 any_active = True
@@ -30287,9 +30361,13 @@ Performance (Classification):
                 # Window from Bayesian (e.g., 31) not in radio buttons - use custom field
                 self.refine_window_custom.set(str(window))
 
-        # Set task type FIRST (auto-detect from data) - CRITICAL FIX for PLS-DA loading
+        # Set task type FIRST (auto-detect from data or config)
         # This must happen before model validation so we validate against the correct task type
-        if self.y is not None:
+        config_task = config.get('Task', '')
+        if config_task == 'one_class':
+            detected_task_type = 'one_class'
+            self.refine_task_type.set('one_class')
+        elif self.y is not None:
             if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                 detected_task_type = 'classification'
                 self.refine_task_type.set('classification')
@@ -30535,10 +30613,69 @@ Performance (Classification):
 
         task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') and self.refined_config else 'regression'
 
-        if task_type == 'classification':
+        if task_type == 'one_class':
+            self._plot_one_class_predictions()
+        elif task_type == 'classification':
             self._plot_classification_predictions()
         else:
             self._plot_regression_predictions()
+
+    def _plot_one_class_predictions(self):
+        """Plot one-class detection results: metrics bar chart and prediction summary."""
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            return
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Clear existing plot
+        for widget in self.refine_plot_frame.winfo_children():
+            widget.destroy()
+
+        plot_frame = ttk.Frame(self.refine_plot_frame)
+        plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+        # Left: Metrics bar chart
+        perf = self.refined_performance
+        metric_names = ['BalancedAcccv', 'Sensitivitycv', 'Specificitycv', 'AUCcv']
+        metric_labels = ['Balanced\nAccuracy', 'Sensitivity', 'Specificity', 'AUC']
+        metric_vals = [perf.get(m, 0) for m in metric_names]
+
+        colors = ['#4a7abc', '#2ecc71', '#e74c3c', '#9b59b6']
+        bars = axes[0].bar(metric_labels, metric_vals, color=colors, edgecolor='white', linewidth=0.5)
+        axes[0].set_ylim(0, 1.05)
+        axes[0].set_ylabel('Score')
+        axes[0].set_title('Cross-Validation Metrics')
+        for bar, val in zip(bars, metric_vals):
+            if not np.isnan(val):
+                axes[0].text(bar.get_x() + bar.get_width()/2., val + 0.02,
+                           f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+
+        # Right: Prediction summary (inlier vs outlier counts)
+        y_true = self.refined_y_true
+        y_pred = self.refined_y_pred
+        n_true_inlier = np.sum(y_true == 1)
+        n_true_outlier = np.sum(y_true == -1)
+        n_pred_inlier = np.sum(y_pred == 1)
+        n_pred_outlier = np.sum(y_pred == -1)
+
+        x = np.arange(2)
+        width = 0.35
+        axes[1].bar(x - width/2, [n_true_inlier, n_true_outlier], width, label='True', color=['#2ecc71', '#e74c3c'], alpha=0.7)
+        axes[1].bar(x + width/2, [n_pred_inlier, n_pred_outlier], width, label='Predicted', color=['#2ecc71', '#e74c3c'], alpha=0.4, hatch='//')
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(['Inlier', 'Outlier'])
+        axes[1].set_ylabel('Count')
+        axes[1].set_title('Inlier/Outlier Distribution')
+        axes[1].legend()
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
 
     def _plot_regression_predictions(self):
         """Plot scatter of reference vs predicted for regression."""
@@ -33593,6 +33730,137 @@ F1 Score:  {f1:.4f}
 
             # Prepare cross-validation
             y_array = y_series.values
+
+            # === ONE-CLASS EARLY-EXIT PATH ===
+            if task_type == 'one_class':
+                from spectral_predict.contamination import run_one_class_cv
+                import ast
+
+                # Parse hyperparameters from selected model config
+                params = {}
+                if self.selected_model_config is not None:
+                    params_str = self.selected_model_config.get('Params', '{}')
+                    try:
+                        params = ast.literal_eval(params_str) if isinstance(params_str, str) else {}
+                    except (ValueError, SyntaxError):
+                        params = {}
+
+                # Apply preprocessing to full spectrum first (matches standard path)
+                if not is_coupled_result:
+                    baseline_method, baseline_params_oc = self._get_baseline_params()
+                else:
+                    baseline_params_oc = {}
+                smoothing_enabled_oc, smoothing_window_oc, smoothing_poly_oc = self._get_smoothing_params()
+
+                prep_steps = build_preprocessing_pipeline(
+                    preprocess_name, deriv, window, polyorder,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params_oc,
+                    smoothing=smoothing_enabled_oc,
+                    smoothing_window=smoothing_window_oc,
+                    smoothing_polyorder=smoothing_poly_oc
+                )
+
+                X_full = X_base_df.values
+                if isinstance(prep_steps, list) and len(prep_steps) > 0:
+                    prep_pipeline_oc = Pipeline(prep_steps)
+                    X_full_preprocessed = prep_pipeline_oc.fit_transform(X_full)
+                else:
+                    X_full_preprocessed = X_full
+
+                # Subset to selected wavelengths
+                original_wavelengths = X_base_df.columns.astype(float).values
+                wavelength_indices = []
+                for wl in selected_wl:
+                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+                X_work = X_full_preprocessed[:, wavelength_indices] if wavelength_indices else X_full_preprocessed
+
+                # Build binary labels: inlier=+1, outlier=-1
+                inlier_label = self.inlier_class_label.get()
+                if not inlier_label and self.selected_model_config:
+                    inlier_label = self.selected_model_config.get('inlier_class', '')
+                y_str = np.array([str(v) for v in y_array])
+                y_oc = np.where(y_str == str(inlier_label), 1, -1)
+
+                self.refine_status.config(text=f"Running one-class CV ({model_name})...")
+                self.root.update()
+
+                cv_result = run_one_class_cv(
+                    X_work, y_oc, model_name, params,
+                    n_folds=n_folds, random_state=42, y_original=y_str,
+                )
+
+                if cv_result.get('skipped', False):
+                    self.refine_status.config(text="One-class CV failed (too few successful folds)")
+                    return
+
+                mean_m = cv_result['mean_metrics']
+                cal_m = cv_result['cal_metrics']
+
+                # Store results in the same format the downstream code expects
+                results = {
+                    'BalancedAcc': cal_m.get('balanced_accuracy', np.nan),
+                    'Sensitivity': cal_m.get('sensitivity', np.nan),
+                    'Specificity': cal_m.get('specificity', np.nan),
+                    'AUC': cal_m.get('auc', np.nan),
+                    'BalancedAcccv': mean_m.get('balanced_accuracy', np.nan),
+                    'Sensitivitycv': mean_m.get('sensitivity', np.nan),
+                    'Specificitycv': mean_m.get('specificity', np.nan),
+                    'AUCcv': mean_m.get('auc', np.nan),
+                }
+
+                self.refined_model = cv_result['cal_model']
+                self.refined_preprocessor = None
+                self.refined_wavelengths = list(selected_wl)
+                self.refined_performance = results
+                self.refined_label_encoder = None
+                self.refined_X_train = X_work
+                self.refined_y_train = y_oc
+                self.refined_oc_scaler = cv_result['cal_scaler']
+                self.refined_oc_pca_reducer = cv_result['cal_pca_reducer']
+                self.refined_config = {
+                    'model_name': model_name,
+                    'task_type': 'one_class',
+                    'preprocessing': preprocess,
+                    'window': window,
+                    'n_vars': X_work.shape[1],
+                    'n_samples': X_work.shape[0],
+                    'cv_folds': n_folds,
+                    'inlier_class_label': inlier_label,
+                    'use_full_spectrum_preprocessing': False,
+                    'ga_genes': None,
+                    'ga_config': None,
+                    'ga_model_type': None,
+                }
+
+                # Predictions for display
+                cal_model = cv_result['cal_model']
+                if cv_result['cal_scaler'] is not None:
+                    X_display = cv_result['cal_scaler'].transform(X_work)
+                    if cv_result['cal_pca_reducer'] is not None:
+                        X_display = cv_result['cal_pca_reducer'].transform(X_display)
+                else:
+                    X_display = X_work
+                self.refined_y_true = y_oc
+                self.refined_y_pred = cal_model.predict(X_display)
+                self.refined_cv_indices = np.arange(len(y_oc))
+                self.refined_specimen_ids = y_series.index.tolist()
+                self.refined_y_proba = None
+
+                # Update UI
+                perf = results
+                status_msg = (
+                    f"One-Class CV Complete: BalAcc_cv={perf['BalancedAcccv']:.3f}, "
+                    f"Sens_cv={perf['Sensitivitycv']:.3f}, Spec_cv={perf['Specificitycv']:.3f}"
+                )
+                self.refine_status.config(text=status_msg)
+
+                # Plot one-class results
+                self.root.after(0, lambda: self._plot_refined_predictions())
+                return  # Skip standard regression/classification CV
+
             if task_type == "regression":
                 cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
             else:
@@ -34785,7 +35053,8 @@ External Validation Performance (n={n_val}):
 
             # Ask for save location
             # Create prefix: C/R for Classification/Regression + number of variables
-            task_prefix = 'C' if self.refined_config['task_type'] == 'classification' else 'R'
+            task_type = self.refined_config['task_type']
+            task_prefix = 'OC' if task_type == 'one_class' else ('C' if task_type == 'classification' else 'R')
             n_vars = self.refined_config['n_vars']
             imbalance_suffix = _get_imbalance_suffix(
                 self.selected_model_config.get('imbalance_method') if self.selected_model_config else None
@@ -36880,6 +37149,16 @@ External Validation Performance (n={n_val}):
                         col_name = f"{original_col_name}_{counter}"
                         counter += 1
 
+                    # Map one-class +1/-1 to human-readable labels
+                    task_type = metadata.get('task_type', 'regression')
+                    if task_type == 'one_class':
+                        inlier_label = metadata.get('inlier_class_label', 'Inlier')
+                        predictions = np.where(
+                            np.asarray(predictions) == 1,
+                            f"Inlier ({inlier_label})",
+                            "Outlier"
+                        )
+
                     results[col_name] = predictions
 
                     # Store mapping to model metadata
@@ -36971,19 +37250,19 @@ External Validation Performance (n={n_val}):
 
         # Check if any models are classification models FIRST - consensus only works for regression
         # This prevents confusing warnings about non-numeric columns for classification predictions
-        has_classification = False
-        classification_count = 0
+        has_non_regression = False
+        non_regression_count = 0
         for col in pred_cols:
             if col in self.predictions_model_map:
                 metadata = self.predictions_model_map[col]
                 task_type = metadata.get('task_type', 'regression')
-                if task_type == 'classification':
-                    has_classification = True
-                    classification_count += 1
+                if task_type in ('classification', 'one_class'):
+                    has_non_regression = True
+                    non_regression_count += 1
 
-        # Skip consensus for classification models (can't average categorical predictions)
-        if has_classification:
-            print(f"\nSkipping consensus predictions: {classification_count} classification model(s) detected.")
+        # Skip consensus for classification/one-class models (can't average categorical predictions)
+        if has_non_regression:
+            print(f"\nSkipping consensus predictions: {non_regression_count} non-regression model(s) detected.")
             print("Consensus predictions are only computed for regression models.")
             return results_df
 
@@ -42727,7 +43006,7 @@ External Validation Performance (n={n_val}):
                 if file_ext == '.csv':
                     # Try combined format first
                     try:
-                        X_df, y, metadata_df, metadata = read_combined_csv(filepath)
+                        X_df, y, metadata_df, metadata = read_combined_csv(filepath, drop_na_y=False)
                         format_type = 'combined_csv'
                         wavelengths = np.array([float(col) for col in X_df.columns])
                         X = X_df.values
@@ -42757,7 +43036,7 @@ External Validation Performance (n={n_val}):
                             sample_ids = self._extract_sample_ids_from_dataframe(df, list(df.columns[1:]))
 
                 elif file_ext in ['.xlsx', '.xls']:
-                    X_df, y, metadata_df, metadata = read_combined_excel(filepath)
+                    X_df, y, metadata_df, metadata = read_combined_excel(filepath, drop_na_y=False)
                     format_type = 'excel'
                     wavelengths = np.array([float(col) for col in X_df.columns])
                     X = X_df.values
@@ -49891,7 +50170,7 @@ External Validation Performance (n={n_val}):
             row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(15, 10))
         row += 1
 
-        ttk.Button(content_frame, text="🗑 Reset All Contamination Data",
+        ttk.Button(content_frame, text="🗑 Reset All One-Class Data",
                    command=self._contam_reset_all, style='Modern.TButton').grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
 
@@ -50439,7 +50718,7 @@ External Validation Performance (n={n_val}):
     # ========================================================================
 
     def _contam_reset_all(self) -> None:
-        """Reset all contamination analysis data, state, and UI to initial defaults."""
+        """Reset all one-class analysis data, state, and UI to initial defaults."""
         if not messagebox.askyesno(
             "Reset All",
             "Clear all loaded data, groups, and results?\n\n"

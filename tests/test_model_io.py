@@ -23,6 +23,7 @@ from spectral_predict.model_io import (
     save_model,
     load_model,
     predict_with_model,
+    predict_with_uncertainty,
     get_model_info,
     _select_wavelengths_from_dataframe,
     _json_serializer
@@ -1291,6 +1292,66 @@ class TestRoundTripIntegration:
         finally:
             for filepath in filepaths:
                 Path(filepath).unlink(missing_ok=True)
+
+
+class TestOneClassPrediction:
+    """Test one-class model prediction pipeline."""
+
+    def test_predict_with_uncertainty_one_class(self):
+        """predict_with_uncertainty returns correct structure for one-class models."""
+        from spectral_predict.contamination import PCASIMCA
+
+        rng = np.random.RandomState(42)
+        n_features = 20
+        wavelengths = [float(w) for w in range(1000, 1000 + n_features)]
+
+        # Train a PCA-SIMCA model
+        X_train = rng.randn(30, n_features)
+        model = PCASIMCA(n_components=3, alpha=0.05)
+        model.fit(X_train)
+
+        # Save the model
+        tmp = tempfile.NamedTemporaryFile(suffix='.dasp', delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+
+        try:
+            save_model(
+                model=model,
+                preprocessor=None,
+                metadata={
+                    'model_name': 'PCA-SIMCA',
+                    'task_type': 'one_class',
+                    'wavelengths': wavelengths,
+                    'preprocessing': 'raw',
+                    'n_components': 3,
+                    'n_vars': n_features,
+                    'inlier_class_label': 'clean',
+                },
+                filepath=tmp_path,
+            )
+
+            loaded = load_model(tmp_path)
+
+            # Create test data
+            X_new = pd.DataFrame(rng.randn(5, n_features), columns=wavelengths)
+
+            result = predict_with_uncertainty(loaded, X_new)
+
+            assert 'predictions' in result
+            assert 'uncertainty' in result
+            assert 'applicability_domain' in result
+            assert 'has_uncertainty' in result
+            assert 'has_applicability_domain' in result
+
+            assert result['has_uncertainty'] is False
+            assert result['uncertainty'] == {}
+
+            preds = result['predictions']
+            assert all(p in (1, -1) for p in preds)
+        finally:
+            import os
+            os.unlink(tmp_path)
 
 
 if __name__ == "__main__":

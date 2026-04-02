@@ -840,6 +840,17 @@ def predict_with_uncertainty(
                 f"but prediction data is {prediction_data_type.upper()}."
             )
 
+    # One-class models: no meaningful uncertainty or applicability domain to compute
+    if task_type == 'one_class':
+        return {
+            'predictions': predictions,
+            'uncertainty': {},
+            'applicability_domain': {},
+            'has_uncertainty': False,
+            'has_applicability_domain': False,
+            'data_type_warning': data_type_warning,
+        }
+
     uncertainty = {}
     has_uncertainty = False
 

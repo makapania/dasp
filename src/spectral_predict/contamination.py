@@ -1,7 +1,7 @@
-"""Contamination detection models for NIR spectroscopic screening.
+"""One-class detection models for NIR spectroscopic screening.
 
 Implements one-class classification models that learn ONLY from clean/inlier
-samples and flag anything outside that distribution as contaminated/suspect.
+samples and flag anything outside that distribution as out-of-class/suspect.
 This solves the heterogeneous contaminant class problem where PLS-DA and
 tree-based classifiers struggle with wildly variable positive classes.
 
@@ -16,7 +16,7 @@ Models provided:
 Usage pattern:
     All models follow sklearn's one-class convention:
     - fit(X_clean) trains only on clean/inlier samples
-    - predict(X) returns +1 (inlier/clean) or -1 (outlier/contaminated)
+    - predict(X) returns +1 (inlier/clean) or -1 (outlier/out-of-class)
     - decision_function(X) returns continuous anomaly scores
 
 References
@@ -36,6 +36,8 @@ import logging
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
 from sklearn.covariance import EllipticEnvelope
@@ -195,7 +197,7 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         Returns
         -------
         labels : ndarray of shape (n_samples,)
-            +1 for inlier (clean), -1 for outlier (contaminated).
+            +1 for inlier (clean), -1 for outlier (out-of-class).
         """
         scores = self.decision_function(X)
         return np.where(scores >= 0, 1, -1)
@@ -412,7 +414,7 @@ def one_class_metrics(y_true, y_pred, scores=None):
     Parameters
     ----------
     y_true : array-like
-        True labels: +1 for inlier (clean), -1 for outlier (contaminated).
+        True labels: +1 for inlier (clean), -1 for outlier (out-of-class).
     y_pred : array-like
         Predicted labels: +1 or -1.
     scores : array-like, optional
@@ -488,3 +490,186 @@ def one_class_metrics(y_true, y_pred, scores=None):
         metrics['auc'] = np.nan
 
     return metrics
+
+
+def run_one_class_cv(
+    X: np.ndarray,
+    y_oc: np.ndarray,
+    model_name: str,
+    params: dict,
+    n_folds: int = 5,
+    random_state: int = 42,
+    y_original: np.ndarray | None = None,
+) -> dict:
+    """Run cross-validation for a one-class model.
+
+    Trains only on inlier samples, tests on inliers + all outliers.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix (already preprocessed).
+    y_oc : np.ndarray
+        Binary labels: +1 for inliers, -1 for outliers.
+    model_name : str
+        Name of the model (e.g., 'PCA-SIMCA', 'OneClassSVM').
+    params : dict
+        Hyperparameters for the model.
+    n_folds : int
+        Number of CV folds (applied to inlier data only).
+    random_state : int
+        Random state for reproducibility.
+    y_original : np.ndarray, optional
+        Original string labels for per-contaminant sensitivity.
+
+    Returns
+    -------
+    dict
+        fold_metrics, mean_metrics, cal_model, cal_scaler, cal_pca_reducer,
+        cal_metrics, per_contaminant_sensitivity, skipped.
+    """
+    inlier_indices = np.where(y_oc == 1)[0]
+    outlier_indices = np.where(y_oc == -1)[0]
+    n_outliers = len(outlier_indices)
+
+    if len(inlier_indices) < n_folds:
+        logger.warning("Too few inliers (%d) for %d-fold CV", len(inlier_indices), n_folds)
+        return {'skipped': True, 'fold_metrics': []}
+
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+
+    # --- Per-fold CV ---
+    fold_metrics = []
+    for train_inlier_idx, test_inlier_idx in kf.split(inlier_indices):
+        train_idx = inlier_indices[train_inlier_idx]
+        test_inlier = inlier_indices[test_inlier_idx]
+        test_idx = np.concatenate([test_inlier, outlier_indices])
+        test_labels = np.concatenate([
+            np.ones(len(test_inlier), dtype=int),
+            -np.ones(n_outliers, dtype=int),
+        ])
+
+        try:
+            model = build_one_class_model(model_name, params)
+
+            # Scale data for OCSVM, EllipticEnvelope, LOF
+            if model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+                scaler = StandardScaler()
+                X_train = scaler.fit_transform(X[train_idx])
+                X_test = scaler.transform(X[test_idx])
+
+                # EllipticEnvelope requires n_samples > n_features
+                if model_name == 'EllipticEnvelope' and X_train.shape[1] > X_train.shape[0]:
+                    n_pca = max(2, X_train.shape[0] // 2)
+                    pca_reducer = PCA(n_components=n_pca)
+                    X_train = pca_reducer.fit_transform(X_train)
+                    X_test = pca_reducer.transform(X_test)
+            else:
+                X_train = X[train_idx]
+                X_test = X[test_idx]
+
+            model.fit(X_train)
+            y_pred = model.predict(X_test)
+
+            # Get decision scores if available
+            scores = None
+            if hasattr(model, 'decision_function'):
+                scores = model.decision_function(X_test)
+            elif hasattr(model, 'score_samples'):
+                scores = model.score_samples(X_test)
+
+            fold_result = one_class_metrics(test_labels, y_pred, scores)
+            fold_metrics.append(fold_result)
+        except (np.linalg.LinAlgError, ValueError) as e:
+            logger.warning("Fold failed for %s (%s): %s", model_name, type(e).__name__, e)
+            continue
+
+    # Skip guard
+    if len(fold_metrics) < max(2, n_folds // 2):
+        return {'skipped': True, 'fold_metrics': fold_metrics}
+
+    # NaN-safe mean of fold metrics
+    def _safe_mean(key):
+        vals = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
+        return np.mean(vals) if vals else np.nan
+
+    mean_metrics = {
+        'sensitivity': _safe_mean('sensitivity'),
+        'specificity': _safe_mean('specificity'),
+        'precision': _safe_mean('precision'),
+        'f1': _safe_mean('f1'),
+        'accuracy': _safe_mean('accuracy'),
+        'balanced_accuracy': _safe_mean('balanced_accuracy'),
+        'auc': _safe_mean('auc'),
+    }
+    # NaN guard for balanced_accuracy in zero-outlier case
+    if np.isnan(mean_metrics['balanced_accuracy']):
+        mean_metrics['balanced_accuracy'] = mean_metrics['specificity']
+
+    # --- Calibration: fit on ALL inliers, evaluate on all data ---
+    cal_model = None
+    cal_scaler = None
+    cal_pca_reducer = None
+    cal_metrics = {}
+    per_contaminant = {}
+
+    try:
+        cal_model = build_one_class_model(model_name, params)
+        if model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+            cal_scaler = StandardScaler()
+            X_inlier_scaled = cal_scaler.fit_transform(X[inlier_indices])
+            X_all_scaled = cal_scaler.transform(X)
+
+            if model_name == 'EllipticEnvelope' and X_inlier_scaled.shape[1] > X_inlier_scaled.shape[0]:
+                n_pca = max(2, X_inlier_scaled.shape[0] // 2)
+                cal_pca_reducer = PCA(n_components=n_pca)
+                X_inlier_scaled = cal_pca_reducer.fit_transform(X_inlier_scaled)
+                X_all_scaled = cal_pca_reducer.transform(X_all_scaled)
+
+            cal_model.fit(X_inlier_scaled)
+            y_pred_cal = cal_model.predict(X_all_scaled)
+            scores_cal = (
+                cal_model.decision_function(X_all_scaled)
+                if hasattr(cal_model, 'decision_function')
+                else None
+            )
+        else:
+            cal_model.fit(X[inlier_indices])
+            y_pred_cal = cal_model.predict(X)
+            scores_cal = (
+                cal_model.decision_function(X)
+                if hasattr(cal_model, 'decision_function')
+                else None
+            )
+        cal_metrics = one_class_metrics(y_oc, y_pred_cal, scores_cal)
+
+        # Per-contaminant sensitivity
+        if n_outliers > 0 and y_original is not None:
+            outlier_mask = y_oc == -1
+            outlier_labels_unique = np.unique(y_original[outlier_mask])
+            for lbl in outlier_labels_unique:
+                lbl_mask = y_original == lbl
+                if lbl_mask.sum() > 0:
+                    lbl_preds = y_pred_cal[lbl_mask]
+                    per_contaminant[str(lbl)] = float(np.mean(lbl_preds == -1))
+        cal_metrics['per_contaminant'] = per_contaminant
+
+    except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
+        logger.warning("Calibration failed for %s: %s", model_name, e)
+        cal_metrics = {
+            k: np.nan
+            for k in ['sensitivity', 'specificity', 'precision', 'f1',
+                       'accuracy', 'balanced_accuracy', 'auc']
+        }
+        cal_metrics['per_contaminant'] = {}
+
+    return {
+        'fold_metrics': fold_metrics,
+        'mean_metrics': mean_metrics,
+        'cal_model': cal_model,
+        'cal_scaler': cal_scaler,
+        'cal_pca_reducer': cal_pca_reducer,
+        'cal_metrics': cal_metrics,
+        'per_contaminant_sensitivity': per_contaminant,
+        'skipped': False,
+    }

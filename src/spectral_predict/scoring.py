@@ -1,5 +1,7 @@
 """Scoring and ranking functions."""
 
+import ast
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
@@ -227,11 +229,16 @@ def _compute_unified_complexity(row):
     model = row.get("Model", "")
     model_scores = {
         "PLS": 20,
+        "PCA-SIMCA": 20,
         "Ridge": 25,
+        "EllipticEnvelope": 30,
         "Lasso": 30,
+        "IsolationForest": 35,
+        "LOF": 45,
+        "OneClassSVM": 55,
         "RandomForest": 60,
         "MLP": 80,
-        "NeuralBoosted": 85
+        "NeuralBoosted": 85,
     }
     model_complexity = model_scores.get(model, 50)  # Default to 50 if unknown
 
@@ -243,6 +250,14 @@ def _compute_unified_complexity(row):
 
     # 3. Latent Variable Complexity (25% weight) - for PLS models
     lvs = row.get("LVs", np.nan)
+    # PCA-SIMCA stores dimensionality as n_components in Params; LVs may be 0 or missing
+    if (pd.isna(lvs) or lvs == 0) and model == "PCA-SIMCA":
+        try:
+            params_str = row.get("Params", "{}")
+            params_dict = ast.literal_eval(params_str) if isinstance(params_str, str) else {}
+            lvs = params_dict.get("n_components", np.nan)
+        except (ValueError, SyntaxError):
+            lvs = np.nan
     if pd.isna(lvs) or lvs == 0:
         # Non-PLS models: use median complexity (50)
         lv_complexity = 50
