@@ -685,3 +685,66 @@ def run_one_class_cv(
         'oc_score_stats': oc_score_stats,
         'skipped': False,
     }
+
+
+def compute_one_class_importances(
+    X: np.ndarray,
+    y_oc: np.ndarray,
+    method: str = 'lightgbm',
+    random_state: int = 42,
+) -> np.ndarray:
+    """Compute feature importances by treating one-class labels as binary classification.
+
+    Uses class_weight='balanced' to handle typical inlier/outlier imbalance.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix.
+    y_oc : np.ndarray
+        Binary labels: +1 for inliers, -1 for outliers.
+    method : str
+        'lightgbm' (default) or 'random_forest'.
+    random_state : int
+        Random seed.
+
+    Returns
+    -------
+    np.ndarray
+        Feature importance array of shape (n_features,).
+    """
+    n_features = X.shape[1]
+    n_outliers = np.sum(np.asarray(y_oc) == -1)
+
+    # Edge case: too few outliers to learn meaningful importances
+    if n_outliers < 2:
+        logger.warning(
+            "Fewer than 2 outliers (%d) — returning uniform importances.", n_outliers
+        )
+        return np.ones(n_features, dtype=np.float64) / n_features
+
+    if method == 'random_forest':
+        from sklearn.ensemble import RandomForestClassifier
+
+        model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=5,
+            class_weight='balanced',
+            random_state=random_state,
+            n_jobs=-1,
+        )
+    else:
+        # Default: LightGBM
+        from lightgbm import LGBMClassifier
+
+        model = LGBMClassifier(
+            n_estimators=100,
+            max_depth=5,
+            class_weight='balanced',
+            random_state=random_state,
+            n_jobs=-1,
+            verbosity=-1,
+        )
+
+    model.fit(X, y_oc)
+    return model.feature_importances_

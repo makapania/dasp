@@ -11209,28 +11209,33 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
-                       variable=self.varsel_ipls).grid(row=4, column=0, sticky=tk.W, pady=2)
+        self._cb_ipls = ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
+                       variable=self.varsel_ipls)
+        self._cb_ipls.grid(row=4, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
-                       variable=self.varsel_ipls_forward).grid(row=5, column=0, sticky=tk.W, pady=2)
+        self._cb_ipls_forward = ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
+                       variable=self.varsel_ipls_forward)
+        self._cb_ipls_forward.grid(row=5, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Tests individual intervals + best combinations",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
-                       variable=self.varsel_ipls_backward).grid(row=6, column=0, sticky=tk.W, pady=2)
+        self._cb_ipls_backward = ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
+                       variable=self.varsel_ipls_backward)
+        self._cb_ipls_backward.grid(row=6, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Progressively removes worst intervals",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="MC-siPLS (Monte Carlo Synergy iPLS)",
-                       variable=self.varsel_mc_sipls).grid(row=7, column=0, sticky=tk.W, pady=2)
+        self._cb_mc_sipls = ttk.Checkbutton(varsel_frame, text="MC-siPLS (Monte Carlo Synergy iPLS)",
+                       variable=self.varsel_mc_sipls)
+        self._cb_mc_sipls.grid(row=7, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Random interval combinations for synergistic regions",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="MWPLS (Moving Window PLS)",
-                       variable=self.varsel_mwpls).grid(row=8, column=0, sticky=tk.W, pady=2)
+        self._cb_mwpls = ttk.Checkbutton(varsel_frame, text="MWPLS (Moving Window PLS)",
+                       variable=self.varsel_mwpls)
+        self._cb_mwpls.grid(row=8, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Optimal contiguous spectral windows",
                  style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
@@ -11281,13 +11286,15 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Noise filter + adaptive + collinearity reduction",
                  style='Caption.TLabel').grid(row=17, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
-                       variable=self.varsel_fipls_spa).grid(row=18, column=0, sticky=tk.W, pady=2)
+        self._cb_fipls_spa = ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
+                       variable=self.varsel_fipls_spa)
+        self._cb_fipls_spa.grid(row=18, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region selection + collinearity reduction",
                  style='Caption.TLabel').grid(row=18, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
-                       variable=self.varsel_fipls_cars).grid(row=19, column=0, sticky=tk.W, pady=2)
+        self._cb_fipls_cars = ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
+                       variable=self.varsel_fipls_cars)
+        self._cb_fipls_cars.grid(row=19, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region selection + adaptive selection",
                  style='Caption.TLabel').grid(row=19, column=1, sticky=tk.W, padx=15)
 
@@ -15424,9 +15431,23 @@ class SpectralPredictApp:
                 self.standard_models_frame.pack_forget()
             if hasattr(self, 'oc_models_frame'):
                 self.oc_models_frame.pack(fill='both', expand=True)
-            # Disable variable selection methods (PLS-specific, not applicable to one-class)
+            # Show variable selection card but disable iPLS-family methods
+            # (they require PLS internals not available for one-class)
             if hasattr(self, 'varsel_card_outer'):
-                self.varsel_card_outer.grid_remove()
+                self.varsel_card_outer.grid()
+            ipls_family_checkboxes = [
+                '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
+                '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
+            ]
+            ipls_family_vars = [
+                'varsel_ipls', 'varsel_ipls_forward', 'varsel_ipls_backward',
+                'varsel_mc_sipls', 'varsel_mwpls', 'varsel_fipls_spa', 'varsel_fipls_cars',
+            ]
+            for cb_attr, var_attr in zip(ipls_family_checkboxes, ipls_family_vars):
+                if hasattr(self, cb_attr):
+                    getattr(self, cb_attr).state(['disabled'])
+                if hasattr(self, var_attr):
+                    getattr(self, var_attr).set(False)
         else:
             self.inlier_class_frame.grid_remove()
             self.oc_hyperparams_frame.grid_remove()
@@ -15438,6 +15459,14 @@ class SpectralPredictApp:
             # Re-enable variable selection methods
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
+            # Re-enable iPLS-family checkboxes
+            ipls_family_checkboxes = [
+                '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
+                '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
+            ]
+            for cb_attr in ipls_family_checkboxes:
+                if hasattr(self, cb_attr):
+                    getattr(self, cb_attr).state(['!disabled'])
 
     def _update_ensemble_controls_state(self):
         """Enable/disable ensemble controls based on task type.
@@ -24924,6 +24953,7 @@ class SpectralPredictApp:
                                 smoothing_window=sm_win_oc,
                                 smoothing_polyorder=sm_poly_oc,
                                 inlier_class_label=inlier_label,
+                                enable_uve=self.bayes_enable_uve.get(),
                             )
                             if len(oc_results_df) > 0:
                                 best = oc_results_df.iloc[0]
@@ -25013,6 +25043,20 @@ class SpectralPredictApp:
                             'alpha': self.oc_alpha.get(),
                             'n_components': self.oc_n_components.get(),
                         },
+                        # Variable selection parameters
+                        variable_selection_methods=selected_varsel_methods,
+                        variable_counts=variable_counts if variable_counts else None,
+                        apply_uve_prefilter=self.apply_uve_prefilter.get(),
+                        uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
+                        uve_n_components=uve_n_comp,
+                        spa_n_random_starts=self.spa_n_random_starts.get(),
+                        ga_population_size=self.ga_population_size.get(),
+                        ga_generations=self.ga_generations.get(),
+                        ga_n_runs=self.ga_n_runs.get(),
+                        # Smart preprocessing discovery parameters
+                        smart_preprocess=self.enable_smart_preprocessing.get(),
+                        smart_preprocess_importance=self.smart_preprocess_importance.get(),
+                        smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
                     )
 
                 label_encoder = None
@@ -46566,7 +46610,7 @@ External Validation Performance (n={n_val}):
             primary_task = primary_metadata.get('task_type', 'unknown')
 
             # Add task type indicator to column name
-            task_indicator = "(Class)" if primary_task == 'classification' else "(Reg)"
+            task_indicator = "(OC)" if primary_task == 'one_class' else ("(Class)" if primary_task == 'classification' else "(Reg)")
             # Use filename instead of target_model_preprocessing
             primary_col_name = f"{primary_filename} {task_indicator}"
 
@@ -46574,6 +46618,14 @@ External Validation Performance (n={n_val}):
                 self.comparison_primary_model, comparison_data_transformed
             )
             primary_predictions = primary_result['predictions']
+            # Map one-class +1/-1 to human-readable labels
+            if primary_task == 'one_class':
+                inlier_label = primary_metadata.get('inlier_class_label', 'Inlier')
+                primary_predictions = np.where(
+                    np.asarray(primary_predictions) == 1,
+                    f"Inlier ({inlier_label})",
+                    "Outlier"
+                )
             results[primary_col_name] = primary_predictions
 
             # Collect domain results per model
@@ -46589,7 +46641,7 @@ External Validation Performance (n={n_val}):
                 aux_task = aux_metadata.get('task_type', 'unknown')
 
                 # Add task type indicator to column name
-                task_indicator = "(Class)" if aux_task == 'classification' else "(Reg)"
+                task_indicator = "(OC)" if aux_task == 'one_class' else ("(Class)" if aux_task == 'classification' else "(Reg)")
                 # Use filename instead of target_model_preprocessing
                 aux_col_name = f"{aux_filename} {task_indicator}"
 
@@ -46604,6 +46656,14 @@ External Validation Performance (n={n_val}):
                     aux_model, comparison_data_transformed
                 )
                 aux_predictions = aux_result['predictions']
+                # Map one-class +1/-1 to human-readable labels
+                if aux_task == 'one_class':
+                    inlier_label = aux_metadata.get('inlier_class_label', 'Inlier')
+                    aux_predictions = np.where(
+                        np.asarray(aux_predictions) == 1,
+                        f"Inlier ({inlier_label})",
+                        "Outlier"
+                    )
                 results[aux_col_name] = aux_predictions
                 aux_col_names.append(aux_col_name)
 
@@ -46632,7 +46692,7 @@ External Validation Performance (n={n_val}):
                         # Apply condition based on type
                         try:
                             # Detect if column is classification or regression
-                            is_classification = '(Class)' in col or pd.api.types.is_string_dtype(results[col].dtype)
+                            is_classification = '(Class)' in col or '(OC)' in col or pd.api.types.is_string_dtype(results[col].dtype)
 
                             if condition == '==':
                                 # Works for both text and numeric
@@ -46924,7 +46984,7 @@ External Validation Performance (n={n_val}):
             for col in columns:
                 val = row[col]
                 # Check if this is a classification column (by task indicator or dtype)
-                is_classification = '(Class)' in col or pd.api.types.is_string_dtype(self.comparison_results[col].dtype)
+                is_classification = '(Class)' in col or '(OC)' in col or pd.api.types.is_string_dtype(self.comparison_results[col].dtype)
 
                 # Format values based on type
                 if pd.isna(val):

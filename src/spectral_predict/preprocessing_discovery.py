@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Callable, Optional, Tuple, Any
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import LabelEncoder
 
@@ -677,7 +677,21 @@ def _quick_evaluate(
         cv_folds = min(cv_folds, n_samples // 2)
         cv_folds = max(2, cv_folds)
 
-        if task_type == 'classification':
+        if task_type == 'one_class':
+            n_outliers = int(np.sum(y == -1))
+            n_splits = min(cv_folds, max(2, n_outliers))
+            model = LGBMClassifier(
+                class_weight='balanced',
+                n_estimators=50,
+                max_depth=3,
+                random_state=RANDOM_STATE,
+                verbose=-1,
+                n_jobs=-1,
+            )
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+            scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
+            return scores.mean()  # Higher is better
+        elif task_type == 'classification':
             model = LGBMClassifier(
                 n_estimators=50,
                 max_depth=4,
@@ -823,7 +837,7 @@ def discover_preprocessing(
     models_to_test : list, optional
         Models that will be tested (for model-specific importance)
     task_type : str
-        'regression' or 'classification'
+        'regression', 'classification', or 'one_class'
     importance_method : str
         One of: 'cars_tree', 'model_specific', 'lightgbm', 'vip'
     n_top : int

@@ -1,5 +1,7 @@
 """Model definitions and grid search configurations."""
 
+import logging
+
 import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
@@ -374,6 +376,19 @@ def build_model(model_name, params, task_type='regression'):
     >>> model = build_model('XGBoost', params, task_type='regression')
     >>> model.fit(X_train, y_train)
     """
+    if task_type == "one_class":
+        # One-class model names go to build_one_class_model; standard model names
+        # (used for variable selection importance computation) fall back to classification.
+        _OC_MODEL_NAMES = {'PCA-SIMCA', 'OneClassSVM', 'IsolationForest', 'EllipticEnvelope', 'LOF'}
+        if model_name in _OC_MODEL_NAMES:
+            from spectral_predict.contamination import build_one_class_model
+            return build_one_class_model(model_name, params)
+        logging.warning(
+            "build_model() called with task_type='one_class' for model '%s'. "
+            "Falling back to task_type='classification'.", model_name
+        )
+        task_type = "classification"
+
     if task_type == "regression":
         if model_name == "PLS":
             return PLSRegression(scale=False, **params)

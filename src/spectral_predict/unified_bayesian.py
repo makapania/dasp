@@ -658,7 +658,8 @@ def compute_importances(
                 monte_carlo_samples=60,  # Increased for better sampling with fewer iterations
                 random_state=random_state,
                 model_type=model_name,  # Enable model-aware evaluation
-                use_hybrid_importance=use_hybrid  # Use hybrid importance for tree models
+                use_hybrid_importance=use_hybrid,  # Use hybrid importance for tree models
+                task_type=task_type,
             )
             return importances
         except Exception as e:
@@ -876,17 +877,110 @@ def create_unified_objective(
                 )
                 n_features_prep = X_prep.shape[1]
 
-            # One-class branch: bypass all variable selection and standard CV
+            # One-class branch: variable selection + one-class CV
             if task_type == 'one_class':
                 from spectral_predict.contamination import run_one_class_cv
 
                 if y_oc is None:
                     return float('inf')
 
+                # --- Variable selection (mirrors regression/classification logic) ---
+                subset_type = trial.suggest_categorical('subset_type', available_methods)
+                subset_size = trial.suggest_categorical('n_vars', SUBSET_SIZES)
+                region_idx = trial.suggest_int('region_id', 0, max(0, n_top_regions - 1))
+
+                # Use y_oc (+1/-1) for all variable selection operations
+                y_for_varsel = y_oc
+
+                top_indices = None
+                subset_tag = 'full'
+
+                if subset_type == 'region':
+                    # Check cache first
+                    if cache_key in region_cache:
+                        dynamic_regions = region_cache[cache_key]
+                    else:
+                        # Compute regions DYNAMICALLY on preprocessed data
+                        try:
+                            if n_features_prep == len(wavelengths_for_trial):
+                                wl_prep = wavelengths_for_trial
+                            else:
+                                wl_prep = np.linspace(
+                                    wavelengths_for_trial[0],
+                                    wavelengths_for_trial[-1],
+                                    n_features_prep,
+                                )
+
+                            dynamic_regions = create_region_subsets(
+                                X_prep, y_for_varsel, wl_prep.astype(float),
+                                n_top_regions=n_top_regions,
+                                test_all_individual=region_test_all_individual,
+                                test_pairwise=region_test_pairwise,
+                            )
+                            region_cache[cache_key] = dynamic_regions
+                        except Exception as e:
+                            logging.warning(
+                                f"Dynamic region creation failed for one-class: {e}, "
+                                "falling back to empty"
+                            )
+                            dynamic_regions = []
+                            region_cache[cache_key] = dynamic_regions
+
+                    # Use cached region count for index clamping
+                    if len(dynamic_regions) > 0:
+                        actual_region_idx = min(region_idx, len(dynamic_regions) - 1)
+                        top_indices = dynamic_regions[actual_region_idx]['indices']
+                        n_vars = len(top_indices)
+                        subset_tag = dynamic_regions[actual_region_idx]['tag']
+                    else:
+                        # Fallback to importance if no regions found
+                        actual_subset_size = subset_size if subset_size != 'full' else 100
+                        n_vars = min(actual_subset_size, n_features_prep - 1)
+                        if n_vars < 5:
+                            n_vars = min(5, n_features_prep - 1)
+                        importances = compute_importances(
+                            X_prep, y_for_varsel, 'importance',
+                            'LightGBM', cv_folds, random_state,
+                            task_type='classification',
+                        )
+                        top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                        subset_tag = f"top{n_vars}_importance_fallback"
+                else:
+                    # Importance-based or CARS-based selection (region_idx is ignored)
+                    if subset_size == 'full':
+                        top_indices = None
+                        n_vars = n_features_prep
+                        subset_tag = 'full'
+                    else:
+                        n_vars = min(subset_size, n_features_prep - 1)
+                        if n_vars < 5:
+                            n_vars = min(5, n_features_prep - 1)
+
+                        # For one-class: use LightGBM as proxy model and
+                        # classification task_type so compute_importances builds
+                        # a standard classifier on the +1/-1 labels.
+                        # Force use_hybrid_importance=True for CARS via the
+                        # 'LightGBM' model name (tree model triggers hybrid flag).
+                        importances = compute_importances(
+                            X_prep, y_for_varsel, subset_type,
+                            'LightGBM', cv_folds, random_state,
+                            task_type='classification',
+                        )
+
+                        top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                        subset_tag = f"top{n_vars}_{subset_type}"
+
+                # Apply subset
+                if top_indices is not None and len(top_indices) > 0:
+                    X_for_cv = X_prep[:, top_indices]
+                else:
+                    X_for_cv = X_prep
+
+                # --- Suggest one-class model params (after subsetting, feature count may differ) ---
                 oc_params = suggest_one_class_params(trial, model_name)
 
                 cv_result = run_one_class_cv(
-                    X_prep, y_oc, model_name, oc_params,
+                    X_for_cv, y_oc, model_name, oc_params,
                     n_folds=cv_folds, random_state=random_state, y_original=y_original,
                 )
 
@@ -911,9 +1005,9 @@ def create_unified_objective(
                 trial.set_user_attr('apply_baseline', preprocess_config.get('apply_baseline', False))
                 trial.set_user_attr('apply_smoothing', preprocess_config.get('apply_smoothing', False))
                 trial.set_user_attr('model_params', str(oc_params))
-                trial.set_user_attr('n_vars', X_prep.shape[1])
+                trial.set_user_attr('n_vars', X_for_cv.shape[1])
                 trial.set_user_attr('full_vars_masked', X_prep.shape[1])
-                trial.set_user_attr('subset_tag', 'full')
+                trial.set_user_attr('subset_tag', subset_tag)
                 trial.set_user_attr('all_wavelengths',
                     ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
 

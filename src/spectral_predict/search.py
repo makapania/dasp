@@ -4662,6 +4662,19 @@ def run_one_class_search(
     baseline_method=None, baseline_params=None,
     enable_smoothing=False, smoothing_window=17, smoothing_polyorder=2,
     oc_hyperparams=None,
+    smart_preprocess=False,
+    smart_preprocess_importance='model_specific',
+    smart_preprocess_n_top=10,
+    # Variable selection
+    variable_selection_methods=None,
+    variable_counts=None,
+    apply_uve_prefilter=False,
+    uve_cutoff_multiplier=1.0,
+    uve_n_components=None,
+    spa_n_random_starts=10,
+    ga_population_size=64,
+    ga_generations=100,
+    ga_n_runs=5,
 ):
     """Run one-class model search.
 
@@ -4707,6 +4720,31 @@ def run_one_class_search(
         Smoothing window size.
     smoothing_polyorder : int, default=2
         Smoothing polynomial order.
+    smart_preprocess : bool, default=False
+        Whether to use smart preprocessing discovery.
+    smart_preprocess_importance : str, default='model_specific'
+        Importance method for preprocessing discovery.
+    smart_preprocess_n_top : int, default=10
+        Number of top preprocessing configs to discover.
+    variable_selection_methods : list of str, optional
+        Variable selection methods (e.g., ['importance', 'spa', 'cars']).
+        If None or empty, no variable selection is performed.
+    variable_counts : list of int, optional
+        Number of top variables to test. Default: [10, 20, 50, 100, 250, 500, 1000].
+    apply_uve_prefilter : bool, default=False
+        Whether to apply UVE prefilter before other methods.
+    uve_cutoff_multiplier : float, default=1.0
+        UVE cutoff multiplier for uninformative variable elimination.
+    uve_n_components : int, optional
+        Number of PLS components for UVE.
+    spa_n_random_starts : int, default=10
+        Number of random starts for SPA.
+    ga_population_size : int, default=64
+        Population size for GA variable selection.
+    ga_generations : int, default=100
+        Number of generations for GA variable selection.
+    ga_n_runs : int, default=5
+        Number of GA runs.
 
     Returns
     -------
@@ -4785,37 +4823,74 @@ def run_one_class_search(
         window_sizes = [7, 19]
 
     preprocess_configs = []
-    for method in preprocessing_methods:
-        if method in ('deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2'):
-            deriv_order = 1 if method.endswith('1') else 2
-            # Map display names to build_preprocessing_pipeline names
-            pipeline_method = method.replace('1', '').replace('2', '')  # deriv1->deriv, snv_deriv2->snv_deriv
-            for ws in window_sizes:
+    if smart_preprocess:
+        from .preprocessing_discovery import discover_preprocessing
+        discovered = discover_preprocessing(
+            X_np, y_oc, task_type='one_class',
+            importance_method=smart_preprocess_importance,
+            n_top=smart_preprocess_n_top,
+            cv_folds=folds,
+            progress_callback=progress_callback,
+        )
+        if discovered:
+            # Translate discovery output format to search config format
+            for cfg in discovered:
+                disc_name = cfg.get('preprocessing', 'raw')
+                disc_deriv = cfg.get('deriv')
+                disc_window = cfg.get('window')
+                # Derive the pipeline method name from the preprocessing name
+                pipeline_method = disc_name
+                for d in [4, 3, 2, 1]:
+                    pipeline_method = pipeline_method.replace(str(d), '')
+                display_name = disc_name + (f'_w{disc_window}' if disc_window else '')
                 preprocess_configs.append({
-                    'method': pipeline_method,  # 2d: base method name for build_preprocessing_pipeline
-                    'name': f'{method}_w{ws}',
-                    'deriv': deriv_order,
-                    'window': ws,
-                    'polyorder': None,  # 2c: let SavgolDerivative auto-detect via polyorder_map
+                    'method': pipeline_method,
+                    'name': display_name,
+                    'deriv': disc_deriv,
+                    'window': disc_window,
+                    'polyorder': cfg.get('polyorder'),
                     'baseline_method': baseline_method,
                     'baseline_params': baseline_params,
                     'smoothing': enable_smoothing,
                     'smoothing_window': smoothing_window,
                     'smoothing_polyorder': smoothing_polyorder,
                 })
-        else:
-            preprocess_configs.append({
-                'method': method,  # 2d: base method name for build_preprocessing_pipeline
-                'name': method,
-                'deriv': None,
-                'window': None,
-                'polyorder': None,  # 2c: consistent with derivative configs
-                'baseline_method': baseline_method,
-                'baseline_params': baseline_params,
-                'smoothing': enable_smoothing,
-                'smoothing_window': smoothing_window,
-                'smoothing_polyorder': smoothing_polyorder,
-            })
+            logger.info(
+                "Smart preprocessing discovered %d configs", len(preprocess_configs)
+            )
+
+    if not preprocess_configs:
+        for method in preprocessing_methods:
+            if method in ('deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2'):
+                deriv_order = 1 if method.endswith('1') else 2
+                # Map display names to build_preprocessing_pipeline names
+                pipeline_method = method.replace('1', '').replace('2', '')  # deriv1->deriv, snv_deriv2->snv_deriv
+                for ws in window_sizes:
+                    preprocess_configs.append({
+                        'method': pipeline_method,  # 2d: base method name for build_preprocessing_pipeline
+                        'name': f'{method}_w{ws}',
+                        'deriv': deriv_order,
+                        'window': ws,
+                        'polyorder': None,  # 2c: let SavgolDerivative auto-detect via polyorder_map
+                        'baseline_method': baseline_method,
+                        'baseline_params': baseline_params,
+                        'smoothing': enable_smoothing,
+                        'smoothing_window': smoothing_window,
+                        'smoothing_polyorder': smoothing_polyorder,
+                    })
+            else:
+                preprocess_configs.append({
+                    'method': method,  # 2d: base method name for build_preprocessing_pipeline
+                    'name': method,
+                    'deriv': None,
+                    'window': None,
+                    'polyorder': None,  # 2c: consistent with derivative configs
+                    'baseline_method': baseline_method,
+                    'baseline_params': baseline_params,
+                    'smoothing': enable_smoothing,
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder,
+                })
 
     # Get model grids
     if enabled_models is None:
@@ -4843,15 +4918,54 @@ def run_one_class_search(
         if model_name in enabled_models:
             model_grids[model_name] = param_list
 
+    # Filter and validate variable selection methods for one-class
+    implemented_oc_varsel = {
+        'importance', 'spa', 'uve', 'cars', 'cars-tree', 'ga',
+        'vcpa-iriv', 'uve_spa', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa',
+    }
+    selected_varsel_methods = []
+    if variable_selection_methods:
+        selected_varsel_methods = [
+            m for m in variable_selection_methods if m in implemented_oc_varsel
+        ]
+        unsupported = [
+            m for m in variable_selection_methods if m not in implemented_oc_varsel
+        ]
+        if unsupported:
+            logger.warning(
+                "Variable selection methods not supported for one-class, skipping: %s",
+                unsupported,
+            )
+        if selected_varsel_methods:
+            logger.info("Variable selection methods: %s", selected_varsel_methods)
+
+    # Determine variable counts for variable selection
+    if variable_counts is None:
+        oc_variable_counts = [10, 20, 50, 100, 250, 500, 1000]
+    else:
+        oc_variable_counts = list(variable_counts)
+
     # Calculate total configurations
-    total_configs = sum(
-        len(params) * len(preprocess_configs)
-        for params in model_grids.values()
-    )
+    n_model_params = sum(len(params) for params in model_grids.values())
+    full_spectrum_configs = n_model_params * len(preprocess_configs)
+
+    # Variable selection adds: preprocess * methods * valid_counts * model_params
+    varsel_configs = 0
+    if selected_varsel_methods:
+        n_estimated_counts = len(oc_variable_counts)
+        varsel_configs = (
+            len(preprocess_configs) * len(selected_varsel_methods)
+            * n_estimated_counts * n_model_params
+        )
+
+    total_configs = full_spectrum_configs + varsel_configs
     current_config = 0
 
     logger.info("Models: %s", list(model_grids.keys()))
     logger.info("Preprocessing configs: %d", len(preprocess_configs))
+    logger.info("Full-spectrum configurations: %d", full_spectrum_configs)
+    if varsel_configs > 0:
+        logger.info("Variable selection configurations (estimated): %d", varsel_configs)
     logger.info("Total configurations: %d", total_configs)
     logger.info("CV: %d-fold on inlier data (outliers in test only)", folds)
     if progress_callback:
@@ -5027,6 +5141,497 @@ def run_one_class_search(
                 # Update best tracker
                 if best_result is None or bal_acc_cv > best_result.get('BalancedAcccv', 0):
                     best_result = result
+
+    # =========================================================================
+    # Variable Selection Loop
+    # =========================================================================
+    # Only run if variable selection methods were requested and validated
+    if selected_varsel_methods:
+        from .contamination import compute_one_class_importances, run_one_class_cv
+
+        logger.info("=" * 70)
+        logger.info("ONE-CLASS VARIABLE SELECTION")
+        logger.info("=" * 70)
+        logger.info("Methods: %s", selected_varsel_methods)
+        logger.info("Variable counts: %s", oc_variable_counts)
+
+        # Cache for variable selection results (keyed by preprocess+method)
+        _oc_varsel_cache: dict = {}
+
+        for preprocess_cfg in preprocess_configs:
+            if controller and not controller.check_and_wait():
+                break
+
+            # Apply preprocessing to full dataset (same as full-spectrum loop)
+            pipe_steps = build_preprocessing_pipeline(
+                preprocess_cfg["method"],
+                preprocess_cfg["deriv"],
+                preprocess_cfg["window"],
+                preprocess_cfg["polyorder"],
+                task_type='one_class',
+                baseline_method=preprocess_cfg.get("baseline_method"),
+                baseline_params=preprocess_cfg.get("baseline_params"),
+                smoothing=preprocess_cfg.get("smoothing", False),
+                smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+            )
+
+            if pipe_steps:
+                from sklearn.pipeline import Pipeline as SkPipeline
+                prep_pipe = SkPipeline(pipe_steps)
+                try:
+                    prep_pipe.fit(X_np[inlier_indices])
+                    X_preprocessed = prep_pipe.transform(X_np)
+                except (ValueError, np.linalg.LinAlgError) as e:
+                    logger.warning(
+                        "Preprocessing '%s' failed in varsel: %s",
+                        preprocess_cfg['name'], e,
+                    )
+                    # Skip all varsel configs for this preprocessing
+                    n_skip = (
+                        len(selected_varsel_methods)
+                        * len(oc_variable_counts) * n_model_params
+                    )
+                    current_config += n_skip
+                    skipped_configs += n_skip
+                    continue
+            else:
+                X_preprocessed = X_np.copy()
+
+            # Apply wavelength mask AFTER preprocessing
+            wavelengths_current = wavelengths_full.copy()
+            if wavelength_restriction_active and wl_mask is not None:
+                X_preprocessed = X_preprocessed[:, wl_mask]
+                wavelengths_current = wavelengths_full[wl_mask]
+
+            # Apply edge mask for derivative preprocessing when no wavelength restriction
+            if (
+                preprocess_cfg.get("deriv")
+                and preprocess_cfg.get("window")
+                and not wavelength_restriction_active
+            ):
+                X_preprocessed, wavelengths_current, _ = _apply_edge_mask_to_data(
+                    X_preprocessed, wavelengths_current, preprocess_cfg
+                )
+
+            n_features_current = X_preprocessed.shape[1]
+
+            for varsel_method in selected_varsel_methods:
+                if controller and not controller.check_and_wait():
+                    break
+
+                logger.info(
+                    "Computing %s importances for preprocess '%s'...",
+                    varsel_method, preprocess_cfg['name'],
+                )
+
+                # Cache key: (preprocess_name, varsel_method)
+                _cache_key = (preprocess_cfg['name'], varsel_method)
+                importances = None
+                uve_selected_mask = None
+
+                if _cache_key in _oc_varsel_cache:
+                    importances = _oc_varsel_cache[_cache_key]['importances']
+                    uve_selected_mask = _oc_varsel_cache[_cache_key].get(
+                        'uve_selected_mask'
+                    )
+                    logger.info("  Using cached %s result", varsel_method)
+                else:
+                    try:
+                        if varsel_method == 'importance':
+                            # Use LightGBM binary classifier on y_oc
+                            importances = compute_one_class_importances(
+                                X_preprocessed, y_oc, method='lightgbm',
+                                random_state=random_state,
+                            )
+
+                        elif varsel_method == 'spa':
+                            default_n_select = (
+                                max(oc_variable_counts)
+                                if oc_variable_counts else 100
+                            )
+                            n_to_select = min(default_n_select, n_features_current)
+                            importances = spa_selection(
+                                X_preprocessed, y_oc,
+                                n_features=n_to_select,
+                                n_random_starts=spa_n_random_starts,
+                                cv_folds=folds,
+                                random_state=random_state,
+                            )
+
+                        elif varsel_method == 'uve':
+                            importances, _uve_threshold, uve_selected_mask = (
+                                get_uve_threshold(
+                                    X_preprocessed, y_oc,
+                                    cutoff_multiplier=uve_cutoff_multiplier,
+                                    n_components=uve_n_components,
+                                    cv_folds=folds,
+                                    random_state=random_state,
+                                )
+                            )
+
+                        elif varsel_method == 'uve_spa':
+                            default_n_select = (
+                                max(oc_variable_counts)
+                                if oc_variable_counts else 100
+                            )
+                            n_to_select = min(default_n_select, n_features_current)
+                            importances = uve_spa_selection(
+                                X_preprocessed, y_oc,
+                                n_features=n_to_select,
+                                cutoff_multiplier=uve_cutoff_multiplier,
+                                uve_n_components=uve_n_components,
+                                uve_cv_folds=folds,
+                                spa_n_random_starts=spa_n_random_starts,
+                                spa_cv_folds=folds,
+                                random_state=random_state,
+                            )
+
+                        elif varsel_method in ('cars', 'cars-tree'):
+                            # For one-class, always use hybrid importance
+                            # (LightGBM-based) on binary y_oc
+                            use_hybrid = varsel_method == 'cars-tree'
+                            importances = cars_selection(
+                                X_preprocessed, y_oc,
+                                n_iterations=50,
+                                pls_components=(
+                                    uve_n_components
+                                    if uve_n_components is not None else 5
+                                ),
+                                cv_folds=folds,
+                                monte_carlo_samples=80,
+                                random_state=random_state,
+                                model_type=None,
+                                use_hybrid_importance=use_hybrid,
+                                hybrid_importance_weight=0.5,
+                                task_type='classification',
+                            )
+
+                        elif varsel_method in ('uve_cars', 'uve_cars_tree'):
+                            use_hybrid = varsel_method == 'uve_cars_tree'
+                            importances = uve_cars_selection(
+                                X_preprocessed, y_oc,
+                                cutoff_multiplier=uve_cutoff_multiplier,
+                                uve_n_components=uve_n_components,
+                                uve_cv_folds=folds,
+                                n_iterations=50,
+                                pls_components=(
+                                    uve_n_components
+                                    if uve_n_components is not None else 5
+                                ),
+                                cars_cv_folds=folds,
+                                monte_carlo_samples=80,
+                                random_state=random_state,
+                                model_type=None,
+                                use_hybrid_importance=use_hybrid,
+                                hybrid_importance_weight=0.5,
+                                task_type='classification',
+                            )
+
+                        elif varsel_method == 'uve_cars_spa':
+                            importances = uve_cars_spa_selection(
+                                X_preprocessed, y_oc,
+                                cutoff_multiplier=uve_cutoff_multiplier,
+                                uve_n_components=uve_n_components,
+                                uve_cv_folds=folds,
+                                n_iterations=50,
+                                pls_components=(
+                                    uve_n_components
+                                    if uve_n_components is not None else 5
+                                ),
+                                cars_cv_folds=folds,
+                                monte_carlo_samples=80,
+                                spa_n_features=None,
+                                spa_n_random_starts=spa_n_random_starts,
+                                spa_cv_folds=folds,
+                                random_state=random_state,
+                                task_type='classification',
+                            )
+
+                        elif varsel_method == 'vcpa-iriv':
+                            result_vcpa = vcpa_iriv(
+                                X_preprocessed, y_oc,
+                                n_outer_iterations=10,
+                                n_inner_iterations=50,
+                                pls_components=(
+                                    uve_n_components
+                                    if uve_n_components is not None else 5
+                                ),
+                                cv_folds=folds,
+                                random_state=random_state,
+                            )
+                            importances = result_vcpa.get(
+                                'importance_scores',
+                                result_vcpa.get('importances', None),
+                            )
+                            selected = result_vcpa.get('selected_indices', [])
+                            if (
+                                importances is not None
+                                and len(importances) == len(selected)
+                            ):
+                                full_importances = np.zeros(n_features_current)
+                                full_importances[selected] = importances
+                                importances = full_importances
+                            elif len(selected) > 0:
+                                importances = np.zeros(n_features_current)
+                                importances[selected] = 1.0
+                            else:
+                                importances = np.ones(n_features_current)
+
+                        elif varsel_method == 'ga':
+                            # GA: use LightGBM fitness for one-class
+                            # (binary classification on y_oc)
+                            ga_pop = ga_population_size
+                            ga_gen = ga_generations
+                            ga_runs_val = ga_n_runs
+                            ga_early = 20
+                            importances = ga_lightgbm_selection(
+                                X_preprocessed, y_oc,
+                                task_type='classification',
+                                cv_folds=folds,
+                                n_estimators=50,
+                                num_leaves=15,
+                                population_size=ga_pop,
+                                n_generations=ga_gen,
+                                n_runs=ga_runs_val,
+                                early_stopping=ga_early,
+                                random_state=random_state,
+                                progress_callback=progress_callback,
+                            )
+
+                        else:
+                            logger.warning(
+                                "Unhandled varsel method '%s' for one-class, skipping",
+                                varsel_method,
+                            )
+                            n_skip = len(oc_variable_counts) * n_model_params
+                            current_config += n_skip
+                            skipped_configs += n_skip
+                            continue
+
+                    except Exception as e:
+                        logger.warning(
+                            "Variable selection '%s' failed for preprocess '%s': %s",
+                            varsel_method, preprocess_cfg['name'], e,
+                        )
+                        n_skip = len(oc_variable_counts) * n_model_params
+                        current_config += n_skip
+                        skipped_configs += n_skip
+                        continue
+
+                    # Cache the result
+                    _oc_varsel_cache[_cache_key] = {
+                        'importances': importances,
+                        'uve_selected_mask': uve_selected_mask,
+                    }
+
+                # Validate importances
+                if importances is None:
+                    logger.warning(
+                        "%s returned None importances, skipping", varsel_method
+                    )
+                    n_skip = len(oc_variable_counts) * n_model_params
+                    current_config += n_skip
+                    skipped_configs += n_skip
+                    continue
+
+                if len(importances) != n_features_current:
+                    logger.warning(
+                        "%s returned wrong-sized importances (%d vs %d), skipping",
+                        varsel_method, len(importances), n_features_current,
+                    )
+                    n_skip = len(oc_variable_counts) * n_model_params
+                    current_config += n_skip
+                    skipped_configs += n_skip
+                    continue
+
+                if np.all(importances == 0):
+                    logger.warning(
+                        "%s returned all-zero importances, using uniform",
+                        varsel_method,
+                    )
+                    importances = np.ones(n_features_current)
+
+                # Apply edge mask for derivatives
+                if not wavelength_restriction_active:
+                    importances = _apply_edge_mask(importances, preprocess_cfg)
+
+                # Filter valid variable counts
+                valid_counts = [
+                    c for c in oc_variable_counts if c < n_features_current
+                ]
+                if not valid_counts:
+                    logger.warning(
+                        "No valid variable counts (all >= %d features), skipping %s",
+                        n_features_current, varsel_method,
+                    )
+                    continue
+
+                logger.info(
+                    "  Valid variable counts: %s (features: %d)",
+                    valid_counts, n_features_current,
+                )
+
+                for n_vars in valid_counts:
+                    top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                    X_subset = X_preprocessed[:, top_indices]
+                    wavelengths_subset = wavelengths_current[top_indices]
+
+                    for model_name, param_list in model_grids.items():
+                        if controller and not controller.check_and_wait():
+                            break
+
+                        for params in param_list:
+                            if controller and not controller.check_and_wait():
+                                break
+
+                            current_config += 1
+                            param_str = ", ".join(
+                                f"{k}={v}" for k, v in list(params.items())[:3]
+                            )
+                            prep_name = preprocess_cfg["name"]
+                            subset_tag = f"{varsel_method}_top{n_vars}"
+                            progress_msg = (
+                                f"Testing {model_name} ({param_str}) + "
+                                f"{prep_name} [{subset_tag}]"
+                            )
+
+                            best_info = ""
+                            if best_result is not None:
+                                best_info = (
+                                    f" | Best: BalAcc="
+                                    f"{best_result.get('BalancedAcccv', 0):.3f}"
+                                )
+                            logger.info(
+                                "[%d/%d] %s%s",
+                                current_config, total_configs,
+                                progress_msg, best_info,
+                            )
+
+                            if progress_callback:
+                                progress_callback({
+                                    'stage': 'model_testing',
+                                    'message': progress_msg,
+                                    'current': current_config,
+                                    'total': total_configs,
+                                    'best_model': best_result,
+                                })
+
+                            cv_result = run_one_class_cv(
+                                X_subset, y_oc, model_name, params,
+                                n_folds=folds, random_state=42,
+                                y_original=y_np,
+                            )
+
+                            if cv_result.get('skipped', False):
+                                logger.warning(
+                                    "[SKIP] Too few successful folds for "
+                                    "%s + %s [%s]",
+                                    model_name, prep_name, subset_tag,
+                                )
+                                skipped_configs += 1
+                                continue
+
+                            mean_m = cv_result['mean_metrics']
+                            cal_metrics = cv_result['cal_metrics']
+                            bal_acc_cv = mean_m['balanced_accuracy']
+
+                            # Build result dict with variable selection info
+                            result = {
+                                "Task": "one_class",
+                                "Model": model_name,
+                                "Params": str(params),
+                                "Preprocess": preprocess_cfg["name"],
+                                "Deriv": preprocess_cfg["deriv"],
+                                "Window": preprocess_cfg["window"],
+                                "Poly": preprocess_cfg["polyorder"],
+                                "LVs": (
+                                    params.get("n_components")
+                                    if model_name == "PCA-SIMCA" else None
+                                ),
+                                "n_vars": n_vars,
+                                "full_vars": n_features_current,
+                                "SubsetTag": subset_tag,
+                                "Imbalance": "—",
+                                # Calibration metrics
+                                "Sensitivity": cal_metrics.get(
+                                    'sensitivity', np.nan
+                                ),
+                                "Specificity": cal_metrics.get(
+                                    'specificity', np.nan
+                                ),
+                                "Precision": cal_metrics.get(
+                                    'precision', np.nan
+                                ),
+                                "F1": cal_metrics.get('f1', np.nan),
+                                "Accuracy": cal_metrics.get(
+                                    'accuracy', np.nan
+                                ),
+                                "BalancedAcc": cal_metrics.get(
+                                    'balanced_accuracy', np.nan
+                                ),
+                                "AUC": cal_metrics.get('auc', np.nan),
+                                # CV metrics
+                                "Sensitivitycv": mean_m['sensitivity'],
+                                "Specificitycv": mean_m['specificity'],
+                                "Precisioncv": mean_m['precision'],
+                                "F1cv": mean_m['f1'],
+                                "Accuracycv": mean_m['accuracy'],
+                                "BalancedAcccv": bal_acc_cv,
+                                "AUCcv": mean_m['auc'],
+                                # Metadata
+                                "n_inliers": n_inliers,
+                                "n_outliers": n_outliers,
+                                "inlier_class": str(inlier_class_label),
+                                "top_vars": ','.join(
+                                    [
+                                        f"{float(w):.1f}"
+                                        for w in wavelengths_subset
+                                    ]
+                                ),
+                                "all_vars": ','.join(
+                                    [
+                                        f"{float(w):.1f}"
+                                        for w in wavelengths_current
+                                    ]
+                                ),
+                                "per_contaminant_sensitivity": cal_metrics.get(
+                                    'per_contaminant', {}
+                                ),
+                            }
+
+                            # Add per-contaminant columns
+                            per_contam = cal_metrics.get('per_contaminant', {})
+                            for contam_label, contam_sens in per_contam.items():
+                                result[f'Sens_{contam_label}'] = contam_sens
+
+                            df_results = add_result(df_results, result)
+
+                            # Log result
+                            sens_cv = mean_m['sensitivity']
+                            spec_cv = mean_m['specificity']
+                            contam_info = ""
+                            if per_contam:
+                                contam_parts = [
+                                    f"{k}={v:.2f}"
+                                    for k, v in per_contam.items()
+                                ]
+                                contam_info = (
+                                    f", Per-contam: "
+                                    f"[{', '.join(contam_parts)}]"
+                                )
+                            logger.info(
+                                "     Sens=%.3f, Spec=%.3f, BalAcc=%.3f%s",
+                                sens_cv, spec_cv, bal_acc_cv, contam_info,
+                            )
+
+                            # Update best tracker
+                            if (
+                                best_result is None
+                                or bal_acc_cv
+                                > best_result.get('BalancedAcccv', 0)
+                            ):
+                                best_result = result
 
     # Rank results using composite score (consistent with regression/classification)
     if len(df_results) > 0:
