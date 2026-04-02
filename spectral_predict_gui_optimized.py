@@ -25883,6 +25883,20 @@ class SpectralPredictApp:
                 if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
                     top_vars = best_model['top_vars'].split(',')[:5]  # First 5
                     model_text += f"\nTop λ: {', '.join(top_vars)} {self._get_x_unit_short()}"
+            elif 'BalancedAcccv' in best_model:
+                # One-class - show balanced accuracy CV metrics
+                model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
+                if best_model.get('Deriv'):
+                    model_text += f" (d{best_model['Deriv']})"
+                bal_acc = best_model.get('BalancedAcccv', 0)
+                model_text += f"\nBalAcccv: {bal_acc:.4f}"
+                sens = best_model.get('Sensitivitycv')
+                if sens is not None:
+                    model_text += f" | Senscv: {sens:.4f}"
+
+                if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
+                    top_vars = best_model['top_vars'].split(',')[:5]
+                    model_text += f"\nTop λ: {', '.join(top_vars)} {self._get_x_unit_short()}"
             else:
                 # Classification - show CV metrics
                 model_text = f"{best_model['Model']} | {best_model['Preprocess']}"

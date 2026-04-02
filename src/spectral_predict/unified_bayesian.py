@@ -1008,8 +1008,15 @@ def create_unified_objective(
                 trial.set_user_attr('n_vars', X_for_cv.shape[1])
                 trial.set_user_attr('full_vars_masked', X_prep.shape[1])
                 trial.set_user_attr('subset_tag', subset_tag)
-                trial.set_user_attr('all_wavelengths',
-                    ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
+                if top_indices is not None:
+                    selected_wl = wavelengths_for_trial[top_indices]
+                    trial.set_user_attr('all_wavelengths',
+                        ','.join([f"{w:.1f}" for w in selected_wl]))
+                    trial.set_user_attr('selected_wavelengths',
+                        ','.join([f"{w:.1f}" for w in selected_wl]))
+                else:
+                    trial.set_user_attr('all_wavelengths',
+                        ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
 
                 balanced_accuracy = mean_m.get('balanced_accuracy', 0.0)
                 return -balanced_accuracy

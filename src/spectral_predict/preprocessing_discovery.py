@@ -679,7 +679,16 @@ def _quick_evaluate(
 
         if task_type == 'one_class':
             n_outliers = int(np.sum(y == -1))
-            n_splits = min(cv_folds, max(2, n_outliers))
+            if n_outliers < 2:
+                # Too few outliers for stratified CV — use simple LightGBM fit score
+                model = LGBMClassifier(
+                    class_weight='balanced', n_estimators=50, max_depth=3,
+                    random_state=RANDOM_STATE, verbose=-1, n_jobs=-1,
+                )
+                model.fit(X, y)
+                from sklearn.metrics import balanced_accuracy_score
+                return balanced_accuracy_score(y, model.predict(X))
+            n_splits = min(cv_folds, n_outliers)
             model = LGBMClassifier(
                 class_weight='balanced',
                 n_estimators=50,
