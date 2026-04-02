@@ -537,6 +537,57 @@ def suggest_model_params(
         return {}
 
 
+def suggest_one_class_params(trial: Trial, model_name: str) -> dict:
+    """Suggest hyperparameters for one-class models via Optuna TPE.
+
+    Parameters
+    ----------
+    trial : optuna.Trial
+        Optuna trial object.
+    model_name : str
+        One-class model name (e.g., 'PCA-SIMCA', 'OneClassSVM').
+
+    Returns
+    -------
+    params : dict
+        Hyperparameters for the specified model.
+
+    Raises
+    ------
+    ValueError
+        If model_name is not a recognised one-class model.
+    """
+    if model_name == 'PCA-SIMCA':
+        return {
+            'n_components': trial.suggest_int('n_components', 2, 20),
+            'alpha': trial.suggest_float('alpha', 0.01, 0.20, log=True),
+        }
+    elif model_name == 'OneClassSVM':
+        return {
+            'nu': trial.suggest_float('nu', 0.001, 0.5, log=True),
+            'kernel': trial.suggest_categorical('kernel', ['rbf', 'poly', 'sigmoid']),
+            'gamma': trial.suggest_categorical('gamma', ['scale', 'auto']),
+        }
+    elif model_name == 'IsolationForest':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 50, 500, step=50),
+            'contamination': trial.suggest_float('contamination', 0.001, 0.3, log=True),
+            'max_features': trial.suggest_float('max_features', 0.3, 1.0),
+        }
+    elif model_name == 'EllipticEnvelope':
+        return {
+            'contamination': trial.suggest_float('contamination', 0.001, 0.3, log=True),
+            'support_fraction': trial.suggest_float('support_fraction', 0.5, 1.0),
+        }
+    elif model_name == 'LOF':
+        return {
+            'n_neighbors': trial.suggest_int('n_neighbors', 5, 50),
+            'contamination': trial.suggest_float('contamination', 0.001, 0.3, log=True),
+        }
+    else:
+        raise ValueError(f"Unknown one-class model: {model_name}")
+
+
 def compute_importances(
     X: np.ndarray,
     y: np.ndarray,
@@ -682,6 +733,8 @@ def create_unified_objective(
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
     enable_uve: bool = False,
+    inlier_class_label=None,
+    y_original: np.ndarray | None = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -770,6 +823,13 @@ def create_unified_objective(
     # Guard against None params for imbalance handling
     _imbalance_params = imbalance_params if imbalance_params is not None else {}
 
+    # Compute one-class binary labels (+1 inlier, -1 outlier) for OC task
+    y_oc: np.ndarray | None = None
+    if task_type == 'one_class' and inlier_class_label is not None and y_original is not None:
+        # Compare as strings to handle both numeric and text labels consistently
+        y_str = np.asarray(y_original, dtype=str)
+        y_oc = np.where(y_str == str(inlier_class_label), 1, -1)
+
     # Cache regions by preprocessing config to avoid redundant computation
     region_cache = {}
 
@@ -815,6 +875,50 @@ def create_unified_objective(
                     X_prep, wavelengths_for_trial, preprocess_config
                 )
                 n_features_prep = X_prep.shape[1]
+
+            # One-class branch: bypass all variable selection and standard CV
+            if task_type == 'one_class':
+                from spectral_predict.contamination import run_one_class_cv
+
+                if y_oc is None:
+                    return float('inf')
+
+                oc_params = suggest_one_class_params(trial, model_name)
+
+                cv_result = run_one_class_cv(
+                    X_prep, y_oc, model_name, oc_params,
+                    n_folds=cv_folds, random_state=random_state, y_original=y_original,
+                )
+
+                if cv_result.get('skipped', False):
+                    return float('inf')
+
+                mean_m = cv_result['mean_metrics']
+                cal_m = cv_result['cal_metrics']
+
+                for key, val in mean_m.items():
+                    trial.set_user_attr(f'{key}_cv', val)
+                for key, val in cal_m.items():
+                    if key != 'per_contaminant':
+                        trial.set_user_attr(key, val)
+                trial.set_user_attr('preprocess', preprocess_config)
+                trial.set_user_attr('params', oc_params)
+                # Store preprocessing fields used by convert_study_to_dataframe
+                trial.set_user_attr('preprocessing', preprocess_config.get('name', 'raw'))
+                trial.set_user_attr('window', preprocess_config.get('window', 0))
+                trial.set_user_attr('deriv', preprocess_config.get('deriv', 0))
+                trial.set_user_attr('poly', preprocess_config.get('polyorder', 0))
+                trial.set_user_attr('apply_baseline', preprocess_config.get('apply_baseline', False))
+                trial.set_user_attr('apply_smoothing', preprocess_config.get('apply_smoothing', False))
+                trial.set_user_attr('model_params', str(oc_params))
+                trial.set_user_attr('n_vars', X_prep.shape[1])
+                trial.set_user_attr('full_vars_masked', X_prep.shape[1])
+                trial.set_user_attr('subset_tag', 'full')
+                trial.set_user_attr('all_wavelengths',
+                    ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
+
+                balanced_accuracy = mean_m.get('balanced_accuracy', 0.0)
+                return -balanced_accuracy
 
             # 3. Suggest subset type and size
             # IMPORTANT: Always suggest ALL parameters to maintain consistent parameter space
@@ -1351,6 +1455,7 @@ def run_unified_bayesian(
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
     enable_uve: bool = False,
+    inlier_class_label=None,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1429,6 +1534,12 @@ def run_unified_bayesian(
         'svr': 'SVR',
         'svm': 'SVM',
         'mlp': 'MLP',
+        # One-class models
+        'pca-simca': 'PCA-SIMCA',
+        'oneclasssvm': 'OneClassSVM',
+        'isolationforest': 'IsolationForest',
+        'ellipticenvelope': 'EllipticEnvelope',
+        'lof': 'LOF',
     }
     model_name = model_name_map.get(model_name.lower(), model_name)
 
@@ -1486,9 +1597,13 @@ def run_unified_bayesian(
         print(f"Trials: {n_trials}")
         print(f"CV Folds: {cv_folds}")
         print(f"Samples: {n_samples}, Features: {n_features}")
-        print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
-        methods_str = "importance, CARS, region" + (", UVE" if enable_uve else "")
-        print(f"Variable methods: {methods_str}")
+        if task_type == 'one_class':
+            print(f"Inlier class: {inlier_class_label}")
+            print(f"Variable selection: disabled (not applicable for one-class models)")
+        else:
+            print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
+            methods_str = "importance, CARS, region" + (", UVE" if enable_uve else "")
+            print(f"Variable methods: {methods_str}")
         # Show early stopping status for boosting models
         if model_name in ('XGBoost', 'LightGBM', 'CatBoost'):
             if early_stopping_rounds and early_stopping_rounds > 0:
@@ -1525,6 +1640,8 @@ def run_unified_bayesian(
         smoothing_window=smoothing_window,
         smoothing_polyorder=smoothing_polyorder,
         enable_uve=enable_uve,
+        inlier_class_label=inlier_class_label,
+        y_original=y,
     )
 
     # Create TPE sampler with good defaults
@@ -1564,6 +1681,8 @@ def run_unified_bayesian(
             if trial.value is not None:
                 if task_type == 'regression':
                     progress_info['message'] += f" - RMSEcv: {trial.value:.4f}"
+                elif task_type == 'one_class':
+                    progress_info['message'] += f" - BalancedAcccv: {-trial.value:.4f}"
                 else:
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
@@ -1573,17 +1692,19 @@ def run_unified_bayesian(
                 best_model = {
                     'Model': model_name,
                     'Preprocess': _build_display_preprocess_name(
-                        best.params.get('preprocessing', 'raw'),
+                        best.user_attrs.get('preprocessing', 'raw'),
                         apply_baseline=best.user_attrs.get('apply_baseline', False),
                         baseline_method=baseline_method,
                         apply_smoothing=best.user_attrs.get('apply_smoothing', False),
                     ),
-                    'n_vars': best.params.get('n_vars', 'N/A'),
+                    'n_vars': best.user_attrs.get('n_vars', 'N/A'),
                 }
                 if task_type == 'regression':
                     best_model['RMSEcv'] = best.value
                     # R²cv not available (only RMSE optimized), use placeholder
                     best_model['R2cv'] = 0.0
+                elif task_type == 'one_class':
+                    best_model['BalancedAcccv'] = -best.value
                 else:
                     best_model['Accuracycv'] = -best.value
                 progress_info['best_model'] = best_model
@@ -1594,6 +1715,8 @@ def run_unified_bayesian(
             if trial.value is not None and trial.value < 1e9:
                 if task_type == 'regression':
                     print(f"  Trial {trial.number + 1}/{n_trials}: RMSEcv={trial.value:.4f}")
+                elif task_type == 'one_class':
+                    print(f"  Trial {trial.number + 1}/{n_trials}: BalancedAcccv={-trial.value:.4f}")
                 else:
                     print(f"  Trial {trial.number + 1}/{n_trials}: Acccv={-trial.value:.4f}")
 
@@ -1631,6 +1754,9 @@ def run_unified_bayesian(
                 best_r2_cv = results_df.loc[results_df['RMSEcv'].idxmin(), 'R2cv']
                 print(f"Best RMSEcv: {best_rmse_cv:.6f}")
                 print(f"Best R2cv: {best_r2_cv:.6f}")
+            elif task_type == 'one_class':
+                best_ba = results_df['BalancedAcccv'].max()
+                print(f"Best BalancedAcccv: {best_ba:.6f}")
             else:
                 best_acc = results_df['Accuracy'].max()
                 print(f"Best Accuracy: {best_acc:.6f}")
@@ -1638,12 +1764,13 @@ def run_unified_bayesian(
             # Show best configuration
             if task_type == 'regression':
                 best_row = results_df.loc[results_df['RMSEcv'].idxmin()]
+            elif task_type == 'one_class':
+                best_row = results_df.loc[results_df['BalancedAcccv'].idxmax()]
             else:
                 best_row = results_df.loc[results_df['Accuracy'].idxmax()]
 
             print(f"\nBest Configuration:")
             print(f"  Preprocessing: {best_row['Preprocess']}")
-            print(f"  Subset: {best_row['SubsetTag']} ({best_row['n_vars']} vars)")
             print(f"  Params: {best_row['Params']}")
             print(f"{'='*70}\n")
 
@@ -1753,6 +1880,27 @@ def convert_study_to_dataframe(
             if regional_rmse:
                 for q in ['Q1', 'Q2', 'Q3', 'Q4']:
                     row[f'RMSE_{q}'] = regional_rmse.get(q, np.nan)
+        elif task_type == 'one_class':
+            # Calibration metrics (keys from run_one_class_cv cal_metrics via one_class_metrics)
+            row['Sensitivity'] = trial.user_attrs.get('sensitivity', np.nan)
+            row['Specificity'] = trial.user_attrs.get('specificity', np.nan)
+            row['Precision'] = trial.user_attrs.get('precision', np.nan)
+            row['F1'] = trial.user_attrs.get('f1', np.nan)
+            row['Accuracy'] = trial.user_attrs.get('accuracy', np.nan)
+            row['BalancedAcc'] = trial.user_attrs.get('balanced_accuracy', np.nan)
+            row['AUC'] = trial.user_attrs.get('auc', np.nan)
+            # Cross-validation metrics (stored with _cv suffix by objective)
+            row['Sensitivitycv'] = trial.user_attrs.get('sensitivity_cv', np.nan)
+            row['Specificitycv'] = trial.user_attrs.get('specificity_cv', np.nan)
+            row['Precisioncv'] = trial.user_attrs.get('precision_cv', np.nan)
+            row['F1cv'] = trial.user_attrs.get('f1_cv', np.nan)
+            row['Accuracycv'] = trial.user_attrs.get('accuracy_cv', np.nan)
+            balanced_acc_cv = trial.user_attrs.get('balanced_accuracy_cv', np.nan)
+            if balanced_acc_cv is None or (isinstance(balanced_acc_cv, float) and np.isnan(balanced_acc_cv)):
+                # Derive from objective value
+                balanced_acc_cv = -trial.value if (trial.value is not None and trial.value < 1e9) else np.nan
+            row['BalancedAcccv'] = balanced_acc_cv
+            row['AUCcv'] = trial.user_attrs.get('auc_cv', np.nan)
         else:
             # Calibration metrics
             row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)
@@ -1813,7 +1961,13 @@ def convert_study_to_dataframe(
                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
                 'early_stopping_rounds', 'trial_number', 'Folds', 'Optimization',
                 'imbalance_method', 'imbalance_params']
-        if task_type == 'classification':
+        if task_type == 'one_class':
+            cols.extend([
+                'Sensitivity', 'Specificity', 'Precision', 'F1', 'Accuracy', 'BalancedAcc', 'AUC',
+                'Sensitivitycv', 'Specificitycv', 'Precisioncv', 'F1cv',
+                'Accuracycv', 'BalancedAcccv', 'AUCcv', 'CompositeScore', 'Score',
+            ])
+        elif task_type == 'classification':
             cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
             cols.extend(['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score'])
@@ -1823,6 +1977,8 @@ def convert_study_to_dataframe(
     # Sort by performance (use CV metrics for model selection)
     if task_type == 'regression':
         df = df.sort_values('RMSEcv', ascending=True)
+    elif task_type == 'one_class':
+        df = df.sort_values('BalancedAcccv', ascending=False)  # Higher balanced accuracy is better
     else:
         df = df.sort_values('CV Error', ascending=True)  # Lower CV Error is better
 
@@ -1832,15 +1988,19 @@ def convert_study_to_dataframe(
     df.insert(0, 'Rank', range(1, len(df) + 1))
 
     # Add CompositeScore column (required for report.py compatibility)
-    # Lower is better for both regression (RMSEcv) and classification (CV Error)
+    # Lower is better for regression/classification; for OC = 1 - BalancedAcccv
     if task_type == 'regression':
         df['CompositeScore'] = df['RMSEcv']
+    elif task_type == 'one_class':
+        df['CompositeScore'] = 1.0 - df['BalancedAcccv']
     else:
         df['CompositeScore'] = df['CV Error']
 
     # Add Score column for compatibility with Coupled format
     if task_type == 'classification':
         df['Score'] = df['CV Error']
+    elif task_type == 'one_class':
+        df['Score'] = df['CompositeScore']
     else:
         df['Score'] = df['RMSEcv']
 
@@ -1853,6 +2013,16 @@ def convert_study_to_dataframe(
     # Performance metrics
     if task_type == 'regression':
         perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score']
+    elif task_type == 'one_class':
+        perf_cols = [
+            # Calibration metrics
+            'Sensitivity', 'Specificity', 'Precision', 'F1', 'Accuracy', 'BalancedAcc', 'AUC',
+            # Cross-validation metrics
+            'Sensitivitycv', 'Specificitycv', 'Precisioncv', 'F1cv',
+            'Accuracycv', 'BalancedAcccv', 'AUCcv',
+            # Composite
+            'CompositeScore', 'Score',
+        ]
     else:
         perf_cols = [
             # Calibration metrics

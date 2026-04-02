@@ -568,7 +568,8 @@ def _compute_reliability_scores(
 def predict_with_model(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
-    validate_wavelengths: bool = True
+    validate_wavelengths: bool = True,
+    _internals: dict | None = None,
 ) -> np.ndarray:
     """
     Make predictions with a loaded model on new spectral data.
@@ -729,6 +730,10 @@ def predict_with_model(
         if oc_pca_reducer is not None:
             X_processed = oc_pca_reducer.transform(X_processed)
 
+        # Capture transformed X for decision score extraction (backward-compatible)
+        if _internals is not None:
+            _internals['X_processed'] = X_processed
+
         # Predict labels (+1 inlier, -1 outlier)
         predictions = model.predict(X_processed)
         return predictions
@@ -822,9 +827,6 @@ def predict_with_uncertainty(
     warnings.filterwarnings("ignore", message="X does not have valid feature names")
     warnings.filterwarnings("ignore", message="This Pipeline instance is not fitted yet")
 
-    # Get standard predictions first
-    predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
-
     model = model_dict['model']
     metadata = model_dict['metadata']
     task_type = metadata.get('task_type', 'regression')
@@ -840,9 +842,24 @@ def predict_with_uncertainty(
                 f"but prediction data is {prediction_data_type.upper()}."
             )
 
-    # One-class models: no meaningful uncertainty or applicability domain to compute
+    # One-class models: extract decision scores for uncertainty/applicability domain
     if task_type == 'one_class':
-        return {
+        internals: dict = {}
+        predictions = predict_with_model(model_dict, X_new, validate_wavelengths, _internals=internals)
+
+        # Extract decision scores from the already-transformed data
+        decision_scores = None
+        X_proc = internals.get('X_processed')
+        if X_proc is not None:
+            try:
+                if hasattr(model, 'decision_function'):
+                    decision_scores = model.decision_function(X_proc)
+                elif hasattr(model, 'score_samples'):
+                    decision_scores = model.score_samples(X_proc)
+            except Exception:
+                decision_scores = None
+
+        result: dict = {
             'predictions': predictions,
             'uncertainty': {},
             'applicability_domain': {},
@@ -850,6 +867,30 @@ def predict_with_uncertainty(
             'has_applicability_domain': False,
             'data_type_warning': data_type_warning,
         }
+
+        if decision_scores is not None:
+            scores = decision_scores
+            # Build applicability domain from decision scores using percentile thresholds
+            q10, q25 = np.percentile(scores, [10, 25])
+            status = np.where(
+                scores >= q25, 'good',
+                np.where(scores >= q10, 'caution', 'extrapolation')
+            )
+            result['uncertainty'] = {
+                'decision_scores': scores,
+                'confidence': np.abs(scores),
+            }
+            result['applicability_domain'] = {
+                'anomaly_score': scores,
+                'distance_status': status,
+            }
+            result['has_uncertainty'] = True
+            result['has_applicability_domain'] = True
+
+        return result
+
+    # Get standard predictions for non-OC models
+    predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
 
     uncertainty = {}
     has_uncertainty = False

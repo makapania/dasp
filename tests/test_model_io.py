@@ -1344,8 +1344,10 @@ class TestOneClassPrediction:
             assert 'has_uncertainty' in result
             assert 'has_applicability_domain' in result
 
-            assert result['has_uncertainty'] is False
-            assert result['uncertainty'] == {}
+            # Feature 2: decision scores are now extracted for one-class models
+            assert result['has_uncertainty'] is True
+            assert 'decision_scores' in result['uncertainty']
+            assert len(result['uncertainty']['decision_scores']) == 5
 
             preds = result['predictions']
             assert all(p in (1, -1) for p in preds)
