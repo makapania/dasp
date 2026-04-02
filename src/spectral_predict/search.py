@@ -1019,8 +1019,6 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     if not selected_methods:
         selected_methods = ['importance']
         print("Info: No implemented methods selected. Defaulting to 'importance'.")
-    if apply_uve_prefilter or uve_n_components or uve_cutoff_multiplier != 1.0:
-        print("Info: UVE prefilter parameters are currently placeholders in the Python backend.")
     if spa_n_random_starts != 10:
         print("Info: SPA random starts parameter is noted but not yet applied in the Python backend.")
     if ipls_n_intervals != 20:
@@ -1825,6 +1823,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         preprocess_cfg: dict,
         varsel_method: str,
         model_name: str,
+        uve_prefilter_active: bool = False,
     ) -> tuple:
         """Build a hashable cache key for variable selection results.
 
@@ -1845,14 +1844,14 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         # Methods that depend on model category (tree vs linear)
         if varsel_method in ('cars-aware', 'cars-tree', 'uve_cars_tree'):
             category = 'tree' if model_name in TREE_MODELS_SET else 'linear'
-            return (prep_parts, varsel_method, category)
+            return (prep_parts, varsel_method, category, uve_prefilter_active)
         elif varsel_method == 'ga':
             # GA uses ga_pls for linear, ga_lightgbm for tree
             category = 'tree' if model_name in TREE_MODELS_SET else 'linear'
-            return (prep_parts, varsel_method, category)
+            return (prep_parts, varsel_method, category, uve_prefilter_active)
         else:
             # Model-independent: uve, spa, ipls, cars, uve_spa, etc.
-            return (prep_parts, varsel_method)
+            return (prep_parts, varsel_method, uve_prefilter_active)
 
     # Main search loop
     for preprocess_cfg in preprocess_configs:
@@ -2204,6 +2203,32 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                         n_features_varsel = X_for_models.shape[1]
                         n_features_for_validation = n_features_varsel  # Define early for SPA/UVE-SPA methods
 
+                        # --- UVE Prefilter: eliminate uninformative variables before varsel ---
+                        _uve_prefilter_active = False
+                        if apply_uve_prefilter and n_features_varsel >= 3:
+                            try:
+                                _uve_imp, _uve_thr, _uve_mask = get_uve_threshold(
+                                    X_transformed_varsel, y_np,
+                                    cutoff_multiplier=uve_cutoff_multiplier,
+                                    n_components=uve_n_components,
+                                    cv_folds=folds,
+                                    random_state=random_state,
+                                )
+                                n_before = n_features_varsel
+                                n_after = int(np.sum(_uve_mask))
+                                if n_after < n_before:
+                                    X_transformed_varsel = X_transformed_varsel[:, _uve_mask]
+                                    wavelengths_varsel = wavelengths_varsel[_uve_mask]
+                                    n_features_varsel = n_after
+                                    n_features_for_validation = n_after
+                                    _uve_prefilter_active = True
+                                    print(f"     UVE prefilter: {n_before} -> {n_after} variables "
+                                          f"({n_before - n_after} eliminated, threshold={_uve_thr:.4f})")
+                            except Exception as e:
+                                print(f"     UVE prefilter failed ({e}), using all {n_features_varsel} variables")
+                        elif apply_uve_prefilter and n_features_varsel < 3:
+                            print(f"     UVE prefilter skipped: only {n_features_varsel} features (min 3)")
+
                         # Loop over each selected variable selection method
                         # DEBUG: Print what methods will be processed
                         print(f"[DEBUG] Processing variable selection methods: {selected_methods}")
@@ -2347,7 +2372,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             # 'importance' is NEVER cached (depends on fitted model + hyperparams)
                             _cache_hit = False
                             if varsel_method != 'importance':
-                                _cache_key = _varsel_cache_key(preprocess_cfg, varsel_method, model_name)
+                                _cache_key = _varsel_cache_key(preprocess_cfg, varsel_method, model_name, _uve_prefilter_active)
                                 with _varsel_cache_lock:
                                     if _cache_key in _varsel_cache:
                                         _cached = _varsel_cache[_cache_key]
@@ -2683,7 +2708,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                 # Apply edge masking for Savitzky-Golay derivatives
                                 # SKIP when wavelength restriction is active - restricted wavelengths
                                 # are from middle of spectrum, not SG boundary edges
-                                if not wavelength_restriction_active:
+                                if not wavelength_restriction_active and not _uve_prefilter_active:
                                     importances = _apply_edge_mask(importances, preprocess_cfg)
 
                                 # Compute method-optimal variable count (natural cutoff from method)
@@ -5227,6 +5252,41 @@ def run_one_class_search(
 
             n_features_current = X_preprocessed.shape[1]
 
+            # --- UVE Prefilter: eliminate uninformative variables before varsel ---
+            _uve_prefilter_active = False
+            if apply_uve_prefilter and n_features_current >= 3:
+                _uve_pf_key = (preprocess_cfg['name'], '__uve_prefilter__')
+                if _uve_pf_key in _oc_varsel_cache:
+                    _uve_mask = _oc_varsel_cache[_uve_pf_key]
+                else:
+                    try:
+                        _uve_imp, _uve_thr, _uve_mask = get_uve_threshold(
+                            X_preprocessed, y_oc,
+                            cutoff_multiplier=uve_cutoff_multiplier,
+                            n_components=uve_n_components,
+                            cv_folds=folds,
+                            random_state=random_state,
+                        )
+                        _oc_varsel_cache[_uve_pf_key] = _uve_mask
+                    except Exception as e:
+                        logger.warning("UVE prefilter failed for '%s': %s",
+                                       preprocess_cfg['name'], e)
+                        _uve_mask = np.ones(n_features_current, dtype=bool)
+                        _oc_varsel_cache[_uve_pf_key] = _uve_mask
+
+                n_before = n_features_current
+                n_after = int(np.sum(_uve_mask))
+                if n_after < n_before:
+                    X_preprocessed = X_preprocessed[:, _uve_mask]
+                    wavelengths_current = wavelengths_current[_uve_mask]
+                    n_features_current = n_after
+                    _uve_prefilter_active = True
+                    logger.info("  UVE prefilter: %d -> %d variables (%d eliminated)",
+                                 n_before, n_after, n_before - n_after)
+            elif apply_uve_prefilter and n_features_current < 3:
+                logger.info("  UVE prefilter skipped: only %d features (min 3)",
+                            n_features_current)
+
             for varsel_method in selected_varsel_methods:
                 if controller and not controller.check_and_wait():
                     break
@@ -5464,7 +5524,8 @@ def run_one_class_search(
                     importances = np.ones(n_features_current)
 
                 # Apply edge mask for derivatives
-                if not wavelength_restriction_active:
+                # Skip when UVE prefilter active — variables are non-contiguous
+                if not wavelength_restriction_active and not _uve_prefilter_active:
                     importances = _apply_edge_mask(importances, preprocess_cfg)
 
                 # Filter valid variable counts
