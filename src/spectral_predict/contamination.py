@@ -612,6 +612,7 @@ def run_one_class_cv(
     cal_pca_reducer = None
     cal_metrics = {}
     per_contaminant = {}
+    oc_score_stats = None
 
     try:
         cal_model = build_one_class_model(model_name, params)
@@ -654,6 +655,16 @@ def run_one_class_cv(
                     per_contaminant[str(lbl)] = float(np.mean(lbl_preds == -1))
         cal_metrics['per_contaminant'] = per_contaminant
 
+        # Compute training inlier score statistics for stable AD thresholds at prediction time
+        if scores_cal is not None:
+            inlier_scores = scores_cal[inlier_indices]
+            oc_score_stats = {
+                'q10': float(np.percentile(inlier_scores, 10)),
+                'q25': float(np.percentile(inlier_scores, 25)),
+                'mean': float(np.mean(inlier_scores)),
+                'std': float(np.std(inlier_scores)),
+            }
+
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
         logger.warning("Calibration failed for %s: %s", model_name, e)
         cal_metrics = {
@@ -671,5 +682,6 @@ def run_one_class_cv(
         'cal_pca_reducer': cal_pca_reducer,
         'cal_metrics': cal_metrics,
         'per_contaminant_sensitivity': per_contaminant,
+        'oc_score_stats': oc_score_stats,
         'skipped': False,
     }

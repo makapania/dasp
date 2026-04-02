@@ -601,7 +601,8 @@ class TestRunOneClassCV:
 
         expected_keys = {
             'fold_metrics', 'mean_metrics', 'cal_model', 'cal_scaler',
-            'cal_pca_reducer', 'cal_metrics', 'per_contaminant_sensitivity', 'skipped',
+            'cal_pca_reducer', 'cal_metrics', 'per_contaminant_sensitivity',
+            'oc_score_stats', 'skipped',
         }
         assert set(result.keys()) == expected_keys
         assert result['skipped'] is False

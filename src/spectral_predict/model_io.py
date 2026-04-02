@@ -870,15 +870,34 @@ def predict_with_uncertainty(
 
         if decision_scores is not None:
             scores = decision_scores
-            # Build applicability domain from decision scores using percentile thresholds
-            q10, q25 = np.percentile(scores, [10, 25])
+
+            # Use training-derived thresholds when available, fall back to batch percentiles
+            oc_stats = metadata.get('oc_score_stats')
+            if oc_stats is not None:
+                q10, q25 = oc_stats['q10'], oc_stats['q25']
+            else:
+                q10, q25 = np.percentile(scores, [10, 25])
+
             status = np.where(
                 scores >= q25, 'good',
                 np.where(scores >= q10, 'caution', 'extrapolation')
             )
+
+            # Compute confidence: higher = more in-domain (positive scores = inlier)
+            if oc_stats is not None:
+                center = oc_stats['mean']
+                scale = max(oc_stats['std'], 1e-10)
+                confidence = 1.0 / (1.0 + np.exp(-(scores - center) / scale))
+            else:
+                s_min, s_max = scores.min(), scores.max()
+                if s_max > s_min:
+                    confidence = (scores - s_min) / (s_max - s_min)
+                else:
+                    confidence = np.full_like(scores, 0.5)
+
             result['uncertainty'] = {
                 'decision_scores': scores,
-                'confidence': np.abs(scores),
+                'confidence': confidence,
             }
             result['applicability_domain'] = {
                 'anomaly_score': scores,

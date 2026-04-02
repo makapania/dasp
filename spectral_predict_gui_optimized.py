@@ -24799,9 +24799,7 @@ class SpectralPredictApp:
             # ONE-CLASS CONTAMINATION SCREENING (separate pipeline)
             # ═══════════════════════════════════════════════════════════════════
             if task_type == "one_class":
-                from spectral_predict.search import run_one_class_search
-
-                # Get inlier class label
+                # Get inlier class label (shared by both grid search and Bayesian paths)
                 inlier_label = self.inlier_class_label.get().strip()
                 if not inlier_label:
                     # Auto-detect most frequent class but require user confirmation
@@ -24838,67 +24836,184 @@ class SpectralPredictApp:
                             f"Available: {list(np.unique(y_filtered.values))}"))
                         return
 
-                # Collect selected one-class models
-                selected_oc_models = [
-                    name for name, var in self.one_class_model_checkboxes.items()
-                    if var.get()
-                ]
-                if not selected_oc_models:
-                    selected_oc_models = None  # Use tier defaults
+                opt_method_oc = self.optimization_method.get()
 
-                # Collect preprocessing methods
-                preprocess_list = []
-                if self.use_raw.get():
-                    preprocess_list.append('raw')
-                if self.use_snv.get():
-                    preprocess_list.append('snv')
-                if self.use_sg1.get():
-                    preprocess_list.append('deriv1')
-                if self.use_sg2.get():
-                    preprocess_list.append('deriv2')
-                if not preprocess_list:
-                    preprocess_list = ['raw', 'snv', 'deriv1']
+                if opt_method_oc == 'unified':
+                    # === BAYESIAN OPTIMIZATION FOR ONE-CLASS ===
+                    if not HAS_UNIFIED_BAYESIAN:
+                        self._log_progress("ERROR: Bayesian optimization module not available!")
+                        self.root.after(0, lambda: messagebox.showerror(
+                            "Module Missing", "Bayesian optimization module not found!"))
+                        return
 
-                # Collect window sizes
-                window_sizes_oc = []
-                if self.window_7.get(): window_sizes_oc.append(7)
-                if self.window_11.get(): window_sizes_oc.append(11)
-                if self.window_17.get(): window_sizes_oc.append(17)
-                if self.window_23.get(): window_sizes_oc.append(23)
-                if self.window_31.get(): window_sizes_oc.append(31)
-                if not window_sizes_oc:
-                    window_sizes_oc = [17]
+                    # Collect selected one-class models
+                    enabled_oc_models = [
+                        name for name, var in self.one_class_model_checkboxes.items()
+                        if var.get()
+                    ]
+                    if not enabled_oc_models:
+                        enabled_oc_models = ['PCA-SIMCA', 'IsolationForest']
 
-                baseline_method, baseline_params = self._get_baseline_params()
+                    # Get wavelengths
+                    oc_wavelengths = None
+                    if hasattr(X_filtered, 'columns'):
+                        try:
+                            oc_wavelengths = np.array([float(c) for c in X_filtered.columns])
+                        except (ValueError, TypeError):
+                            pass
+                    if oc_wavelengths is None:
+                        oc_wavelengths = np.arange(X_filtered.shape[1])
 
-                self._log_progress("\nRunning One-Class Screening...")
-                results_df = run_one_class_search(
-                    X=X_filtered,
-                    y=y_filtered,
-                    inlier_class_label=inlier_label,
-                    folds=self.folds.get(),
-                    preprocessing_methods=preprocess_list,
-                    window_sizes=window_sizes_oc,
-                    tier=tier,
-                    enabled_models=selected_oc_models,
-                    variable_penalty=self.variable_penalty.get(),
-                    gap_penalty=self.gap_penalty.get(),
-                    analysis_wl_min=analysis_wl_min_value,
-                    analysis_wl_max=analysis_wl_max_value,
-                    progress_callback=self._progress_callback,
-                    controller=self.search_controller,
-                    baseline_method=baseline_method,
-                    baseline_params=baseline_params,
-                    enable_smoothing=self.enable_smoothing.get(),
-                    smoothing_window=self.smoothing_window.get(),
-                    smoothing_polyorder=self.smoothing_polyorder.get(),
-                    oc_hyperparams={
-                        'nu': self.oc_nu.get(),
-                        'contamination': self.oc_contamination.get(),
-                        'alpha': self.oc_alpha.get(),
-                        'n_components': self.oc_n_components.get(),
-                    },
-                )
+                    X_oc_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
+                    y_oc_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
+
+                    if self.bayes_enable_baseline.get():
+                        bl_method_oc, bl_params_oc = self._get_baseline_params_for_method(
+                            self.bayes_baseline_method.get()
+                        )
+                    else:
+                        bl_method_oc, bl_params_oc = None, None
+
+                    if self.bayes_enable_smoothing.get():
+                        sm_enabled_oc = True
+                        sm_win_oc = self.smoothing_window.get()
+                        sm_poly_oc = self.smoothing_polyorder.get()
+                    else:
+                        sm_enabled_oc, sm_win_oc, sm_poly_oc = False, 17, 2
+
+                    self._log_progress("\nRunning Bayesian One-Class Optimization...")
+                    self._log_progress(f"   Models: {enabled_oc_models}")
+                    self._log_progress(f"   Inlier class: {inlier_label}")
+                    self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
+
+                    oc_all_results = []
+                    oc_best_overall = [None]
+
+                    def oc_progress_wrapper(info):
+                        best_model = info.get('best_model')
+                        if best_model:
+                            current_best = oc_best_overall[0]
+                            is_better = (
+                                current_best is None or
+                                best_model.get('BalancedAcccv', 0) >
+                                current_best.get('BalancedAcccv', 0)
+                            )
+                            if is_better:
+                                oc_best_overall[0] = best_model.copy()
+                            info['best_model'] = oc_best_overall[0]
+                        self._progress_callback(info)
+
+                    for oc_model_name in enabled_oc_models:
+                        self._log_progress(f"\n  Optimizing {oc_model_name}...")
+                        try:
+                            oc_results_df, _ = run_unified_bayesian(
+                                X=X_oc_np,
+                                y=y_oc_np,
+                                wavelengths=oc_wavelengths,
+                                model_name=oc_model_name,
+                                task_type='one_class',
+                                n_trials=self.n_unified_trials.get(),
+                                cv_folds=self.folds.get(),
+                                random_state=42,
+                                verbose=False,
+                                progress_callback=oc_progress_wrapper,
+                                controller=self.search_controller,
+                                baseline_method=bl_method_oc,
+                                baseline_params=bl_params_oc,
+                                smoothing=sm_enabled_oc,
+                                smoothing_window=sm_win_oc,
+                                smoothing_polyorder=sm_poly_oc,
+                                inlier_class_label=inlier_label,
+                            )
+                            if len(oc_results_df) > 0:
+                                best = oc_results_df.iloc[0]
+                                self._log_progress(
+                                    f"    Best BalancedAcccv: {best['BalancedAcccv']:.4f}"
+                                )
+                                oc_results_df['Model'] = oc_model_name
+                                oc_all_results.append(oc_results_df)
+                            else:
+                                self._log_progress(f"    No results returned")
+                        except Exception as e:
+                            self._log_progress(f"    Error: {str(e)}")
+                            import traceback
+                            self._log_progress(traceback.format_exc())
+                            continue
+
+                    if oc_all_results:
+                        results_df = pd.concat(oc_all_results, ignore_index=True)
+                        results_df = results_df.sort_values(
+                            'BalancedAcccv', ascending=False
+                        ).reset_index(drop=True)
+                        results_df['Rank'] = results_df.index + 1
+                    else:
+                        results_df = None
+
+                else:
+                    # === GRID SEARCH FOR ONE-CLASS (existing path) ===
+                    from spectral_predict.search import run_one_class_search
+
+                    # Collect selected one-class models
+                    selected_oc_models = [
+                        name for name, var in self.one_class_model_checkboxes.items()
+                        if var.get()
+                    ]
+                    if not selected_oc_models:
+                        selected_oc_models = None  # Use tier defaults
+
+                    # Collect preprocessing methods
+                    preprocess_list = []
+                    if self.use_raw.get():
+                        preprocess_list.append('raw')
+                    if self.use_snv.get():
+                        preprocess_list.append('snv')
+                    if self.use_sg1.get():
+                        preprocess_list.append('deriv1')
+                    if self.use_sg2.get():
+                        preprocess_list.append('deriv2')
+                    if not preprocess_list:
+                        preprocess_list = ['raw', 'snv', 'deriv1']
+
+                    # Collect window sizes
+                    window_sizes_oc = []
+                    if self.window_7.get(): window_sizes_oc.append(7)
+                    if self.window_11.get(): window_sizes_oc.append(11)
+                    if self.window_17.get(): window_sizes_oc.append(17)
+                    if self.window_23.get(): window_sizes_oc.append(23)
+                    if self.window_31.get(): window_sizes_oc.append(31)
+                    if not window_sizes_oc:
+                        window_sizes_oc = [17]
+
+                    baseline_method_oc, baseline_params_oc = self._get_baseline_params()
+
+                    self._log_progress("\nRunning One-Class Screening...")
+                    results_df = run_one_class_search(
+                        X=X_filtered,
+                        y=y_filtered,
+                        inlier_class_label=inlier_label,
+                        folds=self.folds.get(),
+                        preprocessing_methods=preprocess_list,
+                        window_sizes=window_sizes_oc,
+                        tier=tier,
+                        enabled_models=selected_oc_models,
+                        variable_penalty=self.variable_penalty.get(),
+                        gap_penalty=self.gap_penalty.get(),
+                        analysis_wl_min=analysis_wl_min_value,
+                        analysis_wl_max=analysis_wl_max_value,
+                        progress_callback=self._progress_callback,
+                        controller=self.search_controller,
+                        baseline_method=baseline_method_oc,
+                        baseline_params=baseline_params_oc,
+                        enable_smoothing=self.enable_smoothing.get(),
+                        smoothing_window=self.smoothing_window.get(),
+                        smoothing_polyorder=self.smoothing_polyorder.get(),
+                        oc_hyperparams={
+                            'nu': self.oc_nu.get(),
+                            'contamination': self.oc_contamination.get(),
+                            'alpha': self.oc_alpha.get(),
+                            'n_components': self.oc_n_components.get(),
+                        },
+                    )
 
                 label_encoder = None
                 self.label_encoder = None
@@ -33820,6 +33935,7 @@ F1 Score:  {f1:.4f}
                 self.refined_y_train = y_oc
                 self.refined_oc_scaler = cv_result['cal_scaler']
                 self.refined_oc_pca_reducer = cv_result['cal_pca_reducer']
+                self.refined_oc_score_stats = cv_result.get('oc_score_stats')
                 self.refined_config = {
                     'model_name': model_name,
                     'task_type': 'one_class',
@@ -35194,6 +35310,7 @@ External Validation Performance (n={n_val}):
                 # Attach fitted scaler/PCA reducer for one-class persistence
                 metadata['scaler'] = getattr(self, 'refined_oc_scaler', None)
                 metadata['pca_reducer'] = getattr(self, 'refined_oc_pca_reducer', None)
+                metadata['oc_score_stats'] = getattr(self, 'refined_oc_score_stats', None)
             else:  # classification
                 perf = {
                     'Accuracy': self.refined_performance.get('accuracy_mean'),
@@ -37132,8 +37249,12 @@ External Validation Performance (n={n_val}):
                     # Debug output
                     print(f"DEBUG: Model {filename} - has_applicability_domain: {has_applicability_domain}")
                     if has_applicability_domain:
-                        print(f"  - PCA distance range: {applicability_domain['pca_distance'].min():.3f} - {applicability_domain['pca_distance'].max():.3f}")
-                        print(f"  - Status counts: {dict(zip(*np.unique(applicability_domain['distance_status'], return_counts=True)))}")
+                        if 'pca_distance' in applicability_domain:
+                            print(f"  - PCA distance range: {applicability_domain['pca_distance'].min():.3f} - {applicability_domain['pca_distance'].max():.3f}")
+                        if 'anomaly_score' in applicability_domain:
+                            print(f"  - Anomaly score range: {applicability_domain['anomaly_score'].min():.3f} - {applicability_domain['anomaly_score'].max():.3f}")
+                        if 'distance_status' in applicability_domain:
+                            print(f"  - Status counts: {dict(zip(*np.unique(applicability_domain['distance_status'], return_counts=True)))}")
                     print(f"  - has_uncertainty: {has_uncertainty}, keys: {list(uncertainty.keys())}")
 
                     # Store predictions with descriptive column name
@@ -37588,6 +37709,72 @@ External Validation Performance (n={n_val}):
             self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')  # Green
             self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')  # Orange
             self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')   # Red
+
+        elif 'decision_scores' in first_uncertainty:
+            # === ONE-CLASS: Show decision scores and status ===
+            print("DEBUG: Displaying one-class uncertainty table")
+            print(f"  - Number of models with uncertainty: {len(self.predictions_uncertainty)}")
+
+            columns = ['Sample', 'Model', 'Prediction', 'Decision Score', 'Confidence', 'Status']
+            self.uncertainty_tree['columns'] = columns
+
+            for col in columns:
+                self.uncertainty_tree.heading(col, text=col)
+                if col == 'Sample':
+                    self.uncertainty_tree.column(col, width=150, anchor='w')
+                elif col == 'Model':
+                    self.uncertainty_tree.column(col, width=180, anchor='w')
+                elif col == 'Prediction':
+                    self.uncertainty_tree.column(col, width=100, anchor='center')
+                elif col == 'Status':
+                    self.uncertainty_tree.column(col, width=120, anchor='center')
+                else:
+                    self.uncertainty_tree.column(col, width=110, anchor='e')
+
+            has_applicability = hasattr(self, 'predictions_applicability') and self.predictions_applicability
+
+            for model_name in self.predictions_uncertainty.keys():
+                uncertainty = self.predictions_uncertainty[model_name]
+                decision_scores = uncertainty.get('decision_scores')
+                confidence = uncertainty.get('confidence')
+
+                ad_data = None
+                if has_applicability and model_name in self.predictions_applicability:
+                    ad_data = self.predictions_applicability[model_name]
+
+                predictions = self.predictions_df[model_name].values
+
+                for i, sample in enumerate(sample_names):
+                    pred_label = "Inlier" if predictions[i] == 1 else "Outlier"
+                    row_values = [
+                        str(sample),
+                        model_name,
+                        pred_label,
+                        f"{decision_scores[i]:.4f}" if decision_scores is not None else "N/A",
+                        f"{confidence[i]:.3f}" if confidence is not None else "N/A",
+                    ]
+
+                    if ad_data and 'distance_status' in ad_data:
+                        status = ad_data['distance_status'][i]
+                        status_display = {'good': '> Good', 'caution': '[!] Caution', 'extrapolation': '[!] Extrap'}
+                        row_values.append(status_display.get(status, status))
+                    else:
+                        row_values.append("N/A")
+
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+
+                    if ad_data and 'distance_status' in ad_data:
+                        status = ad_data['distance_status'][i]
+                        if status == 'good':
+                            self.uncertainty_tree.item(item_id, tags=('high_conf',))
+                        elif status == 'caution':
+                            self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                        else:
+                            self.uncertainty_tree.item(item_id, tags=('low_conf',))
+
+            self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')
+            self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')
+            self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')
 
         else:
             # === REGRESSION: Show RMSECV and applicability domain ===
