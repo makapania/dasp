@@ -4984,6 +4984,9 @@ def run_one_class_search(
     # KFold for splitting inlier samples
     kf = KFold(n_splits=folds, shuffle=True, random_state=random_state)
 
+    # Cache preprocessed data to avoid recomputing in the variable selection loop
+    _preprocess_result_cache = {}
+
     for preprocess_cfg in preprocess_configs:
         # Apply preprocessing to full dataset
         pipe_steps = build_preprocessing_pipeline(
@@ -5028,6 +5031,10 @@ def run_one_class_search(
             X_preprocessed, wavelengths_current, _ = _apply_edge_mask_to_data(
                 X_preprocessed, wavelengths_current, preprocess_cfg
             )
+
+        # Cache final preprocessed result for reuse in variable selection loop
+        _cache_key = (preprocess_cfg['name'], preprocess_cfg.get('deriv', 0), preprocess_cfg.get('window', 0))
+        _preprocess_result_cache[_cache_key] = (X_preprocessed.copy(), wavelengths_current.copy())
 
         for model_name, param_list in model_grids.items():
             if controller and not controller.check_and_wait():
@@ -5162,57 +5169,61 @@ def run_one_class_search(
             if controller and not controller.check_and_wait():
                 break
 
-            # Apply preprocessing to full dataset (same as full-spectrum loop)
-            pipe_steps = build_preprocessing_pipeline(
-                preprocess_cfg["method"],
-                preprocess_cfg["deriv"],
-                preprocess_cfg["window"],
-                preprocess_cfg["polyorder"],
-                task_type='one_class',
-                baseline_method=preprocess_cfg.get("baseline_method"),
-                baseline_params=preprocess_cfg.get("baseline_params"),
-                smoothing=preprocess_cfg.get("smoothing", False),
-                smoothing_window=preprocess_cfg.get("smoothing_window", 17),
-                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
-            )
-
-            if pipe_steps:
-                from sklearn.pipeline import Pipeline as SkPipeline
-                prep_pipe = SkPipeline(pipe_steps)
-                try:
-                    prep_pipe.fit(X_np[inlier_indices])
-                    X_preprocessed = prep_pipe.transform(X_np)
-                except (ValueError, np.linalg.LinAlgError) as e:
-                    logger.warning(
-                        "Preprocessing '%s' failed in varsel: %s",
-                        preprocess_cfg['name'], e,
-                    )
-                    # Skip all varsel configs for this preprocessing
-                    n_skip = (
-                        len(selected_varsel_methods)
-                        * len(oc_variable_counts) * n_model_params
-                    )
-                    current_config += n_skip
-                    skipped_configs += n_skip
-                    continue
+            # Reuse cached preprocessing result from full-spectrum loop
+            _cache_key = (preprocess_cfg['name'], preprocess_cfg.get('deriv', 0), preprocess_cfg.get('window', 0))
+            if _cache_key in _preprocess_result_cache:
+                X_preprocessed, wavelengths_current = _preprocess_result_cache[_cache_key]
+                X_preprocessed = X_preprocessed.copy()  # Don't mutate cache
+                wavelengths_current = wavelengths_current.copy()
             else:
-                X_preprocessed = X_np.copy()
-
-            # Apply wavelength mask AFTER preprocessing
-            wavelengths_current = wavelengths_full.copy()
-            if wavelength_restriction_active and wl_mask is not None:
-                X_preprocessed = X_preprocessed[:, wl_mask]
-                wavelengths_current = wavelengths_full[wl_mask]
-
-            # Apply edge mask for derivative preprocessing when no wavelength restriction
-            if (
-                preprocess_cfg.get("deriv")
-                and preprocess_cfg.get("window")
-                and not wavelength_restriction_active
-            ):
-                X_preprocessed, wavelengths_current, _ = _apply_edge_mask_to_data(
-                    X_preprocessed, wavelengths_current, preprocess_cfg
+                # Fallback: recompute if not in cache (e.g., smart_preprocess changed configs)
+                pipe_steps = build_preprocessing_pipeline(
+                    preprocess_cfg["method"],
+                    preprocess_cfg["deriv"],
+                    preprocess_cfg["window"],
+                    preprocess_cfg["polyorder"],
+                    task_type='one_class',
+                    baseline_method=preprocess_cfg.get("baseline_method"),
+                    baseline_params=preprocess_cfg.get("baseline_params"),
+                    smoothing=preprocess_cfg.get("smoothing", False),
+                    smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+                    smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
                 )
+
+                if pipe_steps:
+                    from sklearn.pipeline import Pipeline as SkPipeline
+                    prep_pipe = SkPipeline(pipe_steps)
+                    try:
+                        prep_pipe.fit(X_np[inlier_indices])
+                        X_preprocessed = prep_pipe.transform(X_np)
+                    except (ValueError, np.linalg.LinAlgError) as e:
+                        logger.warning(
+                            "Preprocessing '%s' failed in varsel: %s",
+                            preprocess_cfg['name'], e,
+                        )
+                        n_skip = (
+                            len(selected_varsel_methods)
+                            * len(oc_variable_counts) * n_model_params
+                        )
+                        current_config += n_skip
+                        skipped_configs += n_skip
+                        continue
+                else:
+                    X_preprocessed = X_np.copy()
+
+                wavelengths_current = wavelengths_full.copy()
+                if wavelength_restriction_active and wl_mask is not None:
+                    X_preprocessed = X_preprocessed[:, wl_mask]
+                    wavelengths_current = wavelengths_full[wl_mask]
+
+                if (
+                    preprocess_cfg.get("deriv")
+                    and preprocess_cfg.get("window")
+                    and not wavelength_restriction_active
+                ):
+                    X_preprocessed, wavelengths_current, _ = _apply_edge_mask_to_data(
+                        X_preprocessed, wavelengths_current, preprocess_cfg
+                    )
 
             n_features_current = X_preprocessed.shape[1]
 
