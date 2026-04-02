@@ -224,7 +224,7 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         pc_scores = self.pca_.transform(X)
 
         t2 = self._compute_t2(pc_scores)
-        q = self._compute_q_residuals(X)
+        q = self._compute_q_residuals_from_scores(X, pc_scores)
 
         # Per-axis p-values from fitted chi-squared distributions
         p_t2 = 1.0 - stats.chi2.cdf(t2, self.t2_dof_, loc=0, scale=self.t2_scale_)
@@ -263,7 +263,12 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         """Compute Q-residuals (SPE) for samples."""
         X = np.asarray(X, dtype=np.float64)
         scores = self.pca_.transform(X)
-        X_reconstructed = scores @ self.pca_.components_ + self.pca_.mean_
+        return self._compute_q_residuals_from_scores(X, scores)
+
+    def _compute_q_residuals_from_scores(self, X, pc_scores):
+        """Compute Q-residuals using pre-computed PCA scores (avoids duplicate transform)."""
+        X = np.asarray(X, dtype=np.float64)
+        X_reconstructed = pc_scores @ self.pca_.components_ + self.pca_.mean_
         residuals = X - X_reconstructed
         return np.sum(residuals ** 2, axis=1)
 
@@ -347,11 +352,11 @@ def build_one_class_model(model_name: str, params: dict):
     if model_name == 'OneClassSVM':
         return OneClassSVM(**params)
     elif model_name == 'IsolationForest':
-        return IsolationForest(**{**params, 'random_state': 42})
+        return IsolationForest(**{**params, 'random_state': 42, 'n_jobs': -1})
     elif model_name == 'EllipticEnvelope':
         return EllipticEnvelope(**{**params, 'random_state': 42})
     elif model_name == 'LOF':
-        return LocalOutlierFactor(**{**params, 'novelty': True})
+        return LocalOutlierFactor(**{**params, 'novelty': True, 'n_jobs': -1})
     elif model_name == 'PCA-SIMCA':
         return PCASIMCA(**params)
     else:
@@ -500,6 +505,7 @@ def run_one_class_cv(
     n_folds: int = 5,
     random_state: int = 42,
     y_original: np.ndarray | None = None,
+    compute_calibration: bool = True,
 ) -> dict:
     """Run cross-validation for a one-class model.
 
@@ -521,6 +527,10 @@ def run_one_class_cv(
         Random state for reproducibility.
     y_original : np.ndarray, optional
         Original string labels for per-contaminant sensitivity.
+    compute_calibration : bool
+        If False, skip the calibration block (fit on all inliers + per-contaminant
+        stats). Set to False during Bayesian optimization trials where only
+        mean_metrics['balanced_accuracy'] is used, saving ~17% overhead per trial.
 
     Returns
     -------
@@ -569,14 +579,19 @@ def run_one_class_cv(
                 X_test = X[test_idx]
 
             model.fit(X_train)
-            y_pred = model.predict(X_test)
 
-            # Get decision scores if available
+            # Get decision scores and derive predictions to avoid duplicate calls.
+            # For PCASIMCA, predict() calls decision_function() internally,
+            # so calling both wastes a full PCA transform + scoring pass.
             scores = None
             if hasattr(model, 'decision_function'):
                 scores = model.decision_function(X_test)
+                y_pred = np.where(scores >= 0, 1, -1)
             elif hasattr(model, 'score_samples'):
                 scores = model.score_samples(X_test)
+                y_pred = model.predict(X_test)
+            else:
+                y_pred = model.predict(X_test)
 
             fold_result = one_class_metrics(test_labels, y_pred, scores)
             fold_metrics.append(fold_result)
@@ -614,6 +629,19 @@ def run_one_class_cv(
     per_contaminant = {}
     oc_score_stats = None
 
+    if not compute_calibration:
+        return {
+            'fold_metrics': fold_metrics,
+            'mean_metrics': mean_metrics,
+            'cal_model': None,
+            'cal_scaler': None,
+            'cal_pca_reducer': None,
+            'cal_metrics': {},
+            'per_contaminant_sensitivity': {},
+            'oc_score_stats': None,
+            'skipped': False,
+        }
+
     try:
         cal_model = build_one_class_model(model_name, params)
         if model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
@@ -628,20 +656,20 @@ def run_one_class_cv(
                 X_all_scaled = cal_pca_reducer.transform(X_all_scaled)
 
             cal_model.fit(X_inlier_scaled)
-            y_pred_cal = cal_model.predict(X_all_scaled)
-            scores_cal = (
-                cal_model.decision_function(X_all_scaled)
-                if hasattr(cal_model, 'decision_function')
-                else None
-            )
+            if hasattr(cal_model, 'decision_function'):
+                scores_cal = cal_model.decision_function(X_all_scaled)
+                y_pred_cal = np.where(scores_cal >= 0, 1, -1)
+            else:
+                y_pred_cal = cal_model.predict(X_all_scaled)
+                scores_cal = None
         else:
             cal_model.fit(X[inlier_indices])
-            y_pred_cal = cal_model.predict(X)
-            scores_cal = (
-                cal_model.decision_function(X)
-                if hasattr(cal_model, 'decision_function')
-                else None
-            )
+            if hasattr(cal_model, 'decision_function'):
+                scores_cal = cal_model.decision_function(X)
+                y_pred_cal = np.where(scores_cal >= 0, 1, -1)
+            else:
+                y_pred_cal = cal_model.predict(X)
+                scores_cal = None
         cal_metrics = one_class_metrics(y_oc, y_pred_cal, scores_cal)
 
         # Per-contaminant sensitivity

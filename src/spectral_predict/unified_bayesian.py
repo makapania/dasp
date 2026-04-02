@@ -833,6 +833,8 @@ def create_unified_objective(
 
     # Cache regions by preprocessing config to avoid redundant computation
     region_cache = {}
+    importance_cache = {}  # Cache importances per (preprocessing_config, method, model_proxy)
+    preprocessing_cache = {}  # Cache preprocessed data per config
 
     def objective(trial: Trial) -> float:
         """Objective function for a single trial."""
@@ -854,14 +856,18 @@ def create_unified_objective(
                 preprocess_config.get('apply_smoothing', False),
             )
 
-            # 2. Apply preprocessing
-            X_prep = apply_preprocessing(
-                X_raw, preprocess_config,
-                baseline_method=baseline_method,
-                baseline_params=baseline_params,
-                smoothing_window=smoothing_window,
-                smoothing_polyorder=smoothing_polyorder,
-            )
+            # 2. Apply preprocessing (cached per config — deterministic for same input)
+            if cache_key in preprocessing_cache:
+                X_prep = preprocessing_cache[cache_key]
+            else:
+                X_prep = apply_preprocessing(
+                    X_raw, preprocess_config,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                )
+                preprocessing_cache[cache_key] = X_prep
             n_features_prep = X_prep.shape[1]
 
             # Validate preprocessing didn't corrupt data
@@ -938,11 +944,16 @@ def create_unified_objective(
                         n_vars = min(actual_subset_size, n_features_prep - 1)
                         if n_vars < 5:
                             n_vars = min(5, n_features_prep - 1)
-                        importances = compute_importances(
-                            X_prep, y_for_varsel, 'importance',
-                            'LightGBM', cv_folds, random_state,
-                            task_type='classification',
-                        )
+                        imp_cache_key = (cache_key, 'importance', 'LightGBM', 'classification')
+                        if imp_cache_key in importance_cache:
+                            importances = importance_cache[imp_cache_key]
+                        else:
+                            importances = compute_importances(
+                                X_prep, y_for_varsel, 'importance',
+                                'LightGBM', cv_folds, random_state,
+                                task_type='classification',
+                            )
+                            importance_cache[imp_cache_key] = importances
                         top_indices = np.argsort(importances, kind='stable')[-n_vars:]
                         subset_tag = f"top{n_vars}_importance_fallback"
                 else:
@@ -959,13 +970,17 @@ def create_unified_objective(
                         # For one-class: use LightGBM as proxy model and
                         # classification task_type so compute_importances builds
                         # a standard classifier on the +1/-1 labels.
-                        # Force use_hybrid_importance=True for CARS via the
-                        # 'LightGBM' model name (tree model triggers hybrid flag).
-                        importances = compute_importances(
-                            X_prep, y_for_varsel, subset_type,
-                            'LightGBM', cv_folds, random_state,
-                            task_type='classification',
-                        )
+                        # Cache per (preprocessing, method) — deterministic for same input.
+                        imp_cache_key = (cache_key, subset_type, 'LightGBM', 'classification')
+                        if imp_cache_key in importance_cache:
+                            importances = importance_cache[imp_cache_key]
+                        else:
+                            importances = compute_importances(
+                                X_prep, y_for_varsel, subset_type,
+                                'LightGBM', cv_folds, random_state,
+                                task_type='classification',
+                            )
+                            importance_cache[imp_cache_key] = importances
 
                         top_indices = np.argsort(importances, kind='stable')[-n_vars:]
                         subset_tag = f"top{n_vars}_{subset_type}"
@@ -982,6 +997,7 @@ def create_unified_objective(
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
                     n_folds=cv_folds, random_state=random_state, y_original=y_original,
+                    compute_calibration=False,  # Skip calibration during optimization trials
                 )
 
                 if cv_result.get('skipped', False):
@@ -1067,9 +1083,14 @@ def create_unified_objective(
                     n_vars = min(actual_subset_size, n_features_prep - 1)
                     if n_vars < 5:
                         n_vars = min(5, n_features_prep - 1)
-                    importances = compute_importances(
-                        X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
-                    )
+                    imp_cache_key = (cache_key, 'importance', model_name, task_type)
+                    if imp_cache_key in importance_cache:
+                        importances = importance_cache[imp_cache_key]
+                    else:
+                        importances = compute_importances(
+                            X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
+                        )
+                        importance_cache[imp_cache_key] = importances
                     top_indices = np.argsort(importances, kind='stable')[-n_vars:]
                     subset_tag = f"top{n_vars}_importance_fallback"
             else:
@@ -1084,10 +1105,15 @@ def create_unified_objective(
                     if n_vars < 5:
                         n_vars = min(5, n_features_prep - 1)
 
-                    # Compute importances
-                    importances = compute_importances(
-                        X_prep, y, subset_type, model_name, cv_folds, random_state, task_type
-                    )
+                    # Compute importances (cached per preprocessing + method + model)
+                    imp_cache_key = (cache_key, subset_type, model_name, task_type)
+                    if imp_cache_key in importance_cache:
+                        importances = importance_cache[imp_cache_key]
+                    else:
+                        importances = compute_importances(
+                            X_prep, y, subset_type, model_name, cv_folds, random_state, task_type
+                        )
+                        importance_cache[imp_cache_key] = importances
 
                     # Select top variables
                     top_indices = np.argsort(importances, kind='stable')[-n_vars:]
@@ -1700,7 +1726,7 @@ def run_unified_bayesian(
         print(f"Samples: {n_samples}, Features: {n_features}")
         if task_type == 'one_class':
             print(f"Inlier class: {inlier_class_label}")
-            print(f"Variable selection: disabled (not applicable for one-class models)")
+            print(f"Variable selection: enabled (importance, CARS, region via LightGBM proxy)")
         else:
             print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
             methods_str = "importance, CARS, region" + (", UVE" if enable_uve else "")
