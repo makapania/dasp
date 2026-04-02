@@ -33268,7 +33268,6 @@ F1 Score:  {f1:.4f}
                 # Try to extract window from Params string
                 if params_str:
                     try:
-                        import ast
                         params = ast.literal_eval(params_str)
                         if 'savgol_window' in params:
                             result['window'] = params['savgol_window']
@@ -33849,7 +33848,6 @@ F1 Score:  {f1:.4f}
             # === ONE-CLASS EARLY-EXIT PATH ===
             if task_type == 'one_class':
                 from spectral_predict.contamination import run_one_class_cv
-                import ast
 
                 # Parse hyperparameters from selected model config
                 params = {}
