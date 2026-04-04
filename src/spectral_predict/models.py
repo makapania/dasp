@@ -622,7 +622,7 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
     # Determine which models to include
     if enabled_models is None:
         # Use tier defaults if no explicit model list provided
-        enabled_models = get_tier_models(tier)
+        enabled_models = get_tier_models(tier, task_type=task_type)
 
     # NeuralBoosted defaults (tier-aware)
     if n_estimators_list is None:

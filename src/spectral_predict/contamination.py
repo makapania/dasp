@@ -170,9 +170,13 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
             Fitted chi-squared degrees of freedom, location (always 0), and scale.
         """
         try:
-            dof, loc, scale = stats.chi2.fit(values, floc=0)
+            # Use method='mm' (method-of-moments) for speed — MLE can hang on
+            # certain data distributions due to scipy's optimizer.
+            # Fall through to manual method-of-moments if this scipy version
+            # doesn't support method='mm'.
+            dof, loc, scale = stats.chi2.fit(values, floc=0, method='mm')
             return dof, loc, scale
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, TypeError) as exc:
             logger.debug("chi2.fit failed for %s (%s); using method-of-moments", label, exc)
 
         # Method-of-moments fallback: df = 2*mean²/var, scale = var/(2*mean)
@@ -301,7 +305,7 @@ def get_one_class_model(model_name: str, **kwargs):
     elif model_name == 'IsolationForest':
         defaults = dict(
             n_estimators=200, contamination=0.05,
-            random_state=42, n_jobs=-1
+            random_state=42, n_jobs=1
         )
         defaults.update(kwargs)
         return IsolationForest(**defaults)
@@ -314,7 +318,7 @@ def get_one_class_model(model_name: str, **kwargs):
     elif model_name == 'LOF':
         defaults = dict(
             n_neighbors=20, contamination=0.05,
-            novelty=True, n_jobs=-1
+            novelty=True, n_jobs=1
         )
         defaults.update(kwargs)
         return LocalOutlierFactor(**defaults)
@@ -352,11 +356,11 @@ def build_one_class_model(model_name: str, params: dict):
     if model_name == 'OneClassSVM':
         return OneClassSVM(**params)
     elif model_name == 'IsolationForest':
-        return IsolationForest(**{**params, 'random_state': 42, 'n_jobs': -1})
+        return IsolationForest(**{**params, 'random_state': 42, 'n_jobs': 1})
     elif model_name == 'EllipticEnvelope':
         return EllipticEnvelope(**{**params, 'random_state': 42})
     elif model_name == 'LOF':
-        return LocalOutlierFactor(**{**params, 'novelty': True, 'n_jobs': -1})
+        return LocalOutlierFactor(**{**params, 'novelty': True, 'n_jobs': 1})
     elif model_name == 'PCA-SIMCA':
         return PCASIMCA(**params)
     else:
@@ -672,7 +676,7 @@ def run_one_class_cv(
                 scores_cal = None
         cal_metrics = one_class_metrics(y_oc, y_pred_cal, scores_cal)
 
-        # Per-contaminant sensitivity
+        # Per-contaminant sensitivity (calibration-only, not CV)
         if n_outliers > 0 and y_original is not None:
             outlier_mask = y_oc == -1
             outlier_labels_unique = np.unique(y_original[outlier_mask])
@@ -695,6 +699,9 @@ def run_one_class_cv(
 
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
         logger.warning("Calibration failed for %s: %s", model_name, e)
+        cal_model = None  # Ensure unfitted model is not returned
+        cal_scaler = None
+        cal_pca_reducer = None
         cal_metrics = {
             k: np.nan
             for k in ['sensitivity', 'specificity', 'precision', 'f1',
@@ -759,7 +766,7 @@ def compute_one_class_importances(
             max_depth=5,
             class_weight='balanced',
             random_state=random_state,
-            n_jobs=-1,
+            n_jobs=1,
         )
     else:
         # Default: LightGBM
@@ -770,7 +777,7 @@ def compute_one_class_importances(
             max_depth=5,
             class_weight='balanced',
             random_state=random_state,
-            n_jobs=-1,
+            n_jobs=1,
             verbosity=-1,
         )
 

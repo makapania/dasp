@@ -5011,8 +5011,11 @@ def run_one_class_search(
 
     # Cache preprocessed data to avoid recomputing in the variable selection loop
     _preprocess_result_cache = {}
+    _user_stopped = False
 
     for preprocess_cfg in preprocess_configs:
+        if _user_stopped:
+            break
         # Apply preprocessing to full dataset
         pipe_steps = build_preprocessing_pipeline(
             preprocess_cfg["method"],  # 2d: use dedicated 'method' key
@@ -5063,10 +5066,12 @@ def run_one_class_search(
 
         for model_name, param_list in model_grids.items():
             if controller and not controller.check_and_wait():
+                _user_stopped = True
                 break
 
             for params in param_list:
                 if controller and not controller.check_and_wait():
+                    _user_stopped = True
                     break
 
                 current_config += 1
@@ -5145,7 +5150,7 @@ def run_one_class_search(
                     # Metadata
                     "n_inliers": n_inliers,
                     "n_outliers": n_outliers,
-                    "inlier_class": str(inlier_class_label),
+                    "inlier_class_label": str(inlier_class_label),
                     "top_vars": "N/A",
                     "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths_current]),
                     "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
@@ -5154,7 +5159,7 @@ def run_one_class_search(
                 # Add per-contaminant columns for display
                 per_contam = cal_metrics.get('per_contaminant', {})
                 for contam_label, contam_sens in per_contam.items():
-                    result[f'Sens_{contam_label}'] = contam_sens
+                    result[f'Cal_Sens_{contam_label}'] = contam_sens
 
                 df_results = add_result(df_results, result)
 
@@ -5191,7 +5196,10 @@ def run_one_class_search(
         _oc_varsel_cache: dict = {}
 
         for preprocess_cfg in preprocess_configs:
+            if _user_stopped:
+                break
             if controller and not controller.check_and_wait():
+                _user_stopped = True
                 break
 
             # Reuse cached preprocessing result from full-spectrum loop
@@ -5288,7 +5296,10 @@ def run_one_class_search(
                             n_features_current)
 
             for varsel_method in selected_varsel_methods:
+                if _user_stopped:
+                    break
                 if controller and not controller.check_and_wait():
+                    _user_stopped = True
                     break
 
                 logger.info(
@@ -5550,11 +5561,17 @@ def run_one_class_search(
                     wavelengths_subset = wavelengths_current[top_indices]
 
                     for model_name, param_list in model_grids.items():
+                        if _user_stopped:
+                            break
                         if controller and not controller.check_and_wait():
+                            _user_stopped = True
                             break
 
                         for params in param_list:
+                            if _user_stopped:
+                                break
                             if controller and not controller.check_and_wait():
+                                _user_stopped = True
                                 break
 
                             current_config += 1
@@ -5654,7 +5671,7 @@ def run_one_class_search(
                                 # Metadata
                                 "n_inliers": n_inliers,
                                 "n_outliers": n_outliers,
-                                "inlier_class": str(inlier_class_label),
+                                "inlier_class_label": str(inlier_class_label),
                                 "top_vars": ','.join(
                                     [
                                         f"{float(w):.1f}"
@@ -5675,7 +5692,7 @@ def run_one_class_search(
                             # Add per-contaminant columns
                             per_contam = cal_metrics.get('per_contaminant', {})
                             for contam_label, contam_sens in per_contam.items():
-                                result[f'Sens_{contam_label}'] = contam_sens
+                                result[f'Cal_Sens_{contam_label}'] = contam_sens
 
                             df_results = add_result(df_results, result)
 

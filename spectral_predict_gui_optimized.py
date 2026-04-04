@@ -15318,10 +15318,12 @@ class SpectralPredictApp:
             actual_task = task_type
 
         # Get models for this tier and task type
+        if get_tier_models is None:
+            return
         try:
             tier_models = set(get_tier_models(tier, actual_task))
-        except ValueError:
-            # If tier not found, keep current selection
+        except (ValueError, TypeError):
+            # If tier not found or function unavailable, keep current selection
             return
 
         # Set flag to prevent triggering custom tier switch
@@ -15382,6 +15384,8 @@ class SpectralPredictApp:
             actual_task = task_type
 
         # Get supported models for this task type
+        if get_supported_models is None:
+            return
         supported_models = set(get_supported_models(actual_task))
 
         # Set flag to prevent triggering custom tier switch when we modify checkboxes
@@ -21825,8 +21829,32 @@ class SpectralPredictApp:
         self.search_controller = SearchController()
         self._update_search_buttons('running')
 
+        # Resolve inlier class label on main thread (messagebox is not thread-safe)
+        resolved_inlier_label = None
+        if task_type_check == "one_class":
+            inlier_label = self.inlier_class_label.get().strip()
+            if not inlier_label:
+                # Auto-detect most frequent class but require user confirmation
+                y_vals = self.y.values
+                unique_labels, counts = np.unique(y_vals, return_counts=True)
+                auto_label = unique_labels[np.argmax(counts)]
+                class_dist = dict(zip(unique_labels.tolist(), counts.tolist()))
+                confirm = messagebox.askyesno(
+                    "Confirm Inlier Class",
+                    f"No inlier class specified.\n\n"
+                    f"Auto-detected: '{auto_label}' ({counts[np.argmax(counts)]} samples)\n"
+                    f"All classes: {class_dist}\n\n"
+                    f"Use '{auto_label}' as the clean/inlier class?"
+                )
+                if not confirm:
+                    self._update_search_buttons('stopped')
+                    return
+                resolved_inlier_label = auto_label
+            else:
+                resolved_inlier_label = inlier_label
+
         # Run in thread
-        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier))
+        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
         self.analysis_thread.start()
 
     def _reconstruct_models_from_results(self, top_models_df, X_train, y_train, task_type):
@@ -22953,7 +22981,7 @@ class SpectralPredictApp:
             self._log_progress(f"   Individual model results are still available")
             return None, None
 
-    def _run_analysis_thread(self, selected_models, tier):
+    def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
         try:
             from spectral_predict.search import run_search
@@ -24828,42 +24856,29 @@ class SpectralPredictApp:
             # ONE-CLASS CONTAMINATION SCREENING (separate pipeline)
             # ═══════════════════════════════════════════════════════════════════
             if task_type == "one_class":
-                # Get inlier class label (shared by both grid search and Bayesian paths)
-                inlier_label = self.inlier_class_label.get().strip()
-                if not inlier_label:
-                    # Auto-detect most frequent class but require user confirmation
-                    unique_labels, counts = np.unique(y_filtered.values, return_counts=True)
-                    auto_label = unique_labels[np.argmax(counts)]
-                    class_dist = dict(zip(unique_labels.tolist(), counts.tolist()))
-                    confirm = messagebox.askyesno(
-                        "Confirm Inlier Class",
-                        f"No inlier class specified.\n\n"
-                        f"Auto-detected: '{auto_label}' ({counts[np.argmax(counts)]} samples)\n"
-                        f"All classes: {class_dist}\n\n"
-                        f"Use '{auto_label}' as the clean/inlier class?"
-                    )
-                    if not confirm:
-                        self._log_progress("One-class screening cancelled: no inlier class confirmed.")
-                        return
-                    inlier_label = auto_label
-                    self._log_progress(f"User confirmed inlier class: '{inlier_label}'")
-                else:
-                    # Check if label exists in data
-                    if inlier_label not in y_filtered.values:
-                        # Try numeric conversion
-                        try:
-                            inlier_label_num = float(inlier_label)
-                            if inlier_label_num in y_filtered.values:
-                                inlier_label = inlier_label_num
-                        except ValueError:
-                            pass
-                    if inlier_label not in y_filtered.values:
-                        self._log_progress(f"ERROR: Inlier class '{inlier_label}' not found in data!")
-                        self._log_progress(f"Available classes: {list(np.unique(y_filtered.values))}")
-                        self.root.after(0, lambda: messagebox.showerror("Invalid Inlier Class",
-                            f"Class '{inlier_label}' not found.\n"
-                            f"Available: {list(np.unique(y_filtered.values))}"))
-                        return
+                # Use inlier label resolved on main thread (thread-safe)
+                inlier_label = resolved_inlier_label
+                if inlier_label is None:
+                    self._log_progress("ERROR: No inlier class label resolved.")
+                    return
+                self._log_progress(f"Inlier class: '{inlier_label}'")
+
+                # Check if label exists in filtered data (may differ from pre-filter)
+                if inlier_label not in y_filtered.values:
+                    # Try numeric conversion
+                    try:
+                        inlier_label_num = float(inlier_label)
+                        if inlier_label_num in y_filtered.values:
+                            inlier_label = inlier_label_num
+                    except (ValueError, TypeError):
+                        pass
+                if inlier_label not in y_filtered.values:
+                    self._log_progress(f"ERROR: Inlier class '{inlier_label}' not found in data!")
+                    self._log_progress(f"Available classes: {list(np.unique(y_filtered.values))}")
+                    self.root.after(0, lambda: messagebox.showerror("Invalid Inlier Class",
+                        f"Class '{inlier_label}' not found.\n"
+                        f"Available: {list(np.unique(y_filtered.values))}"))
+                    return
 
                 opt_method_oc = self.optimization_method.get()
 
@@ -30540,6 +30555,10 @@ Performance (Classification):
         if config_task == 'one_class':
             detected_task_type = 'one_class'
             self.refine_task_type.set('one_class')
+            # Restore inlier class label from saved config
+            inlier_label_saved = config.get('inlier_class_label', '') or config.get('inlier_class', '')
+            if inlier_label_saved:
+                self.inlier_class_label.set(str(inlier_label_saved))
         elif self.y is not None:
             if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                 detected_task_type = 'classification'
@@ -30809,21 +30828,32 @@ Performance (Classification):
 
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-        # Left: Metrics bar chart
+        # Left: Metrics grouped bar chart (calibration + CV)
         perf = self.refined_performance
-        metric_names = ['BalancedAcccv', 'Sensitivitycv', 'Specificitycv', 'AUCcv']
         metric_labels = ['Balanced\nAccuracy', 'Sensitivity', 'Specificity', 'AUC']
-        metric_vals = [perf.get(m, 0) for m in metric_names]
+        cal_names = ['BalancedAcc', 'Sensitivity', 'Specificity', 'AUC']
+        cv_names = ['BalancedAcccv', 'Sensitivitycv', 'Specificitycv', 'AUCcv']
+        cal_vals = [perf.get(m, np.nan) for m in cal_names]
+        cv_vals = [perf.get(m, np.nan) for m in cv_names]
 
-        colors = ['#4a7abc', '#2ecc71', '#e74c3c', '#9b59b6']
-        bars = axes[0].bar(metric_labels, metric_vals, color=colors, edgecolor='white', linewidth=0.5)
+        x = np.arange(len(metric_labels))
+        width = 0.35
+        bars_cal = axes[0].bar(x - width/2, cal_vals, width, label='Calibration',
+                               color=['#4a7abc', '#2ecc71', '#e74c3c', '#9b59b6'], alpha=0.9,
+                               edgecolor='white', linewidth=0.5)
+        bars_cv = axes[0].bar(x + width/2, cv_vals, width, label='Cross-Validation',
+                              color=['#4a7abc', '#2ecc71', '#e74c3c', '#9b59b6'], alpha=0.5,
+                              edgecolor='white', linewidth=0.5, hatch='//')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(metric_labels)
         axes[0].set_ylim(0, 1.05)
         axes[0].set_ylabel('Score')
-        axes[0].set_title('Cross-Validation Metrics')
-        for bar, val in zip(bars, metric_vals):
+        axes[0].set_title('Calibration vs CV Metrics')
+        axes[0].legend(fontsize=8)
+        for bar, val in zip(list(bars_cal) + list(bars_cv), cal_vals + cv_vals):
             if not np.isnan(val):
                 axes[0].text(bar.get_x() + bar.get_width()/2., val + 0.02,
-                           f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+                           f'{val:.3f}', ha='center', va='bottom', fontsize=7)
 
         # Right: Prediction summary (inlier vs outlier counts)
         y_true = self.refined_y_true
@@ -33951,12 +33981,11 @@ F1 Score:  {f1:.4f}
                 # Build binary labels: inlier=+1, outlier=-1
                 inlier_label = self.inlier_class_label.get()
                 if not inlier_label and self.selected_model_config:
-                    inlier_label = self.selected_model_config.get('inlier_class', '')
+                    inlier_label = self.selected_model_config.get('inlier_class_label', '') or self.selected_model_config.get('inlier_class', '')
                 y_str = np.array([str(v) for v in y_array])
                 y_oc = np.where(y_str == str(inlier_label), 1, -1)
 
-                self.refine_status.config(text=f"Running one-class CV ({model_name})...")
-                self.root.update()
+                self.root.after(0, lambda: self.refine_status.config(text=f"Running one-class CV ({model_name})..."))
 
                 cv_result = run_one_class_cv(
                     X_work, y_oc, model_name, params,
@@ -33964,7 +33993,7 @@ F1 Score:  {f1:.4f}
                 )
 
                 if cv_result.get('skipped', False):
-                    self.refine_status.config(text="One-class CV failed (too few successful folds)")
+                    self.root.after(0, lambda: self.refine_status.config(text="One-class CV failed (too few successful folds)"))
                     return
 
                 mean_m = cv_result['mean_metrics']
@@ -33983,7 +34012,7 @@ F1 Score:  {f1:.4f}
                 }
 
                 self.refined_model = cv_result['cal_model']
-                self.refined_preprocessor = None
+                self.refined_preprocessor = prep_pipeline_oc if isinstance(prep_steps, list) and len(prep_steps) > 0 else None
                 self.refined_wavelengths = list(selected_wl)
                 self.refined_performance = results
                 self.refined_label_encoder = None
@@ -34009,25 +34038,37 @@ F1 Score:  {f1:.4f}
 
                 # Predictions for display
                 cal_model = cv_result['cal_model']
-                if cv_result['cal_scaler'] is not None:
-                    X_display = cv_result['cal_scaler'].transform(X_work)
-                    if cv_result['cal_pca_reducer'] is not None:
-                        X_display = cv_result['cal_pca_reducer'].transform(X_display)
+                if cal_model is not None:
+                    try:
+                        if cv_result['cal_scaler'] is not None:
+                            X_display = cv_result['cal_scaler'].transform(X_work)
+                            if cv_result['cal_pca_reducer'] is not None:
+                                X_display = cv_result['cal_pca_reducer'].transform(X_display)
+                        else:
+                            X_display = X_work
+                        self.refined_y_pred = cal_model.predict(X_display)
+                    except Exception as e:
+                        logger.warning("Calibration model predict failed: %s", e)
+                        self.refined_y_pred = np.zeros(len(y_oc))
                 else:
                     X_display = X_work
+                    self.refined_y_pred = np.zeros(len(y_oc))
                 self.refined_y_true = y_oc
-                self.refined_y_pred = cal_model.predict(X_display)
                 self.refined_cv_indices = np.arange(len(y_oc))
                 self.refined_specimen_ids = y_series.index.tolist()
                 self.refined_y_proba = None
 
                 # Update UI
                 perf = results
+                def _fmt(v):
+                    return f"{v:.3f}" if v is not None and not np.isnan(v) else "N/A"
                 status_msg = (
-                    f"One-Class CV Complete: BalAcc_cv={perf['BalancedAcccv']:.3f}, "
-                    f"Sens_cv={perf['Sensitivitycv']:.3f}, Spec_cv={perf['Specificitycv']:.3f}"
+                    f"One-Class Complete | Cal: BalAcc={_fmt(perf['BalancedAcc'])}, "
+                    f"Sens={_fmt(perf['Sensitivity'])}, Spec={_fmt(perf['Specificity'])} | "
+                    f"CV: BalAcc={_fmt(perf['BalancedAcccv'])}, "
+                    f"Sens={_fmt(perf['Sensitivitycv'])}, Spec={_fmt(perf['Specificitycv'])}"
                 )
-                self.refine_status.config(text=status_msg)
+                self.root.after(0, lambda msg=status_msg: self.refine_status.config(text=msg))
 
                 # Plot one-class results
                 self.root.after(0, lambda: self._plot_refined_predictions())
@@ -35357,9 +35398,14 @@ External Validation Performance (n={n_val}):
                     metadata['y_quartiles'] = self.refined_performance['y_quartiles']
             elif self.refined_config['task_type'] == 'one_class':
                 perf = {
-                    'BalancedAcc': self.refined_performance.get('balanced_accuracy_mean'),
-                    'Sensitivity': self.refined_performance.get('sensitivity_mean'),
-                    'Specificity': self.refined_performance.get('specificity_mean'),
+                    'BalancedAcc': self.refined_performance.get('BalancedAcc'),
+                    'Sensitivity': self.refined_performance.get('Sensitivity'),
+                    'Specificity': self.refined_performance.get('Specificity'),
+                    'AUC': self.refined_performance.get('AUC'),
+                    'BalancedAcccv': self.refined_performance.get('BalancedAcccv'),
+                    'Sensitivitycv': self.refined_performance.get('Sensitivitycv'),
+                    'Specificitycv': self.refined_performance.get('Specificitycv'),
+                    'AUCcv': self.refined_performance.get('AUCcv'),
                 }
                 metadata['performance'] = perf
                 metadata['inlier_class_label'] = self.inlier_class_label.get()

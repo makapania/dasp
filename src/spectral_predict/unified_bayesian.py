@@ -1004,13 +1004,15 @@ def create_unified_objective(
                     return float('inf')
 
                 mean_m = cv_result['mean_metrics']
-                cal_m = cv_result['cal_metrics']
+                cal_m = cv_result['cal_metrics']  # Empty when compute_calibration=False
 
                 for key, val in mean_m.items():
                     trial.set_user_attr(f'{key}_cv', val)
-                for key, val in cal_m.items():
-                    if key != 'per_contaminant':
-                        trial.set_user_attr(key, val)
+                # cal_m is populated only on final calibration runs (not during optimization)
+                if cal_m:
+                    for key, val in cal_m.items():
+                        if key != 'per_contaminant':
+                            trial.set_user_attr(key, val)
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
                 # Store preprocessing fields used by convert_study_to_dataframe

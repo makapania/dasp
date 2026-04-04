@@ -279,6 +279,24 @@ class TestIntegration:
         assert 'IsolationForest' in grids
         assert len(grids['PCA-SIMCA']) > 0
 
+    def test_get_model_grids_one_class_default_tier(self):
+        """Test that get_model_grids returns one-class grids with default tier (no enabled_models)."""
+        from spectral_predict.models import get_model_grids
+        grids = get_model_grids(
+            task_type='one_class',
+            n_features=100,
+        )
+        assert len(grids) > 0, "Default tier should return one-class models"
+        assert any(name in grids for name in ['PCA-SIMCA', 'IsolationForest', 'OneClassSVM'])
+
+    def test_run_one_class_cv_clean_only(self, clean_only_data):
+        """Test that run_one_class_cv handles clean-only data (no outliers)."""
+        X, y = clean_only_data
+        result = run_one_class_cv(X, y, 'PCA-SIMCA', {'n_components': 3, 'alpha': 0.05}, n_folds=3)
+        assert 'mean_metrics' in result
+        # With no outliers, sensitivity is NaN but specificity should be valid
+        assert not np.isnan(result['mean_metrics'].get('specificity', np.nan))
+
 
 
 # ============================================================================
@@ -359,7 +377,7 @@ class TestSearchIntegration:
 
         assert len(results) > 0
         # Should have per-contaminant columns
-        has_per_contam = any(c.startswith('Sens_') for c in results.columns)
+        has_per_contam = any(c.startswith('Cal_Sens_') for c in results.columns)
         assert has_per_contam, "Should have per-contaminant sensitivity columns"
 
     def test_run_one_class_search_with_preprocessing(self):
