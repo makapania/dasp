@@ -25093,10 +25093,135 @@ class SpectralPredictApp:
                     self._log_progress(f"\nOne-class search complete: {len(results_df)} configurations tested")
                     self.results = results_df
                     self.results_df = results_df
+
+                    # Add "Select" column for ensemble model selection
+                    if 'Select' not in results_df.columns:
+                        results_df.insert(0, 'Select', False)
+
                     self.root.after(0, lambda: self._populate_results_table(results_df))
                 else:
                     self._log_progress("\nNo valid one-class results.")
                     self.root.after(0, lambda: messagebox.showwarning("No Results", "One-class search produced no valid results."))
+
+                # Store training configuration (needed for Model Dev validation preservation)
+                self.last_training_config = {
+                    'folds': self.folds.get(),
+                    'n_samples_used': len(X_filtered),
+                    'excluded_count': n_excluded,
+                    'validation_count': n_validation,
+                    'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
+                }
+
+                # Compute validation metrics for one-class if enabled
+                if (self.validation_enabled.get() and
+                        self.show_validation_metrics.get() and
+                        self.validation_X is not None and
+                        self.validation_y is not None and
+                        results_df is not None and len(results_df) > 0):
+                    self._log_progress("\n> Computing validation metrics for one-class results...")
+                    try:
+                        from spectral_predict.contamination import run_one_class_cv, build_one_class_model
+                        from spectral_predict.preprocess import build_preprocessing_pipeline
+                        from sklearn.pipeline import Pipeline
+
+                        X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
+                        y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+                        inlier_str = str(inlier_label)
+                        y_val_oc = np.where(np.asarray(y_val_np, dtype=str) == inlier_str, 1, -1)
+
+                        n_val_computed = 0
+                        for idx in range(min(10, len(results_df))):
+                            row = results_df.iloc[idx]
+                            try:
+                                oc_model_name = row.get('Model', '')
+                                params_str = row.get('Params', '{}')
+                                params = ast.literal_eval(params_str) if isinstance(params_str, str) and params_str else {}
+
+                                # Build preprocessing pipeline
+                                preprocess_name = row.get('Preprocessing', 'None')
+                                deriv = int(row.get('Derivative', 0))
+                                window = int(row.get('Window', 0))
+                                polyorder = min(2, window - 1) if window > 2 else 0
+
+                                prep_steps = build_preprocessing_pipeline(
+                                    preprocess_name, deriv, window, polyorder, task_type='one_class'
+                                )
+
+                                # Get training data
+                                X_train_np = X_filtered.values if hasattr(X_filtered, 'values') else np.array(X_filtered)
+                                y_train_oc = np.where(np.asarray(y_filtered.values, dtype=str) == inlier_str, 1, -1)
+
+                                # Apply preprocessing
+                                if isinstance(prep_steps, list) and len(prep_steps) > 0:
+                                    pipe = Pipeline(prep_steps)
+                                    X_train_prep = pipe.fit_transform(X_train_np)
+                                    X_val_prep = pipe.transform(X_val_np)
+                                else:
+                                    X_train_prep = X_train_np
+                                    X_val_prep = X_val_np
+
+                                # Handle wavelength subset
+                                wl_str = row.get('all_wavelengths', '') or row.get('selected_wavelengths', '')
+                                if wl_str:
+                                    try:
+                                        sel_wl = [float(w) for w in str(wl_str).split(',') if w.strip()]
+                                        all_wl = X_filtered.columns.astype(float).values
+                                        wl_idx = [np.argmin(np.abs(all_wl - w)) for w in sel_wl]
+                                        X_train_prep = X_train_prep[:, wl_idx]
+                                        X_val_prep = X_val_prep[:, wl_idx]
+                                    except Exception:
+                                        pass
+
+                                # Build and fit model on inliers only
+                                from sklearn.preprocessing import StandardScaler
+                                from sklearn.decomposition import PCA
+
+                                inlier_mask = y_train_oc == 1
+                                X_inliers = X_train_prep[inlier_mask]
+
+                                scaler = StandardScaler()
+                                X_inliers_scaled = scaler.fit_transform(X_inliers)
+
+                                # PCA if high-dimensional
+                                pca_reducer = None
+                                if X_inliers_scaled.shape[1] > 20:
+                                    n_comp = min(20, X_inliers_scaled.shape[0] - 1, X_inliers_scaled.shape[1])
+                                    if n_comp > 0:
+                                        pca_reducer = PCA(n_components=n_comp)
+                                        X_inliers_scaled = pca_reducer.fit_transform(X_inliers_scaled)
+
+                                model = build_one_class_model(oc_model_name, params)
+                                model.fit(X_inliers_scaled)
+
+                                # Predict on validation
+                                X_val_scaled = scaler.transform(X_val_prep)
+                                if pca_reducer is not None:
+                                    X_val_scaled = pca_reducer.transform(X_val_scaled)
+                                val_preds = model.predict(X_val_scaled)
+
+                                # Compute validation metrics
+                                from sklearn.metrics import balanced_accuracy_score, recall_score
+                                val_bal_acc = balanced_accuracy_score(y_val_oc, val_preds)
+                                val_sens = recall_score(y_val_oc, val_preds, pos_label=-1, zero_division=0)
+                                val_spec = recall_score(y_val_oc, val_preds, pos_label=1, zero_division=0)
+
+                                results_df.loc[results_df.index[idx], 'val_BalancedAcc'] = round(val_bal_acc, 4)
+                                results_df.loc[results_df.index[idx], 'val_Sensitivity'] = round(val_sens, 4)
+                                results_df.loc[results_df.index[idx], 'val_Specificity'] = round(val_spec, 4)
+                                n_val_computed += 1
+
+                            except Exception as val_err:
+                                self._log_progress(f"  Validation failed for row {idx}: {val_err}")
+
+                        if n_val_computed > 0:
+                            self._log_progress(f"  Validation metrics computed for {n_val_computed} models")
+                            # Re-populate table with validation columns
+                            self.results_df = results_df
+                            self.results = results_df
+                            self.root.after(0, lambda: self._populate_results_table(results_df))
+
+                    except Exception as val_err:
+                        self._log_progress(f"  Validation metrics failed: {val_err}")
 
                 # Cleanup: stop animation, play chime, reset buttons
                 self._log_progress(f"\n> Analysis complete!")
