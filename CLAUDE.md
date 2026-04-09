@@ -2,6 +2,25 @@
 
 ---
 
+## Session Protocol (MANDATORY — READ THIS FIRST)
+
+> **CRITICAL:** This project is worked on across multiple computers. All project knowledge MUST be stored in the repo, not in local memory. Failure to maintain these docs wastes the user's time re-explaining context.
+
+### Session Start
+1. **MUST** read `docs/PROJECT_STATUS.md` before doing any work. This tells you what's working, what's broken, and what to do next.
+2. Check `docs/SESSION_LOG.md` if you need historical context on past bugs or architecture decisions.
+
+### During Session
+- **MUST** append to `docs/SESSION_LOG.md` immediately when you discover a non-obvious bug root cause, architecture gotcha, or failed approach. Do NOT wait until end of session — you may forget or the session may end unexpectedly.
+- **MUST** update `docs/PROJECT_STATUS.md` after any commit that changes what works or what's broken.
+
+### Session End
+- **MUST** update `docs/PROJECT_STATUS.md` with current state (what works, known issues, next steps).
+- **MUST** commit and push all doc changes so other machines see them.
+- This is not optional. The user should not have to ask for this.
+
+---
+
 ## Project Overview
 
 Spectral Predict automates spectral modeling: load spectra, test preprocessing x model combinations with cross-validation, get ranked results.
@@ -18,8 +37,13 @@ Spectral Predict automates spectral modeling: load spectra, test preprocessing x
 dasp/
 ├── spectral_predict_gui_optimized.py   # V1 GUI (Tkinter, 7 tabs)
 ├── src/spectral_predict/               # V1 backend
-│   ├── search.py                       # Core automation
+│   ├── search.py                       # Core automation + run_one_class_search()
 │   ├── models.py                       # Model implementations
+│   ├── contamination.py               # One-class models, run_one_class_cv(), compute_one_class_importances()
+│   ├── unified_bayesian.py            # Bayesian optimization (handles one_class task_type)
+│   ├── scoring.py                     # Scoring/ranking with one-class metrics
+│   ├── model_io.py                    # Save/load with scaler/PCA persistence
+│   ├── preprocessing_discovery.py     # Smart preprocessing (one-class path at line ~680)
 │   ├── preprocess.py                   # Preprocessing pipeline
 │   ├── variable_selection.py           # Variable selection
 │   ├── calibration_transfer.py         # DS, PDS transfer
@@ -33,8 +57,9 @@ dasp/
 ## Key Features
 
 - **Models**: PLS, Ridge, Lasso, ElasticNet, RandomForest, LightGBM, XGBoost, CatBoost, SVM, MLP
+- **One-Class Models**: OneClassSVM, IsolationForest, LOF, EllipticEnvelope, PCA-SIMCA (contamination detection / membership screening)
 - **Preprocessing**: SNV, Savitzky-Golay derivatives (1st, 2nd), baseline correction
-- **Variable Selection**: UVE, SPA, iPLS, CARS, GA-PLS
+- **Variable Selection**: UVE, SPA, iPLS, CARS, GA-PLS (note: only 'importance' works for one-class)
 - **Calibration Transfer**: Direct Standardization (DS), Piecewise DS (PDS)
 - **File Formats**: CSV, Excel, ASD, OPUS, SPC, JCAMP-DX, PerkinElmer
 
