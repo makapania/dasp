@@ -4852,12 +4852,23 @@ def run_one_class_search(
     preprocess_configs = []
     if smart_preprocess:
         from .preprocessing_discovery import discover_preprocessing
+
+        # Wrap progress callback to match discovery's (current, total, msg) signature
+        def discovery_progress(current, total, message):
+            if progress_callback:
+                progress_callback({
+                    'stage': 'smart_preprocessing',
+                    'message': message,
+                    'current': current,
+                    'total': total
+                })
+
         discovered = discover_preprocessing(
             X_np, y_oc, task_type='one_class',
             importance_method=smart_preprocess_importance,
             n_top=smart_preprocess_n_top,
             cv_folds=folds,
-            progress_callback=progress_callback,
+            progress_callback=discovery_progress,
         )
         if discovered:
             # Translate discovery output format to search config format
