@@ -34438,6 +34438,69 @@ F1 Score:  {f1:.4f}
                     f"CV Folds: {n_folds}\n"
                 )
 
+                # Compute external validation metrics if enabled
+                if (self.validation_enabled.get() and
+                        self.validation_X is not None and
+                        self.validation_y is not None):
+                    try:
+                        from sklearn.metrics import balanced_accuracy_score, recall_score, roc_auc_score
+
+                        # Preprocess validation data using same pipeline
+                        X_val_raw = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
+                        y_val_raw = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+
+                        # Apply preprocessing
+                        if isinstance(prep_steps, list) and len(prep_steps) > 0:
+                            X_val_prep = prep_pipeline_oc.transform(X_val_raw)
+                        else:
+                            X_val_prep = X_val_raw
+
+                        # Subset to same wavelengths
+                        if wavelength_indices:
+                            X_val_work = X_val_prep[:, wavelength_indices]
+                        else:
+                            X_val_work = X_val_prep
+
+                        # Map validation labels to binary
+                        y_val_oc = np.where(np.asarray(y_val_raw, dtype=str) == str(inlier_label), 1, -1)
+
+                        # Apply scaler and PCA
+                        cal_scaler = cv_result.get('cal_scaler')
+                        cal_pca = cv_result.get('cal_pca_reducer')
+                        X_val_transformed = X_val_work.copy()
+                        if cal_scaler is not None:
+                            X_val_transformed = cal_scaler.transform(X_val_transformed)
+                        if cal_pca is not None:
+                            X_val_transformed = cal_pca.transform(X_val_transformed)
+
+                        # Predict
+                        cal_model = cv_result['cal_model']
+                        if cal_model is not None:
+                            val_preds = cal_model.predict(X_val_transformed)
+                            val_bal_acc = balanced_accuracy_score(y_val_oc, val_preds)
+                            val_sens = recall_score(y_val_oc, val_preds, pos_label=-1, zero_division=0)
+                            val_spec = recall_score(y_val_oc, val_preds, pos_label=1, zero_division=0)
+
+                            # Try AUC if decision_function available
+                            val_auc_str = "N/A"
+                            try:
+                                if hasattr(cal_model, 'decision_function'):
+                                    val_scores = cal_model.decision_function(X_val_transformed)
+                                    val_auc = roc_auc_score(y_val_oc, val_scores)
+                                    val_auc_str = f"{val_auc:.3f}"
+                            except Exception:
+                                pass
+
+                            results_text += (
+                                f"\nExternal Validation ({len(y_val_oc)} samples):\n"
+                                f"  Balanced Accuracy: {val_bal_acc:.3f}\n"
+                                f"  Sensitivity:       {val_sens:.3f}\n"
+                                f"  Specificity:       {val_spec:.3f}\n"
+                                f"  AUC:               {val_auc_str}\n"
+                            )
+                    except Exception as val_err:
+                        results_text += f"\nExternal Validation: Failed ({val_err})\n"
+
                 # Update UI via _update_refined_results (re-enables buttons, resets cursor)
                 self.root.after(0, lambda: self._update_refined_results(results_text))
                 self.root.after(0, lambda: self.model_dev_notebook.select(2))
