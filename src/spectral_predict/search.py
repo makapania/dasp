@@ -4793,7 +4793,9 @@ def run_one_class_search(
     wavelengths = X.columns.values if hasattr(X, 'columns') else np.arange(X_np.shape[1])
 
     # Convert labels to one-class format: +1 = inlier, -1 = outlier
-    y_oc = np.where(y_np == inlier_class_label, 1, -1)
+    # Compare as strings to handle both numeric and text labels consistently
+    y_str = np.asarray(y_np, dtype=str)
+    y_oc = np.where(y_str == str(inlier_class_label), 1, -1)
     inlier_mask = y_oc == 1
     outlier_mask = y_oc == -1
     inlier_indices = np.where(inlier_mask)[0]

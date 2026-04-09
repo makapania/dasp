@@ -18747,7 +18747,7 @@ class SpectralPredictApp:
             if task_type_setting == "auto":
                 is_classification = y_available.nunique() < 10 or not pd.api.types.is_numeric_dtype(y_available.dtype)
             else:
-                is_classification = task_type_setting == "classification"
+                is_classification = task_type_setting in ("classification", "one_class")
 
             # For classification, check if stratified split is feasible
             if is_classification:
@@ -21847,7 +21847,7 @@ class SpectralPredictApp:
                     f"Use '{auto_label}' as the clean/inlier class?"
                 )
                 if not confirm:
-                    self._update_search_buttons('stopped')
+                    self._update_search_buttons('idle')
                     return
                 resolved_inlier_label = auto_label
             else:
@@ -24860,6 +24860,10 @@ class SpectralPredictApp:
                 inlier_label = resolved_inlier_label
                 if inlier_label is None:
                     self._log_progress("ERROR: No inlier class label resolved.")
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
                     return
                 self._log_progress(f"Inlier class: '{inlier_label}'")
 
@@ -24878,6 +24882,10 @@ class SpectralPredictApp:
                     self.root.after(0, lambda: messagebox.showerror("Invalid Inlier Class",
                         f"Class '{inlier_label}' not found.\n"
                         f"Available: {list(np.unique(y_filtered.values))}"))
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
                     return
 
                 opt_method_oc = self.optimization_method.get()
@@ -24888,6 +24896,10 @@ class SpectralPredictApp:
                         self._log_progress("ERROR: Bayesian optimization module not available!")
                         self.root.after(0, lambda: messagebox.showerror(
                             "Module Missing", "Bayesian optimization module not found!"))
+                        self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                        if hasattr(self, 'running_figure'):
+                            self.root.after(0, lambda: self.running_figure.stop_animation())
+                        self.root.after(0, lambda: self._update_search_buttons('idle'))
                         return
 
                     # Collect selected one-class models
@@ -25080,10 +25092,20 @@ class SpectralPredictApp:
                 if results_df is not None and len(results_df) > 0:
                     self._log_progress(f"\nOne-class search complete: {len(results_df)} configurations tested")
                     self.results = results_df
+                    self.results_df = results_df
                     self.root.after(0, lambda: self._populate_results_table(results_df))
                 else:
                     self._log_progress("\nNo valid one-class results.")
                     self.root.after(0, lambda: messagebox.showwarning("No Results", "One-class search produced no valid results."))
+
+                # Cleanup: stop animation, play chime, reset buttons
+                self._log_progress(f"\n> Analysis complete!")
+                self.root.after(0, lambda: self.progress_status.config(text="Analysis complete!"))
+                self.root.after(0, lambda: self.progress_info.config(text="Analysis Complete"))
+                if hasattr(self, 'running_figure'):
+                    self.root.after(0, lambda: self.running_figure.stop_animation())
+                self.root.after(0, self._play_completion_chime)
+                self.root.after(0, lambda: self._update_search_buttons('idle'))
                 return
 
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
@@ -25099,7 +25121,11 @@ class SpectralPredictApp:
                 if not HAS_UNIFIED_BAYESIAN:
                     self._log_progress("❌ ERROR: Bayesian optimization module not available!")
                     self._log_progress("   Please ensure src/spectral_predict/unified_bayesian.py exists")
-                    messagebox.showerror("Module Missing", "Bayesian optimization module not found!")
+                    self.root.after(0, lambda: messagebox.showerror("Module Missing", "Bayesian optimization module not found!"))
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
                     return
 
                 # Get wavelengths for proper variable output
@@ -31358,15 +31384,27 @@ F1 Score:  {f1:.4f}
                     # Use raw data as fallback
                     X_for_importance = self.refined_X_train
 
-            try:
-                from spectral_predict.models import get_feature_importances
-                importances = get_feature_importances(
-                    self.refined_model, model_name,
-                    X_for_importance, self.refined_y_train
-                )
-            except Exception as e:
-                print(f"Could not compute feature importances: {e}")
-                return
+            # One-class models: use surrogate classifier importance
+            task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') else 'regression'
+            if task_type == 'one_class':
+                try:
+                    from spectral_predict.contamination import compute_one_class_importances
+                    importances = compute_one_class_importances(
+                        X_for_importance, self.refined_y_train
+                    )
+                except Exception as e:
+                    print(f"Could not compute one-class feature importances: {e}")
+                    return
+            else:
+                try:
+                    from spectral_predict.models import get_feature_importances
+                    importances = get_feature_importances(
+                        self.refined_model, model_name,
+                        X_for_importance, self.refined_y_train
+                    )
+                except Exception as e:
+                    print(f"Could not compute feature importances: {e}")
+                    return
 
             wavelengths = np.array(self.refined_wavelengths)
 
@@ -31401,15 +31439,18 @@ F1 Score:  {f1:.4f}
             }
 
             # Compute residual correlation if we have predictions
-            # Use preprocessed data for consistent analysis
-            try:
-                y_pred_train = self.refined_model.predict(X_for_importance)
-                self.wavelength_residual_corr_data = self._compute_residual_contribution(
-                    X_for_importance, self.refined_y_train, y_pred_train
-                )
-            except Exception as e:
-                print(f"Could not compute residual correlation: {e}")
+            # Skip for one-class models (no continuous residuals)
+            if task_type == 'one_class':
                 self.wavelength_residual_corr_data = np.zeros(len(wavelengths))
+            else:
+                try:
+                    y_pred_train = self.refined_model.predict(X_for_importance)
+                    self.wavelength_residual_corr_data = self._compute_residual_contribution(
+                        X_for_importance, self.refined_y_train, y_pred_train
+                    )
+                except Exception as e:
+                    print(f"Could not compute residual correlation: {e}")
+                    self.wavelength_residual_corr_data = np.zeros(len(wavelengths))
 
             # Create figure
             fig, ax1 = plt.subplots(figsize=(12, 4), dpi=100)
@@ -31423,6 +31464,10 @@ F1 Score:  {f1:.4f}
                 vip_threshold = 1.0
                 colors = ['#d62728' if v > vip_threshold else '#1f77b4' for v in importances]
                 self.vip_threshold_label.config(text=f"PLS VIP > 1.0: {np.sum(importances > vip_threshold)} wavelengths")
+            elif task_type == 'one_class':
+                importance_label = 'Discriminative Importance (surrogate)'
+                colors = '#1f77b4'
+                self.vip_threshold_label.config(text="")
             else:
                 importance_label = 'Feature Importance'
                 colors = '#1f77b4'
@@ -31753,8 +31798,111 @@ F1 Score:  {f1:.4f}
 
         if task_type == 'classification':
             self._plot_classification_roc_curves()
+        elif task_type == 'one_class':
+            self._plot_one_class_diagnostics()
         else:
             self._plot_regression_residual_diagnostics()
+
+    def _plot_one_class_diagnostics(self):
+        """Plot decision score distribution for one-class models."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        if not hasattr(self, 'refined_model') or self.refined_model is None:
+            return
+        if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
+            return
+        if not hasattr(self, 'refined_y_true') or self.refined_y_true is None:
+            return
+
+        # Clear existing plots in both frames
+        for frame in [self.residual_diagnostics_frame, self.leverage_plot_frame]:
+            for widget in frame.winfo_children():
+                widget.destroy()
+
+        try:
+            model = self.refined_model
+            X_data = self.refined_X_cv
+            y_oc = self.refined_y_true
+
+            # Apply scaler/PCA if needed
+            oc_scaler = getattr(self, 'refined_oc_scaler', None)
+            oc_pca = getattr(self, 'refined_oc_pca_reducer', None)
+            X_transformed = X_data.copy()
+            if oc_scaler is not None:
+                X_transformed = oc_scaler.transform(X_transformed)
+            if oc_pca is not None:
+                X_transformed = oc_pca.transform(X_transformed)
+
+            # Get decision scores
+            if hasattr(model, 'decision_function'):
+                scores = model.decision_function(X_transformed)
+            elif hasattr(model, 'score_samples'):
+                scores = model.score_samples(X_transformed)
+            else:
+                scores = model.predict(X_transformed).astype(float)
+
+            inlier_scores = scores[y_oc == 1]
+            outlier_scores = scores[y_oc == -1]
+
+            # Plot 1: Score distribution (in residual diagnostics frame)
+            fig1 = Figure(figsize=(8, 5))
+            ax1 = fig1.add_subplot(111)
+
+            bins = 30
+            if len(inlier_scores) > 0:
+                ax1.hist(inlier_scores, bins=bins, alpha=0.6, label=f'Inlier (n={len(inlier_scores)})',
+                         color='#2196F3', edgecolor='white')
+            if len(outlier_scores) > 0:
+                ax1.hist(outlier_scores, bins=bins, alpha=0.6, label=f'Outlier (n={len(outlier_scores)})',
+                         color='#F44336', edgecolor='white')
+
+            # Add decision boundary line at 0
+            ax1.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Decision boundary')
+            ax1.set_xlabel('Decision Score', fontsize=10)
+            ax1.set_ylabel('Count', fontsize=10)
+            ax1.set_title('One-Class Decision Score Distribution', fontsize=11, fontweight='bold')
+            ax1.legend(fontsize=9)
+            fig1.tight_layout()
+
+            canvas1 = FigureCanvasTkAgg(fig1, self.residual_diagnostics_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(self.residual_diagnostics_frame, fig1, "oc_score_distribution")
+
+            # Plot 2: Sorted scores with classification (in leverage frame)
+            fig2 = Figure(figsize=(8, 5))
+            ax2 = fig2.add_subplot(111)
+
+            sort_idx = np.argsort(scores)
+            sorted_scores = scores[sort_idx]
+            sorted_labels = y_oc[sort_idx]
+            colors = ['#2196F3' if l == 1 else '#F44336' for l in sorted_labels]
+
+            ax2.scatter(range(len(sorted_scores)), sorted_scores, c=colors, s=15, alpha=0.7)
+            ax2.axhline(y=0, color='black', linestyle='--', linewidth=1.5, label='Decision boundary')
+            ax2.set_xlabel('Sample Index (sorted by score)', fontsize=10)
+            ax2.set_ylabel('Decision Score', fontsize=10)
+            ax2.set_title('Sample Classification by Decision Score', fontsize=11, fontweight='bold')
+
+            # Add legend
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='#2196F3', markersize=8, label='Inlier'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='#F44336', markersize=8, label='Outlier'),
+                Line2D([0], [0], color='black', linestyle='--', label='Decision boundary'),
+            ]
+            ax2.legend(handles=legend_elements, fontsize=9)
+            fig2.tight_layout()
+
+            canvas2 = FigureCanvasTkAgg(fig2, self.leverage_plot_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(self.leverage_plot_frame, fig2, "oc_sample_classification")
+
+        except Exception as e:
+            import traceback
+            print(f"One-class diagnostics error: {e}\n{traceback.format_exc()}")
 
     def _plot_regression_residual_diagnostics(self):
         """Plot residual diagnostics for regression."""
@@ -32187,6 +32335,8 @@ F1 Score:  {f1:.4f}
 
         if task_type == 'classification':
             self._plot_classification_confidence()
+        elif task_type == 'one_class':
+            self._plot_one_class_diagnostics()
         else:
             self._plot_regression_leverage_diagnostics()
 
@@ -32406,7 +32556,77 @@ F1 Score:  {f1:.4f}
             model_name = self.refined_config.get('model_name', 'Unknown')
 
             # Choose appropriate SHAP explainer based on model type
-            if model_name in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
+            task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') else 'regression'
+
+            if task_type == 'one_class':
+                # One-class models: use permutation importance for variable analysis
+                # KernelExplainer is too slow for high-dimensional spectral data
+                oc_scaler = getattr(self, 'refined_oc_scaler', None)
+                oc_pca = getattr(self, 'refined_oc_pca_reducer', None)
+
+                try:
+                    if model_name == 'IsolationForest' and oc_scaler is None and oc_pca is None:
+                        # IsolationForest is tree-based: TreeExplainer is fast
+                        self.shap_explainer = shap.TreeExplainer(model)
+                        self.shap_values = self.shap_explainer.shap_values(X_data)
+                    else:
+                        # For other one-class models, use permutation importance
+                        # This is much faster than KernelExplainer for spectral data
+                        from sklearn.inspection import permutation_importance
+
+                        # Build a wrapper estimator for permutation importance
+                        class _OCWrapper:
+                            """Wrapper to make one-class models compatible with permutation_importance."""
+                            def __init__(self, model, scaler, pca):
+                                self.model = model
+                                self.scaler = scaler
+                                self.pca = pca
+                            def fit(self, X, y=None):
+                                return self
+                            def predict(self, X):
+                                X_t = X.copy()
+                                if self.scaler is not None:
+                                    X_t = self.scaler.transform(X_t)
+                                if self.pca is not None:
+                                    X_t = self.pca.transform(X_t)
+                                if hasattr(self.model, 'decision_function'):
+                                    return self.model.decision_function(X_t)
+                                return self.model.predict(X_t).astype(float)
+
+                        wrapper = _OCWrapper(model, oc_scaler, oc_pca)
+                        y_oc = self.refined_y_true
+
+                        # Use decision scores as target for importance
+                        # Permute each feature and measure score change
+                        from sklearn.metrics import make_scorer
+
+                        def oc_score(estimator, X, y):
+                            """Score = correlation between decision scores and true labels."""
+                            scores = estimator.predict(X)
+                            return np.corrcoef(scores, y)[0, 1] if len(np.unique(y)) > 1 else 0.0
+
+                        perm_result = permutation_importance(
+                            wrapper, X_data, y_oc,
+                            scoring=oc_score,
+                            n_repeats=10,
+                            random_state=42,
+                            n_jobs=1,
+                        )
+                        # Convert permutation importance to SHAP-like format
+                        # Each sample gets the same importance (global, not local)
+                        mean_imp = perm_result.importances_mean
+                        mean_imp = np.maximum(mean_imp, 0)  # Clip negatives
+                        self.shap_values = np.tile(mean_imp, (len(X_data), 1))
+                        self.shap_explainer = None  # No explainer object for permutation
+
+                except Exception as e:
+                    import traceback
+                    print(f"One-class SHAP/importance failed: {e}\n{traceback.format_exc()}")
+                    if hasattr(self, 'shap_status_label'):
+                        self.shap_status_label.config(text=f"Failed: {e}")
+                    return
+
+            elif model_name in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
                 # Linear models - use LinearExplainer or KernelExplainer
                 try:
                     self.shap_explainer = shap.LinearExplainer(model, X_data)
@@ -32441,14 +32661,20 @@ F1 Score:  {f1:.4f}
             # Plot SHAP summary
             self._plot_shap_summary()
 
-            # Enable single sample explanation button
+            # Enable single sample explanation button (not for one-class permutation importance)
             if hasattr(self, 'shap_single_btn'):
-                self.shap_single_btn.config(state='normal')
-                # Update spinbox max
-                self.shap_sample_spinbox.config(to=len(X_data) - 1)
+                if task_type == 'one_class' and self.shap_explainer is None:
+                    # Permutation importance is global - single sample doesn't apply
+                    self.shap_single_btn.config(state='disabled')
+                else:
+                    self.shap_single_btn.config(state='normal')
+                    self.shap_sample_spinbox.config(to=len(X_data) - 1)
 
             if hasattr(self, 'shap_status_label'):
-                self.shap_status_label.config(text=f"SHAP computed for {len(X_data)} samples")
+                if task_type == 'one_class' and self.shap_explainer is None:
+                    self.shap_status_label.config(text=f"Permutation importance computed ({len(X_data)} samples, {X_data.shape[1]} features)")
+                else:
+                    self.shap_status_label.config(text=f"SHAP computed for {len(X_data)} samples")
 
         except Exception as e:
             if hasattr(self, 'shap_status_label'):
@@ -33993,7 +34219,12 @@ F1 Score:  {f1:.4f}
                 )
 
                 if cv_result.get('skipped', False):
-                    self.root.after(0, lambda: self.refine_status.config(text="One-class CV failed (too few successful folds)"))
+                    self.root.after(0, lambda: self._update_refined_results(
+                        "One-class CV failed: too few successful folds.\n\n"
+                        "This may happen when:\n"
+                        "- Too few inlier samples for the requested number of folds\n"
+                        "- The model fails to converge on most folds",
+                        is_error=True))
                     return
 
                 mean_m = cv_result['mean_metrics']
@@ -34057,21 +34288,34 @@ F1 Score:  {f1:.4f}
                 self.refined_cv_indices = np.arange(len(y_oc))
                 self.refined_specimen_ids = y_series.index.tolist()
                 self.refined_y_proba = None
+                self.refined_X_cv = X_work  # Needed for SHAP and diagnostics
 
-                # Update UI
+                # Build results text for display
                 perf = results
                 def _fmt(v):
                     return f"{v:.3f}" if v is not None and not np.isnan(v) else "N/A"
-                status_msg = (
-                    f"One-Class Complete | Cal: BalAcc={_fmt(perf['BalancedAcc'])}, "
-                    f"Sens={_fmt(perf['Sensitivity'])}, Spec={_fmt(perf['Specificity'])} | "
-                    f"CV: BalAcc={_fmt(perf['BalancedAcccv'])}, "
-                    f"Sens={_fmt(perf['Sensitivitycv'])}, Spec={_fmt(perf['Specificitycv'])}"
-                )
-                self.root.after(0, lambda msg=status_msg: self.refine_status.config(text=msg))
 
-                # Plot one-class results
-                self.root.after(0, lambda: self._plot_refined_predictions())
+                results_text = (
+                    f"One-Class Model: {model_name}\n"
+                    f"{'='*50}\n\n"
+                    f"Calibration Metrics:\n"
+                    f"  Balanced Accuracy: {_fmt(perf['BalancedAcc'])}\n"
+                    f"  Sensitivity:       {_fmt(perf['Sensitivity'])}\n"
+                    f"  Specificity:       {_fmt(perf['Specificity'])}\n"
+                    f"  AUC:               {_fmt(perf['AUC'])}\n\n"
+                    f"Cross-Validation Metrics:\n"
+                    f"  Balanced Accuracy: {_fmt(perf['BalancedAcccv'])}\n"
+                    f"  Sensitivity:       {_fmt(perf['Sensitivitycv'])}\n"
+                    f"  Specificity:       {_fmt(perf['Specificitycv'])}\n"
+                    f"  AUC:               {_fmt(perf['AUCcv'])}\n\n"
+                    f"Variables: {X_work.shape[1]}\n"
+                    f"Samples: {X_work.shape[0]} (Inliers: {np.sum(y_oc == 1)}, Outliers: {np.sum(y_oc == -1)})\n"
+                    f"CV Folds: {n_folds}\n"
+                )
+
+                # Update UI via _update_refined_results (re-enables buttons, resets cursor)
+                self.root.after(0, lambda: self._update_refined_results(results_text))
+                self.root.after(0, lambda: self.model_dev_notebook.select(2))
                 return  # Skip standard regression/classification CV
 
             if task_type == "regression":
@@ -38015,7 +38259,7 @@ External Validation Performance (n={n_val}):
                         task_type = metadata.get('task_type', None)
 
                         # Check metadata first
-                        if task_type == 'classification':
+                        if task_type in ('classification', 'one_class'):
                             is_classification = True
                         # Also check if values are strings (text labels)
                         elif len(values) > 0 and isinstance(values.iloc[0], str):
@@ -38049,6 +38293,17 @@ External Validation Performance (n={n_val}):
                             # Get actual values aligned with predictions
                             y_true = self.validation_y.loc[self.predictions_df['Sample']].values
                             y_pred = values.values
+
+                            # For one-class models, map actual labels to inlier/outlier format
+                            if task_type == 'one_class' and col in self.predictions_model_map:
+                                oc_metadata = self.predictions_model_map[col]
+                                inlier_label = str(oc_metadata.get('inlier_class_label', ''))
+                                y_true = np.where(
+                                    np.asarray(y_true, dtype=str) == inlier_label,
+                                    f"Inlier ({inlier_label})",
+                                    "Outlier"
+                                )
+                                is_classification = True
 
                             if is_classification:
                                 # Use classification metrics
@@ -38156,7 +38411,7 @@ External Validation Performance (n={n_val}):
         # Classification predictions are text labels, not numeric values
         is_classification = False
         for col, metadata in self.predictions_model_map.items():
-            if metadata.get('task_type') == 'classification':
+            if metadata.get('task_type') in ('classification', 'one_class'):
                 is_classification = True
                 break
 
@@ -38421,9 +38676,21 @@ External Validation Performance (n={n_val}):
 
             y_pred = self.predictions_df[col].values
 
+            # For one-class models, map actual labels to inlier/outlier format
+            y_true_mapped = y_true
+            if col in self.predictions_model_map:
+                col_metadata = self.predictions_model_map[col]
+                if col_metadata.get('task_type') == 'one_class':
+                    inlier_label = str(col_metadata.get('inlier_class_label', ''))
+                    y_true_mapped = np.where(
+                        np.asarray(y_true, dtype=str) == inlier_label,
+                        f"Inlier ({inlier_label})",
+                        "Outlier"
+                    )
+
             # Create confusion matrix
-            cm = confusion_matrix(y_true, y_pred)
-            class_labels = np.unique(np.concatenate([y_true, y_pred]))
+            cm = confusion_matrix(y_true_mapped, y_pred)
+            class_labels = np.unique(np.concatenate([y_true_mapped, y_pred]))
 
             # Plot confusion matrix as heatmap
             im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
@@ -38445,12 +38712,12 @@ External Validation Performance (n={n_val}):
                            fontsize=10, fontweight='bold')
 
             # Calculate metrics
-            accuracy = accuracy_score(y_true, y_pred)
+            accuracy = accuracy_score(y_true_mapped, y_pred)
             n_classes = len(class_labels)
             avg = 'binary' if n_classes == 2 else 'weighted'
-            precision = precision_score(y_true, y_pred, average=avg, zero_division=0)
-            recall = recall_score(y_true, y_pred, average=avg, zero_division=0)
-            f1 = f1_score(y_true, y_pred, average=avg, zero_division=0)
+            precision = precision_score(y_true_mapped, y_pred, average=avg, zero_division=0)
+            recall = recall_score(y_true_mapped, y_pred, average=avg, zero_division=0)
+            f1 = f1_score(y_true_mapped, y_pred, average=avg, zero_division=0)
 
             ax.set_xlabel('Predicted', fontsize=9)
             ax.set_ylabel('Actual', fontsize=9)
