@@ -34,6 +34,7 @@
 - [x] Residual/leverage diagnostics route to one-class-specific plots (not regression fallback)
 - [x] Basic preprocessing discovery works for one-class grid search (callback wrapper fixed)
 - [x] Variable selection: 'importance' method works for one-class
+- [x] Results Treeview tooltips: all one-class metrics (Sensitivity/AUC/cv) + validation metrics (RMSEP/R2pred/val_*) now covered; jargon-heavy tooltips (ROC_AUC, Kappa, MCC, BER, LogLoss) rewritten for non-technical audience
 
 ## Known Issues
 
