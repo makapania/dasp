@@ -36,7 +36,7 @@
 
 ## Known Issues
 
-- [ ] **PCA-SIMCA preprocessing discovery very slow** — The discovery itself uses LightGBM (fast), but the full grid search after discovery may be slow for SIMCA. Needs investigation.
+- [ ] **One-class preprocessing discovery/grid search significantly slower than classification** — User reports 20-100x slower. Discovery uses LightGBM (same for all), so slowness may be in the grid search itself or StratifiedKFold with very few outliers. Needs profiling.
 - [ ] **Preprocessing importance dropdown has no effect for one-class** — All methods resolve to LightGBM. Per-model refinement never triggers because `models_to_test` isn't passed.
 - [ ] **"Contamination" naming** — Plan Task 1 calls for renaming to "One-Class" throughout. Not yet done.
 - [ ] **Variable selection limited** — Only 'importance' method works. UVE/SPA/iPLS/CARS are PLS-specific and incompatible. This is by design but could use a UI hint.

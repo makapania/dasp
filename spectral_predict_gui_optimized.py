@@ -25138,10 +25138,13 @@ class SpectralPredictApp:
                                 params = ast.literal_eval(params_str) if isinstance(params_str, str) and params_str else {}
 
                                 # Build preprocessing pipeline
-                                preprocess_name = row.get('Preprocessing', 'None')
-                                deriv = int(row.get('Derivative', 0))
-                                window = int(row.get('Window', 0))
-                                polyorder = min(2, window - 1) if window > 2 else 0
+                                # Grid search uses 'Preprocess'/'PreprocessBase', Bayesian uses 'preprocessing'
+                                preprocess_name = row.get('PreprocessBase', row.get('Preprocess', row.get('preprocessing', 'raw')))
+                                if preprocess_name is None or str(preprocess_name) == 'None':
+                                    preprocess_name = 'raw'
+                                deriv = int(row.get('Deriv', row.get('deriv', 0)))
+                                window = int(row.get('Window', row.get('window', 0)))
+                                polyorder = int(row.get('Poly', row.get('poly', min(2, window - 1) if window > 2 else 0)))
 
                                 prep_steps = build_preprocessing_pipeline(
                                     preprocess_name, deriv, window, polyorder, task_type='one_class'
