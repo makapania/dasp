@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-09 by Claude (Opus 4.6)
+> **Last updated:** 2026-04-10 by Claude (Opus 4.6)
 
 ---
 
@@ -22,7 +22,8 @@
 - [x] Model save/load with scaler + PCA reducer persistence (`model_io.py`)
 - [x] Prediction tab: predictions work, labels mapped to "Inlier (X)" / "Outlier"
 - [x] External validation: label mapping, confusion matrix, balanced accuracy/sensitivity/specificity
-- [x] External validation metrics in Results tab (top 10 models)
+- [x] External validation metrics in Results tab — top N respects `validation_top_n` (default 700), matching classification/regression
+- [x] External validation produces full 7-metric set (Sensitivity, Specificity, Precision, F1, Accuracy, BalancedAcc, AUC) via `compute_validation_metrics_for_top_one_class_models()` in `contamination.py` — parity with cal/CV
 - [x] External validation metrics in Model Development results text
 - [x] Validation checkbox preserved when loading results into Model Development
 - [x] Dancing man animation stops on completion

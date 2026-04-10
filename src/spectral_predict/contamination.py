@@ -31,9 +31,11 @@ References
 
 from __future__ import annotations
 
+import ast
 import logging
 
 import numpy as np
+import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
@@ -710,6 +712,369 @@ def run_one_class_cv(
         'oc_score_stats': oc_score_stats,
         'skipped': False,
     }
+
+
+# Canonical order for external validation columns on one-class results.
+# Mirrors the cal/CV metric block (Sensitivity, Specificity, Precision, F1,
+# Accuracy, BalancedAcc, AUC) so the Results tab shows a clean contiguous block.
+_VAL_OC_COLUMNS = [
+    'val_Sensitivity',
+    'val_Specificity',
+    'val_Precision',
+    'val_F1',
+    'val_Accuracy',
+    'val_BalancedAcc',
+    'val_AUC',
+]
+
+# Map from one_class_metrics() dict keys → val_* column names.
+_VAL_OC_METRIC_KEY_TO_COLUMN = {
+    'sensitivity': 'val_Sensitivity',
+    'specificity': 'val_Specificity',
+    'precision': 'val_Precision',
+    'f1': 'val_F1',
+    'accuracy': 'val_Accuracy',
+    'balanced_accuracy': 'val_BalancedAcc',
+    'auc': 'val_AUC',
+}
+
+
+def compute_validation_metrics_for_top_one_class_models(
+    df_results: pd.DataFrame,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    inlier_label,
+    wavelengths: np.ndarray,
+    top_n: int = 700,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """Compute external validation metrics for the top N one-class models.
+
+    Parallel to ``compute_validation_metrics_for_top_models`` in ``search.py``
+    but for ``task_type='one_class'``. Adds these columns to ``df_results``
+    in this order:
+
+        val_Sensitivity, val_Specificity, val_Precision, val_F1,
+        val_Accuracy, val_BalancedAcc, val_AUC
+
+    The column set mirrors the cal/CV one-class metric block so Results tab
+    users see validation parity with ``BalancedAcccv``, ``AUCcv``, etc.
+
+    Parameters
+    ----------
+    df_results : pd.DataFrame
+        One-class results (from grid search or Bayesian). Must include
+        ``Model`` and ``Params`` columns, plus the preprocessing columns
+        stored by the search paths (``PreprocessBase``/``Preprocess``,
+        ``Deriv``, ``Window``, ``Poly``, optional ``baseline_method``,
+        ``smoothing``, ``smoothing_window``, ``smoothing_polyorder``).
+    X_train, y_train : np.ndarray
+        Full-spectrum training spectra and raw target labels (strings/ints).
+    X_val, y_val : np.ndarray
+        Full-spectrum external validation spectra and raw target labels.
+    inlier_label : Any
+        Label value denoting the inlier/clean class. Compared as str to
+        match the convention used elsewhere (Bayesian and grid paths).
+    wavelengths : np.ndarray
+        Wavelength values aligned with ``X_train``/``X_val`` columns. Used
+        to map ``all_vars`` (wavelength values) back to column indices.
+    top_n : int
+        Number of top models (by Rank / CompositeScore) to compute
+        validation for. Default 700 matches the GUI spinbox default.
+    progress_callback : callable, optional
+        Called with a status dict for each model processed. Signature:
+        ``progress_callback({'stage': 'validation', 'current': i, 'total': n})``.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same ``df_results`` with val_* columns added/populated.
+    """
+    from spectral_predict.preprocess import build_preprocessing_pipeline
+    from sklearn.pipeline import Pipeline
+
+    if df_results is None or len(df_results) == 0:
+        return df_results
+
+    # Drop training samples with NaN raw labels (safety net — upstream should
+    # already filter, but matches classification helper behavior).
+    try:
+        train_nan_mask = pd.isna(y_train)
+    except TypeError:
+        train_nan_mask = np.zeros(len(y_train), dtype=bool)
+    if np.any(train_nan_mask):
+        n_dropped = int(np.sum(train_nan_mask))
+        logger.info("[OC Validation] Dropping %d training sample(s) with NaN labels", n_dropped)
+        X_train = X_train[~train_nan_mask]
+        y_train = y_train[~train_nan_mask]
+
+    try:
+        val_nan_mask = pd.isna(y_val)
+    except TypeError:
+        val_nan_mask = np.zeros(len(y_val), dtype=bool)
+    if np.any(val_nan_mask):
+        n_dropped = int(np.sum(val_nan_mask))
+        logger.info("[OC Validation] Dropping %d validation sample(s) with NaN labels", n_dropped)
+        X_val = X_val[~val_nan_mask]
+        y_val = y_val[~val_nan_mask]
+
+    # Map raw labels to +1 (inlier) / -1 (outlier). Use str comparison to match
+    # the convention used in unified_bayesian and the GUI (gui:25130, 34468).
+    inlier_str = str(inlier_label)
+    y_train_oc = np.where(np.asarray(y_train, dtype=str) == inlier_str, 1, -1)
+    y_val_oc = np.where(np.asarray(y_val, dtype=str) == inlier_str, 1, -1)
+
+    # Initialise val_* columns in canonical order (preserves column ordering).
+    for col in _VAL_OC_COLUMNS:
+        if col not in df_results.columns:
+            df_results[col] = np.nan
+
+    # Select top-N rows. Prefer Rank (both Bayesian and grid set it), then
+    # CompositeScore (lower = better), then fall back to insertion order.
+    n_to_process = min(top_n, len(df_results))
+    if 'Rank' in df_results.columns:
+        rank_numeric = pd.to_numeric(df_results['Rank'], errors='coerce')
+        top_indices = rank_numeric.sort_values(kind='mergesort').index[:n_to_process]
+    elif 'CompositeScore' in df_results.columns:
+        df_results['CompositeScore'] = pd.to_numeric(df_results['CompositeScore'], errors='coerce')
+        top_indices = df_results.nsmallest(n_to_process, 'CompositeScore').index
+    elif 'BalancedAcccv' in df_results.columns:
+        bacc = pd.to_numeric(df_results['BalancedAcccv'], errors='coerce')
+        top_indices = bacc.sort_values(ascending=False, kind='mergesort').index[:n_to_process]
+    else:
+        top_indices = df_results.head(n_to_process).index
+
+    logger.info("[OC Validation] Computing validation metrics for top %d one-class models", n_to_process)
+
+    # Cache preprocessed (X_train_prep, X_val_prep) by config key so models
+    # sharing preprocessing don't pay the transform cost repeatedly.
+    preprocess_cache: dict = {}
+
+    # Pre-compute wavelength → column-index mapping for the all_vars lookup.
+    try:
+        wl_to_idx = {float(wl): i for i, wl in enumerate(np.asarray(wavelengths))}
+    except (TypeError, ValueError):
+        wl_to_idx = {}
+
+    for i, idx in enumerate(top_indices):
+        # Report progress every 10 models (matches classification helper at
+        # search.py:738). Without the 'message' key, _progress_callback() logs
+        # an empty line per call — flooding the progress tab with blanks.
+        if progress_callback is not None and (i + 1) % 10 == 0:
+            try:
+                progress_callback({
+                    'stage': 'validation_metrics',
+                    'message': f'  Computing one-class validation metrics ({i + 1}/{n_to_process})',
+                    'current': i + 1,
+                    'total': n_to_process,
+                })
+            except Exception:
+                pass
+
+        row = df_results.loc[idx]
+        try:
+            # === Parse preprocessing config ===
+            preprocess_name = row.get('PreprocessBase', row.get('Preprocess', 'raw'))
+            if preprocess_name is None or (isinstance(preprocess_name, float) and pd.isna(preprocess_name)):
+                preprocess_name = 'raw'
+            preprocess_name = str(preprocess_name)
+
+            def _maybe_int(v, default=0):
+                try:
+                    if v is None or (isinstance(v, float) and pd.isna(v)):
+                        return default
+                    return int(v)
+                except (TypeError, ValueError):
+                    return default
+
+            deriv = _maybe_int(row.get('Deriv'), 0)
+            window = _maybe_int(row.get('Window'), 0)
+            poly = _maybe_int(
+                row.get('Poly'),
+                min(2, window - 1) if window > 2 else 0,
+            )
+
+            baseline_method = row.get('baseline_method', None)
+            if isinstance(baseline_method, float) and pd.isna(baseline_method):
+                baseline_method = None
+            smoothing_raw = row.get('smoothing', False)
+            if isinstance(smoothing_raw, float) and pd.isna(smoothing_raw):
+                smoothing = False
+            else:
+                smoothing = bool(smoothing_raw)
+            smoothing_window = _maybe_int(row.get('smoothing_window'), 17)
+            smoothing_polyorder = _maybe_int(row.get('smoothing_polyorder'), 2)
+
+            cache_key = (
+                preprocess_name, deriv, window, poly,
+                baseline_method, smoothing, smoothing_window, smoothing_polyorder,
+            )
+
+            # === Preprocess FULL spectrum (matching search.py pattern) ===
+            if cache_key in preprocess_cache:
+                X_train_prep, X_val_prep = preprocess_cache[cache_key]
+            else:
+                prep_steps = build_preprocessing_pipeline(
+                    preprocess_name,
+                    deriv=deriv if deriv > 0 else None,
+                    window=window if window > 0 else None,
+                    polyorder=poly if poly > 0 else None,
+                    task_type='one_class',
+                    baseline_method=baseline_method,
+                    baseline_params=None,
+                    smoothing=smoothing,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                )
+                if prep_steps:
+                    pipe = Pipeline(list(prep_steps))
+                    X_train_prep = pipe.fit_transform(X_train)
+                    X_val_prep = pipe.transform(X_val)
+                else:
+                    X_train_prep = np.asarray(X_train)
+                    X_val_prep = np.asarray(X_val)
+                preprocess_cache[cache_key] = (X_train_prep, X_val_prep)
+
+            # === Wavelength subset (from all_vars / selected_wavelengths) ===
+            col_indices = None
+            all_vars_str = row.get('all_vars', None)
+            if all_vars_str is None or (isinstance(all_vars_str, float) and pd.isna(all_vars_str)):
+                all_vars_str = row.get('selected_wavelengths', None)
+            if all_vars_str is not None and isinstance(all_vars_str, str) and all_vars_str.strip() and all_vars_str != 'N/A':
+                try:
+                    model_wls = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                    if wl_to_idx:
+                        col_indices = [wl_to_idx[wl] for wl in model_wls if wl in wl_to_idx]
+                    else:
+                        # No wavelength mapping — nearest-index fallback
+                        all_wl_arr = np.asarray(wavelengths, dtype=float)
+                        col_indices = [int(np.argmin(np.abs(all_wl_arr - wl))) for wl in model_wls]
+                    if not col_indices:
+                        col_indices = None
+                except Exception as wl_err:
+                    logger.debug("[OC Validation] all_vars parse failed for row %s: %s", idx, wl_err)
+                    col_indices = None
+
+            if col_indices is not None:
+                max_col = X_train_prep.shape[1] - 1
+                col_indices = [c for c in col_indices if 0 <= c <= max_col]
+                if not col_indices:
+                    logger.warning("[OC Validation] All wavelength indices out of bounds for row %s", idx)
+                    continue
+                X_train_final = X_train_prep[:, col_indices]
+                X_val_final = X_val_prep[:, col_indices]
+            else:
+                X_train_final = X_train_prep
+                X_val_final = X_val_prep
+
+            # === Fit on inliers only (mirrors run_one_class_cv calibration) ===
+            inlier_mask = y_train_oc == 1
+            if not np.any(inlier_mask):
+                logger.warning("[OC Validation] No inliers in training set for row %s", idx)
+                continue
+            X_inliers = X_train_final[inlier_mask]
+
+            model_name = str(row.get('Model', ''))
+            params_raw = row.get('Params', '{}')
+            if isinstance(params_raw, dict):
+                params = params_raw
+            elif isinstance(params_raw, str) and params_raw.strip():
+                try:
+                    params = ast.literal_eval(params_raw)
+                except (ValueError, SyntaxError):
+                    params = {}
+            else:
+                params = {}
+
+            # Scale + optional PCA for scale-sensitive models, matching the
+            # pattern in run_one_class_cv's calibration block.
+            scaler = None
+            pca_reducer = None
+            if model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+                scaler = StandardScaler()
+                X_inliers_scaled = scaler.fit_transform(X_inliers)
+                X_val_scaled = scaler.transform(X_val_final)
+                if model_name == 'EllipticEnvelope' and X_inliers_scaled.shape[1] > X_inliers_scaled.shape[0]:
+                    n_pca = max(2, X_inliers_scaled.shape[0] // 2)
+                    pca_reducer = PCA(n_components=n_pca)
+                    X_inliers_scaled = pca_reducer.fit_transform(X_inliers_scaled)
+                    X_val_scaled = pca_reducer.transform(X_val_scaled)
+            else:
+                X_inliers_scaled = X_inliers
+                X_val_scaled = X_val_final
+
+            model = build_one_class_model(model_name, params)
+            model.fit(X_inliers_scaled)
+
+            # === Predict on validation, prefer decision_function for AUC ===
+            val_scores = None
+            if hasattr(model, 'decision_function'):
+                val_scores = model.decision_function(X_val_scaled)
+                val_preds = np.where(val_scores >= 0, 1, -1)
+            elif hasattr(model, 'score_samples'):
+                val_scores = model.score_samples(X_val_scaled)
+                val_preds = model.predict(X_val_scaled)
+            else:
+                val_preds = model.predict(X_val_scaled)
+
+            metrics = one_class_metrics(y_val_oc, val_preds, val_scores)
+
+            for metric_key, col_name in _VAL_OC_METRIC_KEY_TO_COLUMN.items():
+                value = metrics.get(metric_key, np.nan)
+                df_results.loc[idx, col_name] = float(value) if value is not None and not np.isnan(value) else np.nan
+
+        except Exception as row_err:
+            logger.warning("[OC Validation] Row %s failed: %s", idx, row_err)
+            continue
+
+    logger.info("[OC Validation] Completed validation metrics for %d models", n_to_process)
+
+    # Reorder columns so val_* sit directly after the cv metric block.
+    # This mirrors compute_validation_metrics_for_top_models in search.py
+    # (lines 748-789) and matches user expectation that validation columns
+    # appear next to calibration/CV columns rather than at the far right.
+    # Canonical one-class layout (scoring.py:392-401):
+    #   ...cal metrics... (Sensitivity..AUC)
+    #   ...cv metrics...  (Sensitivitycv..AUCcv)
+    #   val_* columns     (Sensitivity..AUC — injected here)
+    #   top_vars, all_vars, CompositeScore, Rank
+    cols = list(df_results.columns)
+    present_val_cols = [c for c in _VAL_OC_COLUMNS if c in cols]
+    if present_val_cols:
+        for c in present_val_cols:
+            cols.remove(c)
+
+        # Insert after the last cv metric that exists in the frame. Prefer
+        # AUCcv (final cv metric in canonical order), fall back to any cv
+        # metric, then to Imbalance/SubsetTag, then to the end.
+        cv_metric_order = [
+            'AUCcv', 'BalancedAcccv', 'Accuracycv', 'F1cv',
+            'Precisioncv', 'Specificitycv', 'Sensitivitycv',
+        ]
+        insert_after = None
+        for cv_col in cv_metric_order:
+            if cv_col in cols:
+                insert_after = cv_col
+                break
+        if insert_after is None:
+            for anchor in ('Imbalance', 'SubsetTag'):
+                if anchor in cols:
+                    insert_after = anchor
+                    break
+
+        if insert_after is not None:
+            anchor_idx = cols.index(insert_after) + 1
+        else:
+            anchor_idx = len(cols)
+
+        for offset, c in enumerate(present_val_cols):
+            cols.insert(anchor_idx + offset, c)
+
+        df_results = df_results[cols]
+
+    return df_results
 
 
 def compute_one_class_importances(
