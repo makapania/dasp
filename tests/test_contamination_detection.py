@@ -677,3 +677,260 @@ class TestRunOneClassCV:
         assert result['skipped'] is False
         assert 'contam_A' in result['per_contaminant_sensitivity']
         assert 'contam_B' in result['per_contaminant_sensitivity']
+
+
+# ============================================================================
+# Full-spectrum-first preprocessing + save/load/predict roundtrip
+# ============================================================================
+
+class TestOneClassRefinementRoundtrip:
+    """Regression coverage for the 2026-04-10 "all outliers" bug.
+
+    The one-class refinement thread in spectral_predict_gui_optimized.py
+    trains with ``prep_pipeline.fit_transform(X_full)`` first and then
+    subsets to selected wavelengths, but it used to hardcode
+    ``'use_full_spectrum_preprocessing': False`` in the saved metadata and
+    never populate ``full_wavelengths``. At predict time model_io.py took
+    the "subset then preprocess" branch, which produces feature values
+    that are mathematically different from training (especially for SG
+    derivatives where the window lands on subset boundaries). The scaler
+    inside run_one_class_cv was fit on the training-time feature space,
+    so predictions on the model's own training data came back as -1 for
+    every specimen.
+
+    These tests lock in the contract at the model_io level: when the
+    metadata accurately describes the training order (Mode A =
+    full-spectrum preprocess then subset), the save->load->predict
+    roundtrip must correctly label the training inliers. They also pin
+    the characterization that the *broken* metadata (which the GUI
+    used to emit) would produce the all-outlier symptom, so that a
+    future maintainer can see the bug mechanism from the test alone.
+    """
+
+    @pytest.fixture
+    def spectral_data_with_full_spectrum_preprocessing(self):
+        """Build a synthetic spectral DataFrame, apply SNV + SG 1st derivative
+        to the FULL spectrum, then subset to the middle wavelengths. Returns
+        everything the refinement thread would hand to run_one_class_cv plus
+        the raw training DataFrame needed for the predict-time roundtrip."""
+        from sklearn.pipeline import Pipeline
+        from spectral_predict.preprocess import build_preprocessing_pipeline
+
+        rng = np.random.RandomState(2026)
+        n_features = 200
+        # Inliers: tight cluster centered at a smooth baseline
+        n_inliers = 60
+        baseline = np.linspace(0.2, 0.8, n_features) + 0.1 * np.sin(
+            np.linspace(0, 4 * np.pi, n_features)
+        )
+        X_inliers = baseline + rng.randn(n_inliers, n_features) * 0.02
+        # Outliers: distinctly shifted and noisier
+        n_outliers = 15
+        X_outliers = baseline + 0.5 + rng.randn(n_outliers, n_features) * 0.15
+
+        X_full_raw = np.vstack([X_inliers, X_outliers])
+        y_oc = np.array([1] * n_inliers + [-1] * n_outliers)
+
+        # Wavelength columns as floats, matching GUI convention
+        original_wavelengths = np.linspace(900.0, 1700.0, n_features)
+        X_df = pd.DataFrame(
+            X_full_raw,
+            columns=[float(w) for w in original_wavelengths],
+        )
+
+        # Build preprocessing pipeline: SNV + SG 1st derivative
+        # This is the case qwen3-235B flagged as catastrophic at subset boundaries
+        prep_steps = build_preprocessing_pipeline(
+            'snv_deriv', deriv=1, window=11, polyorder=2
+        )
+        assert isinstance(prep_steps, list) and len(prep_steps) > 0
+        prep_pipeline = Pipeline(prep_steps)
+
+        # Refinement thread order: FIT on full spectrum, THEN subset
+        X_full_preprocessed = prep_pipeline.fit_transform(X_full_raw)
+
+        # Subset to middle 100 wavelengths (simulates a selected band)
+        selected_indices = list(range(50, 150))
+        selected_wavelengths = [float(original_wavelengths[i]) for i in selected_indices]
+        X_work = X_full_preprocessed[:, selected_indices]
+
+        return {
+            'X_df': X_df,                                # raw training DataFrame (for predict)
+            'X_work': X_work,                            # preprocessed + subset (for run_one_class_cv)
+            'y_oc': y_oc,
+            'prep_pipeline': prep_pipeline,
+            'original_wavelengths': list(original_wavelengths),
+            'selected_wavelengths': selected_wavelengths,
+            'n_inliers': n_inliers,
+            'n_outliers': n_outliers,
+        }
+
+    def _train_and_build_metadata(
+        self,
+        data,
+        *,
+        use_full_spectrum_preprocessing: bool,
+        full_wavelengths,
+    ):
+        """Train a OneClassSVM via run_one_class_cv and package a metadata
+        dict matching what _run_refined_model_thread passes to save_model.
+
+        Parameterized on the two metadata fields whose incorrect values
+        caused the bug, so we can construct both the broken and fixed
+        variants from the same training run."""
+        result = run_one_class_cv(
+            data['X_work'],
+            data['y_oc'],
+            'OneClassSVM',
+            {'nu': 0.1, 'kernel': 'rbf', 'gamma': 'scale'},
+            n_folds=3,
+            random_state=42,
+        )
+        assert result['skipped'] is False
+        assert result['cal_model'] is not None
+        assert result['cal_scaler'] is not None
+
+        metadata = {
+            'model_name': 'OneClassSVM',
+            'task_type': 'one_class',
+            'wavelengths': data['selected_wavelengths'],
+            'full_wavelengths': full_wavelengths,
+            'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
+            'n_vars': len(data['selected_wavelengths']),
+            'inlier_class_label': 'Inlier',
+            'performance': {'BalancedAcc': 0.95},
+            # These three are the artifacts the 2026-04-10 fix added for grid search,
+            # and which _run_refined_model_thread already stores correctly today.
+            'scaler': result['cal_scaler'],
+            'pca_reducer': result['cal_pca_reducer'],
+            'oc_score_stats': result['oc_score_stats'],
+        }
+        return result['cal_model'], metadata
+
+    def _run_predict_roundtrip(self, model, preprocessor, metadata, X_df):
+        """Save/load/predict helper. Returns the predicted labels."""
+        from spectral_predict.model_io import predict_with_model
+
+        with tempfile.NamedTemporaryFile(suffix='.dasp', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            save_model(
+                model=model,
+                preprocessor=preprocessor,
+                metadata=metadata,
+                filepath=tmp_path,
+            )
+            loaded = load_model(tmp_path)
+            return predict_with_model(loaded, X_df)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+    def test_correct_metadata_reproduces_training_predictions_exactly(
+        self, spectral_data_with_full_spectrum_preprocessing
+    ):
+        """Contract: when metadata accurately describes full-spectrum-first
+        training (use_full_spectrum_preprocessing=True + full_wavelengths
+        populated), Mode A in model_io.py must reproduce the training-time
+        decisions EXACTLY on the training data. This is a much stronger
+        guarantee than a loose accuracy threshold: it proves that predict
+        time is numerically indistinguishable from training time.
+
+        OneClassSVM with nu=0.1 only classifies ~70% of noisy synthetic
+        training data as inliers in its *own* fit, so asserting on an
+        accuracy threshold would be model-dependent. Asserting exact
+        equality is model-agnostic — whatever the model decided at
+        training time, the roundtrip must reproduce it bit-for-bit."""
+        data = spectral_data_with_full_spectrum_preprocessing
+
+        model, metadata = self._train_and_build_metadata(
+            data,
+            use_full_spectrum_preprocessing=True,
+            full_wavelengths=data['original_wavelengths'],
+        )
+
+        # Training-time ground truth: what the model says about its own
+        # training data, computed the same way run_one_class_cv's calibration
+        # block does (scaler.transform then model.predict).
+        X_work_scaled = metadata['scaler'].transform(data['X_work'])
+        training_predictions = model.predict(X_work_scaled)
+
+        # Predict-time via the save->load->predict roundtrip.
+        roundtrip_predictions = self._run_predict_roundtrip(
+            model=model,
+            preprocessor=data['prep_pipeline'],
+            metadata=metadata,
+            X_df=data['X_df'],
+        )
+
+        np.testing.assert_array_equal(
+            roundtrip_predictions,
+            training_predictions,
+            err_msg=(
+                "Predict-time labels did not match training-time labels "
+                "exactly. Mode A in model_io.py is supposed to reproduce "
+                "the training pipeline (preprocess full -> subset) bit-for-bit. "
+                "If this assertion fails, either the wavelength subsetting "
+                "introduced a rounding/ordering mismatch, the preprocessor "
+                "is no longer stateless across fit/transform, or the scaler/PCA "
+                "pickling lost precision. Investigate before relaxing this test."
+            ),
+        )
+
+        # Sanity check: outliers should be cleanly separable on this fixture.
+        # This is a model-behavior smoke test, not the primary regression guard.
+        y_oc = data['y_oc']
+        outlier_correct = (roundtrip_predictions[y_oc == -1] == -1).mean()
+        assert outlier_correct > 0.8, (
+            f"OneClassSVM on this fixture should detect >80% of outliers, "
+            f"got {outlier_correct:.1%}. This is a fixture sanity check, not "
+            f"the primary regression guard — if it fires, the synthetic data "
+            f"generator likely drifted, not the save/load/predict path."
+        )
+
+    def test_broken_metadata_reproduces_all_outlier_bug(
+        self, spectral_data_with_full_spectrum_preprocessing
+    ):
+        """Characterization: with the broken metadata the refinement thread
+        used to emit (use_full_spectrum_preprocessing=False,
+        full_wavelengths=None), the predict path takes Mode B (subset-first
+        → preprocess) and the resulting feature values do not match the
+        training-time scaler. A large majority of samples are mislabeled,
+        including training inliers. This pins the bug mechanism so a
+        future maintainer can see why the two-line fix in
+        _run_refined_model_thread is load-bearing.
+
+        Compares predict-time labels to training-time labels (the same
+        ground truth the correct-metadata test uses) and asserts they
+        DISAGREE on a large fraction of samples. The test is model- and
+        fixture-agnostic: whatever the model decided at training, broken
+        metadata must cause a large mismatch."""
+        data = spectral_data_with_full_spectrum_preprocessing
+
+        model, metadata = self._train_and_build_metadata(
+            data,
+            use_full_spectrum_preprocessing=False,
+            full_wavelengths=None,
+        )
+
+        # Training-time ground truth (computed on X_work, which used the
+        # full-spectrum-first preprocessing order).
+        X_work_scaled = metadata['scaler'].transform(data['X_work'])
+        training_predictions = model.predict(X_work_scaled)
+
+        roundtrip_predictions = self._run_predict_roundtrip(
+            model=model,
+            preprocessor=data['prep_pipeline'],
+            metadata=metadata,
+            X_df=data['X_df'],
+        )
+
+        disagreement = (roundtrip_predictions != training_predictions).mean()
+        assert disagreement > 0.3, (
+            f"Expected broken metadata to mislabel >30% of samples relative "
+            f"to training-time ground truth, got {disagreement:.1%}. If this "
+            f"fails, either model_io.py's Mode B path has become more "
+            f"forgiving of the flag mismatch, or the fixture's SNV+SG "
+            f"preprocessing is no longer order-sensitive — investigate "
+            f"before deleting this test."
+        )

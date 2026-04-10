@@ -24992,7 +24992,7 @@ class SpectralPredictApp:
                                 inlier_class_label=inlier_label,
                                 enable_uve=self.bayes_enable_uve.get(),
                             )
-                            if len(oc_results_df) > 0:
+                            if oc_results_df is not None and len(oc_results_df) > 0:
                                 best = oc_results_df.iloc[0]
                                 self._log_progress(
                                     f"    Best BalancedAcccv: {best['BalancedAcccv']:.4f}"
@@ -25002,15 +25002,17 @@ class SpectralPredictApp:
                             else:
                                 self._log_progress(f"    No results returned")
                         except Exception as e:
-                            self._log_progress(f"    Error: {str(e)}")
+                            self._log_progress(f"    Error in {oc_model_name}: {e}")
                             import traceback
                             self._log_progress(traceback.format_exc())
                             continue
 
                     if oc_all_results:
                         results_df = pd.concat(oc_all_results, ignore_index=True)
+                        # na_position='last' so failed trials with NaN BalancedAcccv
+                        # sink to the bottom instead of corrupting the ranking.
                         results_df = results_df.sort_values(
-                            'BalancedAcccv', ascending=False
+                            'BalancedAcccv', ascending=False, na_position='last'
                         ).reset_index(drop=True)
                         results_df['Rank'] = results_df.index + 1
                     else:
@@ -25185,6 +25187,18 @@ class SpectralPredictApp:
                         self._log_progress(f"  [Warning] Validation metrics failed: {val_err}")
                         import traceback
                         self._log_progress(traceback.format_exc())
+
+                if results_df is not None and len(results_df) > 0:
+                    try:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_dir = Path(self.output_dir.get())
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
+                        results_path = output_dir / f"results_{safe_target}_{timestamp}.csv"
+                        results_df.to_csv(results_path, index=False)
+                        self._log_progress(f"\n> Results saved: {results_path}")
+                    except Exception as exp_err:
+                        self._log_progress(f"  [Warning] Failed to save results CSV: {exp_err}")
 
                 # Cleanup: stop animation, play chime, reset buttons
                 self._log_progress(f"\n> Analysis complete!")
@@ -34292,6 +34306,14 @@ F1 Score:  {f1:.4f}
                         wavelength_indices.append(idx[0])
                 X_work = X_full_preprocessed[:, wavelength_indices] if wavelength_indices else X_full_preprocessed
 
+                # Required for predict-time Mode A in model_io.py: training applies
+                # preprocessing (SNV, SG deriv, baseline) on the FULL spectrum then
+                # subsets wavelengths, so prediction must reproduce that order. Without
+                # this the predict path takes Mode B (subset-first) and produces feature
+                # values mathematically different from training, causing the model to
+                # flag even its own training data as outliers.
+                self.refined_full_wavelengths = list(original_wavelengths)
+
                 # Build binary labels: inlier=+1, outlier=-1
                 inlier_label = self.inlier_class_label.get()
                 if not inlier_label and self.selected_model_config:
@@ -34349,7 +34371,9 @@ F1 Score:  {f1:.4f}
                     'n_samples': X_work.shape[0],
                     'cv_folds': n_folds,
                     'inlier_class_label': inlier_label,
-                    'use_full_spectrum_preprocessing': False,
+                    # Training is full-spectrum-first (fit_transform on X_full, then
+                    # wavelength subset), so predict-time must match via Mode A.
+                    'use_full_spectrum_preprocessing': True,
                     'ga_genes': None,
                     'ga_config': None,
                     'ga_model_type': None,
@@ -38242,7 +38266,14 @@ External Validation Performance (n={n_val}):
                 predictions = self.predictions_df[model_name].values
 
                 for i, sample in enumerate(sample_names):
-                    pred_label = "Inlier" if predictions[i] == 1 else "Outlier"
+                    # One-class predictions are pre-mapped to strings ("Inlier (<label>)"
+                    # / "Outlier") upstream in _run_predictions, so a raw `== 1` check
+                    # would silently compare str to int and always return False.
+                    raw = predictions[i]
+                    if isinstance(raw, str):
+                        pred_label = raw
+                    else:
+                        pred_label = "Inlier" if raw == 1 else "Outlier"
                     row_values = [
                         str(sample),
                         model_name,

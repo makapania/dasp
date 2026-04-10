@@ -1001,6 +1001,11 @@ def create_unified_objective(
                 )
 
                 if cv_result.get('skipped', False):
+                    # Surface the skip reason so the GUI progress wrapper and
+                    # downstream diagnostics can explain WHY the trial bailed
+                    # (e.g. "Need at least 3 clean samples to fit DD-SIMCA").
+                    skip_reason = cv_result.get('skip_reason', 'unknown')
+                    trial.set_user_attr('skip_reason', skip_reason)
                     return float('inf')
 
                 mean_m = cv_result['mean_metrics']
@@ -1013,6 +1018,17 @@ def create_unified_objective(
                     for key, val in cal_m.items():
                         if key != 'per_contaminant':
                             trial.set_user_attr(key, val)
+                    # Store fitted calibration artifacts so any future direct
+                    # save-from-results path can persist them without needing a
+                    # refinement round-trip. Mirrors search.py:5171-5173 for grid
+                    # search. See docs/SESSION_LOG.md 2026-04-10 "One-Class
+                    # Prediction Disaster" for context on why this matters.
+                    if 'cal_scaler' in cv_result:
+                        trial.set_user_attr('cal_scaler', cv_result['cal_scaler'])
+                    if 'cal_pca_reducer' in cv_result:
+                        trial.set_user_attr('cal_pca_reducer', cv_result['cal_pca_reducer'])
+                    if 'oc_score_stats' in cv_result:
+                        trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
                 # Store preprocessing fields used by convert_study_to_dataframe
@@ -1811,7 +1827,14 @@ def run_unified_bayesian(
                 if task_type == 'regression':
                     progress_info['message'] += f" - RMSEcv: {trial.value:.4f}"
                 elif task_type == 'one_class':
-                    progress_info['message'] += f" - BalancedAcccv: {-trial.value:.4f}"
+                    # For skipped one-class trials, value is +inf (we return
+                    # float('inf') from the objective when CV is skipped).
+                    # Show the reason instead of a useless "-inf".
+                    if np.isinf(trial.value):
+                        reason = trial.user_attrs.get('skip_reason', 'skipped')
+                        progress_info['message'] += f" - SKIPPED ({reason})"
+                    else:
+                        progress_info['message'] += f" - BalancedAcccv: {-trial.value:.4f}"
                 else:
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
@@ -2030,6 +2053,12 @@ def convert_study_to_dataframe(
                 balanced_acc_cv = -trial.value if (trial.value is not None and trial.value < 1e9) else np.nan
             row['BalancedAcccv'] = balanced_acc_cv
             row['AUCcv'] = trial.user_attrs.get('auc_cv', np.nan)
+            # Fitted calibration artifacts (defensive: refinement re-runs CV, so the
+            # only consumer of these today is any future direct-save-from-results
+            # path). Column names match search.py:5171-5173 for grid-search parity.
+            row['scaler'] = trial.user_attrs.get('cal_scaler')
+            row['pca_reducer'] = trial.user_attrs.get('cal_pca_reducer')
+            row['oc_score_stats'] = trial.user_attrs.get('oc_score_stats')
         else:
             # Calibration metrics
             row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)

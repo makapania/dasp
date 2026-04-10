@@ -4,6 +4,58 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-10 — One-Class Prediction Disaster: Order-of-Operations Bug (Claude Opus 4.6)
+
+### Bug: Every specimen labeled "Outlier" at predict time, including training data
+
+**Symptom reported:** User trained one-class models via Bayesian optimization, loaded top results into Model Development, ran refinement, saved models, then predicted on novel specimens. *Every* specimen — including specimens that were literally in the training set — was labeled "Outlier" in the main Prediction Results table. All one-class model families affected (OneClassSVM/IF/LOF/EllipticEnvelope/PCA-SIMCA). Multi-class models on the same data worked correctly.
+
+**Root cause:** Order-of-operations mismatch between training and predict. The one-class early-exit branch in `_run_refined_model_thread` (`spectral_predict_gui_optimized.py:34260-34283`) applies `prep_pipeline_oc.fit_transform(X_full)` to the **full** spectrum *then* subsets to selected wavelengths:
+
+```python
+X_full_preprocessed = prep_pipeline_oc.fit_transform(X_full)   # full-spectrum fit
+X_work = X_full_preprocessed[:, wavelength_indices]            # subset AFTER
+```
+
+The `StandardScaler` inside `run_one_class_cv` is then fit on `X_work`, so it expects data in the (preprocess-then-subset) feature space. BUT `self.refined_config` at line 34342 hardcodes `'use_full_spectrum_preprocessing': False`, and `self.refined_full_wavelengths` is never assigned in the one-class branch. These propagate into model metadata at lines 35726-35727. At predict time, `model_io.py:640-677` sees both flags False/None and takes Mode B (subset-first → preprocess), which for SNV / SG derivatives / baseline correction produces mathematically *different* feature values than training. The scaler then receives distributionally alien inputs, `model.predict()` returns -1 across the board, including on samples the model was trained on.
+
+**Why the 2026-04-10 "scaler persistence" fix did not catch this:** that fix ensured `cal_scaler` / `cal_pca_reducer` / `oc_score_stats` were persisted for grid-search results. Orthogonal to this bug. The scaler IS being saved correctly; it is just receiving inputs in the wrong feature space at predict time.
+
+**Why the multi-class path works on the same data:** `spectral_predict_gui_optimized.py:33815` sets `use_full_spectrum_preprocessing = True` for regression/classification, and line 35515 assigns `self.refined_full_wavelengths`. The one-class early-exit branch was a copy-paste that missed both lines. This is the Nth instance of the pattern flagged in SESSION_LOG `2026-04-09` ("One-class early returns are the #1 bug pattern").
+
+**Severity note on Savitzky–Golay:** for `deriv=1` or `deriv=2` preprocessing the subset-first path is not merely slightly different — the SG window at subset boundaries lands on indices outside the subset, producing artificial discontinuities and derivative values off by orders of magnitude. This is the dominant contributor when SG is enabled (flagged by qwen3-235B review).
+
+**Fix:** Two lines in `_run_refined_model_thread`:
+- Assign `self.refined_full_wavelengths = list(original_wavelengths)` right after `X_work` is built.
+- Flip `'use_full_spectrum_preprocessing'` from `False` to `True` in `self.refined_config`.
+
+The metadata save path at `:35726-35727` already reads these correctly — no save-side change needed.
+
+### Secondary bug: Uncertainty-tab display always shows "Outlier"
+
+`spectral_predict_gui_optimized.py:38245`:
+
+```python
+predictions = self.predictions_df[model_name].values   # STRINGS at this point
+pred_label = "Inlier" if predictions[i] == 1 else "Outlier"   # str == int → False
+```
+
+Line 37770-37780 converts numeric +1/-1 to `"Inlier ({label})"` / `"Outlier"` strings before storing in `predictions_df`. The Uncertainty display then compares those strings to the integer `1`, which is unconditionally False, so every row shows "Outlier" regardless of the real prediction. Not what the user was seeing in *this* report (they confirmed they were on the Results tab), but would silently contradict the Results tab once the primary bug is fixed. Fix: replace with `isinstance(raw, str)` branch that accepts already-stringified predictions.
+
+### Latent bug: Bayesian path never stores cal_scaler/cal_pca_reducer/oc_score_stats on trials
+
+`src/spectral_predict/unified_bayesian.py:1009-1037` stores metrics and preprocessing config but never calls `trial.set_user_attr('cal_scaler', ...)`, `'cal_pca_reducer'`, or `'oc_score_stats'`. The 2026-04-10 fix only covered `search.py` (grid search). Not biting the user *today* because all saves flow through refinement (which re-runs CV), but a latent landmine for any future "save direct from results" code path. Close it, but audit `convert_study_to_dataframe` consumers first — storing sklearn objects as DataFrame columns could break `to_csv` / Treeview inserts / sort handlers.
+
+### Architecture insight: test suite does not exercise save→load→predict-on-novel-specimens for one-class with preprocessing
+
+All 44 existing contamination tests passed. None of them round-trip through `save_model` → `load_model` → `predict_with_model` against training data with an actual preprocessing pipeline (SNV/SG). This is exactly why the bug was invisible and PROJECT_STATUS listed prediction as working. Added `test_one_class_save_load_predict_roundtrip_with_preprocessing` to cover it.
+
+### Architecture insight: `use_full_spectrum_preprocessing=False` is effectively dead for regression/classification
+
+Searching the codebase, the flag is only ever set to `True` in the non-one-class paths (lines 28371, 33815). It is only ever set to `False` in the one-class early-exit branch (34342 — the bug) and in a couple of load/default contexts. If no path actually wants Mode B anymore, Step 1 here is a point fix but the underlying dichotomy in `model_io.py:640-677` could be simplified in a future cleanup. Out of scope for this bugfix.
+
+---
+
 ## 2026-04-10 — Tooltip Gap Fixes for Metric Column Headers (Claude Opus 4.6)
 
 ### Gap: Results Treeview had no tooltip for Sensitivity, Sensitivitycv, AUC, AUCcv columns
@@ -42,7 +94,68 @@ The dict is populated at import time (`:1253`), so tooltip edits only take effec
 
 Adds all 7 val_* columns in canonical order: val_Sensitivity, val_Specificity, val_Precision, val_F1, val_Accuracy, val_BalancedAcc, val_AUC. Preprocessing cache keyed by config so models sharing preprocessing only pay the transform cost once.
 
-**Verified:** Synthetic 3-model DataFrame populates all 7 val_* columns for all rows; `top_n=2` correctly limits to top 2 by Rank. Existing 44 contamination tests pass.
+### Bug: Progress tab flooded with blank lines during one-class validation metrics step
+
+**Root cause:** First cut of `compute_validation_metrics_for_top_one_class_models` called `progress_callback` every row with `{'stage': 'validation', 'current': ..., 'total': ...}` — no `'message'` key. `_progress_callback` at `spectral_predict_gui_optimized.py:25958` does `msg = info.get('message', '')` then `self._log_progress(msg)`, so every invocation appended an empty line. 80 rows → 80 blank lines.
+
+**Fix:** Throttled callback to every 10 rows and included a `'message'` key, matching the classification helper's pattern at `search.py:738-744`.
+
+### Bug: val_* columns appeared at far-right of Results tab instead of adjacent to cal/CV columns
+
+**Root cause:** Helper only did `df_results[col] = np.nan` which appends new columns at the end of the DataFrame. Classification helper explicitly reorders at `search.py:748-789` to slot validation columns right after their calibration counterparts.
+
+**Fix:** After populating metrics, helper now removes val_* columns and re-inserts them immediately after the last cv metric present in the frame (prefers `AUCcv`, falls back through the cv metric chain, then to `Imbalance`/`SubsetTag`). Final layout now reads: cal metrics → cv metrics → val metrics → top_vars/all_vars/CompositeScore/Rank.
+
+**Verified:** Synthetic 25-model DataFrame — progress_callback invoked exactly 2 times (at i=10, i=20) with proper messages; val_Sensitivity lands at index `AUCcv + 1`; existing 44 contamination tests still pass.
+
+### Bug: PCA-SIMCA silently produces 0 rows in Bayesian one-class runs on small training sets
+
+**Symptom reported:** User selected 5 one-class models × 20 Bayesian trials and expected 100 rows in the Results tab. Got 80 — PCA-SIMCA was completely missing. Running again with 4 models INCLUDING SIMCA (implying a different split/inlier count) produced SIMCA results. User asked: "is there a reason small validation set would impact SIMCA more than other models?"
+
+**Root cause:** `PCASIMCA.fit()` at `contamination.py:108-111` had a hardcoded guard:
+
+```python
+if n_samples < 10:
+    raise ValueError(f"Need at least 10 clean samples to fit DD-SIMCA, got {n_samples}")
+```
+
+User's dataset had ~7 training inliers after the validation split. 5-fold CV produces training folds of size `4N/5` = 5–6 samples. Every single fold tripped the guard → `run_one_class_cv` skip guard (`contamination.py:599`) fired → Bayesian objective returned `+inf` → `convert_study_to_dataframe` dropped all 20 SIMCA trials (`unified_bayesian.py:1960-1961`) → 0 SIMCA rows in final DataFrame.
+
+**Answer to the user's question: yes, SIMCA alone is vulnerable to small training sets.** The other 4 one-class models each have explicit small-sample fallbacks:
+
+| Model | Small-sample accommodation |
+|---|---|
+| OneClassSVM | Kernel-based — fits 2+ points |
+| IsolationForest | Random split trees — fits 1+ points |
+| LOF | `n_neighbors` auto-clamped to `n_samples - 1` |
+| EllipticEnvelope | PCA fallback at `contamination.py:568-572` when `n_features > n_samples` |
+| PCA-SIMCA | **None — hard floor at 10** |
+
+So the validation set size doesn't affect SIMCA "more" in some abstract sense; it's that carving any fixed amount off an already-small training set pushes SIMCA over its unique cliff while the others coast.
+
+**Fix (`contamination.py:105-128`):** Replaced the 10-sample floor with the true mathematical minimum:
+
+```python
+if n_samples < 3:
+    raise ValueError(f"Need at least 3 clean samples to fit DD-SIMCA, got {n_samples}")
+# ...
+max_components = min(n_samples - 1, n_features)
+if max_components < 1:
+    raise ValueError(...)
+```
+
+`n_components` was already clamped to `n_samples - 1` at line 114, and `_fit_chi2` already has a method-of-moments fallback (`:187-210`) that handles low-sample instability gracefully. The 10-sample floor was conservative, not mathematical.
+
+**Skip-reason surfacing:** Augmented `run_one_class_cv` to collect `fold_errors` and return `skip_reason` in the result dict (`contamination.py:540-610`). The Bayesian objective now stores this as `trial.set_user_attr('skip_reason', ...)` when a trial bails (`unified_bayesian.py:1003-1009`), and the progress wrapper surfaces it in the GUI as `"Trial N/20 - SKIPPED (<reason>)"` instead of the previous useless `-inf` (`unified_bayesian.py:1810-1821`). Future silent-drop failure modes will now be visible.
+
+**Verified:** Direct unit test with user's exact scenario (7 inliers, 30 features, 5-fold CV):
+- 5 samples: fit succeeds (previously failed)
+- 3 samples: fit succeeds (new floor)
+- 2 samples: correctly rejected with new error message
+- `run_one_class_cv` with 7 inliers / 5-fold: **all 5 folds succeed**, BalancedAcc=0.60, sensitivity=1.00
+- 46 existing contamination tests still pass
+
+**Follow-up requested by user (unclaimed):** Add Leave-One-Out CV as an optional cv_strategy for all task types. LOO uses every sample and eliminates the fold-too-small failure mode entirely for tiny datasets — noted in PROJECT_STATUS.md Follow-Ups section.
 
 ---
 

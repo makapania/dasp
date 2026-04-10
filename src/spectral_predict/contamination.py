@@ -105,13 +105,26 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         X = np.asarray(X, dtype=np.float64)
         n_samples, n_features = X.shape
 
-        if n_samples < 10:
+        # Absolute mathematical minimum: need ≥ 3 samples for the chi² moment
+        # fit and ≥ n_components + 1 for PCA to have any residual dimension.
+        # The previous hardcoded floor of 10 was a conservative stability
+        # cushion that silently killed SIMCA on small-fold CV (e.g. 5-fold on
+        # ~7 training inliers leaves 5–6 samples per fold, which OCSVM / IF /
+        # LOF / EllipticEnvelope all handle via their own fallbacks). With
+        # this relaxed guard SIMCA attempts to fit; method-of-moments chi²
+        # fallback at _fit_chi2 handles the small-N instability gracefully.
+        if n_samples < 3:
             raise ValueError(
-                f"Need at least 10 clean samples to fit DD-SIMCA, got {n_samples}"
+                f"Need at least 3 clean samples to fit DD-SIMCA, got {n_samples}"
             )
 
-        # Determine n_components
+        # Determine n_components, clamping aggressively for small samples:
+        # PCA needs at least one residual dimension, so n_components <= n_samples - 1.
         max_components = min(n_samples - 1, n_features)
+        if max_components < 1:
+            raise ValueError(
+                f"Cannot fit DD-SIMCA with n_samples={n_samples}, n_features={n_features}"
+            )
         if isinstance(self.n_components, float) and 0 < self.n_components < 1:
             # sklearn PCA supports float n_components as variance fraction
             pca_probe = PCA(n_components=self.n_components)
@@ -538,15 +551,21 @@ def run_one_class_cv(
     outlier_indices = np.where(y_oc == -1)[0]
     n_outliers = len(outlier_indices)
 
+    # Track per-fold failure reasons so the caller (and ultimately the GUI
+    # progress tab) can surface WHY a model was skipped instead of silently
+    # returning +inf from the Bayesian objective.
+    fold_errors: list[str] = []
+
     if len(inlier_indices) < n_folds:
-        logger.warning("Too few inliers (%d) for %d-fold CV", len(inlier_indices), n_folds)
-        return {'skipped': True, 'fold_metrics': []}
+        msg = f"Too few inliers ({len(inlier_indices)}) for {n_folds}-fold CV"
+        logger.warning(msg)
+        return {'skipped': True, 'fold_metrics': [], 'skip_reason': msg, 'fold_errors': [msg]}
 
     kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
 
     # --- Per-fold CV ---
     fold_metrics = []
-    for train_inlier_idx, test_inlier_idx in kf.split(inlier_indices):
+    for fold_i, (train_inlier_idx, test_inlier_idx) in enumerate(kf.split(inlier_indices)):
         train_idx = inlier_indices[train_inlier_idx]
         test_inlier = inlier_indices[test_inlier_idx]
         test_idx = np.concatenate([test_inlier, outlier_indices])
@@ -592,12 +611,23 @@ def run_one_class_cv(
             fold_result = one_class_metrics(test_labels, y_pred, scores)
             fold_metrics.append(fold_result)
         except (np.linalg.LinAlgError, ValueError) as e:
-            logger.warning("Fold failed for %s (%s): %s", model_name, type(e).__name__, e)
+            err_msg = f"fold {fold_i} train_n={len(train_idx)}: {type(e).__name__}: {e}"
+            fold_errors.append(err_msg)
+            logger.warning("Fold failed for %s (%s)", model_name, err_msg)
             continue
 
     # Skip guard
     if len(fold_metrics) < max(2, n_folds // 2):
-        return {'skipped': True, 'fold_metrics': fold_metrics}
+        reason = (
+            f"{len(fold_metrics)}/{n_folds} folds succeeded; first error: "
+            f"{fold_errors[0] if fold_errors else 'unknown'}"
+        )
+        return {
+            'skipped': True,
+            'fold_metrics': fold_metrics,
+            'skip_reason': reason,
+            'fold_errors': fold_errors,
+        }
 
     # NaN-safe mean of fold metrics
     def _safe_mean(key):
