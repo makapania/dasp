@@ -4,6 +4,27 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-09 — Pre-Merge Review Fixes (Claude Opus 4.6)
+
+### Bug: Bayesian one-class results show NaN on Results tab
+**Root cause:** `unified_bayesian.py:1000` explicitly set `compute_calibration=False`. Cal metrics never computed → trial user_attrs empty → DataFrame columns all NaN. Model Development worked because it recomputes metrics directly from trained model.
+**Fix:** Changed to `compute_calibration=True`. Adds ~2x per trial but Bayesian runs 50-100 trials vs grid's thousands.
+
+### Bug: Scaler/PCA not persisted in grid search result dicts
+**Root cause (found by Codex gpt-5.4):** `run_one_class_search()` result dicts never stored `cal_scaler`, `cal_pca_reducer`, or `oc_score_stats` from `run_one_class_cv()`. Saved OneClassSVM/LOF/EllipticEnvelope models would predict on raw features instead of scaled space. Also caused batch-dependent uncertainty thresholds.
+**Fix:** Added `scaler`, `pca_reducer`, `oc_score_stats` to both result dict blocks (full-spectrum and varsel).
+
+### Bug: LightGBM label encoding in importance computation
+**Root cause:** `compute_one_class_importances()` passed +1/-1 labels to `LGBMClassifier` which expects 0/1. Auto-remapped but semantically ambiguous and may fail in strict builds.
+**Fix:** Convert `y_oc` to binary before fit: `(y_oc == -1).astype(int)`.
+
+### Performance: Reduced IsolationForest/LOF grid bloat
+- IF: replaced `n_estimators=200/300` entries with `n_estimators=100` + `max_features` variants (~50% faster)
+- LOF: removed 2 redundant configs that only varied `contamination` with identical `n_neighbors=20` (~40% faster)
+- Discovery: skipped unused importance computation during initial scan (~17% faster)
+
+---
+
 ## 2026-04-09 — One-Class Bug Fixes (Claude Opus 4.6)
 
 ### Bug: One-class models "hang" on Model Development page

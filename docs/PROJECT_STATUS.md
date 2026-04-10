@@ -36,9 +36,13 @@
 
 ## Known Issues
 
-- [ ] **One-class preprocessing discovery/grid search significantly slower than classification** — User reports 20-100x slower. Discovery uses LightGBM (same for all), so slowness may be in the grid search itself or StratifiedKFold with very few outliers. Needs profiling.
+- [x] ~~**Bayesian one-class results NaN on Results tab**~~ — Fixed: enabled `compute_calibration=True` in Bayesian objective
+- [x] ~~**Scaler/PCA not persisted in grid search results**~~ — Fixed: `cal_scaler`, `cal_pca_reducer`, `oc_score_stats` now stored in result dicts
+- [x] ~~**LightGBM label encoding bug**~~ — Fixed: `compute_one_class_importances()` now converts +1/-1 to 0/1
+- [x] ~~**"Contamination" naming**~~ — Fixed: comments/docstrings updated where "contamination" referred to task type
+- [x] ~~**Performance: IsolationForest/LOF grid bloat**~~ — Fixed: reduced IF n_estimators (300→100), removed redundant LOF configs, skipped unused importance in discovery
+- [ ] **One-class grid search inherently slower than classification** — Expected due to two-phase CV+calibration design and LOF O(n²) complexity. Optimized but still slower by nature.
 - [ ] **Preprocessing importance dropdown has no effect for one-class** — All methods resolve to LightGBM. Per-model refinement never triggers because `models_to_test` isn't passed.
-- [ ] **"Contamination" naming** — Plan Task 1 calls for renaming to "One-Class" throughout. Not yet done.
 - [ ] **Variable selection limited** — Only 'importance' method works. UVE/SPA/iPLS/CARS are PLS-specific and incompatible. This is by design but could use a UI hint.
 - [ ] **Residual correlation overlay** — Disabled for one-class (no continuous residuals). Shows zeros.
 
@@ -67,7 +71,6 @@
 
 ## Next Steps
 
-1. Investigate PCA-SIMCA grid search slowness (is it the model itself or the preprocessing discovery?)
-2. Rename "Contamination" to "One-Class" throughout (Plan Task 1)
-3. Consider adding UI hint when variable selection methods are incompatible with one-class
-4. Test end-to-end: load data → create validation set → run one-class analysis → view results → load in Model Dev → run refined → save model → predict on new data
+1. End-to-end manual test: load data → create validation set → run one-class analysis → view results → load in Model Dev → run refined → save model → predict on new data
+2. Consider adding UI hint when variable selection methods are incompatible with one-class
+3. Merge to main

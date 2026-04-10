@@ -575,7 +575,8 @@ def evaluate_preprocessing_config(
     importance_method: str,
     model_name: Optional[str],
     task_type: str,
-    cv_folds: int = 5
+    cv_folds: int = 5,
+    skip_importance: bool = False
 ) -> Dict[str, Any]:
     """
     Evaluate one preprocessing config using ALL wavelengths (like grid search does).
@@ -623,21 +624,23 @@ def evaluate_preprocessing_config(
         score = _quick_evaluate(X_eval, y, task_type, cv_folds)
 
         # 4. Compute importance for potential variable selection use
-        # (stored but not used for evaluation score)
-        try:
-            importance = compute_importance(
-                X_eval, y, method=importance_method,
-                model_name=model_name, task_type=task_type
-            )
-            # Select wavelengths using default subset size (200)
-            selected_wavelengths = select_wavelengths_by_importance(
-                importance, target_n=200, edge_zone=0  # Edge already applied
-            )
-            # Adjust indices to account for edge masking
-            if edge_zone > 0:
-                selected_wavelengths = selected_wavelengths + edge_zone
-        except Exception:
-            selected_wavelengths = None
+        # (stored but not used for evaluation score — skip during initial scan)
+        selected_wavelengths = None
+        if not skip_importance:
+            try:
+                importance = compute_importance(
+                    X_eval, y, method=importance_method,
+                    model_name=model_name, task_type=task_type
+                )
+                # Select wavelengths using default subset size (200)
+                selected_wavelengths = select_wavelengths_by_importance(
+                    importance, target_n=200, edge_zone=0  # Edge already applied
+                )
+                # Adjust indices to account for edge masking
+                if edge_zone > 0:
+                    selected_wavelengths = selected_wavelengths + edge_zone
+            except Exception:
+                selected_wavelengths = None
 
         # Parse deriv order from name
         deriv_order = None
@@ -902,7 +905,8 @@ def discover_preprocessing(
             importance_method=initial_importance_method,
             model_name=None,
             task_type=task_type,
-            cv_folds=cv_folds
+            cv_folds=cv_folds,
+            skip_importance=True,  # Importance is recomputed in expansion phase
         )
 
         if result is not None:

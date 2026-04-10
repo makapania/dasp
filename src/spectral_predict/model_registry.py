@@ -36,7 +36,7 @@ CLASSIFICATION_MODELS = [
     'CatBoost',      # Categorical Boosting
 ]
 
-# One-class models for contamination screening (ordered by complexity)
+# One-class models for anomaly screening (ordered by complexity)
 # These train ONLY on clean/inlier samples and flag anomalies
 ONE_CLASS_MODELS = [
     'PCA-SIMCA',         # PCA residuals + Hotelling T² (classic chemometrics)

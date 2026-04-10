@@ -997,7 +997,7 @@ def create_unified_objective(
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
                     n_folds=cv_folds, random_state=random_state, y_original=y_original,
-                    compute_calibration=False,  # Skip calibration during optimization trials
+                    compute_calibration=True,
                 )
 
                 if cv_result.get('skipped', False):

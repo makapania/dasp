@@ -21,7 +21,7 @@ from catboost import CatBoostRegressor, CatBoostClassifier
 # Import tiered configuration
 from .model_config import get_tier_models, get_hyperparameters
 
-# Import one-class models for contamination detection
+# Import one-class models for anomaly detection
 from .contamination import (
     get_one_class_model, build_one_class_model, get_one_class_model_grids
 )

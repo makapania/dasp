@@ -390,7 +390,7 @@ def create_results_dataframe(task_type):
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
         metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER"]
     elif task_type == "one_class":
-        # One-class contamination screening metrics
+        # One-class detection screening metrics
         metric_cols = [
             # Calibration metrics
             "Sensitivity", "Specificity", "Precision", "F1",

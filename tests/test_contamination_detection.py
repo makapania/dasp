@@ -1,4 +1,4 @@
-"""Tests for one-class contamination detection models.
+"""Tests for one-class detection models.
 
 Tests the contamination.py module including:
 - PCA-SIMCA one-class classifier (DD-SIMCA)

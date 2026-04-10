@@ -41,6 +41,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
 from sklearn.covariance import EllipticEnvelope
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score,
+    f1_score, roc_auc_score, balanced_accuracy_score,
+)
 from sklearn.neighbors import LocalOutlierFactor
 from scipy import stats
 
@@ -107,11 +111,10 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         # Determine n_components
         max_components = min(n_samples - 1, n_features)
         if isinstance(self.n_components, float) and 0 < self.n_components < 1:
-            pca_full = PCA(n_components=max_components)
-            pca_full.fit(X)
-            cumvar = np.cumsum(pca_full.explained_variance_ratio_)
-            n_comp = int(np.searchsorted(cumvar, self.n_components) + 1)
-            n_comp = min(n_comp, max_components)
+            # sklearn PCA supports float n_components as variance fraction
+            pca_probe = PCA(n_components=self.n_components)
+            pca_probe.fit(X)
+            n_comp = min(pca_probe.n_components_, max_components)
         else:
             n_comp = min(int(self.n_components), max_components)
 
@@ -254,14 +257,8 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         Uses T² = sum(t_a² / lambda_a) which is numerically stable
         and exact for PCA scores (which are orthogonal by construction).
         """
-        eigenvalues = self.eigenvalues_
-        if self.n_components_ == 1:
-            lam = max(eigenvalues[0], 1e-10)
-            return (scores.ravel() ** 2) / lam
-        else:
-            # Vectorized: T² = sum_a (score_a² / lambda_a)
-            lam = np.maximum(eigenvalues, 1e-10)
-            return np.sum(scores ** 2 / lam, axis=1)
+        lam = np.maximum(self.eigenvalues_, 1e-10)
+        return np.sum(scores ** 2 / lam, axis=1)
 
     def _compute_q_residuals(self, X):
         """Compute Q-residuals (SPE) for samples."""
@@ -385,10 +382,10 @@ def get_one_class_model_grids() -> dict:
         ],
         'IsolationForest': [
             {'n_estimators': 100, 'contamination': 0.01, 'max_features': 1.0},
-            {'n_estimators': 200, 'contamination': 0.05, 'max_features': 1.0},
-            {'n_estimators': 200, 'contamination': 0.05, 'max_features': 0.5},
-            {'n_estimators': 200, 'contamination': 0.1, 'max_features': 1.0},
-            {'n_estimators': 300, 'contamination': 0.05, 'max_features': 0.8},
+            {'n_estimators': 100, 'contamination': 0.05, 'max_features': 1.0},
+            {'n_estimators': 100, 'contamination': 0.05, 'max_features': 0.5},
+            {'n_estimators': 100, 'contamination': 0.1, 'max_features': 1.0},
+            {'n_estimators': 100, 'contamination': 0.1, 'max_features': 0.5},
         ],
         'EllipticEnvelope': [
             {'contamination': 0.01},
@@ -399,8 +396,6 @@ def get_one_class_model_grids() -> dict:
             {'n_neighbors': 10, 'contamination': 0.05},
             {'n_neighbors': 20, 'contamination': 0.05},
             {'n_neighbors': 30, 'contamination': 0.05},
-            {'n_neighbors': 20, 'contamination': 0.01},
-            {'n_neighbors': 20, 'contamination': 0.1},
         ],
         'PCA-SIMCA': [
             {'n_components': 3, 'alpha': 0.05},
@@ -441,11 +436,6 @@ def one_class_metrics(y_true, y_pred, scores=None):
         - balanced_accuracy: Average of sensitivity and specificity
         - auc: ROC AUC if scores provided
     """
-    from sklearn.metrics import (
-        accuracy_score, precision_score, recall_score,
-        f1_score, roc_auc_score, balanced_accuracy_score,
-    )
-
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
 
@@ -610,7 +600,7 @@ def run_one_class_cv(
     # NaN-safe mean of fold metrics
     def _safe_mean(key):
         vals = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
-        return np.mean(vals) if vals else np.nan
+        return float(np.mean(vals)) if vals else np.nan
 
     mean_metrics = {
         'sensitivity': _safe_mean('sensitivity'),
@@ -781,5 +771,7 @@ def compute_one_class_importances(
             verbosity=-1,
         )
 
-    model.fit(X, y_oc)
+    # LightGBM binary classification expects 0/1 labels, not +1/-1
+    y_for_fit = (np.asarray(y_oc) == -1).astype(int)  # 1=outlier, 0=inlier
+    model.fit(X, y_for_fit)
     return model.feature_importances_

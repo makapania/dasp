@@ -7,9 +7,13 @@ Usage:
     pytest tests/gui/ -v --data-path=path   # Use different test data
 """
 
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend — no plot windows
+
 import pytest
 import tkinter as tk
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -58,6 +62,7 @@ def session_app(gui_visible):
     Create a single SpectralPredictApp instance for the entire test session.
 
     Session-scoped to avoid Tkinter menu resource exhaustion.
+    All messagebox dialogs are auto-dismissed to prevent blocking in headless mode.
     """
     from spectral_predict_gui_optimized import SpectralPredictApp
 
@@ -81,6 +86,23 @@ def session_app(gui_visible):
         root.destroy()
     except tk.TclError:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _suppress_dialogs():
+    """Auto-dismiss all tkinter dialogs to prevent blocking in headless tests."""
+    with patch('tkinter.messagebox.showinfo', return_value=None), \
+         patch('tkinter.messagebox.showwarning', return_value=None), \
+         patch('tkinter.messagebox.showerror', return_value=None), \
+         patch('tkinter.messagebox.askyesno', return_value=True), \
+         patch('tkinter.messagebox.askokcancel', return_value=True), \
+         patch('tkinter.messagebox.askquestion', return_value='yes'), \
+         patch('tkinter.messagebox.askretrycancel', return_value=True), \
+         patch('tkinter.messagebox.askyesnocancel', return_value=True), \
+         patch('tkinter.filedialog.askopenfilename', return_value=''), \
+         patch('tkinter.filedialog.asksaveasfilename', return_value=''), \
+         patch('tkinter.filedialog.askdirectory', return_value=''):
+        yield
 
 
 @pytest.fixture

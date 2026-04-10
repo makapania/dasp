@@ -2984,7 +2984,7 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
     # Compute composite scores and rank
     from .scoring import compute_composite_score
 
-    # Check for subset contamination (mixing full-spectrum with subset models)
+    # Check for subset mixing (full-spectrum with subset models)
     if "SubsetTag" in df_results.columns:
         subset_counts = df_results["SubsetTag"].value_counts()
         if len(subset_counts) > 1:
@@ -4674,7 +4674,7 @@ def _run_single_config(
 
 
 # ============================================================================
-# ONE-CLASS CONTAMINATION SEARCH
+# ONE-CLASS DETECTION SEARCH
 # ============================================================================
 
 def run_one_class_search(
@@ -4781,6 +4781,7 @@ def run_one_class_search(
     from sklearn.preprocessing import StandardScaler
     from .contamination import (
         build_one_class_model, get_one_class_model_grids, one_class_metrics,
+        run_one_class_cv,
     )
     from .model_config import get_tier_models
     from .scoring import create_results_dataframe, add_result
@@ -5109,8 +5110,7 @@ def run_one_class_search(
                         'best_model': best_result,
                     })
 
-                # Run one-class CV via extracted function
-                from spectral_predict.contamination import run_one_class_cv
+                # Run one-class CV
                 cv_result = run_one_class_cv(
                     X_preprocessed, y_oc, model_name, params,
                     n_folds=folds, random_state=42, y_original=y_np,
@@ -5167,6 +5167,10 @@ def run_one_class_search(
                     "top_vars": "N/A",
                     "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths_current]),
                     "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
+                    # Persist scaler/PCA/stats for model save/load
+                    "scaler": cv_result.get('cal_scaler'),
+                    "pca_reducer": cv_result.get('cal_pca_reducer'),
+                    "oc_score_stats": cv_result.get('oc_score_stats'),
                 }
 
                 # Add per-contaminant columns for display
@@ -5197,7 +5201,7 @@ def run_one_class_search(
     # =========================================================================
     # Only run if variable selection methods were requested and validated
     if selected_varsel_methods:
-        from .contamination import compute_one_class_importances, run_one_class_cv
+        from .contamination import compute_one_class_importances
 
         logger.info("=" * 70)
         logger.info("ONE-CLASS VARIABLE SELECTION")
@@ -5700,6 +5704,10 @@ def run_one_class_search(
                                 "per_contaminant_sensitivity": cal_metrics.get(
                                     'per_contaminant', {}
                                 ),
+                                # Persist scaler/PCA/stats for model save/load
+                                "scaler": cv_result.get('cal_scaler'),
+                                "pca_reducer": cv_result.get('cal_pca_reducer'),
+                                "oc_score_stats": cv_result.get('oc_score_stats'),
                             }
 
                             # Add per-contaminant columns
