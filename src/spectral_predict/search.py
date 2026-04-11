@@ -4211,12 +4211,15 @@ def _run_single_config(
 
     # Average metrics
     if task_type == "regression":
-        mean_rmse = np.mean([m["RMSE"] for m in cv_metrics])
-
-        # Compute regional performance (quartile-based) for consensus predictions
         # Collect all CV predictions and true values
         all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
         all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+
+        # Compute RMSE from aggregated predictions (not per-fold averages).
+        # Matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC).
+        # Under LOO this is required — per-fold RMSE on 1-sample folds degenerates to |y-ŷ|,
+        # and averaging those gives MAE, not RMSE.
+        mean_rmse = float(np.sqrt(mean_squared_error(all_y_test, all_y_pred)))
 
         # Compute R² from aggregated predictions (not per-fold averages)
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold

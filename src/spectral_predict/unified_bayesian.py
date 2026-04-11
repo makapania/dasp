@@ -1241,29 +1241,11 @@ def create_unified_objective(
 
             # 7. Compute metrics
             if task_type == 'regression':
-                # Use cross_validate for RMSE (averaging is valid for RMSE)
-                # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
-                if use_early_stopping:
-                    cv_results = cross_validate_with_early_stopping(
-                        model, X_final, y,
-                        cv=cv,
-                        scoring={'rmse': 'neg_root_mean_squared_error'},
-                        early_stopping_rounds=early_stopping_rounds,
-                        n_jobs=n_jobs_cv,
-                    )
-                else:
-                    cv_results = cross_validate(
-                        model, X_final, y,
-                        cv=cv,
-                        scoring={'rmse': 'neg_root_mean_squared_error'},
-                        n_jobs=n_jobs_cv,
-                        error_score='raise'
-                    )
-                rmse = -cv_results['test_rmse'].mean()
-
-                # R² must use aggregated predictions (not per-fold averages)
-                # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
-                # This matches the method used in search.py for consistency with Model Development
+                # Compute pooled CV predictions once and derive both RMSE and R² from them.
+                # Averaging per-fold R² is mathematically incorrect (different SS_tot per fold),
+                # and averaging per-fold RMSE degenerates to MAE under LOO (1-sample test folds).
+                # This matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC)
+                # and the method used in search.py for consistency with Model Development.
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
@@ -1271,6 +1253,7 @@ def create_unified_objective(
                     )
                 else:
                     y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
                 # Compute additional NIR spectroscopy metrics from CV predictions
@@ -1304,19 +1287,11 @@ def create_unified_objective(
                 metric = rmse  # Minimize RMSE
             else:
                 # Classification: use accuracy and ROC_AUC
-                # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
-                if use_early_stopping:
-                    scores = cross_val_score_with_early_stopping(
-                        model, X_final, y, cv=cv, scoring='accuracy',
-                        early_stopping_rounds=early_stopping_rounds, n_jobs=n_jobs_cv
-                    )
-                else:
-                    scores = cross_val_score(
-                        model, X_final, y, cv=cv, scoring='accuracy', n_jobs=n_jobs_cv, error_score='raise'
-                    )
-                accuracy = scores.mean()
-
-                # Get CV predictions for comprehensive metrics
+                # Compute pooled CV predictions once and derive accuracy + other metrics from them.
+                # Pooled accuracy (sample-weighted across all folds) differs slightly from
+                # per-fold-averaged accuracy when folds have unequal sizes — the pooled form
+                # is the chemometrics/IUPAC convention and matches how R² is computed above.
+                # This also saves a full CV pass per trial (was 2 passes: cross_val_score + cross_val_predict).
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
@@ -1324,6 +1299,7 @@ def create_unified_objective(
                     )
                 else:
                     y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                accuracy = float(accuracy_score(y, y_pred_cv))
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
                 try:
